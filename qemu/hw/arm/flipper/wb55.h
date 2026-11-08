@@ -327,6 +327,78 @@ struct WB55RegfileState {
 };
 enum { WB55_RF_PLAIN = 0, WB55_RF_ADC, WB55_RF_TIM, WB55_RF_AES, WB55_RF_CRC };
 
+/* ----------------------------------------------------------------- USB */
+#include "chardev/char-fe.h"
+#include "qemu/fifo8.h"
+
+#define TYPE_WB55_USB "stm32wb55-usb"
+OBJECT_DECLARE_SIMPLE_TYPE(WB55UsbState, WB55_USB)
+
+/* one control transfer issued by the built-in host */
+typedef struct WB55UsbCtl {
+    bool active;
+    uint8_t setup[8];
+    uint8_t buf[512];
+    uint16_t len, done;
+    uint8_t stage;
+    int64_t deadline;
+    int64_t not_before;
+} WB55UsbCtl;
+
+struct WB55UsbState {
+    SysBusDevice parent_obj;
+    MemoryRegion mmio;           /* registers  @0x40006800 */
+    MemoryRegion pma_mmio;       /* packet RAM @0x40006C00 */
+    qemu_irq irq_lp, irq_hp;
+
+    /* device controller */
+    uint16_t epr[8];
+    uint16_t epr_seen[8];        /* CTR bits the CPU saw at its last read */
+    uint16_t cntr, istr, istr_seen, daddr, btable, lpmcsr, bcdr;
+    uint8_t pma[1024];
+    int64_t frame_base_ns;
+
+    /* built-in host */
+    CharFrontend chr;            /* CDC ACM data <-> this chardev */
+    bool attached;               /* virtual cable plugged in */
+    bool debug;
+    QEMUTimer *timer;
+    int hstate;
+    int64_t wait_until;
+    int failures;
+    uint8_t addr;                /* device address the host talks to */
+    uint8_t ep0_mps;
+    int enum_step;
+    WB55UsbCtl ctl;
+    uint8_t dev_desc[18];
+    uint8_t cfg_desc[512];
+    uint16_t cfg_len;
+    uint16_t langid;
+    char strings[3][64];         /* manufacturer, product, serial */
+    char functions[64];          /* "CDC ACM", "HID", ... */
+
+    /* CDC ACM function (first one in the configuration) */
+    bool cdc;
+    uint8_t cdc_if, cdc_in, cdc_out;
+    uint16_t cdc_out_mps;
+    bool chr_open, dtr_sent, dtr_pending;
+    Fifo8 to_dev, to_chr;
+    guint watch;
+
+    /* HID function: keystrokes become text on the same chardev */
+    bool hid;
+    uint8_t hid_in, hid_interval;
+    int64_t hid_next_poll;
+    uint8_t kb_mods, kb_keys[6], kb_lone_mods, mouse_btn;
+    uint16_t alt_code;           /* Windows Alt+Numpad character entry */
+    uint8_t alt_digits;
+    uint16_t consumer[2];
+
+    /* board hook: VBUS follows the virtual cable */
+    void (*vbus_changed)(void *opaque, bool on);
+    void *vbus_opaque;
+};
+
 /* ------------------------------------------------------------ the SoC */
 #include "hw/arm/armv7m.h"
 #include "hw/gpio/stm32l4x5_gpio.h"
@@ -358,6 +430,7 @@ struct WB55SocState {
     WB55RngState rng;
     WB55DwtState dwt;
     WB55DbgmcuState dbgmcu;
+    WB55UsbState usb;
     Stm32l4x5GpioState gpio[WB55_NUM_PORTS];
     Stm32l4x5UsartBaseState usart1;
     Stm32l4x5UsartBaseState lpuart1;

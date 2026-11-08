@@ -1,7 +1,7 @@
 # Bring-up log
 
 How official firmware 1.5.1 went from "QEMU segfaults" to the desktop running apps from
-the SD card, 2026-11-07. Each entry has the symptom, how it was found, and the fix. Read
+the SD card, and then to a CLI over emulated USB, 2026-11-07. Each entry has the symptom, how it was found, and the fix. Read
 these before modelling anything new; most traps repeat.
 
 Tools that did the work: the firmware's own USART1 log (`-serial stdio`), QEMU's gdb stub
@@ -67,6 +67,35 @@ registers` through the monitor to histogram PC and IPSR, and QEMU trace points
 
 All three are small, self-contained, and suitable for sending upstream.
 
+## USB (M2)
+
+10. **BusFault in the USB ISR right after the first bus reset; reboot loop.** The crash
+    dump only showed the fault handler's own frame. A gdb breakpoint on
+    `BusFault_Handler` plus the stacked exception frame gave PC = `ep_deconfig+34`,
+    `strd r2, r2, [r3]` with r3 = 0x40006C00, and CFSR = 0x8200 (precise, BFAR valid).
+    GCC clears a buffer-table entry with one 64-bit store, and the packet-memory region
+    only accepted up to 32-bit accesses. Fix: `valid.max_access_size = 8` with
+    `impl.max_access_size = 4`, so QEMU splits it as the APB bridge does.
+
+11. **Enumeration stalled at SET_ADDRESS (sometimes SET_CONFIGURATION), timing-dependent.**
+    The status stage came back STALL. The cause: after a status-OUT stage the firmware
+    clears CTR_RX and then re-arms EP0 with `EP_RX_VALID`, a read-modify-write of EP0R.
+    The virtual host (in the main-loop thread) could slip the next SETUP in between
+    those two accesses. The toggle write then flipped STAT_RX to VALID with a SETUP
+    pending, `ep_read()` refused the endpoint, and `usbd_stall_pid()` fired. Silicon has
+    the same window, but no real host sends a SETUP microseconds after a status stage.
+    Fix: the host waits until EP0 is settled (no CTR, STAT_RX VALID or STALL) before a
+    SETUP, and leaves a small gap between transfers. As a general guard, a CPU write
+    clears a CTR or ISTR event bit only if the CPU's last read showed it set, which makes
+    the firmware's RMW sequences atomic against the host.
+
+12. **QEMU assertion when typing into the CLI.** `fifo8_peek_bufptr(fifo, max, …)`
+    requires `max <= bytes queued`; the host asked for a full 64-byte packet. Fix: clamp.
+
+13. **Orphaned emulators.** `kill <launcher pid>` stopped the Python launcher but not its
+    QEMU child, which kept the device's flash and SD images open. Fix: the launcher
+    forwards SIGTERM/SIGHUP to QEMU.
+
 ## Things that were right the first time (and why)
 
 - HSEM modelled from RM0434: **reading RLRx is the 1-step lock**. `furi_hal_bt_init()`
@@ -77,6 +106,9 @@ All three are small, self-contained, and suitable for sending upstream.
   worked as soon as the EXTI issue was gone (998 ticks/s, CPU parked in WFI).
 - DMA beat-by-beat arbitration: SD block reads and writes worked as soon as the
   card answered.
+- USB double-buffered endpoints: the STAT semantics derived from libusb's
+  `ep_write()`/`ep_read()` (see ARCHITECTURE.md) worked for CDC and RPC the first time
+  the control path was race-free.
 
 ## Numbers
 
@@ -85,3 +117,6 @@ All three are small, self-contained, and suitable for sending upstream.
   `BQ27220_CONFIG_APPLY_US` delays).
 - `snake_game.fap` loads from the emulated SD in 48 ms (firmware's own measurement).
 - Idle: the vCPU sleeps in WFI between ticks, so the host CPU stays near idle.
+- USB: 33 ms from D+ pull-up to enumerated: 25 ms of attach debounce, suspend and
+  reset timing (as a PC takes), ~8 ms of control transfers. The CLI banner shows within
+  a second of opening the pty (QEMU checks a pty for a reader once a second).

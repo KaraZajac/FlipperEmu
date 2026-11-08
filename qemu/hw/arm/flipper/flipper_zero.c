@@ -28,6 +28,7 @@
 #include "hw/core/boards.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-properties-system.h"
+#include "chardev/char.h"
 #include "hw/core/irq.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/machines-qom.h"
@@ -52,6 +53,7 @@ struct FlipperZeroState {
     Bq27220State *gauge;
     Bq25896State *charger;
     char *name;
+    char *usb_serial;            /* chardev id bridged to USB CDC */
     uint32_t scale;
     uint32_t region;
     bool legacy_sleep;
@@ -287,6 +289,14 @@ static void flipper_zero_reset(MachineState *machine, ResetType type)
     flipper_drive_pins(FLIPPER_ZERO(machine));
 }
 
+/* The virtual USB cable also carries VBUS to the charger. */
+static void flipper_usb_vbus(void *opaque, bool on)
+{
+    FlipperZeroState *s = opaque;
+
+    object_property_set_bool(OBJECT(s->charger), "usb", on, &error_abort);
+}
+
 /* --------------------------------------------------------------- machine */
 
 static void flipper_zero_init(MachineState *machine)
@@ -305,6 +315,18 @@ static void flipper_zero_init(MachineState *machine)
     if (dinfo) {
         qdev_prop_set_drive_err(soc, "flash-drive", blk_by_legacy_dinfo(dinfo),
                                 &error_fatal);
+    }
+    if (s->usb_serial) {
+        Chardev *chr = qemu_chr_find(s->usb_serial);
+
+        if (!chr) {
+            error_report("flipper-zero: usb-serial: no chardev '%s'",
+                         s->usb_serial);
+            exit(1);
+        }
+        qdev_prop_set_chr(DEVICE(&s->soc.usb), "chardev", chr);
+        object_property_set_bool(OBJECT(&s->soc.usb), "attached", true,
+                                 &error_fatal);
     }
     sysbus_realize(SYS_BUS_DEVICE(&s->soc), &error_fatal);
     flipper_provision(s, uid64);
@@ -348,6 +370,11 @@ static void flipper_zero_init(MachineState *machine)
                                          "charger"));
     s->charger->gauge = s->gauge;
     s->led = LP5562(flipper_i2c_dev(machine, i2c1, TYPE_LP5562, 0x30, "led"));
+    s->soc.usb.vbus_changed = flipper_usb_vbus;
+    s->soc.usb.vbus_opaque = s;
+    if (s->soc.usb.attached) {
+        flipper_usb_vbus(s, true);
+    }
     if (s->nvram) {
         flipper_nvram_load(s);
         s->exit_notifier.notify = flipper_nvram_save;
@@ -382,6 +409,20 @@ static void flipper_set_nvram(Object *obj, const char *value, Error **errp)
 
     g_free(s->nvram);
     s->nvram = *value ? g_strdup(value) : NULL;
+}
+
+static char *flipper_get_usb_serial(Object *obj, Error **errp)
+{
+    return g_strdup(FLIPPER_ZERO(obj)->usb_serial);
+}
+
+static void flipper_set_usb_serial(Object *obj, const char *value,
+                                   Error **errp)
+{
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+
+    g_free(s->usb_serial);
+    s->usb_serial = *value ? g_strdup(value) : NULL;
 }
 
 static char *flipper_get_name(Object *obj, Error **errp)
@@ -447,6 +488,10 @@ static void flipper_zero_class_init(ObjectClass *oc, const void *data)
                                   flipper_set_name);
     object_class_property_add_str(oc, "nvram", flipper_get_nvram,
                                   flipper_set_nvram);
+    object_class_property_add_str(oc, "usb-serial", flipper_get_usb_serial,
+                                  flipper_set_usb_serial);
+    object_class_property_set_description(oc, "usb-serial",
+        "Chardev id for the USB CDC port (CLI/RPC); plugs in the USB cable");
     object_class_property_set_description(oc, "nvram",
         "File keeping battery-backed state (gauge, RTC) between runs");
     object_class_property_set_description(oc, "name",

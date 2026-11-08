@@ -20,7 +20,7 @@ QEMU, so none has QEMU's speed, built-in GDB stub, snapshots or tracing plugins.
 ## Status
 
 Verified on 2026-11-07 with `scripts/smoke_test.py` (headless boot, SD mount, LCD, input,
-no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed unlshd-094**.
+CLI over USB, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed unlshd-094**.
 
 | | |
 |:-:|:-:|
@@ -36,6 +36,10 @@ no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed unlshd-094**.
 - Persistent devices: the internal flash (`flash.img`) and the battery-backed state (fuel
   gauge data memory and RTC backup domain, `nvram.bin`) survive restarts.
 - USART1 log console (`[I][Flipper] Startup complete`, …) on stdio, a file, a pty or TCP.
+- USB: the firmware enumerates on a built-in virtual host. Its USB serial port (the CLI
+  and the protobuf RPC) is bridged to a pty or socket, and `./flipperemu cli` talks to
+  it. When an app switches the port to HID (Bad USB, USB remote), the host plays the
+  PC and shows what the Flipper types.
 - CPU2 modelled as ST's FUS with no wireless stack. That's a real device state, and it
   keeps the crypto-enclave and BT paths healthy.
 - Sub-GHz CC1101 self-test passes (`Init OK`) and the NFC ST25R3916 initialises (chip ID,
@@ -43,7 +47,9 @@ no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed unlshd-094**.
 - GDB stub with the release `.elf` symbols.
 
 **Not yet** (see [PLAN.md](PLAN.md))
-- USB: no CLI, RPC or qFlipper yet. This is the next milestone.
+- qFlipper and lab.flipper.net: they look for a USB device (VID/PID), not a serial
+  port, so they don't see the emulator yet (a USB/IP bridge would fix that). Tools that
+  open a serial port path work.
 - Bluetooth (needs a radio stack), and RF signals for Sub-GHz, NFC, RFID, IR and iButton.
 - Speaker audio. LP5562 engine programs are approximated (steady-state brightness only).
 - Implemented but not yet exercised end to end: runtime flash programming (OTA updater,
@@ -90,7 +96,8 @@ are erased). Without `-f` it boots whatever is already flashed.
 
 | command | what it does |
 |---|---|
-| `run [-f FW] [--headless] [--gdb\|--wait-gdb] [--serial S] [--no-sd]` | (flash and) boot |
+| `run [-f FW] [--headless] [--gdb\|--wait-gdb] [--serial S] [--usb U] [--no-sd]` | (flash and) boot |
+| `cli ["CMD" …]` | the device's CLI over USB: interactive, or run commands and print their output |
 | `flash FW [--erase-all]` | program `.elf` / `.dfu` / `.bin` / update `.tgz` into `flash.img` |
 | `sd [--resources X] [--size 512M]` | rebuild the microSD from a resources tgz, update package or folder |
 | `press ok down down ok …` | press buttons on a running device |
@@ -98,9 +105,11 @@ are erased). Without `-f` it boots whatever is already flashed.
 | `gdb` | attach gdb (with symbols when the device was flashed from an `.elf`) |
 | `info` | which firmware is on the device |
 
-`--serial` takes `stdio` (default), `file:PATH`, `pty`, `tcp:PORT` or `null`. Anything
-after `--` is passed straight to QEMU, e.g. `-- -icount shift=auto` for deterministic
-timing, or `-- -d in_asm,cpu -D trace.log`.
+`--serial` (the USART1 log) takes `stdio` (default), `file:PATH`, `pty`, `tcp:PORT` or
+`null`. `--usb` (the USB serial port) takes `pty` (default), `unix`
+(`devices/NAME/usb.sock`), `tcp:PORT` or `none` (cable unplugged). Anything after `--` is
+passed straight to QEMU, e.g. `-- -icount shift=auto` for deterministic timing, or
+`-- -d in_asm,cpu -D trace.log`.
 
 ### Smoke-testing a build
 
@@ -109,8 +118,37 @@ scripts/smoke_test.py path/to/firmware.elf|.dfu|update.tgz [--no-sd]
 ```
 
 Boots a throwaway device headless and checks: "Startup complete", "card mounted", the
-LCD draws, OK changes the screen, and no `[CRASH]` in the log. Exit code 0 means pass, so
+LCD draws, OK changes the screen, `info device` answers on the USB CLI, and no `[CRASH]`
+in the log. Exit code 0 means pass, so
 it slots into a pre-flash habit or CI.
+
+### USB: CLI, RPC and Bad USB
+
+```sh
+./flipperemu run …        # prints: USB serial (CLI/RPC): /dev/pts/7 -> devices/default/usb.tty
+./flipperemu cli          # interactive CLI session; Ctrl-] quits
+./flipperemu cli "info device" "storage list /ext" "loader open /ext/apps/USB/bad_usb.fap"
+screen devices/default/usb.tty      # or minicom, picocom, a pyserial script, …
+```
+
+Connecting raises DTR and the firmware starts a CLI session, the same as `/dev/ttyACM0` on a
+real Flipper; disconnecting ends it. `start_rpc_session` switches the same port to the
+protobuf RPC, so tools that open a serial port by path work against the emulator.
+
+When an app turns the port into a USB keyboard (Bad USB, the USB remote), the virtual
+host acts as a PC with a US layout, and what the Flipper types appears as text on the
+same port. Key combinations are shown the way DuckyScript writes them. Bad USB's
+`demo_windows` starts like this:
+
+```
+<GUI r>notepad
+Hello World!
+<UP><HOME><SHIFT DOWN><CTRL c><RIGHT><CTRL v><CTRL v><ALT 7>This line was print using Alt+Numpad input method. …
+```
+
+| | |
+|:-:|:-:|
+| ![badusb](docs/img/09-badusb-hid.png) | Bad USB with the emulator's host as the "PC": the script runs to 100 %, and its keystrokes show up on `devices/NAME/usb.tty` |
 
 ### Battery and USB power
 
@@ -121,7 +159,11 @@ The fuel gauge and charger are live QOM objects. From the monitor
 qom-set /machine/gauge soc 5           # 5 % battery: low-battery warnings
 qom-set /machine/gauge temperature-dk 3330   # 60 °C
 qom-set /machine/charger usb true      # plug in a charger (charging icon)
+qom-set /machine/soc/usb attached false   # pull the USB cable (data and VBUS)
 ```
+
+With `--usb` (the default) the virtual cable is plugged in, so the Flipper shows
+charging.
 
 ### Debugging firmware
 
@@ -138,15 +180,17 @@ QEMU's own `-d` tracing works too. `scripts/fe_monitor.py` drives the HMP monito
 ### Running QEMU by hand
 
 ```sh
-build/qemu/qemu-system-arm -M flipper-zero,name=Qemu,nvram=nv.bin \
+build/qemu/qemu-system-arm -M flipper-zero,name=Qemu,nvram=nv.bin,usb-serial=usb \
+    -chardev pty,id=usb \
     -drive if=pflash,format=raw,file=flash.img \
     -drive if=sd,format=raw,file=sd.img \
     -rtc base=localtime -serial stdio
-# or simply: -M flipper-zero -kernel firmware.elf   (volatile flash)
+# or simply: -M flipper-zero -kernel firmware.elf   (volatile flash, no USB)
 ```
 
 Machine options: `name=` (OTP device name, ≤8 chars), `lcd-scale=`, `region=` (OTP
-region), `legacy-sleep=on|off`, `nvram=`.
+region), `legacy-sleep=on|off`, `nvram=`, `usb-serial=` (chardev id for the USB port;
+plugs the cable in). `-global stm32wb55-usb.debug=on` traces the USB host.
 
 ## Layout
 
@@ -154,12 +198,12 @@ region), `legacy-sleep=on|off`, `nvram=`.
 RESEARCH.md            prior-art survey (who else has done this, and how)
 PLAN.md                roadmap
 docs/ARCHITECTURE.md   how the machine is modelled, device by device
-docs/BRINGUP_LOG.md    every bug found on the way to the desktop (incl. 3 QEMU fixes)
+docs/BRINGUP_LOG.md    every bug found on the way (incl. 3 QEMU fixes and the USB races)
 flipperemu             launcher / device manager
 qemu/hw/arm/flipper/   the QEMU machine + STM32WB55 SoC + board devices (C)
 qemu/patches/          fixes to upstream QEMU (SysTick, ssi-sd, SD SPI state)
 scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_monitor.py,
-                       smoke_test.py
+                       fe_cli.py, smoke_test.py
 devices/ firmware/ build/ third_party/    generated, git-ignored
 ```
 

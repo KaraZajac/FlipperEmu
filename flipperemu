@@ -12,6 +12,8 @@ you flash stays flashed, settings and files persist across runs.
   ./flipperemu run -f update.tgz --headless  update package, no window
   ./flipperemu flash fw.dfu                  just program the flash
   ./flipperemu sd --resources update.tgz     (re)build the SD card
+  ./flipperemu cli                           USB CLI of a running device
+  ./flipperemu cli "storage list /ext"       run CLI commands, print output
   ./flipperemu gdb                           attach gdb to a --gdb run
   ./flipperemu shot out.png | press ok       drive a running device
   ./flipperemu info                          what is on the device
@@ -19,6 +21,9 @@ you flash stays flashed, settings and files persist across runs.
 Firmware formats: .elf (from fbt: build/f7-firmware-*/firmware.elf),
 .dfu / .bin (release or fbt dist/), and update packages (.tgz, official,
 Momentum, Unleashed, ...). Keys: arrows, Enter/Space = OK, Backspace/Esc = Back.
+
+USB: the firmware's USB serial port (CLI and protobuf RPC) is bridged to a
+pty by default (--usb), linked as devices/<name>/usb.tty while running.
 """
 import argparse
 import io
@@ -26,10 +31,12 @@ import json
 import os
 import pathlib
 import shutil
+import signal
 import struct
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent
@@ -117,6 +124,8 @@ class Device:
         self.monitor = self.dir / "monitor.sock"
         self.uart = self.dir / "uart.log"
         self.nvram = self.dir / "nvram.bin"     # gauge + RTC backup domain
+        self.usb_sock = self.dir / "usb.sock"   # --usb unix
+        self.usb_tty = self.dir / "usb.tty"     # --usb pty: symlink to the pty
 
     def info(self):
         try:
@@ -196,7 +205,19 @@ def qemu_cmd(dev: Device, args):
                f",nvram={dev.nvram}")
     if args.no_legacy_sleep:
         machine += ",legacy-sleep=off"
-    cmd = [str(QEMU), "-M", machine,
+    usb = []
+    if args.usb == "pty":
+        usb = ["-chardev", "pty,id=usb"]
+    elif args.usb == "unix":
+        usb = ["-chardev", f"socket,id=usb,path={dev.usb_sock},server=on,wait=off"]
+    elif args.usb.startswith("tcp:"):
+        usb = ["-chardev", f"socket,id=usb,host=127.0.0.1,port={args.usb[4:]},"
+                           "server=on,wait=off"]
+    elif args.usb != "none":
+        sys.exit(f"--usb: expected pty, unix, tcp:PORT or none, not {args.usb!r}")
+    if usb:
+        machine += ",usb-serial=usb"
+    cmd = [str(QEMU), "-M", machine, *usb,
            "-drive", f"if=pflash,format=raw,file={dev.flash}",
            "-rtc", "base=localtime",
            "-monitor", f"unix:{dev.monitor},server=on,wait=off",
@@ -245,11 +266,42 @@ def cmd_run(args):
     print(f"[{dev.name}] {info.get('firmware', '?')}  "
           f"(monitor: {dev.monitor}"
           + (f", gdb: :{args.gdb_port}" if args.gdb or args.wait_gdb else "") + ")")
+    for stale in (dev.monitor, dev.usb_tty):
+        try:
+            stale.unlink()
+        except FileNotFoundError:
+            pass
+    proc = subprocess.Popen(cmd)
+    # killing the launcher stops the emulator too (Ctrl-C already reaches both)
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, lambda signum, frame: proc.send_signal(signum))
+    if args.usb == "pty":
+        threading.Thread(target=announce_usb_tty, args=(dev, proc),
+                         daemon=True).start()
     try:
-        dev.monitor.unlink()
-    except FileNotFoundError:
-        pass
-    return subprocess.call(cmd)
+        return proc.wait()
+    except KeyboardInterrupt:
+        proc.terminate()
+        return proc.wait()
+
+
+def announce_usb_tty(dev: Device, proc):
+    """Link devices/<name>/usb.tty to QEMU's pty for the USB CDC port."""
+    from fe_cli import usb_endpoint
+    for _ in range(100):
+        if proc.poll() is not None:
+            return
+        if dev.monitor.exists():
+            try:
+                ep = usb_endpoint(dev.monitor)
+            except OSError:
+                ep = None
+            if ep and ep[0] == "pty":
+                dev.usb_tty.symlink_to(ep[1])
+                print(f"[{dev.name}] USB serial (CLI/RPC): {ep[1]} -> {dev.usb_tty}"
+                      f"   (./flipperemu -d {dev.name} cli)", flush=True)
+                return
+        time.sleep(0.1)
 
 
 def cmd_gdb(args):
@@ -263,6 +315,28 @@ def cmd_gdb(args):
         cmd += ["-ex", "set architecture armv7e-m"]
     cmd += ["-ex", f"target remote :{args.gdb_port}"]
     os.execvp(cmd[0], cmd)
+
+
+def cmd_cli(args):
+    from fe_cli import FlipperCli, usb_endpoint
+    dev = Device(args.device)
+    if not dev.monitor.exists():
+        sys.exit(f"[{dev.name}] not running (no {dev.monitor})")
+    ep = usb_endpoint(dev.monitor)
+    if not ep:
+        sys.exit(f"[{dev.name}] was started with --usb none")
+    cli = FlipperCli(ep)
+    try:
+        if not args.commands:
+            print(f"[{dev.name}] USB CLI on {ep[1]}; Ctrl-] quits")
+            cli.interactive()
+            return 0
+        cli.read_until_prompt(args.timeout)
+        for command in args.commands:
+            print(cli.run(command, timeout=args.timeout, color=sys.stdout.isatty()))
+    finally:
+        cli.close()
+    return 0
 
 
 def cmd_shot(args):
@@ -302,6 +376,9 @@ def main():
     p.add_argument("--erase-all", action="store_true", help="wipe flash before programming")
     p.add_argument("--headless", action="store_true", help="no window")
     p.add_argument("--no-sd", action="store_true", help="boot without a microSD card")
+    p.add_argument("--usb", default="pty",
+                   help="USB serial port (CLI/RPC): pty (default), unix "
+                        "(devices/<name>/usb.sock), tcp:PORT, none (cable unplugged)")
     p.add_argument("--serial", default="stdio",
                    help="USART1 log: stdio (default), file:PATH, pty, tcp:PORT, null")
     p.add_argument("--gdb", action="store_true", help="enable the gdb stub")
@@ -324,6 +401,13 @@ def main():
     p.add_argument("--resources", help="resources .tgz, update package or directory")
     p.add_argument("--size", default="512M")
     p.set_defaults(func=cmd_sd)
+
+    p = sub.add_parser("cli", help="the USB CLI of a running device")
+    p.add_argument("commands", nargs="*",
+                   help="run these CLI commands and print their output "
+                        "(default: interactive session, Ctrl-] quits)")
+    p.add_argument("--timeout", type=float, default=30)
+    p.set_defaults(func=cmd_cli)
 
     p = sub.add_parser("gdb", help="attach gdb to a running --gdb device")
     p.add_argument("--gdb-port", type=int, default=1234)

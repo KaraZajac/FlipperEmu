@@ -17,12 +17,14 @@ it; the file comments name that function. Register layouts come from RM0434 and 
   stm32wb55_soc.c  (SoC: memory map, NVIC lines, DMA requests, GPIO fan-out)
         │   Cortex-M4F (QEMU armv7m, 63 IRQs, MPU, FPU)
         │   rcc pwr flash hsem ipcc(+CPU2) exti syscfg rtc lptim×2 spi×2 i2c×2
-        │   dma(+dmamux) rng dwt dbgmcu  ·  gpio×6 usart1 lpuart1 (QEMU L4x5 models)
-        │   tim1/2/16/17 adc aes pka crc comp iwdg usb … (register files)
+        │   dma(+dmamux) rng dwt dbgmcu usb(+virtual host)
+        │   gpio×6 usart1 lpuart1 (QEMU L4x5 models)
+        │   tim1/2/16/17 adc aes pka crc comp iwdg … (register files)
         │
    SPI2 ── st7567 (LCD, CS PC11, A0 PB1, RST PB0)   ── ssi-sd + sd-card-spi (CS PC12, CD PC10)
    SPI1 ── cc1101 (CS PD0, GDO0 → PA1)              ── st25r3916 (CS PE4, IRQ → PA2)
    I2C1 ── bq27220 @0x55   bq25896 @0x6B   lp5562 @0x30
+   USB ─── built-in host ── CDC ACM ⇄ chardev "usb" (pty/socket)  ·  HID → text on it
 ```
 
 ## Memory map
@@ -116,6 +118,58 @@ flushed from the TCG translation cache (`memory_region_flush_rom_device`), so fr
 written code runs; that's what XIP app loaders and the OTA updater need. With a
 `-drive if=pflash` image every program/erase is written through to the file. Pages from
 SFSA (0xD7) up belong to CPU2 and refuse writes.
+
+## USB (`stm32wb55_usb.c`)
+
+QEMU has no USB wire that leaves the machine, so the device model contains the other end
+too: a small **virtual host**. Device side, modelled to what the firmware's driver
+(`lib/libusb_stm32/src/usbd_stm32wb55_devfs.c`) relies on:
+- **EPnR**: STAT_RX/STAT_TX/DTOG_RX/DTOG_TX toggle when written with 1, CTR_RX/CTR_TX are
+  rc_w0, SETUP is read-only, EA/EP_TYPE/EP_KIND are plain fields. A bus reset clears
+  everything except the CTR bits.
+- **ISTR/CNTR**: CTR, DIR and EP_ID are derived from the endpoint registers
+  (isochronous/double-buffered first, then the lowest number); event flags are rc_w0; CNTR
+  masks everything onto USB_LP (IRQ 20).
+- **Packet memory**: BTABLE and 1 KiB of PMA. The buffer table holds {ADDR_TX, COUNT_TX,
+  ADDR_RX, COUNT_RX} per endpoint as 16-bit words. The RX buffer size comes from
+  BL_SIZE/NUM_BLOCK. `ep_deconfig()` clears an entry with `STRD`, so 64-bit accesses must
+  be split, not refused.
+- **Double-buffered bulk** (the CDC data endpoints): the USB side uses the buffer DTOG
+  selects and software the one SW_BUF selects; the endpoint NAKs while they are equal.
+  libusb pins down the visible STAT bits. `ep_write()` accepts an IN endpoint only when
+  STAT_TX reads NAK, so STAT_TX reads NAK while DTOG_TX == SW_BUF and VALID otherwise.
+  `ep_read()` accepts an OUT endpoint only when STAT_RX reads VALID, so STAT_RX keeps its
+  programmed value.
+- **BCDR**: charger detection reports a standard PC port while the cable is attached;
+  DPPU (the D+ pull-up) is "connect".
+
+The host runs in QEMU's main loop, alongside the vCPU thread. Two measures stop it from
+racing the firmware's read-modify-write sequences on EPnR and ISTR:
+1. The CPU clears a CTR or ISTR event bit only if its last read of that register showed
+   the bit set. A set that lands between the firmware's read and write survives, which
+   makes the RMW atomic.
+2. The host never touches an endpoint while one of its CTR bits is pending. It also waits
+   until EP0 is re-armed (STAT_RX VALID) before the next SETUP.
+
+Host sequence, as a PC does it:
+1. On DPPU: debounce, report suspend, then resume plus bus reset. `usb.connected`
+   (insomnia, CDC "connected") only becomes true on the WKUP event.
+2. GET_DESCRIPTOR(device, 8), SET_ADDRESS, then the device, configuration and string
+   descriptors, SET_CONFIGURATION.
+3. Bind the class:
+   - **CDC ACM** (CLI, protobuf RPC): SET_LINE_CODING, then SET_CONTROL_LINE_STATE whenever
+     a client connects to or leaves the chardev (DTR is what starts and stops the
+     firmware's CLI session). Bulk OUT is fed from the chardev. Bulk IN is read only while
+     a client is connected, like a closed tty.
+   - **HID** (Bad USB, USB remote): poll the interrupt endpoint every bInterval and decode
+     Flipper's report IDs (1 keyboard, 2 mouse, 3 consumer) or boot keyboards. Output is
+     text in a US layout: combos as `<CTRL c>`, Alt+Numpad decoded like Windows does.
+   - Anything else is enumerated and configured, but not bridged.
+4. On DPPU low (mode change, reinit), or `attached=false`, the host forgets the device.
+   With `attached=false` the device sees a suspend, and VBUS drops at the charger.
+
+Mode switches re-enumerate on their own. Opening Bad USB turns the CDC port into a HID
+keyboard (`046d:c529`); leaving the app turns it back.
 
 ## Storage
 

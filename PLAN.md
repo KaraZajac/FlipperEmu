@@ -13,37 +13,32 @@ RESEARCH.md §5).
 - ☑ Persistent devices (flash, SD, NVRAM), `flipperemu` launcher, gdb, monitor automation
 - ☑ Three upstream QEMU fixes (SysTick clock updates, ssi-sd framing, SD SPI state)
 
-## M2: USB CDC (CLI + RPC) ☐  *next*
+## M2: USB (CLI, RPC, HID) ☑ (2026-11-07)
 The Flipper's CLI (`log`, `info`, `ps`, `storage`, `loader`, …) and the protobuf RPC used by
 qFlipper / lab.flipper.net / `ufbt launch` only run over USB CDC.
-- ☐ STM32 USB FS device model (EPnR toggle semantics, ISTR/CNTR, BTABLE + 1 KiB PMA,
-      double-buffered bulk), driven by libusb_stm32's `usbd_stm32wb55_devfs.c`
-- ☐ Built-in "virtual host": reset → enumerate (descriptors, SET_ADDRESS,
-      SET_CONFIGURATION) → CDC SET_LINE_CODING / SET_CONTROL_LINE_STATE(DTR) → bulk
-      pumping between the CDC endpoints and a QEMU chardev (pty/socket)
-- ☐ Charger reports VBUS while the virtual cable is "plugged"
-- ☐ Result: `screen /dev/pts/N`, `scripts/storage.py`, `ufbt launch` against the emulator
-- Stretch: USB/IP export so the host kernel (and qFlipper) sees a real Flipper
+- ☑ STM32 USB FS device model (`stm32wb55_usb.c`): EPnR toggle/rc_w0 semantics,
+      ISTR/CNTR, BTABLE + 1 KiB PMA, double-buffered bulk, BCDR charger detection
+- ☑ Built-in virtual host: suspend → resume → bus reset → enumerate (descriptors,
+      SET_ADDRESS, strings, SET_CONFIGURATION) → CDC SET_LINE_CODING /
+      SET_CONTROL_LINE_STATE (DTR follows the chardev connection) → bulk pumping
+- ☑ CDC bridged to a pty (default), unix socket or TCP port; `./flipperemu cli`;
+      reconnects restart the CLI session like a real terminal
+- ☑ Protobuf RPC over the same port (`start_rpc_session`: ping, device info verified)
+- ☑ HID: the host plays a PC with a US layout and writes what Bad USB / the USB remote
+      type as text (combos as `<GUI r>`, Alt+Numpad decoded); `demo_windows` runs to 100 %
+- ☑ The charger sees VBUS while the virtual cable is attached; `qom-set
+      /machine/soc/usb attached false` unplugs it at runtime
+- ☑ Verified with official 1.5.1, Momentum mntm-012, Unleashed unlshd-094 (smoke test)
+- ☐ Stretch: USB/IP export, so the host kernel (and qFlipper) sees a real Flipper
+- ☐ Stretch: second CDC port of the dual-CDC mode; mass storage
 
-Notes from reading the driver (2026-11-07), to start M2 from:
-- `furi_hal_usb_init()`: `usbd_init(&udev, &usbd_hw, …)`, USB_LP and USB_HP IRQs enabled,
-  driver thread "UsbDriver". `usbd_connect(true)` sets `BCDR.DPPU` when a mode starts.
-- `usbd_stm32wb55_devfs.c`: BTABLE = 0, EP table at PMA 0x40006C00 + ep*8 = {tx.addr, tx.cnt,
-  rx.addr, rx.cnt} (u16 each), PMA byte-addressed as u16. EPnR toggle semantics:
-  STAT/DTOG toggle on write-1, CTR rc_w0, SETUP read-only. `evt_poll()` reads ISTR and
-  handles CTR (per-EP CTR_TX/CTR_RX), RESET (BTABLE=0, deconfig all), SOF, WKUP, SUSP.
-- The CDC interface (`furi_hal_usb_cdc.c`) uses EP 0x01 OUT and EP 0x82 IN as
-  **double-buffered bulk** (64 B), plus EP 0x83 interrupt. `usb.connected` (insomnia,
-  CDC "connected") becomes true on a **WKUP** event, so the virtual host should signal
-  SUSP → WKUP → RESET before enumerating. DTR via SET_CONTROL_LINE_STATE starts the CLI
-  session; drive it from the chardev's open/close events.
-- Open question to settle from RM0434 §"Double-buffered endpoints" before coding:
-  libusb's `ep_write()` accepts a double-buffered IN endpoint only when `STAT_TX` reads
-  NAK, while `ep_read()` accepts a double-buffered OUT endpoint only when `STAT_RX` reads
-  VALID, and `ep_config()` leaves both VALID with DTOG == SW_BUF (TX) / DTOG != SW_BUF (RX).
-  The model must reproduce exactly when hardware moves STAT to NAK in double-buffer mode.
+The double-buffer question from the notes was settled by what libusb_stm32 requires:
+`ep_write()` only accepts a double-buffered IN endpoint whose STAT_TX reads NAK (so STAT_TX
+must read NAK while DTOG_TX == SW_BUF and VALID otherwise), and `ep_read()` only accepts an
+OUT endpoint whose STAT_RX reads VALID (so STAT_RX keeps its programmed value; the
+NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
 
-## M3: verify the write paths ☐
+## M3: verify the write paths ☐  *next*
 - ☐ OTA: stage an update package on the SD, run the stock updater (RAM execution via
       MEMRMP, flash programming, option bytes, radio-stack check, resources) through
       its reboot chain

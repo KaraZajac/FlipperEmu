@@ -16,6 +16,7 @@ arm_common_ss.add(when: 'CONFIG_FLIPPER_ZERO', if_true: files(
   'stm32wb55_i2c.c',
   'stm32wb55_dma.c',
   'stm32wb55_misc.c',
+  'stm32wb55_usb.c',
   'st7567.c',
   'flipper_power.c',
   'flipper_rf.c',

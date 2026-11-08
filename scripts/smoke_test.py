@@ -7,7 +7,8 @@
     scripts/smoke_test.py ~/fw/build/f7-firmware-D/firmware.elf --no-sd
 
 Boots a throwaway device, waits for the firmware's own log milestones, presses
-Back (dismiss the first scene) and OK (main menu), and checks the LCD changed.
+Back (dismiss the first scene) and OK (main menu), checks the LCD changed, and
+runs `info device` on the CLI over the emulated USB serial port.
 Exit status 0 = pass. Screenshots are kept in the --out directory.
 """
 import argparse
@@ -22,6 +23,7 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 from fe_monitor import Monitor  # noqa: E402
+from fe_cli import FlipperCli, usb_endpoint  # noqa: E402
 
 CRASH = re.compile(r"\[CRASH\]|furi_check failed|HardFault|Kernel is Dead")
 
@@ -47,11 +49,26 @@ def dark_pixels(png: pathlib.Path, scale: int = 4) -> int:
     return sum(n for level, n in enumerate(img.histogram()) if level < 60)
 
 
+def usb_cli_check(mon: Monitor) -> bool:
+    try:
+        cli = FlipperCli(usb_endpoint(mon))
+        try:
+            cli.read_until_prompt(15)
+            out = cli.run("info device", timeout=15)
+        finally:
+            cli.close()
+    except (OSError, TimeoutError, ConnectionError, TypeError) as e:
+        print(f"  usb: {e}")
+        return False
+    return re.search(r"hardware[._]name", out) is not None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("firmware")
     ap.add_argument("--no-sd", action="store_true")
+    ap.add_argument("--no-usb", action="store_true", help="skip the USB CLI check")
     ap.add_argument("--timeout", type=float, default=30)
     ap.add_argument("--out", default=None, help="keep screenshots here")
     args = ap.parse_args()
@@ -65,6 +82,7 @@ def main() -> int:
            "--headless", "--serial", f"file:{uart}"]
     if args.no_sd:
         cmd.append("--no-sd")
+    cmd += ["--usb", "none" if args.no_usb else "pty"]
 
     results = []
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -90,6 +108,8 @@ def main() -> int:
             results.append((f"lcd: desktop drawn ({d1} dark px)", d1 > 500))
             results.append(("input: OK changed the screen",
                             desk.read_bytes() != menu.read_bytes()))
+            if not args.no_usb:
+                results.append(("usb: CLI 'info device' over CDC", usb_cli_check(mon)))
             mon.cmd("quit")
         text = uart.read_text(errors="replace") if uart.exists() else ""
         results.append(("no crash in log", not CRASH.search(text)))

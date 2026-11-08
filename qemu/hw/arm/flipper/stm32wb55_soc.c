@@ -4,7 +4,7 @@
  * Memory map and IRQ numbers: RM0434 chapter 2/14 and stm32wb55xx.h.
  * GPIO, USART and LPUART reuse QEMU's STM32L4x5 models (same IP); everything
  * that differs on the WB55 (RCC, PWR, EXTI, SYSCFG, FLASH, HSEM, IPCC, RTC,
- * LPTIM, SPI, I2C, DMA/DMAMUX, RNG, DWT) is modelled in this directory.
+ * LPTIM, SPI, I2C, DMA/DMAMUX, RNG, DWT, USB) is modelled in this directory.
  *
  * Copyright (c) 2026, Kara Zajac
  * SPDX-License-Identifier: BSD-3-Clause
@@ -107,6 +107,7 @@ static void wb55_soc_init(Object *obj)
     object_initialize_child(obj, "rng", &s->rng, TYPE_WB55_RNG);
     object_initialize_child(obj, "dwt", &s->dwt, TYPE_WB55_DWT);
     object_initialize_child(obj, "dbgmcu", &s->dbgmcu, TYPE_WB55_DBGMCU);
+    object_initialize_child(obj, "usb", &s->usb, TYPE_WB55_USB);
     for (int i = 0; i < WB55_NUM_PORTS; i++) {
         g_autofree char *name = g_strdup_printf("gpio%c", "abcdeh"[i]);
         object_initialize_child(obj, name, &s->gpio[i], TYPE_STM32L4X5_GPIO);
@@ -349,6 +350,17 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
     soc_map(SYS_BUS_DEVICE(dev), 0x40008000, errp);
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, NVIC(WB55_IRQ_LPUART1));
 
+    /* ---- USB FS device (+ built-in host): registers, packet memory */
+    sbd = SYS_BUS_DEVICE(&s->usb);
+    if (!sysbus_realize(sbd, errp)) {
+        return;
+    }
+    sysbus_mmio_map(sbd, 0, 0x40006800);
+    sysbus_mmio_map(sbd, 1, 0x40006C00);
+    sysbus_connect_irq(sbd, 0, NVIC(WB55_IRQ_USB_LP));
+    sysbus_connect_irq(sbd, 1, NVIC(WB55_IRQ_USB_HP));
+    wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_APB1RSTR1, 26, DEVICE(&s->usb));
+
     /* ---- RNG */
     soc_map(SYS_BUS_DEVICE(&s->rng), 0x58001000, errp);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->rng), 0, NVIC(WB55_IRQ_RNG));
@@ -371,8 +383,6 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
     soc_regfile("comp", 0x40010200, 0x200, WB55_RF_PLAIN);
     soc_regfile("iwdg", 0x40003000, 0x400, WB55_RF_PLAIN);
     soc_regfile("wwdg", 0x40002C00, 0x400, WB55_RF_PLAIN);
-    soc_regfile("usb", 0x40006800, 0x400, WB55_RF_PLAIN);
-    soc_regfile("usb-pma", 0x40006C00, 0x400, WB55_RF_PLAIN);
     soc_regfile("crs", 0x40006000, 0x400, WB55_RF_PLAIN);
     soc_regfile("lcd", 0x40002400, 0x400, WB55_RF_PLAIN);
     soc_regfile("sai1", 0x40015400, 0x400, WB55_RF_PLAIN);

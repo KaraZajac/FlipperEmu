@@ -27,6 +27,9 @@ class Monitor:
         self.s.connect(path)
         self._read()
 
+    def close(self):
+        self.s.close()
+
     def _read(self):
         buf = b""
         while not buf.rstrip().endswith(b"(qemu)"):
