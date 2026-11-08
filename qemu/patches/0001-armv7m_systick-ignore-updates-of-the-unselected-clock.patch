@@ -1,0 +1,32 @@
+From: FlipperEmu
+Subject: [PATCH] hw/timer/armv7m_systick: ignore updates of the unselected clock
+
+systick_cpuclk_update() and systick_refclk_update() test whether the
+updated clock is the one SYST_CSR.CLKSOURCE selects, and the comments say
+the update can then be ignored, but the early return is missing. A board
+that changes HCLK at runtime (and with it refclk = HCLK/8) therefore
+re-times SysTick from refclk even though the guest selected the CPU clock.
+
+Seen with the STM32WB55 Flipper Zero model: after the switch from MSI to
+the 64 MHz PLL the 1 ms tick (LOAD=63999, CLKSOURCE=1) fired every 8 ms.
+
+Signed-off-by: FlipperEmu
+---
+--- a/hw/timer/armv7m_systick.c
++++ b/hw/timer/armv7m_systick.c
+@@ -220,6 +220,7 @@
+ 
+     if (!(s->control & SYSTICK_CLKSOURCE)) {
+         /* currently using refclk, we can ignore cpuclk changes */
++        return;
+     }
+ 
+     ptimer_transaction_begin(s->ptimer);
+@@ -233,6 +234,7 @@
+ 
+     if (s->control & SYSTICK_CLKSOURCE) {
+         /* currently using cpuclk, we can ignore refclk changes */
++        return;
+     }
+ 
+     ptimer_transaction_begin(s->ptimer);

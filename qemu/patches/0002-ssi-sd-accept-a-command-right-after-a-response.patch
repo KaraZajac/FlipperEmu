@@ -1,0 +1,44 @@
+From: FlipperEmu
+Subject: [PATCH] hw/sd/ssi-sd: accept a command right after a response
+
+After sending a command response the model stays in SSI_SD_RESPONSE and
+consumes one more byte before it is ready for the next command. Hosts that
+deselect the card after the response and clock their padding byte with CS
+high (the Flipper Zero SD driver, sd_spi_deselect_card_and_purge) lose the
+first byte of their next command: CMD8 48 00 00 01 AA 87 was parsed as
+CMD0 with argument 0x0001AA87.
+
+Recognise a command start (01xxxxxx) in that state, and in the idle state
+ignore bytes that cannot start a command, as a card does.
+
+Signed-off-by: FlipperEmu
+---
+--- a/hw/sd/ssi-sd.c
++++ b/hw/sd/ssi-sd.c
+@@ -146,6 +146,10 @@
+             return SSI_DUMMY;
+         }
+ 
++        if ((val & 0xc0) != 0x40) {
++            /* not a command start (start bit 0, transmission bit 1) */
++            return SSI_DUMMY;
++        }
+         s->cmd = val & 0x3f;
+         s->mode = SSI_SD_CMDARG;
+         s->arglen = 0;
+@@ -191,6 +195,15 @@
+         } else {
+             DPRINTF("End of command\n");
+             s->mode = SSI_SD_CMD;
++            /*
++             * The card accepts the next command right after its response;
++             * hosts need not clock an extra byte with CS asserted first.
++             */
++            if ((val & 0xc0) == 0x40) {
++                s->cmd = val & 0x3f;
++                s->mode = SSI_SD_CMDARG;
++                s->arglen = 0;
++            }
+         }
+         return SSI_DUMMY;
+     case SSI_SD_PREP_DATA:

@@ -1,0 +1,18 @@
+# Copyright (c) 2026, Kara Zajac
+# SPDX-License-Identifier: BSD-3-Clause
+config FLIPPER_ZERO
+    bool
+    default y
+    depends on TCG && ARM
+    select ARM_V7M
+    select STM32L4X5_SOC
+    select STM32L4X5_GPIO
+    select STM32L4X5_SYSCFG
+    select STM32L4X5_USART
+    select SSI
+    select SSI_SD
+    select SD
+    select I2C
+    select OR_IRQ
+    select SPLIT_IRQ
+    select UNIMP

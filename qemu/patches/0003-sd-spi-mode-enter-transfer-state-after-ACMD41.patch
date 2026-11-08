@@ -1,0 +1,30 @@
+From: FlipperEmu
+Subject: [PATCH] hw/sd/sd: SPI mode: enter transfer state when ACMD41 completes
+
+In SPI mode the card only reached sd_transfer_state through CMD9/CMD10
+(spi_cmd_SEND_CxD). Hosts that read a block right after ACMD41/CMD58/CMD16
+- the Flipper Zero firmware does - got 'CMD16/CMD17 in a wrong state:
+ready'. The SD spec has no identification or stand-by phase in SPI mode:
+keep reporting In-Idle-State until power-up completes, then accept data
+transfer commands.
+
+Signed-off-by: FlipperEmu
+---
+--- a/hw/sd/sd.c
++++ b/hw/sd/sd.c
+@@ -2297,7 +2297,14 @@
+     }
+ 
+     if (sd_is_spi(sd)) {
+-        sd->state = sd_ready_state;
++        /*
++         * SPI mode has no identification/stand-by phase: R1 reports
++         * "in idle state" until power-up completes, after which the
++         * card accepts data transfer commands straight away.
++         */
++        if (FIELD_EX32(sd->ocr, OCR, CARD_POWER_UP)) {
++            sd->state = sd_transfer_state;
++        }
+         return sd_r1;
+     } else {
+         if (FIELD_EX32(sd->ocr & req.arg, OCR, VDD_VOLTAGE_WINDOW)) {

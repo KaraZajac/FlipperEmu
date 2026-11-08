@@ -1,0 +1,350 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026, Kara Zajac
+# SPDX-License-Identifier: BSD-3-Clause
+"""FlipperEmu - run Flipper Zero firmware in QEMU, no Flipper required.
+
+Each virtual device lives in devices/<name>/ with a persistent 1 MiB internal
+flash (flash.img) and a microSD card (sd.img), exactly like a real one: what
+you flash stays flashed, settings and files persist across runs.
+
+  ./flipperemu run  -f firmware.elf          flash + boot (GTK window)
+  ./flipperemu run                           boot whatever is flashed
+  ./flipperemu run -f update.tgz --headless  update package, no window
+  ./flipperemu flash fw.dfu                  just program the flash
+  ./flipperemu sd --resources update.tgz     (re)build the SD card
+  ./flipperemu gdb                           attach gdb to a --gdb run
+  ./flipperemu shot out.png | press ok       drive a running device
+  ./flipperemu info                          what is on the device
+
+Firmware formats: .elf (from fbt: build/f7-firmware-*/firmware.elf),
+.dfu / .bin (release or fbt dist/), and update packages (.tgz, official,
+Momentum, Unleashed, ...). Keys: arrows, Enter/Space = OK, Backspace/Esc = Back.
+"""
+import argparse
+import io
+import json
+import os
+import pathlib
+import shutil
+import struct
+import subprocess
+import sys
+import tarfile
+import time
+
+ROOT = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "scripts"))
+
+QEMU = ROOT / "build" / "qemu" / "qemu-system-arm"
+DEVICES = ROOT / "devices"
+FLASH_BASE = 0x08000000
+FLASH_SIZE = 1 << 20
+SECURE_START = 0x080D7000          # SFSA 0xD7: CPU2 area, never written
+
+
+# ------------------------------------------------------------ firmware IO
+
+def parse_dfu(data: bytes):
+    """DfuSe: yields (address, bytes) elements."""
+    if data[:5] != b"DfuSe":
+        raise ValueError("not a DfuSe file")
+    off, out = 11, []
+    for _ in range(data[10]):
+        if data[off:off + 6] != b"Target":
+            raise ValueError("bad DfuSe target prefix")
+        nel = struct.unpack_from("<I", data, off + 270)[0]
+        off += 274
+        for _ in range(nel):
+            addr, size = struct.unpack_from("<II", data, off)
+            out.append((addr, data[off + 8:off + 8 + size]))
+            off += 8 + size
+    return out
+
+
+def parse_elf(data: bytes):
+    """Loadable file contents at their physical (load) addresses."""
+    if data[:4] != b"\x7fELF" or data[4] != 1:
+        raise ValueError("not a 32-bit ELF")
+    phoff, = struct.unpack_from("<I", data, 28)
+    phentsize, phnum = struct.unpack_from("<HH", data, 42)
+    out = []
+    for i in range(phnum):
+        p_type, p_off, _vaddr, p_paddr, p_filesz = struct.unpack_from(
+            "<IIIII", data, phoff + i * phentsize)
+        if p_type == 1 and p_filesz and FLASH_BASE <= p_paddr < FLASH_BASE + FLASH_SIZE:
+            out.append((p_paddr, data[p_off:p_off + p_filesz]))
+    if not out:
+        raise ValueError("ELF has nothing to load into flash")
+    return out
+
+
+def load_firmware(path: pathlib.Path):
+    """-> (elements, elf_bytes_or_None, resources_source_or_None, label)"""
+    raw = path.read_bytes()
+    name = path.name.lower()
+    if raw[:4] == b"\x7fELF":
+        return parse_elf(raw), raw, None, path.name
+    if raw[:5] == b"DfuSe":
+        return parse_dfu(raw), None, None, path.name
+    if name.endswith((".tgz", ".tar.gz", ".tar")):
+        with tarfile.open(path, "r:*") as tar:
+            names = tar.getnames()
+            dfu = next((n for n in names if n.endswith("firmware.dfu")), None)
+            if not dfu:
+                raise ValueError("no firmware.dfu in the package")
+            fuf = next((n for n in names if n.endswith("update.fuf")), None)
+            label = path.name
+            if fuf:
+                for line in tar.extractfile(fuf).read().decode(errors="replace").splitlines():
+                    if line.startswith("Info:"):
+                        label = line.split(":", 1)[1].strip()
+            return parse_dfu(tar.extractfile(dfu).read()), None, path, label
+    if name.endswith(".bin"):
+        return [(FLASH_BASE, raw)], None, None, path.name
+    raise ValueError(f"don't know how to load {path}")
+
+
+# ---------------------------------------------------------------- device
+
+class Device:
+    def __init__(self, name: str):
+        self.name = name
+        self.dir = DEVICES / name
+        self.flash = self.dir / "flash.img"
+        self.sd = self.dir / "sd.img"
+        self.elf = self.dir / "firmware.elf"
+        self.meta = self.dir / "device.json"
+        self.monitor = self.dir / "monitor.sock"
+        self.uart = self.dir / "uart.log"
+        self.nvram = self.dir / "nvram.bin"     # gauge + RTC backup domain
+
+    def info(self):
+        try:
+            return json.loads(self.meta.read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def save_info(self, **kw):
+        info = self.info()
+        info.update(kw)
+        self.meta.write_text(json.dumps(info, indent=2) + "\n")
+
+    def program(self, fw: pathlib.Path, erase_all: bool = False):
+        elements, elf, resources, label = load_firmware(fw)
+        self.dir.mkdir(parents=True, exist_ok=True)
+        if not self.flash.exists() or erase_all:
+            self.flash.write_bytes(b"\xff" * FLASH_SIZE)
+        img = bytearray(self.flash.read_bytes().ljust(FLASH_SIZE, b"\xff"))
+        # like DFU: erase every touched 4 KiB page first, then program
+        for addr, data in elements:
+            if addr < FLASH_BASE or addr + len(data) > SECURE_START:
+                raise ValueError(f"element {addr:#x}+{len(data)} outside user flash")
+            off = addr - FLASH_BASE
+            first, last = off // 4096, (off + len(data) - 1) // 4096
+            img[first * 4096:(last + 1) * 4096] = b"\xff" * ((last - first + 1) * 4096)
+        for addr, data in elements:
+            off = addr - FLASH_BASE
+            img[off:off + len(data)] = data
+        self.flash.write_bytes(img)
+        if elf:
+            self.elf.write_bytes(elf)
+        elif self.elf.exists():
+            self.elf.unlink()                   # stale symbols would mislead gdb
+        if resources is None:
+            resources = find_resources_for(fw)
+        self.save_info(firmware=label, source=str(fw.resolve()),
+                       flashed=time.strftime("%Y-%m-%d %H:%M:%S"),
+                       bytes=sum(len(d) for _, d in elements),
+                       **({"resources": str(resources.resolve())} if resources else {}))
+        return label, resources
+
+    def make_sd(self, resources=None, size="512M", force=False):
+        cmd = [sys.executable, "-I", str(ROOT / "scripts" / "make_sdcard.py"),
+               str(self.sd), "--size", size]
+        if resources:
+            cmd += ["--resources", str(resources)]
+        if force:
+            cmd.append("--force")
+        subprocess.run(cmd, check=True)
+
+
+def find_resources_for(fw: pathlib.Path):
+    """Release folders from fetch_firmware.py keep resources next to the ELF."""
+    for pat in ("*update*.tgz", "*resources*.tgz"):
+        hits = sorted(fw.parent.glob(pat))
+        if hits:
+            return hits[0]
+    return None
+
+
+# --------------------------------------------------------------- commands
+
+def cmd_flash(args):
+    dev = Device(args.device)
+    label, _ = dev.program(pathlib.Path(args.firmware), args.erase_all)
+    print(f"[{dev.name}] flashed {label} -> {dev.flash}")
+
+
+def cmd_sd(args):
+    dev = Device(args.device)
+    dev.dir.mkdir(parents=True, exist_ok=True)
+    dev.make_sd(args.resources, args.size, force=True)
+
+
+def qemu_cmd(dev: Device, args):
+    machine = (f"flipper-zero,name={args.name or dev.name[:8]},lcd-scale={args.scale}"
+               f",nvram={dev.nvram}")
+    if args.no_legacy_sleep:
+        machine += ",legacy-sleep=off"
+    cmd = [str(QEMU), "-M", machine,
+           "-drive", f"if=pflash,format=raw,file={dev.flash}",
+           "-rtc", "base=localtime",
+           "-monitor", f"unix:{dev.monitor},server=on,wait=off",
+           "-name", f"Flipper Zero ({dev.name})"]
+    if not args.no_sd and dev.sd.exists():
+        cmd += ["-drive", f"if=sd,format=raw,file={dev.sd}"]
+    if args.headless:
+        cmd += ["-display", "none"]
+    else:
+        cmd += ["-display", "gtk,show-menubar=off,zoom-to-fit=off"]
+    if args.serial == "stdio" and not args.headless:
+        cmd += ["-serial", "stdio"]
+    elif args.serial == "stdio":
+        cmd += ["-serial", "stdio"]
+    elif args.serial.startswith("tcp:"):
+        cmd += ["-serial", f"tcp::{args.serial[4:]},server=on,wait=off"]
+    else:
+        cmd += ["-serial", args.serial]
+    if args.gdb or args.wait_gdb:
+        cmd += ["-gdb", f"tcp::{args.gdb_port}"]
+    if args.wait_gdb:
+        cmd += ["-S"]
+    return cmd + list(args.qemu_args or [])
+
+
+def cmd_run(args):
+    if not QEMU.exists():
+        sys.exit(f"QEMU not built yet: run scripts/setup_qemu.sh ({QEMU})")
+    dev = Device(args.device)
+    if args.firmware:
+        fw = pathlib.Path(args.firmware)
+        label, resources = dev.program(fw, args.erase_all)
+        print(f"[{dev.name}] flashed {label}")
+        if not dev.sd.exists() and not args.no_sd and not args.print_cmd:
+            dev.make_sd(resources or find_resources_for(fw))
+    if not dev.flash.exists():
+        sys.exit(f"[{dev.name}] nothing flashed yet: ./flipperemu run -f <firmware>")
+    cmd = qemu_cmd(dev, args)
+    if args.print_cmd:
+        print(" ".join(cmd))
+        return 0
+    if not dev.sd.exists() and not args.no_sd:
+        dev.make_sd(dev.info().get("resources"))
+        cmd = qemu_cmd(dev, args)
+    info = dev.info()
+    print(f"[{dev.name}] {info.get('firmware', '?')}  "
+          f"(monitor: {dev.monitor}"
+          + (f", gdb: :{args.gdb_port}" if args.gdb or args.wait_gdb else "") + ")")
+    try:
+        dev.monitor.unlink()
+    except FileNotFoundError:
+        pass
+    return subprocess.call(cmd)
+
+
+def cmd_gdb(args):
+    dev = Device(args.device)
+    gdb = shutil.which("gdb-multiarch") or shutil.which("arm-none-eabi-gdb") or "gdb"
+    cmd = [gdb, "-q"]
+    if dev.elf.exists():
+        cmd += ["-ex", f"file {dev.elf}"]
+    else:
+        print("(no ELF for this firmware: flash an .elf to get symbols)")
+        cmd += ["-ex", "set architecture armv7e-m"]
+    cmd += ["-ex", f"target remote :{args.gdb_port}"]
+    os.execvp(cmd[0], cmd)
+
+
+def cmd_shot(args):
+    from fe_monitor import Monitor
+    print(Monitor(str(Device(args.device).monitor)).screenshot(args.out))
+
+
+def cmd_press(args):
+    from fe_monitor import Monitor
+    m = Monitor(str(Device(args.device).monitor))
+    for key in args.keys:
+        m.press(key, args.hold)
+        time.sleep(args.gap / 1000)
+
+
+def cmd_info(args):
+    dev = Device(args.device)
+    info = dev.info()
+    print(f"device   : {dev.name} ({dev.dir})")
+    for k in ("firmware", "source", "flashed", "bytes", "resources"):
+        if k in info:
+            print(f"{k:9}: {info[k]}")
+    print(f"flash    : {'yes' if dev.flash.exists() else 'no'}")
+    print(f"sd card  : {'yes' if dev.sd.exists() else 'no'}")
+    print(f"symbols  : {'yes' if dev.elf.exists() else 'no'}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("-d", "--device", default="default",
+                    help="virtual device name (devices/<name>/), default: default")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("run", help="boot the device (optionally flashing first)")
+    p.add_argument("-f", "--firmware", help=".elf/.dfu/.bin/update .tgz to flash first")
+    p.add_argument("--erase-all", action="store_true", help="wipe flash before programming")
+    p.add_argument("--headless", action="store_true", help="no window")
+    p.add_argument("--no-sd", action="store_true", help="boot without a microSD card")
+    p.add_argument("--serial", default="stdio",
+                   help="USART1 log: stdio (default), file:PATH, pty, tcp:PORT, null")
+    p.add_argument("--gdb", action="store_true", help="enable the gdb stub")
+    p.add_argument("--wait-gdb", action="store_true", help="gdb stub, halt at reset")
+    p.add_argument("--gdb-port", type=int, default=1234)
+    p.add_argument("--scale", type=int, default=4, help="LCD pixel size (default 4)")
+    p.add_argument("--name", help="device name in OTP (max 8 chars)")
+    p.add_argument("--no-legacy-sleep", action="store_true",
+                   help="use the firmware's default STOP2 sleep (needs a radio stack)")
+    p.add_argument("--print-cmd", action="store_true", help="show the QEMU command and exit")
+    p.add_argument("qemu_args", nargs="*", help="extra QEMU arguments after --")
+    p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("flash", help="program firmware into the device flash")
+    p.add_argument("firmware")
+    p.add_argument("--erase-all", action="store_true")
+    p.set_defaults(func=cmd_flash)
+
+    p = sub.add_parser("sd", help="(re)create the microSD image")
+    p.add_argument("--resources", help="resources .tgz, update package or directory")
+    p.add_argument("--size", default="512M")
+    p.set_defaults(func=cmd_sd)
+
+    p = sub.add_parser("gdb", help="attach gdb to a running --gdb device")
+    p.add_argument("--gdb-port", type=int, default=1234)
+    p.set_defaults(func=cmd_gdb)
+
+    p = sub.add_parser("shot", help="save the LCD of a running device as PNG")
+    p.add_argument("out")
+    p.set_defaults(func=cmd_shot)
+
+    p = sub.add_parser("press", help="press buttons on a running device")
+    p.add_argument("keys", nargs="+", help="ok back up down left right")
+    p.add_argument("--hold", type=int, default=120, help="ms per press")
+    p.add_argument("--gap", type=int, default=250, help="ms between presses")
+    p.set_defaults(func=cmd_press)
+
+    p = sub.add_parser("info", help="show what is on the device")
+    p.set_defaults(func=cmd_info)
+
+    args = ap.parse_args()
+    return args.func(args) or 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

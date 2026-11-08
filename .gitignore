@@ -1,0 +1,12 @@
+# regenerable / large
+build/
+third_party/
+firmware/
+devices/
+
+# python
+__pycache__/
+*.pyc
+
+# local copies of third-party docs consulted for RESEARCH.md (not ours to publish)
+research/prior-art/

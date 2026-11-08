@@ -1,0 +1,23 @@
+# Copyright (c) 2026, Kara Zajac
+# SPDX-License-Identifier: BSD-3-Clause
+# Flipper Zero machine + STM32WB55 SoC models (FlipperEmu overlay)
+arm_common_ss.add(when: 'CONFIG_FLIPPER_ZERO', if_true: files(
+  'stm32wb55_soc.c',
+  'stm32wb55_rcc.c',
+  'stm32wb55_pwr.c',
+  'stm32wb55_flash.c',
+  'stm32wb55_hsem.c',
+  'stm32wb55_ipcc.c',
+  'stm32wb55_exti.c',
+  'stm32wb55_syscfg.c',
+  'stm32wb55_rtc.c',
+  'stm32wb55_lptim.c',
+  'stm32wb55_spi.c',
+  'stm32wb55_i2c.c',
+  'stm32wb55_dma.c',
+  'stm32wb55_misc.c',
+  'st7567.c',
+  'flipper_power.c',
+  'flipper_rf.c',
+  'flipper_zero.c',
+))
