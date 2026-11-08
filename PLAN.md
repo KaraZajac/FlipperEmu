@@ -59,10 +59,11 @@ NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
 - ◐ IR: receive ☑ (TIM2 input capture + virtual receiver; 14 protocols, raw, .ir files;
       decoded by the Infrared app and `ir rx`), transmit capture ☐ (TIM1 + DMA bursts)
 
-## M5: virtual RF ☐
+## M5: virtual RF ◐
 TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX uses.
-- ☐ Sub-GHz: CC1101 async RX from `.sub` RAW timings (GDO0 → TIM2 capture), TX capture
-      to `.sub`
+- ☑ Sub-GHz receive: `.sub` RAW captures and Princeton keys on a virtual air, heard by the
+      CC1101 in RX within 500 kHz (GDO0 → TIM2 capture); decoded by Read / `subghz rx`
+- ☐ Sub-GHz transmit capture to `.sub` (TIM2 output compare + DMA), more key encoders
 - ☐ NFC: ST25R3916 transparent mode / virtual tags from `.nfc` files
 - ☐ 125 kHz RFID via COMP1 / TIM, iButton 1-Wire
 

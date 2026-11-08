@@ -18,6 +18,7 @@ you flash stays flashed, settings and files persist across runs.
   ./flipperemu cli                           USB CLI of a running device
   ./flipperemu cli "storage list /ext"       run CLI commands, print output
   ./flipperemu ir NEC 0x04 0x08              point a virtual IR remote at it
+  ./flipperemu subghz capture.sub            put a Sub-GHz signal on the air
   ./flipperemu gdb                           attach gdb to a --gdb run
   ./flipperemu shot out.png | press ok       drive a running device
   ./flipperemu info                          what is on the device
@@ -531,6 +532,41 @@ def cmd_ir(args):
     return 0
 
 
+def cmd_subghz(args):
+    import fe_subghz
+    from fe_monitor import Monitor
+    dev = Device(args.device)
+    if not dev.running():
+        sys.exit(f"[{dev.name}] not running")
+    sig = args.signal
+    try:
+        if sig[0].endswith(".sub"):
+            label = pathlib.Path(sig[0]).name
+            freq, durs = fe_subghz.parse_sub(sig[0])
+        elif sig[0].lower() == "princeton" and len(sig) == 2:
+            label = f"Princeton {int(sig[1], 0):#x}"
+            freq, durs = 0, fe_subghz.princeton(int(sig[1], 0), args.bits, args.te)
+        elif sig[0].lower() == "raw":
+            label, freq, durs = "raw", 0, [int(x) for x in sig[1:]]
+        else:
+            sys.exit("usage: subghz FILE.sub | subghz princeton KEY | subghz raw +H -L ...")
+    except (ValueError, KeyError, OSError) as e:
+        sys.exit(f"subghz: {e}")
+    if args.freq:
+        freq = int(float(args.freq) * 1e6) if float(args.freq) < 10000 else int(args.freq)
+    freq = freq or 433920000
+    air = dev.dir / "subghz-air.txt"          # long captures: past HMP line limits
+    air.write_text(f"@{freq}\n" + "\n".join(map(str, durs)) + "\n")
+    m = Monitor(str(dev.monitor))
+    err = m.cmd(f"qom-set /machine/subghz rx file:{air}")
+    m.close()
+    if err:
+        sys.exit(f"subghz: {err}")
+    print(f"[{dev.name}] on the air at {freq / 1e6:.3f} MHz: {label}, "
+          f"{len(durs)} levels, {sum(abs(d) for d in durs) / 1000:.0f} ms")
+    return 0
+
+
 def cmd_shot(args):
     from fe_monitor import Monitor
     print(Monitor(str(Device(args.device).monitor)).screenshot(args.out))
@@ -622,6 +658,15 @@ def main():
     p.add_argument("--repeat", type=int, help="frames to send (default: what the "
                                               "protocol's encoder sends)")
     p.set_defaults(func=cmd_ir)
+
+    p = sub.add_parser("subghz", help="put a Sub-GHz signal on the air for a running device")
+    p.add_argument("signal", nargs="+",
+                   help="FILE.sub (RAW capture or Princeton key), princeton KEY, "
+                        "or raw +HIGH -LOW ... (µs)")
+    p.add_argument("--freq", help="MHz or Hz (default: the file's, else 433.92 MHz)")
+    p.add_argument("--bits", type=int, default=24, help="princeton: key bits")
+    p.add_argument("--te", type=int, default=390, help="princeton: TE in µs")
+    p.set_defaults(func=cmd_subghz)
 
     p = sub.add_parser("gdb", help="attach gdb to a running --gdb device")
     p.add_argument("--gdb-port", type=int, default=1234)

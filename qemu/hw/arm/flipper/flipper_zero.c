@@ -100,6 +100,18 @@ static DeviceState *spi_dev(SSIBus *bus, const char *type, uint8_t cs)
     return dev;
 }
 
+/* an SPI chip as a named machine child: /machine/subghz, /machine/nfc */
+static DeviceState *spi_named(MachineState *m, SSIBus *bus, const char *type,
+                              uint8_t cs, const char *name)
+{
+    DeviceState *dev = qdev_new(type);
+
+    qdev_prop_set_uint8(dev, "cs", cs);
+    object_property_add_child(OBJECT(m), name, OBJECT(dev));
+    ssi_realize_and_unref(dev, bus, &error_fatal);
+    return dev;
+}
+
 /* I2C chips as named machine children: /machine/gauge, /machine/charger ... */
 static I2CSlave *flipper_i2c_dev(MachineState *m, I2CBus *bus, const char *type,
                                  uint8_t addr, const char *name)
@@ -387,10 +399,11 @@ static void flipper_zero_init(MachineState *machine)
 
     /* ---- SPI1: CC1101 + ST25R3916 */
     SSIBus *spi1 = s->soc.spi[0].bus;
-    dev = spi_dev(spi1, TYPE_CC1101, 0);
+    dev = spi_named(machine, spi1, TYPE_CC1101, 0, "subghz");
     soc_out(s, 'D', 0, qdev_get_gpio_in_named(dev, SSI_GPIO_CS, 0));
     qdev_connect_gpio_out_named(dev, "gdo0", 0, soc_in(s, 'A', 1));
-    dev = spi_dev(spi1, TYPE_ST25R3916, 1);
+    CC1101(dev)->tim = &s->soc.tim2;    /* GDO0 is also TIM2 TI2 */
+    dev = spi_named(machine, spi1, TYPE_ST25R3916, 1, "nfc");
     soc_out(s, 'E', 4, qdev_get_gpio_in_named(dev, SSI_GPIO_CS, 0));
     qdev_connect_gpio_out_named(dev, "irq", 0, soc_in(s, 'A', 2));
 

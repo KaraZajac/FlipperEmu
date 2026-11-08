@@ -34,6 +34,10 @@ CLI over USB, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed 
 - Infrared receive: `./flipperemu ir NEC 0x04 0x08` points a virtual remote at the
   Flipper (14 protocols, raw timings, or signals from `.ir` files). The Infrared app's
   Learn screen and the `ir rx` CLI command decode it.
+- Sub-GHz receive: `./flipperemu subghz capture.sub` puts a recorded RAW capture (or a
+  Princeton key) on the air at its frequency. The CC1101 hears it while it listens on that
+  frequency, so the Sub-GHz app's Read and Read RAW, and `subghz rx`, receive and decode
+  it.
 - Speaker: TIM16's PWM tone plays through QEMU audio (desktop sound or a WAV recording).
   The duty cycle sets the volume, as on the real piezo.
 - Buttons from the keyboard, the QEMU monitor, or `./flipperemu press`.
@@ -58,8 +62,8 @@ CLI over USB, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed 
 - qFlipper and lab.flipper.net: they look for a USB device (VID/PID), not a serial
   port, so they don't see the emulator yet (a USB/IP bridge would fix that). Tools that
   open a serial port path work.
-- Bluetooth (needs a radio stack), RF signals for Sub-GHz, NFC, RFID and iButton, and IR
-  transmit (IR receive works).
+- Bluetooth (needs a radio stack); NFC, 125 kHz RFID and iButton signals; transmitting
+  (IR and Sub-GHz receive work).
 - LP5562 engine programs are approximated (steady-state brightness only).
 - Not yet exercised: XIP app loaders that run code from internal flash, and the
   radio-stack stage of updates (the emulated CPU2 can't install a stack).
@@ -111,6 +115,7 @@ are erased). Without `-f` it boots whatever is already flashed.
 | `stop` | shut a running device down cleanly (saves its NVRAM) |
 | `cli ["CMD" …]` | the device's CLI over USB: interactive, or run commands and print their output |
 | `ir PROTO ADDR CMD` \| `ir raw …` \| `ir FILE.ir [NAME]` | send an infrared signal to the device's receiver |
+| `subghz FILE.sub` \| `subghz princeton KEY` \| `subghz raw +H -L …` | put a Sub-GHz signal on the air (`--freq`) |
 | `flash FW [--erase-all]` | program `.elf` / `.dfu` / `.bin` / update `.tgz` into `flash.img` |
 | `sd [--resources X] [--size 512M]` | rebuild the microSD from a resources tgz, update package or folder |
 | `press ok down down ok …` | press buttons on a running device |
@@ -133,8 +138,8 @@ scripts/smoke_test.py path/to/firmware.elf|.dfu|update.tgz [--no-sd]
 
 Boots a throwaway device headless and checks: "Startup complete", "card mounted", the
 LCD draws, OK changes the screen, `info device` answers on the USB CLI, an NEC frame from the
-virtual IR remote is decoded, the LCD comes back after `power reboot`, and no `[CRASH]` in
-the log. Exit code 0 means pass, so
+virtual IR remote and a Princeton key over the virtual air are decoded, the LCD comes back
+after `power reboot`, and no `[CRASH]` in the log. Exit code 0 means pass, so
 it slots into a pre-flash habit or CI.
 
 ### Updating like qFlipper does
@@ -196,6 +201,26 @@ rx` on the CLI, and the signal is decoded:
 | | |
 |:-:|:-:|
 | ![ir](docs/img/11-ir-learn.png) | `./flipperemu ir Samsung32 0x07 0x02` with the Infrared app's Learn screen open |
+
+### Sub-GHz
+
+```sh
+./flipperemu subghz garage.sub                  # a RAW capture, at the file's frequency
+./flipperemu subghz princeton 0x95D5D4          # a PT2262 fixed code (default 433.92 MHz)
+./flipperemu subghz raw 390 -1170 1170 -390 … --freq 315
+```
+
+The signal goes "on the air". The emulated CC1101 only hears it while it's in RX and
+tuned within 500 kHz, as a real radio would, and it reports a strong RSSI during the
+burst. Open Sub-GHz → Read (or Read RAW, or run `subghz rx 433920000 0` on the CLI) and
+the firmware's own decoders take it from there:
+
+| | |
+|:-:|:-:|
+| ![subghz](docs/img/12-subghz-read.png) | Sub-GHz → Read after `./flipperemu subghz princeton 0x95D5D4` and a RAW `.sub` capture |
+
+Key files are encoded for Princeton. For other protocols, use a RAW capture (Read RAW
+on a real Flipper records one).
 
 ### Sound
 
@@ -262,7 +287,7 @@ flipperemu             launcher / device manager
 qemu/hw/arm/flipper/   the QEMU machine + STM32WB55 SoC + board devices (C)
 qemu/patches/          fixes to upstream QEMU (SysTick, ssi-sd, SD SPI state)
 scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_monitor.py,
-                       fe_cli.py, fe_ir.py, smoke_test.py
+                       fe_cli.py, fe_ir.py, fe_subghz.py, smoke_test.py
 devices/ firmware/ build/ third_party/    generated, git-ignored
 ```
 

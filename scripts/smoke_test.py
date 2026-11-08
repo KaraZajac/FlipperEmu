@@ -9,8 +9,9 @@
 Boots a throwaway device, waits for the firmware's own log milestones, presses
 Back (dismiss the first scene) and OK (main menu), checks the LCD changed,
 runs `info device` on the CLI over the emulated USB serial port, receives an
-NEC frame through the virtual IR receiver (`ir rx`), then reboots through the
-CLI and checks the LCD comes back after the warm reset.
+NEC frame through the virtual IR receiver (`ir rx`) and a Princeton key over
+the virtual air (`subghz rx`), then reboots through the CLI and checks the LCD
+comes back after the warm reset.
 Exit status 0 = pass. Screenshots are kept in the --out directory.
 """
 import argparse
@@ -105,6 +106,53 @@ def ir_check(mon: Monitor) -> bool:
     return b"NEC, A:0x04, C:0x08" in out
 
 
+def subghz_check(mon: Monitor) -> bool:
+    """`subghz rx` at 433.92 MHz, then a Princeton key on the air.
+
+    Some firmwares' `subghz rx` refuses the internal radio ("Device 0 failed
+    to start": Unleashed's begin() check has no handler for it); there the
+    raw capture (`subghz rx_raw`) must show the key's 390/1170 µs timings."""
+    import re
+    import select
+    import fe_subghz
+    want = b"Key:0x0095D5D4"
+    sig = fe_subghz.princeton(0x95D5D4)
+
+    def listen(cli, command, until):
+        cli.write(command)
+        time.sleep(1.5)
+        mon.cmd("qom-set /machine/subghz rx @433920000," + ",".join(map(str, sig)))
+        out, end = b"", time.time() + 4
+        while time.time() < end and not until(out):
+            r, _, _ = select.select([cli.fd], [], [], 0.1)
+            if r:
+                out += cli.sock.recv(4096) if cli.sock else os.read(cli.fd, 4096)
+        cli.write(b"\x03")
+        time.sleep(0.5)
+        return out
+
+    def princeton_raw(out):
+        vals = [int(v) for v in re.findall(rb"[+-](\d+)", out)]
+        return sum(abs(v - 390) < 60 or abs(v - 1170) < 90 for v in vals) >= 40
+
+    try:
+        cli = FlipperCli(usb_endpoint(mon))
+        try:
+            cli.read_until_prompt(15)
+            out = listen(cli, b"subghz rx 433920000 0\r", lambda o: want in o)
+            if want in out:
+                return True
+            if b"failed to start" in out:
+                cli.read_until_prompt(5)
+                return princeton_raw(listen(cli, b"subghz rx_raw 433920000\r",
+                                            princeton_raw))
+        finally:
+            cli.close()
+    except (OSError, TimeoutError, ConnectionError, TypeError) as e:
+        print(f"  subghz: {e}")
+    return False
+
+
 def usb_cli_check(mon: Monitor) -> bool:
     try:
         cli = FlipperCli(usb_endpoint(mon))
@@ -167,6 +215,8 @@ def main() -> int:
             if not args.no_usb:
                 results.append(("usb: CLI 'info device' over CDC", usb_cli_check(mon)))
                 results.append(("ir: NEC frame received and decoded", ir_check(mon)))
+                results.append(("subghz: Princeton key received at 433.92 MHz",
+                                subghz_check(mon)))
                 results.append(("reboot: LCD redrawn after a warm reset",
                                 reboot_check(mon, uart, out, args.timeout)))
             mon.cmd("quit")

@@ -2,16 +2,26 @@
  * Flipper Zero radio front-ends on SPI1: TI CC1101 (sub-GHz, CS=PD0,
  * GDO0=PA1) and ST25R3916 (NFC, CS=PE4, IRQ=PA2).
  *
- * Register-level models with no RF: enough for the firmware's own bring-up
+ * Register-level models: enough for the firmware's own bring-up
  * (furi_hal_subghz_init() GDO0 self-test, furi_hal_nfc_init() chip id,
  * oscillator and VDD measurement) and for apps to configure the chips.
+ *
+ * Sub-GHz receive: a signal can be put "on the air" through the CC1101's
+ * "rx" property (+high/-low µs, optionally at a frequency).  While the chip
+ * is in RX, tuned within 500 kHz and set to asynchronous serial output on
+ * GDO0 (IOCFG0 = 0x0D), GDO0 follows the carrier, and RSSI reads strong.
+ * GDO0 is PA1 and TIM2's TI2, which is how furi_hal_subghz captures it.
  *
  * Copyright (c) 2026, Kara Zajac
  * SPDX-License-Identifier: BSD-3-Clause
  */
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/timer.h"
+#include "qemu/cutils.h"
+#include "qapi/error.h"
 #include "hw/core/irq.h"
+#include "wb55.h"
 #include "flipper.h"
 
 /* --------------------------------------------------------------- CC1101 */
@@ -29,6 +39,23 @@ static const uint8_t cc1101_defaults[0x2F] = {
 #define MARC_FSTXON 0x12
 #define MARC_TX     0x13
 
+#define AIR_MAX 65536
+
+static uint32_t cc1101_freq_hz(Cc1101State *s)
+{
+    uint32_t f = s->regs[0x0D] << 16 | s->regs[0x0E] << 8 | s->regs[0x0F];
+
+    return (uint64_t)f * 26000000 / 65536;
+}
+
+/* in RX and tuned to what is on the air */
+static bool cc1101_hears(Cc1101State *s)
+{
+    return s->state == MARC_RX &&
+           (!s->air_freq ||
+            ABS((int64_t)cc1101_freq_hz(s) - (int64_t)s->air_freq) < 500000);
+}
+
 static int cc1101_gdo_level(Cc1101State *s, uint8_t cfg)
 {
     int lvl;
@@ -37,15 +64,131 @@ static int cc1101_gdo_level(Cc1101State *s, uint8_t cfg)
     case 0x2F: lvl = 0; break;          /* HW to 0 */
     case 0x2E: lvl = 1; break;          /* high-Z: released (pull-up) */
     case 0x29: lvl = 0; break;          /* CHIP_RDYn */
+    case 0x0D: lvl = cc1101_hears(s) && s->carrier; break; /* async data */
     default:   lvl = 0; break;          /* no RF activity */
     }
     return (cfg & 0x40) ? !lvl : lvl;
 }
 
+static void cc1101_drive_gdo0(Cc1101State *s, bool level, int64_t when)
+{
+    if (level == s->gdo0_level) {
+        return;
+    }
+    s->gdo0_level = level;
+    qemu_set_irq(s->gdo0, level);
+    if (s->tim) {
+        wb55_tim_input(s->tim, 1, level, when);
+    }
+}
+
 static void cc1101_update_gdo(Cc1101State *s)
 {
-    qemu_set_irq(s->gdo0, cc1101_gdo_level(s, s->regs[0x02]));
+    cc1101_drive_gdo0(s, cc1101_gdo_level(s, s->regs[0x02]),
+                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     qemu_set_irq(s->gdo2, cc1101_gdo_level(s, s->regs[0x00]));
+}
+
+/*
+ * One edge of the air signal.  Like the IR receiver, an edge that would
+ * reach the capture timer waits (up to 10 ms) for the firmware to service
+ * the previous capture; the timestamp keeps the measured duration exact.
+ */
+static void cc1101_air_edge(void *opaque)
+{
+    Cc1101State *s = opaque;
+    int64_t when = s->air_next_ns;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    bool level;
+
+    if (s->tim && cc1101_hears(s) && wb55_tim_capture_pending(s->tim) &&
+        now < when + 10 * SCALE_MS) {
+        timer_mod(s->air_timer, now + 20 * SCALE_US);
+        return;
+    }
+    if (s->air_pos >= s->air_len) {
+        level = false;                  /* transmission over */
+        g_free(s->air);
+        s->air = NULL;
+        s->air_len = s->air_pos = 0;
+    } else {
+        int32_t d = s->air[s->air_pos++];
+
+        level = d > 0;
+        s->air_next_ns = when + (int64_t)ABS(d) * 1000;
+        timer_mod(s->air_timer, s->air_next_ns);
+    }
+    s->carrier = level;
+    cc1101_drive_gdo0(s, cc1101_gdo_level(s, s->regs[0x02]), when);
+}
+
+static char *cc1101_get_rx(Object *obj, Error **errp)
+{
+    return g_strdup(CC1101(obj)->air ? "busy" : "");
+}
+
+/* "[@FREQ_HZ,]d,d,..." (+high/-low µs), or "file:PATH" holding the same */
+static void cc1101_set_rx(Object *obj, const char *value, Error **errp)
+{
+    Cc1101State *s = CC1101(obj);
+    g_autofree char *text = NULL;
+    g_autofree int32_t *air = g_new0(int32_t, AIR_MAX);
+    g_auto(GStrv) parts = NULL;
+    uint32_t freq = 0;
+    int n = 0;
+
+    if (g_str_has_prefix(value, "file:")) {
+        g_autoptr(GError) err = NULL;
+
+        if (!g_file_get_contents(value + 5, &text, NULL, &err)) {
+            error_setg(errp, "subghz rx: %s", err->message);
+            return;
+        }
+        value = text;
+    }
+    parts = g_strsplit_set(value, " ,;\t\r\n", -1);
+    for (int i = 0; parts[i]; i++) {
+        const char *p = parts[i];
+        int64_t v;
+
+        if (!*p) {
+            continue;
+        }
+        if (*p == '@') {
+            uint64_t f;
+
+            if (qemu_strtou64(p + 1, NULL, 10, &f) < 0 || f > UINT32_MAX) {
+                error_setg(errp, "subghz rx: bad frequency '%s'", p);
+                return;
+            }
+            freq = f;
+            continue;
+        }
+        if (qemu_strtoi64(p, NULL, 10, &v) < 0 || !v ||
+            v > 10000000 || v < -10000000) {
+            error_setg(errp, "subghz rx: bad duration '%s'", p);
+            return;
+        }
+        if (n && (air[n - 1] > 0) == (v > 0)) {
+            air[n - 1] += v;            /* merge runs of one level */
+        } else if (n < AIR_MAX) {
+            air[n++] = v;
+        } else {
+            error_setg(errp, "subghz rx: more than %d durations", AIR_MAX);
+            return;
+        }
+    }
+    if (!n) {
+        return;
+    }
+    timer_del(s->air_timer);
+    g_free(s->air);
+    s->air = g_steal_pointer(&air);
+    s->air_len = n;
+    s->air_pos = 0;
+    s->air_freq = freq;
+    s->air_next_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 2 * SCALE_MS;
+    timer_mod(s->air_timer, s->air_next_ns);
 }
 
 static uint8_t cc1101_status(Cc1101State *s)
@@ -83,7 +226,9 @@ static uint8_t cc1101_status_reg(Cc1101State *s, uint8_t addr)
     switch (addr) {
     case 0x30: return 0x00;             /* PARTNUM */
     case 0x31: return 0x14;             /* VERSION */
-    case 0x34: return 0x80;             /* RSSI: noise floor */
+    case 0x34:                          /* RSSI: dBm = value/2 - 74 */
+        return cc1101_hears(s) && s->air ? 0x44 /* -40 dBm */
+                                         : 0xCC /* -100 dBm */;
     case 0x35: return s->state;         /* MARCSTATE */
     case 0x38: return 0x00;             /* PKTSTATUS */
     case 0x39: return 0x94;             /* VCO_VC_DAC */
@@ -158,6 +303,14 @@ static void cc1101_realize(SSIPeripheral *d, Error **errp)
 
     qdev_init_gpio_out_named(DEVICE(d), &s->gdo0, "gdo0", 1);
     qdev_init_gpio_out_named(DEVICE(d), &s->gdo2, "gdo2", 1);
+    s->air_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, cc1101_air_edge, s);
+}
+
+static void cc1101_init(Object *obj)
+{
+    object_property_add_str(obj, "rx", cc1101_get_rx, cc1101_set_rx);
+    object_property_set_description(obj, "rx",
+        "Put a signal on the air: [@freq_hz,]+high,-low,... in µs, or file:PATH");
 }
 
 static void cc1101_reset_hold(Object *obj, ResetType type)
@@ -173,7 +326,11 @@ static void cc1101_reset_hold(Object *obj, ResetType type)
 
 static void cc1101_reset_exit(Object *obj, ResetType type)
 {
-    cc1101_update_gdo(CC1101(obj));
+    Cc1101State *s = CC1101(obj);
+
+    /* GDO0 is only driven on changes: force the pins to the reset level */
+    s->gdo0_level = !cc1101_gdo_level(s, s->regs[0x02]);
+    cc1101_update_gdo(s);
 }
 
 static void cc1101_class_init(ObjectClass *klass, const void *data)
@@ -386,6 +543,7 @@ static const TypeInfo flipper_rf_types[] = {
         .name = TYPE_CC1101,
         .parent = TYPE_SSI_PERIPHERAL,
         .instance_size = sizeof(Cc1101State),
+        .instance_init = cc1101_init,
         .class_init = cc1101_class_init,
     }, {
         .name = TYPE_ST25R3916,

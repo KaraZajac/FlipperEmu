@@ -97,6 +97,15 @@ struct Cc1101State {
     bool read, burst;
     int pa_idx;
     qemu_irq gdo0, gdo2;
+    /* what is on the air: +high / -low µs at air_freq (0: any frequency) */
+    struct WB55TimState *tim;    /* TIM2: GDO0 is its TI2 input */
+    QEMUTimer *air_timer;
+    int32_t *air;
+    int air_len, air_pos;
+    int64_t air_next_ns;
+    uint32_t air_freq;
+    bool carrier;                /* the air level right now */
+    bool gdo0_level;             /* what GDO0 drives */
 };
 
 /* ---------------------------------------------------- ST25R3916 NFC */

@@ -26,6 +26,7 @@ it; the file comments name that function. Register layouts come from RM0434 and 
    I2C1 ── bq27220 @0x55   bq25896 @0x6B   lp5562 @0x30
    TIM16 CH1 (PB8) ── piezo → flipper-speaker → QEMU audio (desktop or WAV)
    PA0 + TIM2 TI1  ←─ IR receiver ← /machine/ir rx (marks/spaces)
+   PA1 + TIM2 TI2  ←─ CC1101 GDO0 (async RX) ← /machine/subghz rx (the "air")
    USB ─── built-in host ── CDC ACM ⇄ chardev "usb" (pty/socket)  ·  HID → text on it
 ```
 
@@ -248,7 +249,13 @@ firmware keeps `/int` on the card as `/ext/.int`.
 - **LP5562**: register file. W PWM is the backlight and R/G/B the status LED, both drawn
   next to the LCD.
 - **CC1101**: status byte, header/burst/strobe framing, config and status registers,
-  MARCSTATE, PATABLE, and GDO0/GDO2 driven from IOCFG (self-test passes).
+  MARCSTATE, PATABLE, and GDO0/GDO2 driven from IOCFG (self-test passes). Receive: a
+  signal written to `/machine/subghz`'s `rx` property (+high/−low µs at a frequency, or
+  `file:PATH` for long captures) plays on "the air". With IOCFG0 = 0x0D (async serial
+  data), GDO0 follows the carrier while the chip is in RX and tuned within 500 kHz, and
+  RSSI reads −40 dBm (−100 dBm otherwise). GDO0 is PA1 and TIM2 TI2, so
+  `furi_hal_subghz_start_async_rx` captures it the same way the IR receiver path does,
+  with the same pacing.
 - **ST25R3916**: register spaces A and B, IC identity 0x2A, IRQ status (clear on read) and
   mask registers driving the IRQ pin, oscillator-ready and VDD measurement.
 - **Speaker**: the piezo on PB8 is TIM16 CH1 in PWM mode. Every TIM16 write recomputes
