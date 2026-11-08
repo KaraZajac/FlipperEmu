@@ -13,7 +13,8 @@ NEC frame through the virtual IR receiver (`ir rx`), captures an `ir tx` and
 decodes it back, receives a Princeton key over the virtual air (`subghz rx`),
 captures a `subghz tx`, reads a 125 kHz EM4100
 tag (`rfid read`) and reads back its own H10301 emulation (`rfid emulate`),
-reads an NTAG215 over NFC (`mfu info`), enumerates over USB/IP, then reboots through the CLI and checks the LCD comes
+reads an NTAG215 (`mfu info`) and dumps a MIFARE Classic 1K over NFC,
+enumerates over USB/IP, then reboots through the CLI and checks the LCD comes
 back after the warm reset.
 Exit status 0 = pass. Screenshots are kept in the --out directory.
 """
@@ -298,8 +299,7 @@ def nfc_check(mon: Monitor, devdir: pathlib.Path):
                 cli.write(b"\x03")
                 return None
             _, out = cli.watch("mfu info", r"\[nfc\]>: ", timeout=15, stop=False)
-            cli.write(b"\x03")
-            time.sleep(0.3)
+            cli.run("exit", timeout=5)  # leave the NFC shell
         finally:
             cli.close()
             mon.cmd("qom-set /machine/nfc card none")
@@ -310,6 +310,52 @@ def nfc_check(mon: Monitor, devdir: pathlib.Path):
     if not ok:
         print(f"  nfc: {out.strip()[-300:]!r}")
     return ok
+
+
+def mfc_check(mon: Monitor, devdir: pathlib.Path):
+    """A MIFARE Classic 1K in the field and its keys in the NFC app's key
+    cache: `dump` must authenticate every sector (Crypto1) and save all 64
+    blocks.  None (skip) without the NFC shell."""
+    import fe_nfc
+    uid = bytes.fromhex("11223344")
+    card = devdir / "nfc-card.txt"
+    card.write_text(fe_nfc.blank_mfc("1k", uid))
+    keys = ("Filetype: Flipper NFC keys\nVersion: 1\nMifare Classic type: 1K\n"
+            "Key A map: 000000000000FFFF\nKey B map: 000000000000FFFF\n" +
+            "".join(f"Key A sector {s}: FF FF FF FF FF FF\n"
+                    f"Key B sector {s}: FF FF FF FF FF FF\n" for s in range(16)))
+    try:
+        if mon.cmd(f"qom-set /machine/nfc card file:{card}"):
+            return False
+        cli = FlipperCli(usb_endpoint(mon))
+        try:
+            cli.read_until_prompt(15)
+            cli.run("storage mkdir /ext/nfc/.cache", timeout=5)
+            cli.write(f"storage write_chunk /ext/nfc/.cache/{uid.hex().upper()}.keys "
+                      f"{len(keys)}\r".encode())
+            time.sleep(0.5)
+            cli.write(keys.encode())
+            cli.read_until_prompt(5)
+            found, _ = cli.watch("nfc", r"\[nfc\]>: ", timeout=8, stop=False)
+            if not found:
+                cli.write(b"\x03")
+                return None
+            saved, out = cli.watch("dump", r"Dump saved to '([^']+)'", timeout=40,
+                                   stop=False)
+            cli.read_until_prompt(5)
+            cli.run("exit", timeout=5)  # leave the NFC shell (^C only cancels)
+            if not saved:
+                print(f"  mfc: {out.strip()[-200:]!r}")
+                return False
+            text = cli.run(f"storage read {saved.group(1).decode()}", timeout=10)
+        finally:
+            cli.close()
+            mon.cmd("qom-set /machine/nfc card none")
+    except (OSError, TimeoutError, ConnectionError, TypeError) as e:
+        print(f"  mfc: {e}")
+        return False
+    return ("Block 63: FF FF FF FF FF FF FF 07 80 69 FF FF FF FF FF FF" in text and
+            "Block 0: 11 22 33 44 44 08 04 00" in text)
 
 
 def usbip_check(port: int) -> bool:
@@ -431,6 +477,8 @@ def main() -> int:
                                 rfid_emulate_check(mon, devdir)))
                 results.append(("nfc: NTAG215 read by `mfu info` (all 135 pages)",
                                 nfc_check(mon, devdir)))
+                results.append(("nfc: MIFARE Classic 1K dumped (Crypto1, 16 sectors)",
+                                mfc_check(mon, devdir)))
                 results.append(("usbip: enumerated by a USB/IP client, CLI over URBs",
                                 usbip_check(usbip_port)))
                 results.append(("reboot: LCD redrawn after a warm reset",

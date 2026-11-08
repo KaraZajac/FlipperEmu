@@ -378,9 +378,24 @@ vector with TIM1's trigger and commutation interrupts.
 - Type 2 commands, with AUTH0/PROT access control and a NAK that sends the tag back
   to IDLE.
 
+MIFARE Classic uses Crypto1, written from its published description (Garcia et al.,
+"Dismantling MIFARE Classic", 2008). It is a plain 48-bit LFSR with the paper's
+feedback taps and its filter built from the fa/fb/fc boolean functions. Keys, nonces
+and data enter in transmission order, LSB first. The card's nonces come from the
+16-bit PRNG (x^16+x^14+x^13+x^11+1), advanced one step per bit time since the field
+came on, as on silicon, so they pass the firmware's "weak PRNG" test. Authentication
+runs the three passes:
+- the card sends nT, plain, or encrypted for a nested AUTH;
+- the reader's {nR} is fed back into the LFSR;
+- {aR} must equal suc^64(nT), and {aT} = suc^96(nT).
+
+After that every frame is encrypted, parity bits included (each one with the next
+keystream bit). READ, WRITE and HALT obey the sector trailer's access bits, by the
+MF1S50 tables, and Key A always reads back as zeros.
+
 `scripts/fe_nfc.py` converts a Flipper `.nfc` file into the card description (newer
 files store ATQA MSB first, and this swaps it back). It can also make a new NTAG with
-an NDEF URL record.
+an NDEF URL record, or a factory MIFARE Classic.
 
 ## Storage
 

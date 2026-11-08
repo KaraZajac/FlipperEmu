@@ -10,7 +10,10 @@ holds in its field (see qemu/hw/arm/flipper/nfc_card.c):
     fe_nfc.py --ntag215 04112233445566      -> a blank NTAG215 with that UID
     fe_nfc.py --ntag215 04112233445566 https://flipperzero.one   (with a URL)
 
-Supported: MIFARE Ultralight / Ultralight EV1 / NTAG21x (Type 2).
+    fe_nfc.py --mfc1k 11223344              -> a factory MIFARE Classic 1K
+
+Supported: MIFARE Ultralight / Ultralight EV1 / NTAG21x (Type 2), MIFARE
+Classic Mini / 1K / 4K (unread blocks: zeros; unread keys: FF..FF).
 """
 import pathlib
 import sys
@@ -48,10 +51,41 @@ def parse_nfc(path):
     return fields
 
 
+MFC_BLOCKS = {"MINI": 20, "1K": 64, "4K": 256}
+MFC_TRAILER = bytes.fromhex("FFFFFFFFFFFF") + bytes.fromhex("FF078069") + \
+    bytes.fromhex("FFFFFFFFFFFF")
+
+
+def mfc_trailer(block):
+    return block % 4 == 3 if block < 128 else (block - 128) % 16 == 15
+
+
+def describe_mfc(fields, atqa):
+    """A MIFARE Classic dump: its blocks; what was never read gets the
+    factory values (the card's keys must be something)."""
+    kind = fields.get("Mifare Classic type", "1K").upper()
+    if kind not in MFC_BLOCKS:
+        raise ValueError(f"MIFARE Classic type {kind!r} is not supported")
+    uid = hexbytes(fields["UID"])
+    out = [f"# MIFARE Classic {kind}", "type mfc", f"uid {uid.hex(' ')}",
+           f"atqa {atqa.hex(' ')}", f"sak {fields.get('SAK', '08')}"]
+    for b in range(MFC_BLOCKS[kind]):
+        raw = fields.get(f"Block {b}", " ".join(["??"] * 16)).split()
+        if mfc_trailer(b):
+            raw = [MFC_TRAILER[i:i + 1].hex() if x == "??" else x
+                   for i, x in enumerate(raw)]
+        out.append(f"mem {' '.join('00' if x == '??' else x for x in raw)}")
+    return "\n".join(out) + "\n"
+
+
 def describe(fields):
     """The card description for nfc_card.c."""
     version = int(fields.get("Version", "4"))
     dev = fields.get("Device type", "")
+    if dev in ("Mifare Classic",):
+        atqa = hexbytes(fields["ATQA"])
+        return describe_mfc(fields, atqa[::-1] if version > LSB_ATQA_FORMAT_VERSION
+                            else atqa)
     kind = fields.get("NTAG/Ultralight type", dev)
     if dev not in T2_TYPES and kind not in T2_TYPES:
         raise ValueError(f"device type {dev!r} is not supported yet "
@@ -121,10 +155,33 @@ def blank(kind, uid, url=None):
     return "\n".join(out) + "\n"
 
 
+def blank_mfc(kind, uid):
+    """A factory MIFARE Classic: transport keys FF..FF, empty blocks."""
+    blocks = MFC_BLOCKS[kind.upper()]
+    if len(uid) != 4:
+        raise ValueError("a MIFARE Classic UID here is 4 bytes")
+    sak = {"MINI": 0x09, "1K": 0x08, "4K": 0x18}[kind.upper()]
+    atqa = bytes([0x04, 0x00]) if blocks < 256 else bytes([0x02, 0x00])
+    out = [f"# MIFARE Classic {kind.upper()} (blank)", "type mfc", f"uid {uid.hex(' ')}",
+           f"atqa {atqa.hex(' ')}", f"sak {sak:02x}"]
+    for b in range(blocks):
+        if b == 0:                      # manufacturer block
+            blk = uid + bytes([uid[0] ^ uid[1] ^ uid[2] ^ uid[3], sak]) + atqa + \
+                bytes.fromhex("6263646566676869")
+        elif mfc_trailer(b):
+            blk = MFC_TRAILER
+        else:
+            blk = bytes(16)
+        out.append(f"mem {blk.hex(' ')}")
+    return "\n".join(out) + "\n"
+
+
 def main():
     args = sys.argv[1:]
     if len(args) == 1 and args[0].endswith(".nfc"):
         print(describe(parse_nfc(args[0])), end="")
+    elif len(args) == 2 and args[0].lstrip("-").lower() in ("mfcmini", "mfc1k", "mfc4k"):
+        print(blank_mfc(args[0].lstrip("-")[3:], bytes.fromhex(args[1])), end="")
     elif len(args) in (2, 3) and args[0].lstrip("-") in BLANK:
         print(blank(args[0].lstrip("-"), bytes.fromhex(args[1]),
                     args[2] if len(args) == 3 else None), end="")

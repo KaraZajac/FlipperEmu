@@ -281,6 +281,23 @@ All three are small, self-contained, and suitable for sending upstream.
     signature, and the converter had dropped it, so the card NAKed READ_SIG. Every
     EV1 and NTAG21x answers READ_SIG; the card now does too.
 
+33. **Crypto1 interoperated on the first run.** The firmware's `crypto1.c` is GPL-3,
+    which cannot go into GPL-2 QEMU. So the card's Crypto1 is written from the
+    published description, as a plain 48-bit LFSR, and only the bit-order conventions
+    were read from the firmware. Before any C, a check confirmed that the paper's
+    boolean filter functions reproduce the reference tables under the chosen indexing.
+    The NFC app then read a virtual 1K with 32/32 keys and 16/16 sectors.
+    - A dump with a key-B-only sector reads 15/16, which is the firmware's own logic:
+      it reads with the key it found first and moves on after a NAK.
+    - Two bugs were caught in review before the first build: {aR} begins at air
+      bit 36, not byte 4, and the nonce must come from the 16-bit LFSR.
+
+34. **Smoke test: `^C` does not leave the NFC shell.** In the `nfc` sub-shell, Ctrl+C
+    only cancels the line, and its prompt `[nfc]>: ` also ends in `>: `. So the next
+    command went to the NFC shell ("could not find command"). `exit` leaves it. The
+    Classic check writes the NFC app's key cache (`/ext/nfc/.cache/UID.keys`) over the
+    CLI so that `dump` can authenticate every sector without the GUI.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
