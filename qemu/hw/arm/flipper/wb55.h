@@ -366,9 +366,21 @@ enum { WB55_RF_PLAIN = 0, WB55_RF_ADC, WB55_RF_TIM, WB55_RF_AES, WB55_RF_CRC };
 /* ----------------------------------------------------------------- USB */
 #include "chardev/char-fe.h"
 #include "qemu/fifo8.h"
+#include "qemu/queue.h"
 
 #define TYPE_WB55_USB "stm32wb55-usb"
 OBJECT_DECLARE_SIMPLE_TYPE(WB55UsbState, WB55_USB)
+
+/* a URB from a USB/IP client (the host kernel), being executed on the bus */
+typedef struct WB55Urb {
+    uint32_t seqnum, flags, len, start_frame, npackets;
+    uint8_t ep, dir;             /* dir: 1 = IN */
+    uint8_t setup[8];
+    uint8_t *data;               /* OUT payload, or IN buffer */
+    uint32_t done;
+    bool started, zlp_done, unlinked;
+    QTAILQ_ENTRY(WB55Urb) next;
+} WB55Urb;
 
 /* one control transfer issued by the built-in host */
 typedef struct WB55UsbCtl {
@@ -429,6 +441,16 @@ struct WB55UsbState {
     uint16_t alt_code;           /* Windows Alt+Numpad character entry */
     uint8_t alt_digits;
     uint16_t consumer[2];
+
+    /* USB/IP export: the PC's kernel becomes the host (qFlipper & co.) */
+    CharFrontend usbip_chr;
+    bool usbip_open, usbip_imported;
+    GByteArray *usbip_rx, *usbip_tx;
+    guint usbip_watch;
+    QTAILQ_HEAD(, WB55Urb) urbs;
+    WB55Urb *ctl_urb;            /* the URB the control engine is serving */
+    uint16_t ep_mps[2][16];      /* [dir][ep] from the configuration */
+    uint8_t nif, if_class[16][3];
 
     /* board hook: VBUS follows the virtual cable */
     void (*vbus_changed)(void *opaque, bool on);

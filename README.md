@@ -20,8 +20,8 @@ QEMU, so none has QEMU's speed, built-in GDB stub, snapshots or tracing plugins.
 ## Status
 
 Verified on 2026-11-08 with `scripts/smoke_test.py` (boot, SD mount, LCD, input, CLI over
-USB, IR receive, Sub-GHz receive and transmit, warm reboot, no crash): **official 1.5.1**,
-**Momentum mntm-012**, **Unleashed unlshd-094**.
+USB, IR receive, Sub-GHz receive and transmit, USB/IP export, warm reboot, no crash):
+**official 1.5.1**, **Momentum mntm-012**, **Unleashed unlshd-094**.
 
 | | |
 |:-:|:-:|
@@ -42,6 +42,8 @@ USB, IR receive, Sub-GHz receive and transmit, warm reboot, no crash): **officia
   and the protobuf RPC) is bridged to a pty or socket, and `./flipperemu cli` talks to
   it. When an app switches the port to HID (Bad USB, USB remote), the host plays the
   PC and shows what the Flipper types.
+- USB/IP: `--usbip` exports the USB device so this PC's kernel can attach it as a real
+  Flipper (`0483:5740`, `/dev/ttyACM*`), for qFlipper, lab.flipper.net and other tools.
 - Over-the-air updates through the firmware's own updater (`run --update`): /int backup,
   updater in RAM, flash write and verify, resources and splash, then a normal boot.
 - Infrared receive: `./flipperemu ir NEC 0x04 0x08` points a virtual remote at the
@@ -65,9 +67,8 @@ USB, IR receive, Sub-GHz receive and transmit, warm reboot, no crash): **officia
 - GDB stub with the release `.elf` symbols.
 
 **Not yet** (see [PLAN.md](PLAN.md))
-- qFlipper and lab.flipper.net: they look for a USB device (VID/PID), not a serial
-  port, so they don't see the emulator yet (a USB/IP bridge would fix that). Tools that
-  open a serial port path work.
+- qFlipper's firmware *update* includes a radio-stack stage that the emulated CPU2
+  cannot install; use `./flipperemu run --update` for updates.
 - Bluetooth (needs a radio stack); NFC, 125 kHz RFID and iButton signals; IR transmit.
 - LP5562 engine programs are approximated (steady-state brightness only).
 - Not yet exercised: XIP app loaders that run code from internal flash, and the
@@ -118,6 +119,7 @@ are erased). Without `-f` it boots whatever is already flashed.
 | `run [-f FW] [--headless] [--gdb\|--wait-gdb] [--serial S] [--usb U] [--no-sd]` | (flash and) boot |
 | `run --update PKG` | install an update package through the firmware's own updater (keeps settings and files) |
 | `stop` | shut a running device down cleanly (saves its NVRAM) |
+| `run --usbip [PORT]` | export the USB device over USB/IP (then `sudo scripts/usbip_attach.py`) |
 | `cli ["CMD" …]` | the device's CLI over USB: interactive, or run commands and print their output |
 | `ir PROTO ADDR CMD` \| `ir raw …` \| `ir FILE.ir [NAME]` | send an infrared signal to the device's receiver |
 | `subghz FILE.sub` \| `subghz princeton KEY` \| `subghz raw +H -L …` | put a Sub-GHz signal on the air (`--freq`) |
@@ -146,6 +148,25 @@ LCD draws, OK changes the screen, `info device` answers on the USB CLI, an NEC f
 virtual IR remote and a Princeton key over the virtual air are decoded, the LCD comes back
 after `power reboot`, and no `[CRASH]` in the log. Exit code 0 means pass, so
 it slots into a pre-flash habit or CI.
+
+### qFlipper, lab.flipper.net and other PC tools (USB/IP)
+
+```sh
+./flipperemu run --usbip                   # serve the USB device on 127.0.0.1:3240
+sudo scripts/usbip_attach.py --watch       # plug it into this PC, and again after reboots
+```
+
+The emulator speaks Linux's USB/IP protocol. The attach script imports the device and
+hands the connection to the kernel's `vhci-hcd` driver, which is what `usbip attach`
+does, without needing the `usbip` package. From then on the PC sees a Flipper on USB:
+cdc_acm binds `/dev/ttyACM*`, and qFlipper, lab.flipper.net (Chrome WebSerial), `ufbt`
+and serial tools find it by VID/PID. When the firmware leaves the bus (reboot, USB mode
+change), the device is unplugged from the PC too. `--watch` plugs it back in when it
+returns. `sudo scripts/usbip_attach.py --detach` unplugs it.
+
+The URB path is tested with a client that plays the kernel's part (`scripts/fe_usbip.py`):
+import, descriptors, SET_CONFIGURATION, CDC line state, bulk URBs carrying the CLI, and
+unlinks. Attaching to the real kernel needs root, so that part is yours to try.
 
 ### Updating like qFlipper does
 
@@ -307,7 +328,8 @@ flipperemu             launcher / device manager
 qemu/hw/arm/flipper/   the QEMU machine + STM32WB55 SoC + board devices (C)
 qemu/patches/          fixes to upstream QEMU (SysTick, ssi-sd, SD SPI state)
 scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_monitor.py,
-                       fe_cli.py, fe_ir.py, fe_subghz.py, smoke_test.py
+                       fe_cli.py, fe_ir.py, fe_subghz.py, fe_usbip.py, usbip_attach.py,
+                       smoke_test.py
 devices/ firmware/ build/ third_party/    generated, git-ignored
 ```
 

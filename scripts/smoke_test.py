@@ -176,6 +176,41 @@ def subghz_tx_check(mon: Monitor):
     return tx.startswith("@433920000") and int("".join(map(str, bits)), 2) == 0x95D5D4
 
 
+def usbip_check(port: int) -> bool:
+    """Play the PC's kernel over USB/IP: import, enumerate, configure, CLI."""
+    import select
+    import struct
+    import fe_usbip
+    try:
+        if not any(d["busid"] == "1-1" for d in fe_usbip.devlist(port=port)):
+            return False
+        c = fe_usbip.UsbipClient(port=port)
+        try:
+            pend = []
+            dd = c.control(0x80, 6, 0x0100, 0, 18, pending=pend)
+            c.control(0x00, 9, 1, 0, pending=pend)                 # SET_CONFIGURATION
+            c.control(0x21, 0x20, 0, 0, data=struct.pack("<IBBB", 115200, 0, 0, 8),
+                      pending=pend)
+            reads = [c.submit_in(2, 128) for _ in range(4)]
+            c.control(0x21, 0x22, 3, 0, pending=pend)              # DTR
+            out, end = b"", time.time() + 15
+            for _, seq, _, data, _ in pend:
+                out += data if seq in reads else b""
+            while time.time() < end and b">: " not in out:
+                if select.select([c.sock], [], [], 0.2)[0]:
+                    cmd, seq, status, data, _ = c.receive()
+                    if seq in reads:
+                        out += data
+                        reads.remove(seq)
+                        reads.append(c.submit_in(2, 128))
+        finally:
+            c.close()
+    except (OSError, ConnectionError) as e:
+        print(f"  usbip: {e}")
+        return False
+    return dd[8:12] == bytes.fromhex("83044057") and b">: " in out
+
+
 def usb_cli_check(mon: Monitor) -> bool:
     try:
         cli = FlipperCli(usb_endpoint(mon))
@@ -210,6 +245,13 @@ def main() -> int:
     if args.no_sd:
         cmd.append("--no-sd")
     cmd += ["--usb", "none" if args.no_usb else "pty"]
+    usbip_port = None
+    if not args.no_usb:
+        import socket
+        with socket.socket() as probe:                 # a free TCP port
+            probe.bind(("127.0.0.1", 0))
+            usbip_port = probe.getsockname()[1]
+        cmd += ["--usbip", str(usbip_port)]
 
     results = []
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -242,6 +284,8 @@ def main() -> int:
                                 subghz_check(mon)))
                 results.append(("subghz: transmission captured with exact timings",
                                 subghz_tx_check(mon)))
+                results.append(("usbip: enumerated by a USB/IP client, CLI over URBs",
+                                usbip_check(usbip_port)))
                 results.append(("reboot: LCD redrawn after a warm reset",
                                 reboot_check(mon, uart, out, args.timeout)))
             mon.cmd("quit")

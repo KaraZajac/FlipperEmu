@@ -185,6 +185,21 @@ Host sequence, as a PC does it:
 Mode switches re-enumerate on their own. Opening Bad USB turns the CDC port into a HID
 keyboard (`046d:c529`); leaving the app turns it back.
 
+**USB/IP export** (`usbip` chardev, a TCP server, default port 3240). The device can be
+handed to the PC's kernel instead of the built-in class drivers:
+- Before import, OP_REQ_DEVLIST and OP_REQ_IMPORT are answered from the descriptors the
+  built-in host read.
+- vhci-hcd handles SET_ADDRESS itself and forwards everything else as CMD_SUBMIT URBs.
+  The built-in host keeps the bus-level jobs (reset, address).
+- Control URBs run through the same control-transfer engine.
+- Bulk and interrupt URBs queue per endpoint and direction, and complete as the firmware
+  supplies or takes data: short packet, full buffer, ZLP flag, STALL → −EPIPE.
+- UNLINK removes a pending URB without a RET_SUBMIT. For non-ISO URBs, start_frame and
+  number_of_packets are echoed back, since the protocol document's prose and examples
+  disagree on them.
+- When the firmware drops off the bus, the socket closes, so the PC sees an unplug. When
+  the client disconnects, the device gets a fresh reset back on the built-in host.
+
 ## Resets and the OTA updater
 
 A system reset (SYSRESETREQ, or `OBL_LAUNCH` after option-byte programming) goes through the machine

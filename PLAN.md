@@ -29,7 +29,10 @@ qFlipper / lab.flipper.net / `ufbt launch` only run over USB CDC.
 - ☑ The charger sees VBUS while the virtual cable is attached; `qom-set
       /machine/soc/usb attached false` unplugs it at runtime
 - ☑ Verified with official 1.5.1, Momentum mntm-012, Unleashed unlshd-094 (smoke test)
-- ☐ Stretch: USB/IP export, so the host kernel (and qFlipper) sees a real Flipper
+- ☑ USB/IP export (`--usbip`, `sudo scripts/usbip_attach.py`): the PC's kernel attaches
+      the emulated Flipper as a real USB device for qFlipper & co. Verified with a
+      kernel-role client; real-kernel/qFlipper run pending
+- ☐ A minimal BLE stack on CPU2, so qFlipper's updates (radio stage) and the BT service work
 - ☐ Stretch: second CDC port of the dual-CDC mode; mass storage
 
 The double-buffer question from the notes was settled by what libusb_stm32 requires:

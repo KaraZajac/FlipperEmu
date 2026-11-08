@@ -56,6 +56,7 @@ struct FlipperZeroState {
     Bq25896State *charger;
     char *name;
     char *usb_serial;            /* chardev id bridged to USB CDC */
+    char *usbip;                 /* chardev id serving USB/IP (TCP 3240) */
     uint32_t scale;
     uint32_t region;
     bool legacy_sleep;
@@ -380,6 +381,17 @@ static void flipper_zero_init(MachineState *machine)
         object_property_set_bool(OBJECT(&s->soc.usb), "attached", true,
                                  &error_fatal);
     }
+    if (s->usbip) {
+        Chardev *chr = qemu_chr_find(s->usbip);
+
+        if (!chr) {
+            error_report("flipper-zero: usbip: no chardev '%s'", s->usbip);
+            exit(1);
+        }
+        qdev_prop_set_chr(DEVICE(&s->soc.usb), "usbip", chr);
+        object_property_set_bool(OBJECT(&s->soc.usb), "attached", true,
+                                 &error_fatal);
+    }
     sysbus_realize(SYS_BUS_DEVICE(&s->soc), &error_fatal);
     flipper_provision(s, uid64);
 
@@ -496,6 +508,19 @@ static void flipper_set_usb_serial(Object *obj, const char *value,
     s->usb_serial = *value ? g_strdup(value) : NULL;
 }
 
+static char *flipper_get_usbip(Object *obj, Error **errp)
+{
+    return g_strdup(FLIPPER_ZERO(obj)->usbip);
+}
+
+static void flipper_set_usbip(Object *obj, const char *value, Error **errp)
+{
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+
+    g_free(s->usbip);
+    s->usbip = *value ? g_strdup(value) : NULL;
+}
+
 static char *flipper_get_name(Object *obj, Error **errp)
 {
     return g_strdup(FLIPPER_ZERO(obj)->name);
@@ -560,6 +585,10 @@ static void flipper_zero_class_init(ObjectClass *oc, const void *data)
                                   flipper_set_name);
     object_class_property_add_str(oc, "nvram", flipper_get_nvram,
                                   flipper_set_nvram);
+    object_class_property_add_str(oc, "usbip", flipper_get_usbip,
+                                  flipper_set_usbip);
+    object_class_property_set_description(oc, "usbip",
+        "Chardev id (a TCP server socket) exporting the USB device over USB/IP");
     object_class_property_add_str(oc, "usb-serial", flipper_get_usb_serial,
                                   flipper_set_usb_serial);
     object_class_property_set_description(oc, "usb-serial",
