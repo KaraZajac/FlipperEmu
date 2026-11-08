@@ -163,6 +163,87 @@ All three are small, self-contained, and suitable for sending upstream.
     (virtual time runs with the host clock even when the vCPU thread isn't). Fix: wait
     for the CCRx *read*, with a 250 ms cap. 200/200 frames decode in a soak test.
 
+## 125 kHz RFID (M5)
+
+22. **EM4100 read, but HID (FSK) tags never did: "Read overrun, recovering".** The raw
+    capture (`rfid raw_read` + `raw_analyze`) showed exact 32/40 µs timings and found
+    the card, so the signal was right and the throughput was wrong. An FSK tag produces
+    ~28k edges/s. The tag polled every 10 µs while a capture was pending, which kept
+    QEMU's main loop at 64 % of a core and starved the vCPU through the BQL. Worse, the
+    exact-timestamp catch-up delivered whole stretches of edges at ISR speed. The ISR
+    kept up, but `lfrfid_worker` decodes in a thread with ~200 ms of buffers, and those
+    bursts overran it. Fix: TIM2 notifies when the firmware reads its last pending
+    capture, so there is no polling. Any delay is added to the tag's own timeline
+    rather than caught up, and timestamps on that timeline keep the durations exact.
+    HID now reads in 0.8 s with no overruns.
+
+23. **The capture ISR restarts the counter in software.** `furi_hal_rfid`'s ISR clears
+    CC4IF, writes CNT = 0, then reads CCR4. With paced edges the next edge can be
+    stamped *before* that write, which would give garbage durations. Fix: a CNT write
+    made while a capture is being serviced (flag cleared, CCRx unread) restarts the
+    counter at that capture's time, as a prompt ISR would.
+
+24. **PSK tags were never read in auto mode.** `rfid read indala` found an Indala26 in
+    1 s, but plain `rfid read` never left ASK. In `lfrfid_worker_read_internal`, the
+    2 s switch timeout is only checked after a buffer of edges arrives (`buffer ==
+    NULL` → `continue`). A real comparator is never silent, but the emulated one was.
+    Fix: field noise while no tag answers, made of short spikes and long gaps. It
+    doesn't decode and doesn't trip the "card sensed" ratio. With no tag the reader now
+    alternates ASK/PSK every 2.5 s, as on hardware.
+
+25. **Emulation: only one of two DMA channels on TIM2_UP fired.** The level-triggered
+    DMA served ch1 (ARR), whose write acknowledged the timer's request, so ch2 (CCR3)
+    never saw it. On silicon both channels transfer. Fix: a request edge latches a beat
+    for every channel that selects it. Batched updates then ran their DMA from inside a
+    TIM2 register access, and QEMU blocked that ("Blocked re-entrant IO"). TIM2's
+    region now opts out of the guard; `tim_write` already handled it. The firmware's
+    EM4100/H10301/Indala26 emulation now matches the Python encoders cycle for cycle.
+
+## Infrared transmit (M4)
+
+26. **The last mark of a transmission ran ~1 ms long (or 9 ms).** `furi_hal_infrared`
+    keeps TIM1's update DMA in normal mode, and an ISR re-arms both channels at every
+    buffer boundary. The last buffer is two 1-period spaces, so that ISR has 26 µs on
+    silicon. The emulated vCPU was sometimes later than the next update, which then
+    found the polarity channel dry, and the carrier stayed on until the counter
+    stopped. Fix: an update waits, keeping its exact time, until the channels that
+    served the last one are re-armed (`wb55_dma_ready_for`). A 5 ms cap still let
+    one in three overrun on a heavily loaded host. With a 250 ms cap (a real end
+    stops the counter anyway), 20/20 transmissions of six protocols come out within
+    one carrier period of the encoder.
+
+27. **Firmware finding: an IR transmission garbles the next DMA2 ch1 user.**
+    After `ir tx`, the next `subghz tx` lost its start, or transmitted a 256-entry
+    loop forever. DMA2 ch1 carries the IR transmitter's polarity stream with only TC
+    interrupts enabled, so its HTIF is set and nothing clears it.
+    `furi_hal_subghz_start_async_tx()` then reuses ch1 (`LL_DMA_Init` keeps flags)
+    and enables HTIE, and its refill ISR runs at once, before the first fill. It
+    consumes the first half-buffer of the signal; if the signal ends inside that
+    refill, it also disables its own interrupts, and the circular buffer repeats with
+    no end marker. `rfid emulate` after `ir tx` likewise glitches its first
+    half-buffer once. The emulator follows RM0434 here (HTIF is set whether or not
+    HTIE is), so a real Flipper should do the same. This has not been checked on
+    hardware. The smoke test runs the Sub-GHz checks before `ir tx`.
+
+28. **Firmware finding: 32-bit Radio Key cards don't round-trip.** Porting the
+    encoders for `fe_rfid.py` turned up a mismatch. `protocol_securakey.c`'s 32-bit
+    encoder writes encoded bits 38–44 from data bit 3 (`bit_lib_copy_bits(...,
+    38, 7, protocol->data, 3)`), but its decoder, and the 26-bit encoder, use data
+    bit 9. A 32-bit card read by a Flipper is therefore emulated with the wrong
+    facility code. `fe_rfid.py` keeps the firmware's behaviour (marked `sic`), and
+    `rfid_check.py` tests Radio Key with a 26-bit card.
+
+29. **All 24 LF protocols verified both ways.** `rfid_check.py` emulates each one on
+    the firmware, compares the capture with the Python encoder cycle for cycle, and
+    reads the Python tag back with `rfid read`. Several encoders carry state across
+    frames (FDX-B, Jablotron and GProxII carry their level; AWID and Pyramid their FSK
+    phase), so their loops span two or four frames. `capture_frame()` therefore looks
+    for the period from the middle of a capture: zero runs repeat inside a frame
+    (Pyramid has 70 zero bits), and the start can carry a glitch (entry 27). On a
+    heavily loaded host (load average ~9) the fastest FSK tags (HIDProx, HIDExt,
+    FDX-A, Pyramid) sometimes overran the firmware's read worker and needed a second
+    `rfid read`.
+
 ## Things that were right the first time (and why)
 
 - HSEM modelled from RM0434: **reading RLRx is the 1-step lock**. `furi_hal_bt_init()`

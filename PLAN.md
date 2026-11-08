@@ -59,8 +59,10 @@ NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
 - ☐ LP5562 engine interpreter (blinks, ramps)
 - ◐ Battery/USB power: monitor control done (`qom-set /machine/gauge soc 5`, `/machine/charger usb true`); window UI todo
 - ☑ STOP2 deep sleep (CPU2 performs the SHCI clock switch); now the default, 1–2 % host CPU idle
-- ◐ IR: receive ☑ (TIM2 input capture + virtual receiver; 14 protocols, raw, .ir files;
-      decoded by the Infrared app and `ir rx`), transmit capture ☐ (TIM1 + DMA bursts)
+- ☑ IR: receive (TIM2 input capture + virtual receiver; 14 protocols, raw, .ir files;
+      decoded by the Infrared app and `ir rx`) and transmit capture (TIM1 with its
+      repetition counter, two DMA channels on TIM1_UP; every transmission →
+      `devices/NAME/ir-tx/*.ir`, within one carrier period of the encoder)
 
 ## M5: virtual RF ◐
 TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX uses.
@@ -70,7 +72,15 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       timings, frequency, custom preset from the live registers); TX → RX loopback decodes
 - ☐ TX-side pacing against DMA refill lag; more key encoders (CAME, Nice FLO, …)
 - ☐ NFC: ST25R3916 transparent mode / virtual tags from `.nfc` files
-- ☐ 125 kHz RFID via COMP1 / TIM, iButton 1-Wire
+- ☑ 125 kHz RFID read: COMP1 → TIM2 TI4 capture, a virtual tag in the reader's field
+      (ASK/FSK/PSK, field noise), encoders ported from the firmware (`fe_rfid.py`, checked
+      cycle for cycle against its emulation by `rfid_check.py`); app Read and `rfid read`
+- ☑ 125 kHz RFID emulate: a virtual reader clocks TIM2 (ETR), records CH3's PWM load →
+      `devices/NAME/rfid-tx/`; captures replay as tags (any protocol the firmware has)
+- ☐ T5577 writes (carrier gaps on TIM1: a virtual T5577 that takes them and then
+      answers with the new data), RFID reader detection (TIM1 is a full timer now:
+      check `furi_hal_rfid_field_detect_*`), iButton 1-Wire / Cyfral / Metakom (the
+      COMP1 interrupt is modelled)
 
 ## M6: research tooling ☐
 - ☐ Snapshot workflow (`savevm` on qcow2 images; boot once, jump straight to an app)

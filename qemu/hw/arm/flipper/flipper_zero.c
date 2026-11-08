@@ -52,6 +52,9 @@ struct FlipperZeroState {
     Lp5562State *led;
     FlipperSpeakerState *speaker;
     FlipperIrState *ir;
+    FlipperRfidState *rfid;
+    Cc1101State *cc1101;
+    bool tim1_running;
     Bq27220State *gauge;
     Bq25896State *charger;
     char *name;
@@ -235,6 +238,77 @@ static void flipper_tim16_changed(void *opaque)
     }
 }
 
+/*
+ * The infrared transmitter: TIM1 PWM on CH3N (the IR LED, PB9) or CH1N (an
+ * external LED on PA7) while OCxM is PWM, i.e. during marks; the update
+ * events (every RCR+1 carrier periods) are the mark/space boundaries.
+ * Returns whether the carrier is on, with its frequency and duty.
+ */
+static bool flipper_ir_carrier(FlipperZeroState *s, uint32_t *hz, uint32_t *duty)
+{
+    const uint32_t *r = s->soc.tim1.regs;
+    uint32_t ccer = r[0x20 / 4], arr = r[0x2C / 4] & 0xFFFF;
+    uint32_t psc = r[0x28 / 4] & 0xFFFF;
+    int ch = (ccer & (1u << 10)) ? 2 : (ccer & (1u << 2)) ? 0 : -1;
+    uint32_t ccmr = ch == 2 ? r[0x1C / 4] : r[0x18 / 4];
+    int m = ((ccmr >> 4) & 7) | ((ccmr >> 13) & 8);
+    uint64_t ccr, f;
+
+    if (ch < 0 || !(r[0x00 / 4] & 1) || !(r[0x44 / 4] & (1u << 15)) ||
+        (m != 6 && m != 7)) {
+        return false;
+    }
+    f = clock_get_hz(s->soc.rcc.hclk) / ((uint64_t)(psc + 1) * (arr + 1));
+    if (f < 10000 || f > 60000) {
+        return false;                   /* not an IR carrier (RFID: 125 kHz) */
+    }
+    ccr = MIN(r[(0x34 + 4 * ch) / 4] & 0xFFFF, arr + 1);
+    *hz = f;
+    *duty = (m == 6 ? ccr : arr + 1 - ccr) * 1000000 / (arr + 1);
+    return true;
+}
+
+static void flipper_tim1_update(void *opaque, int64_t when)
+{
+    FlipperZeroState *s = opaque;
+    uint32_t hz = 0, duty = 0;
+    bool mark = flipper_ir_carrier(s, &hz, &duty);
+
+    flipper_ir_tx(s->ir, mark, when, hz, duty);
+}
+
+/*
+ * The 125 kHz RFID reader drives its antenna with TIM1 CH1N PWM (PB13):
+ * frequency HCLK / ((PSC+1)(ARR+1)); it needs CEN, CC1NE and MOE.  For the
+ * IR transmitter, TIM1 starting (CEN) begins the first mark, and stopping
+ * ends the transmission; marks and spaces between come from updates.
+ */
+static void flipper_tim1_changed(void *opaque)
+{
+    FlipperZeroState *s = opaque;
+    const uint32_t *r = s->soc.tim1.regs;
+    uint32_t psc = r[0x28 / 4] & 0xFFFF, arr = r[0x2C / 4] & 0xFFFF;
+    uint32_t ccmr1 = r[0x18 / 4];
+    int oc1m = ((ccmr1 >> 4) & 7) | ((ccmr1 >> 13) & 8);
+    bool running = r[0x00 / 4] & 1;
+    bool field = running && (r[0x20 / 4] & (1u << 2)) &&
+                 (r[0x44 / 4] & (1u << 15)) && (oc1m == 6 || oc1m == 7) && arr &&
+                 (r[0x34 / 4] & 0xFFFF);
+    uint32_t hz = 0, duty = 0;
+
+    flipper_rfid_set_drive(s->rfid, field ? clock_get_hz(s->soc.rcc.hclk) /
+                                            ((uint64_t)(psc + 1) * (arr + 1)) : 0);
+    if (running != s->tim1_running) {
+        s->tim1_running = running;
+        if (running && flipper_ir_carrier(s, &hz, &duty)) {
+            flipper_ir_tx(s->ir, true, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
+                          hz, duty);
+        } else if (!running) {
+            flipper_ir_tx_end(s->ir);
+        }
+    }
+}
+
 /* ------------------------------------------------- OTP / unique device ID */
 
 static void flipper_provision(FlipperZeroState *s, uint64_t uid64)
@@ -334,11 +408,18 @@ static void flipper_zero_reset(MachineState *machine, ResetType type)
     wb55_soc_sync_pins(&FLIPPER_ZERO(machine)->soc);
 }
 
-/* Sub-GHz transmit: TIM2 CH2 drives PA1, the CC1101's GDO0 data input. */
+/*
+ * TIM2 outputs: CH2 drives PA1, the CC1101's GDO0 data input (Sub-GHz
+ * transmit); CH3 drives PA2, RFID_PULL, the 125 kHz antenna load (emulation).
+ */
 static void flipper_tim2_oc(void *opaque, int ch, bool level, int64_t when)
 {
+    FlipperZeroState *s = opaque;
+
     if (ch == 1) {
-        cc1101_tx_data(CC1101(opaque), level, when);
+        cc1101_tx_data(s->cc1101, level, when);
+    } else if (ch == 2) {
+        flipper_rfid_load(s->rfid, level, when);
     }
 }
 
@@ -423,8 +504,9 @@ static void flipper_zero_init(MachineState *machine)
     soc_out(s, 'D', 0, qdev_get_gpio_in_named(dev, SSI_GPIO_CS, 0));
     qdev_connect_gpio_out_named(dev, "gdo0", 0, soc_in(s, 'A', 1));
     CC1101(dev)->tim = &s->soc.tim2;    /* GDO0 is also TIM2 TI2 */
+    s->cc1101 = CC1101(dev);
     s->soc.tim2.oc_changed = flipper_tim2_oc;   /* TX: TIM2 CH2 -> GDO0 */
-    s->soc.tim2.oc_opaque = dev;
+    s->soc.tim2.oc_opaque = s;
     dev = spi_named(machine, spi1, TYPE_ST25R3916, 1, "nfc");
     soc_out(s, 'E', 4, qdev_get_gpio_in_named(dev, SSI_GPIO_CS, 0));
     qdev_connect_gpio_out_named(dev, "irq", 0, soc_in(s, 'A', 2));
@@ -472,6 +554,20 @@ static void flipper_zero_init(MachineState *machine)
     s->ir = FLIPPER_IR(dev);
     s->ir->tim = &s->soc.tim2;
     qdev_connect_gpio_out_named(dev, "out", 0, soc_in(s, 'A', 0));
+
+    /* ---- 125 kHz RFID: TIM1 carrier, COMP1 -> TIM2 TI4 (reading);
+     *      reader carrier -> TIM2 ETR, TIM2 CH3 -> antenna load (emulating) */
+    dev = qdev_new(TYPE_FLIPPER_RFID);
+    s->rfid = FLIPPER_RFID(dev);
+    s->rfid->comp = &s->soc.comp;
+    s->rfid->tim = &s->soc.tim2;
+    object_property_add_child(OBJECT(machine), "rfid", OBJECT(dev));
+    qdev_realize_and_unref(dev, NULL, &error_fatal);
+    notifier_list_add(&s->soc.tim2.cap_read, &s->rfid->cap_read);
+    s->soc.tim1.changed = flipper_tim1_changed;
+    s->soc.tim1.changed_opaque = s;
+    s->soc.tim1.update_hook = flipper_tim1_update;  /* IR transmit */
+    s->soc.tim1.update_opaque = s;
 
     if (!machine->kernel_filename && !drive_get(IF_PFLASH, 0, 0)) {
         warn_report("flipper-zero: no firmware (-kernel) and no flash image "

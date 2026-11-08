@@ -115,6 +115,32 @@ class FlipperCli:
             rest = ANSI.sub(b"", rest)
         return rest.decode(errors="replace").replace("\r\n", "\n").rstrip("\n")
 
+    def watch(self, command, until, timeout=10.0, stop=True):
+        """Start a command that runs until Ctrl+C (`rfid read`, `ir rx`, ...),
+        collect its output until the regex `until` matches or `timeout`
+        passes, then stop it with Ctrl+C. Returns (match or None, output).
+        An empty command watches one that is already running."""
+        pattern = re.compile(until.encode() if isinstance(until, str) else until)
+        if command:
+            self.write(command.encode() + b"\r")
+        end, found = time.time() + timeout, None
+        while time.time() < end:
+            found = pattern.search(ANSI.sub(b"", self.buf))
+            if found:
+                break
+            self._fill(min(0.1, max(0.0, end - time.time())))
+        out = self.buf
+        self.buf = b""
+        if stop:
+            self.write(b"\x03")
+            try:
+                out += self.read_until_prompt(5)
+            except TimeoutError:
+                out += self.buf
+                self.buf = b""
+        out = ANSI.sub(b"", out).decode(errors="replace")
+        return found, out.replace("\r\n", "\n")
+
     def interactive(self):
         import termios
         import tty

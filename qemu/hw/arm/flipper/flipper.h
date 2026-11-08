@@ -157,7 +157,56 @@ struct FlipperIrState {
     int len, pos;
     int64_t next_ns;
     bool level;
+    /* transmit: TIM1 puts the carrier on the IR LED during marks */
+    GArray *tx;                  /* mark/space µs recorded so far */
+    int64_t tx_edge_ns;          /* when the current mark or space began */
+    bool tx_mark;
+    uint32_t tx_freq, tx_duty_ppm;
+    char *tx_dir;                /* write each transmission here as .ir */
+    char *tx_last;
 };
 void flipper_ir_idle(FlipperIrState *s);
+/* transmitting: from `when` on, the LED carries the carrier (a mark) or not */
+void flipper_ir_tx(FlipperIrState *s, bool mark, int64_t when,
+                   uint32_t freq_hz, uint32_t duty_ppm);
+/* the transmitter stopped: save what was sent */
+void flipper_ir_tx_end(FlipperIrState *s);
+
+/* ------------------------------------------- 125 kHz RFID (virtual tag) */
+#define TYPE_FLIPPER_RFID "flipper-rfid"
+OBJECT_DECLARE_SIMPLE_TYPE(FlipperRfidState, FLIPPER_RFID)
+struct FlipperRfidState {
+    DeviceState parent_obj;
+    struct WB55CompState *comp;  /* COMP1: the demodulated antenna signal */
+    struct WB55TimState *tim;    /* TIM2: captures COMP1's edges (pacing) */
+    QEMUTimer *timer;
+    int32_t *tag;                /* one frame: +high / -low µs at 125 kHz */
+    char *tag_str;
+    int len, pos;
+    bool psk;                    /* a PSK tag: answers a PSK-mode read only */
+    uint32_t field_hz;           /* the reader's field, 0 = off */
+    bool psk_mode;               /* the reader drives the PSK way */
+    int64_t next_ns;             /* the next edge on the tag's own timeline */
+    int64_t shift_ns;            /* how far that timeline trails virtual time */
+    bool waiting;                /* the next edge waits for a capture read */
+    bool noise;                  /* comparator noise while no tag answers */
+    bool noise_high;
+    uint32_t rng;
+    Notifier cap_read;           /* TIM2: the firmware read its capture */
+    /* emulating: a virtual reader's field clocks TIM2 (ETR); CH3 loads it */
+    bool reader;                 /* a reader's field around the Flipper */
+    GArray *tx;                  /* the load so far: +on/-off carrier cycles */
+    int64_t tx_t0, tx_last_ns;   /* first and latest edge */
+    uint64_t tx_cycles;          /* cycles recorded so far */
+    bool tx_level;
+    QEMUTimer *tx_timer;         /* ends a capture after a silence */
+    char *tx_dir;                /* write each capture here */
+    char *tx_last;               /* the latest capture file */
+};
+#define FLIPPER_RFID_READER_HZ 125000
+/* the reader's antenna drive (TIM1 CH1N PWM) frequency, 0 = off */
+void flipper_rfid_set_drive(FlipperRfidState *s, uint32_t drive_hz);
+/* emulating: the load on the antenna (TIM2 CH3 on RFID_PULL) changed */
+void flipper_rfid_load(FlipperRfidState *s, bool on, int64_t when);
 
 #endif

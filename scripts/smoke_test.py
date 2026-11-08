@@ -9,9 +9,12 @@
 Boots a throwaway device, waits for the firmware's own log milestones, presses
 Back (dismiss the first scene) and OK (main menu), checks the LCD changed,
 runs `info device` on the CLI over the emulated USB serial port, receives an
-NEC frame through the virtual IR receiver (`ir rx`) and a Princeton key over
-the virtual air (`subghz rx`), then reboots through the CLI and checks the LCD
-comes back after the warm reset.
+NEC frame through the virtual IR receiver (`ir rx`), captures an `ir tx` and
+decodes it back, receives a Princeton key over the virtual air (`subghz rx`),
+captures a `subghz tx`, reads a 125 kHz EM4100
+tag (`rfid read`) and reads back its own H10301 emulation (`rfid emulate`),
+enumerates over USB/IP, then reboots through the CLI and checks the LCD comes
+back after the warm reset.
 Exit status 0 = pass. Screenshots are kept in the --out directory.
 """
 import argparse
@@ -106,6 +109,41 @@ def ir_check(mon: Monitor) -> bool:
     return b"NEC, A:0x04, C:0x08" in out
 
 
+def ir_tx_check(mon: Monitor) -> bool:
+    """`ir tx NEC 04 08`: the transmission saved as .ir must hold the NEC
+    frame's timings, and played back into the receiver, `ir rx` decodes it."""
+    import fe_ir
+    try:
+        cli = FlipperCli(usb_endpoint(mon))
+        try:
+            cli.read_until_prompt(15)
+            cli.run("ir tx NEC 04 08", timeout=10)
+            path = ""
+            for _ in range(30):
+                path = mon.cmd("qom-get /machine/ir tx").strip().strip('"')
+                if path:
+                    break
+                time.sleep(0.1)
+            if not path:
+                return False
+            _, sent = fe_ir.parse_ir_file(path)
+            want = fe_ir.encode("NEC", 4, 8)
+            if len(sent) < len(want) or any(abs(a - b) > max(30, b // 50)
+                                            for a, b in zip(sent, want)):
+                print(f"  ir tx: {sent[:8]}... vs {want[:8]}...")
+                return False
+            cli.write(b"ir rx\r")
+            time.sleep(1.0)
+            mon.cmd("qom-set /machine/ir rx " + ",".join(map(str, sent)))
+            found, _ = cli.watch("", r"NEC, A:0x04, C:0x08", timeout=3)
+        finally:
+            cli.close()
+    except (OSError, TimeoutError, ConnectionError, TypeError, ValueError) as e:
+        print(f"  ir tx: {e}")
+        return False
+    return found is not None
+
+
 def subghz_check(mon: Monitor) -> bool:
     """`subghz rx` at 433.92 MHz, then a Princeton key on the air.
 
@@ -174,6 +212,73 @@ def subghz_tx_check(mon: Monitor):
     # 0x95D5D4: 1 = 1170/-390, 0 = 390/-1170, then the 30-TE guard
     bits = [1 if d > 700 else 0 for d in durs[0:48:2]]
     return tx.startswith("@433920000") and int("".join(map(str, bits)), 2) == 0x95D5D4
+
+
+def rfid_read_check(mon: Monitor, devdir: pathlib.Path) -> bool:
+    """An EM4100 tag in the 125 kHz field; `rfid read` must decode it."""
+    import fe_rfid
+    tagfile = devdir / "rfid-tag.txt"
+    tagfile.write_text(fe_rfid.tag("EM4100", bytes.fromhex("DEADBEEF01")))
+    try:
+        if mon.cmd(f"qom-set /machine/rfid tag file:{tagfile}"):
+            return False
+        cli = FlipperCli(usb_endpoint(mon))
+        try:
+            cli.read_until_prompt(15)
+            found, _ = cli.watch("rfid read", r"EM4100 DEADBEEF01", timeout=12)
+        finally:
+            cli.close()
+            mon.cmd("qom-set /machine/rfid tag none")
+    except (OSError, TimeoutError, ConnectionError, TypeError) as e:
+        print(f"  rfid read: {e}")
+        return False
+    return found is not None
+
+
+def rfid_emulate_check(mon: Monitor, devdir: pathlib.Path) -> bool:
+    """`rfid emulate H10301 010203` for the virtual reader, whose capture
+    goes back into the field: `rfid read` must find the same card."""
+    import fe_rfid
+    try:
+        cli = FlipperCli(usb_endpoint(mon))
+        try:
+            cli.read_until_prompt(15)
+            cli.watch("rfid emulate H10301 010203", r"NEVER", timeout=1.2)
+            path = ""
+            for _ in range(50):         # written once the field is quiet
+                path = mon.cmd("qom-get /machine/rfid tx").strip().strip('"')
+                if path:
+                    break
+                time.sleep(0.1)
+            if not path:
+                return False
+            frame, mod = fe_rfid.capture_frame(fe_rfid.parse_capture(path))
+            _, sent, _ = fe_rfid.encode("H10301", bytes.fromhex("010203"))
+            if not fe_rfid.same_frame(frame, sent):
+                print(f"  rfid emulate: the capture's frame is not the encoder's ({path})")
+                return False
+            tagfile = devdir / "rfid-tag.txt"
+            tagfile.write_text(fe_rfid.tag_string(frame, mod))
+            if mon.cmd(f"qom-set /machine/rfid tag file:{tagfile}"):
+                return False
+            # A fast FSK tag can overrun the firmware's read worker when the
+            # host is busy (BRINGUP_LOG, entry 29): read again, as a person
+            # holding the card would, but say so.
+            for attempt in (1, 2):
+                found, out = cli.watch("rfid read", r"H10301 010203", timeout=12)
+                if found:
+                    if attempt > 1:
+                        print("  rfid emulate: read back on the second try")
+                    break
+                print(f"  rfid emulate: read {attempt} found nothing "
+                      f"({out.strip().splitlines()[-1]!r})")
+        finally:
+            cli.close()
+            mon.cmd("qom-set /machine/rfid tag none")
+    except (OSError, TimeoutError, ConnectionError, TypeError, ValueError) as e:
+        print(f"  rfid emulate: {e}")
+        return False
+    return found is not None
 
 
 def usbip_check(port: int) -> bool:
@@ -284,6 +389,15 @@ def main() -> int:
                                 subghz_check(mon)))
                 results.append(("subghz: transmission captured with exact timings",
                                 subghz_tx_check(mon)))
+                # after Sub-GHz TX: firmware 1.5.1's IR transmitter leaves DMA2
+                # ch1's half-transfer flag set, which garbles the next
+                # Sub-GHz transmission (BRINGUP_LOG, entry 27)
+                results.append(("ir: NEC transmission captured, decoded back",
+                                ir_tx_check(mon)))
+                results.append(("rfid: EM4100 tag read at 125 kHz",
+                                rfid_read_check(mon, devdir)))
+                results.append(("rfid: H10301 emulation captured, read back",
+                                rfid_emulate_check(mon, devdir)))
                 results.append(("usbip: enumerated by a USB/IP client, CLI over URBs",
                                 usbip_check(usbip_port)))
                 results.append(("reboot: LCD redrawn after a warm reset",

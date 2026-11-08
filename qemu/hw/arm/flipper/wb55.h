@@ -17,6 +17,7 @@
 #include "hw/i2c/i2c.h"
 #include "qom/object.h"
 #include "qemu/timer.h"
+#include "qemu/notify.h"
 
 /* ---------------------------------------------------------------- memory map */
 #define WB55_FLASH_BASE      0x08000000u
@@ -282,9 +283,16 @@ struct WB55DmaState {
     uint32_t isr[2];
     uint32_t muxccr[14];
     uint64_t req;                /* request line levels (bit = DMAMUX input) */
+    uint16_t latched;            /* channels owed a beat by a request edge */
+    uint16_t served[64];         /* per request: channels of its last edge */
     bool in_service;
     bool dirty;
 };
+
+/* have the channels that served request `req` last time been given more
+ * to do (enabled, count left)?  A timer waits for that before its next
+ * update when the firmware re-arms normal-mode DMA from an ISR */
+bool wb55_dma_ready_for(WB55DmaState *s, int req);
 
 /* ------------------------------------------------- small misc devices */
 #define TYPE_WB55_RNG "stm32wb55-rng"
@@ -322,10 +330,14 @@ OBJECT_DECLARE_SIMPLE_TYPE(WB55TimState, WB55_TIM)
 struct WB55TimState {
     SysBusDevice parent_obj;
     MemoryRegion mmio;
-    qemu_irq irq;
+    qemu_irq irq;                /* any interrupt (TIM2's vector) */
+    qemu_irq irq_up, irq_cc, irq_trg, irq_brk;  /* TIM1's four vectors */
     Clock *clk;
     QEMUTimer *timer;
     uint32_t width;              /* 16 or 32 bit counter */
+    uint32_t rcr_bits;           /* repetition counter width, 0: none */
+    bool batch_dma;              /* DMA-only updates may be replayed late */
+    uint32_t rep;                /* repetition count in effect (from RCR) */
     uint32_t regs[0x70 / 4];
     bool running;
     uint32_t cnt_base;           /* CNT at base_ns */
@@ -334,17 +346,52 @@ struct WB55TimState {
     int64_t now_override;        /* processing an update: its exact time */
     bool ti_level[4];
     uint8_t cap_unread;          /* captured, CCRx not read yet (bitmask) */
+    int64_t cap_ns[4];           /* when each channel last captured */
+    NotifierList cap_read;       /* the firmware read the last pending CCRx */
     bool oc_level[4];            /* output compare pins (OCxREF) */
     qemu_irq dma_up;             /* update DMA request (DMAMUX TIMx_UP) */
     bool dma_up_pending;         /* raised, not yet acknowledged */
-    /* board hook: an output compare pin changed at an exact time */
+    bool in_updates;             /* tim_run_updates() is replaying updates */
+    uint64_t ext_hz;             /* clock on the ETR pin (0: none) */
+    /* board hook: an output compare pin changed at an exact time (times can
+     * be ahead of virtual time: a PWM period is reported as it starts) */
     void (*oc_changed)(void *opaque, int ch, bool level, int64_t when);
     void *oc_opaque;
+    /* board hook: an update event at its exact time, after its DMA (only
+     * while updates are replayed one by one: UDE or toggle mode, or UG) */
+    void (*update_hook)(void *opaque, int64_t when);
+    void *update_opaque;
+    /* board hook: after every register write and after reset */
+    void (*changed)(void *opaque);
+    void *changed_opaque;
+    /* SoC hook: is the update DMA re-armed? (see wb55_dma_ready_for) */
+    bool (*dma_ready)(void *opaque);
+    void *dma_ready_opaque;
+    bool dma_wait;               /* an update waits for the DMA */
 };
 /* an edge on input TI1..TI4 (ti 0..3) at virtual time `when` */
 void wb55_tim_input(WB55TimState *s, int ti, bool level, int64_t when);
+/* the clock on the ETR pin, for external clock modes (0: none) */
+void wb55_tim_set_ext_clock(WB55TimState *s, uint64_t hz);
 /* has the firmware still to service a capture interrupt? */
 bool wb55_tim_capture_pending(WB55TimState *s);
+
+/* ------------------------------------------------------- COMP1 / COMP2 */
+#define TYPE_WB55_COMP "stm32wb55-comp"
+OBJECT_DECLARE_SIMPLE_TYPE(WB55CompState, WB55_COMP)
+struct WB55CompState {
+    SysBusDevice parent_obj;
+    MemoryRegion mmio;
+    uint32_t csr[2];
+    bool inp[2];                 /* analog: input+ above input- */
+    bool out[2];
+    qemu_irq exti[2];            /* EXTI lines 20 (COMP1) and 21 (COMP2) */
+    /* SoC hook: an output changed at an exact virtual time */
+    void (*out_changed)(void *opaque, int n, bool level, int64_t when);
+    void *out_opaque;
+};
+/* the board's analog side: is comparator n's input+ above input-? */
+void wb55_comp_input(WB55CompState *s, int n, bool above, int64_t when);
 
 /* Read/write register file used for blocks that only need readback. */
 #define TYPE_WB55_REGFILE "stm32wb55-regfile"
@@ -489,7 +536,9 @@ struct WB55SocState {
     WB55DwtState dwt;
     WB55DbgmcuState dbgmcu;
     WB55UsbState usb;
+    WB55TimState tim1;               /* RFID carrier, IR transmit */
     WB55TimState tim2;               /* IR receive, Sub-GHz async RX capture */
+    WB55CompState comp;              /* COMP1: 125 kHz RFID demodulator */
     Stm32l4x5GpioState gpio[WB55_NUM_PORTS];
     Stm32l4x5UsartBaseState usart1;
     Stm32l4x5UsartBaseState lpuart1;

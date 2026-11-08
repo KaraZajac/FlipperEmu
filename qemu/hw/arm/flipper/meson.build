@@ -18,10 +18,12 @@ arm_common_ss.add(when: 'CONFIG_FLIPPER_ZERO', if_true: files(
   'stm32wb55_misc.c',
   'stm32wb55_usb.c',
   'stm32wb55_tim.c',
+  'stm32wb55_comp.c',
   'st7567.c',
   'flipper_power.c',
   'flipper_rf.c',
   'flipper_speaker.c',
   'flipper_ir.c',
+  'flipper_rfid.c',
   'flipper_zero.c',
 ))

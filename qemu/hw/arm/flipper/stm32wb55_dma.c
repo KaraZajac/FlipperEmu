@@ -12,6 +12,13 @@
  *
  * Channels without a request (DMAMUX id 0) in MEM2MEM mode run to completion.
  *
+ * Several channels may select the same request: each rising edge then owes
+ * every one of them a beat, even after the first beat has made the
+ * peripheral drop the request.  A timer's update request works that way on
+ * silicon, and the firmware relies on it: furi_hal_rfid's emulation feeds
+ * TIM2 ARR and CCR3 from two channels on TIM2_UP, and furi_hal_infrared's
+ * transmitter TIM1 RCR and CCMR2 on TIM1_UP.
+ *
  * Copyright (c) 2026, Kara Zajac
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -100,6 +107,7 @@ static bool dma_beat(WB55DmaState *s, int c)
         dma_flag(s, c, IF_TE);
         return false;
     }
+    s->latched &= ~(1u << c);
     ch->pidx++;
     ch->midx++;
     ch->cndtr--;
@@ -128,7 +136,8 @@ static bool dma_ready(WB55DmaState *s, int c)
         return true;
     }
     req = s->muxccr[c] & 0x3F;
-    return req != 0 && req < 64 && (s->req >> req) & 1;
+    return req != 0 && req < 64 &&
+           (((s->req >> req) & 1) || (s->latched & (1u << c)));
 }
 
 static void dma_run(WB55DmaState *s)
@@ -170,8 +179,30 @@ static void dma_request(void *opaque, int n, int level)
         s->req &= ~bit;
     }
     if (rose) {
+        uint16_t owed = 0;
+
+        for (int c = 0; c < 14; c++) {
+            if ((s->ch[c].ccr & CCR_EN) && (s->muxccr[c] & 0x3F) == n) {
+                owed |= 1u << c;
+            }
+        }
+        s->latched |= owed;
         dma_run(s);
+        s->served[n] = owed & ~s->latched;
     }
+}
+
+bool wb55_dma_ready_for(WB55DmaState *s, int req)
+{
+    for (int c = 0; c < 14; c++) {
+        WB55DmaChannel *ch = &s->ch[c];
+
+        if ((s->served[req] & (1u << c)) &&
+            (!(ch->ccr & CCR_EN) || ch->cndtr == 0)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /* ---- DMA1/DMA2 register blocks: ISR, IFCR, then 7 x {CCR,CNDTR,CPAR,CMAR} */
@@ -216,6 +247,9 @@ static void dma_write(WB55DmaState *s, int ctrl, hwaddr addr, uint32_t val)
     case 0x0: {
         bool enabling = (val & CCR_EN) && !(ch->ccr & CCR_EN);
         ch->ccr = val & 0x7FFF;
+        if (!(val & CCR_EN)) {
+            s->latched &= ~(1u << c);
+        }
         if (enabling) {
             ch->pidx = ch->midx = 0;
             ch->reload = ch->cndtr;
@@ -315,6 +349,8 @@ static void wb55_dma_reset_hold(Object *obj, ResetType type)
     memset(s->isr, 0, sizeof(s->isr));
     memset(s->muxccr, 0, sizeof(s->muxccr));
     s->in_service = s->dirty = false;
+    s->latched = 0;
+    memset(s->served, 0, sizeof(s->served));
     for (int c = 0; c < 14; c++) {
         qemu_set_irq(s->irq[c], 0);
     }

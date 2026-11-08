@@ -19,6 +19,7 @@ you flash stays flashed, settings and files persist across runs.
   ./flipperemu cli "storage list /ext"       run CLI commands, print output
   ./flipperemu ir NEC 0x04 0x08              point a virtual IR remote at it
   ./flipperemu subghz capture.sub            put a Sub-GHz signal on the air
+  ./flipperemu rfid EM4100 DEADBEEF01        hold a 125 kHz tag to it (or a .rfid)
   ./flipperemu gdb                           attach gdb to a --gdb run
   ./flipperemu shot out.png | press ok       drive a running device
   ./flipperemu info                          what is on the device
@@ -323,8 +324,12 @@ def qemu_cmd(dev: Device, args):
     if audio:
         machine += ",audiodev=snd0"
     cmd = [str(QEMU), "-M", machine, *usb, *audio,
-           # every Sub-GHz transmission is saved as a .sub RAW file
+           # every Sub-GHz transmission is saved as a .sub RAW file, every
+           # infrared one as an .ir file, and every 125 kHz emulation as a
+           # capture of what a reader would see
            "-global", f"cc1101.tx-dir={dev.dir / 'subghz-tx'}",
+           "-global", f"flipper-ir.tx-dir={dev.dir / 'ir-tx'}",
+           "-global", f"flipper-rfid.tx-dir={dev.dir / 'rfid-tx'}",
            "-drive", f"if=pflash,format=raw,file={dev.flash}",
            "-rtc", "base=localtime",
            "-monitor", f"unix:{dev.monitor},server=on,wait=off",
@@ -577,6 +582,72 @@ def cmd_subghz(args):
     return 0
 
 
+def cmd_rfid(args):
+    import fe_rfid
+    from fe_monitor import Monitor
+    if args.list:
+        for name, (_, size, mod) in fe_rfid.PROTOCOLS.items():
+            print(f"{name:12} {size} bytes  {mod}")
+        return 0
+    dev = Device(args.device)
+    if not dev.running():
+        sys.exit(f"[{dev.name}] not running")
+    tag = args.tag
+    label, value = None, None
+    try:
+        if not tag:
+            pass
+        elif tag == ["none"]:
+            label, value = "no tag", "none"
+        elif len(tag) == 1 and tag[0].endswith(".rfid"):
+            proto, data = fe_rfid.parse_rfid(tag[0])
+            label = f"{proto} {data.hex(' ').upper()} ({pathlib.Path(tag[0]).name})"
+            value = fe_rfid.tag(proto, data)
+        elif len(tag) == 1 and pathlib.Path(tag[0]).is_file():
+            frame, mod = fe_rfid.capture_frame(fe_rfid.parse_capture(tag[0]))
+            label = (f"the tag emulated in {pathlib.Path(tag[0]).name} "
+                     f"({sum(n for _, n in frame)}-cycle frame, {mod.upper()})")
+            value = fe_rfid.tag_string(frame, mod)
+        elif len(tag) >= 2:
+            data = fe_rfid.parse_hex(" ".join(tag[1:]))
+            name, frame, mod = fe_rfid.encode(tag[0], data)
+            label = f"{name} {data.hex(' ').upper()}"
+            value = fe_rfid.tag_string(frame, mod)
+        else:
+            sys.exit("usage: rfid PROTOCOL DATA | rfid FILE.rfid | rfid CAPTURE.txt | "
+                     "rfid none | rfid --list")
+    except (ValueError, KeyError, OSError) as e:
+        sys.exit(f"rfid: {e}")
+    m = Monitor(str(dev.monitor))
+    try:
+        for prop, on in (("reader", args.reader), ("noise", args.noise)):
+            if on is not None:
+                err = m.cmd(f"qom-set /machine/rfid {prop} {'on' if on == 'on' else 'off'}")
+                if err:
+                    sys.exit(f"rfid: {err}")
+        if value is not None:
+            if value != "none":
+                path = dev.dir / "rfid-tag.txt"     # long frames: past HMP line limits
+                path.write_text(value + "\n")
+                value = f"file:{path}"
+            err = m.cmd(f"qom-set /machine/rfid tag {value}")
+            if err:
+                sys.exit(f"rfid: {err}")
+            print(f"[{dev.name}] 125 kHz field: {label}")
+        else:
+            get = lambda prop: m.cmd(f"qom-get /machine/rfid {prop}").strip().strip('"')
+            onoff = lambda prop: "on" if get(prop) == "true" else "off"
+            print(f"[{dev.name}] its reader's field: {get('field')}; tag in it: "
+                  f"{'yes' if get('tag') else 'none'}; field noise: {onoff('noise')}; "
+                  f"virtual reader (for emulation): {onoff('reader')}")
+            last = get("tx")
+            if last:
+                print(f"latest emulation capture: {last}")
+    finally:
+        m.close()
+    return 0
+
+
 def cmd_shot(args):
     from fe_monitor import Monitor
     print(Monitor(str(Device(args.device).monitor)).screenshot(args.out))
@@ -684,6 +755,18 @@ def main():
     p.add_argument("--bits", type=int, default=24, help="princeton: key bits")
     p.add_argument("--te", type=int, default=390, help="princeton: TE in µs")
     p.set_defaults(func=cmd_subghz)
+
+    p = sub.add_parser("rfid", help="hold a 125 kHz RFID tag to a running device")
+    p.add_argument("tag", nargs="*",
+                   help="PROTOCOL DATA (EM4100 DEADBEEF01, H10301 010203, ...), "
+                        "FILE.rfid, an emulation capture "
+                        "(devices/NAME/rfid-tx/*.txt), or none; nothing: show state")
+    p.add_argument("--list", action="store_true", help="list the protocols")
+    p.add_argument("--reader", choices=("on", "off"),
+                   help="the virtual reader that clocks and records emulation")
+    p.add_argument("--noise", choices=("on", "off"),
+                   help="comparator noise while no tag answers (as on hardware)")
+    p.set_defaults(func=cmd_rfid)
 
     p = sub.add_parser("gdb", help="attach gdb to a running --gdb device")
     p.add_argument("--gdb-port", type=int, default=1234)

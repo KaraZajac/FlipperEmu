@@ -94,6 +94,29 @@ void wb55_soc_sync_pins(WB55SocState *s)
     }
 }
 
+/* TIM1's update DMA: is it re-armed for the next update? */
+static bool soc_tim1_dma_ready(void *opaque)
+{
+    WB55SocState *s = opaque;
+
+    return wb55_dma_ready_for(&s->dma, WB55_DREQ_TIM1_UP);
+}
+
+/*
+ * A comparator output changed.  TIM2_OR.TI4_RMP (bits 3:2) picks TI4's
+ * source: 00 the TIM2_CH4 pin, 01 COMP1, 10 COMP2, 11 COMP1 OR COMP2.
+ */
+static void soc_comp_out(void *opaque, int n, bool level, int64_t when)
+{
+    WB55SocState *s = opaque;
+    int rmp = (s->tim2.regs[0x50 / 4] >> 2) & 3;
+
+    if (rmp && (rmp & (1 << n))) {
+        wb55_tim_input(&s->tim2, 3, ((rmp & 1) && s->comp.out[0]) ||
+                                    ((rmp & 2) && s->comp.out[1]), when);
+    }
+}
+
 static DeviceState *soc_regfile(const char *name, hwaddr addr, uint32_t size,
                                 uint32_t kind)
 {
@@ -138,7 +161,9 @@ static void wb55_soc_init(Object *obj)
     object_initialize_child(obj, "dwt", &s->dwt, TYPE_WB55_DWT);
     object_initialize_child(obj, "dbgmcu", &s->dbgmcu, TYPE_WB55_DBGMCU);
     object_initialize_child(obj, "usb", &s->usb, TYPE_WB55_USB);
+    object_initialize_child(obj, "tim1", &s->tim1, TYPE_WB55_TIM);
     object_initialize_child(obj, "tim2", &s->tim2, TYPE_WB55_TIM);
+    object_initialize_child(obj, "comp", &s->comp, TYPE_WB55_COMP);
     for (int i = 0; i < WB55_NUM_PORTS; i++) {
         g_autofree char *name = g_strdup_printf("gpio%c", "abcdeh"[i]);
         object_initialize_child(obj, name, &s->gpio[i], TYPE_STM32L4X5_GPIO);
@@ -398,11 +423,23 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->rng), 0, NVIC(WB55_IRQ_RNG));
 
     /* ---- read-back register files (no behaviour the firmware needs yet) */
-    dev = soc_regfile("tim1", 0x40012C00, 0x400, WB55_RF_TIM);
+    /* TIM1: advanced timer (RFID carrier, IR transmit, RFID field timeout) */
+    dev = DEVICE(&s->tim1);
+    qdev_prop_set_uint32(dev, "rcr-bits", 16);
+    qdev_connect_clock_in(dev, "clk", hclk);
+    soc_map(SYS_BUS_DEVICE(dev), 0x40012C00, errp);
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 1, NVIC(WB55_IRQ_TIM1_UP_TIM16));
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 2, NVIC(WB55_IRQ_TIM1_CC));
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 3, NVIC(WB55_IRQ_TIM1_TRG_COM_TIM17));
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 4, NVIC(WB55_IRQ_TIM1_BRK));
+    qdev_connect_gpio_out_named(dev, "dma-up", 0, DREQ(WB55_DREQ_TIM1_UP));
+    s->tim1.dma_ready = soc_tim1_dma_ready;
+    s->tim1.dma_ready_opaque = s;
     wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_APB2RSTR, 11, dev);
-    /* TIM2: 32-bit general-purpose timer (IR receive, Sub-GHz capture) */
+    /* TIM2: 32-bit general-purpose timer (IR receive, Sub-GHz capture, RFID) */
     dev = DEVICE(&s->tim2);
     qdev_prop_set_uint32(dev, "width", 32);
+    qdev_prop_set_bit(dev, "batch-dma", true);
     qdev_connect_clock_in(dev, "clk", hclk);
     soc_map(SYS_BUS_DEVICE(dev), 0x40000000, errp);
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, NVIC(WB55_IRQ_TIM2));
@@ -419,7 +456,14 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
     soc_regfile("aes2", 0x58001800, 0x400, WB55_RF_AES);
     soc_regfile("pka", 0x58002000, 0x2000, WB55_RF_PLAIN);
     soc_regfile("crc", 0x40023000, 0x400, WB55_RF_PLAIN);
-    soc_regfile("comp", 0x40010200, 0x200, WB55_RF_PLAIN);
+    /* COMP1/2: EXTI lines 20/21, and TIM2's TI4 when TIM2_OR remaps it */
+    s->comp.out_changed = soc_comp_out;
+    s->comp.out_opaque = s;
+    soc_map(SYS_BUS_DEVICE(&s->comp), 0x40010200, errp);
+    for (int n = 0; n < 2; n++) {
+        qdev_connect_gpio_out_named(DEVICE(&s->comp), "exti", n,
+                                    qdev_get_gpio_in(DEVICE(&s->exti), 20 + n));
+    }
     soc_regfile("iwdg", 0x40003000, 0x400, WB55_RF_PLAIN);
     soc_regfile("wwdg", 0x40002C00, 0x400, WB55_RF_PLAIN);
     soc_regfile("crs", 0x40006000, 0x400, WB55_RF_PLAIN);

@@ -237,6 +237,29 @@ TIM2 is a real timer model, written for TIM1/16/17's layout too:
   side, isn't done yet. A guest lagging by more than half the DMA buffer (several ms)
   would get stale durations from it.
 
+Added for 125 kHz RFID (next section):
+- External clock mode 2 (SMCR.ECE), and mode 1 on ETRF, counting a clock the board puts
+  on ETR (`wb55_tim_set_ext_clock`). With no clock there the counter stands still.
+- PWM channels (OCxM 110/111) report both edges of every period to the board, with
+  exact timestamps. The falling edge is reported as the period starts, so it can be
+  ahead of virtual time.
+- When no timer interrupt is enabled (DMA only), updates are replayed in batches every
+  1 ms rather than as one QEMU timer event each, because a PSK tag reprograms the timer
+  every 16 µs. A register access first replays the updates that are due. Their DMA then
+  writes back into the timer from inside its own MMIO handler, so TIM2's region opts
+  out of QEMU's re-entrancy guard (`tim_write` is written for it).
+- A notifier (`cap_read`) fires when the firmware reads the last pending capture, so
+  paced edge sources need not poll.
+- A write to CNT made while a capture is being serviced (its flag already cleared, CCRx
+  not read yet) restarts the counter at that capture's time. On silicon the RFID capture
+  ISR's `LL_TIM_SetCounter(0)` runs within a microsecond or two of the edge, but here it
+  can run much later.
+
+The DMA model gained one silicon behaviour for it: when several channels select the same
+request, each rising edge owes every one of them a beat, even after the first beat has
+made the peripheral drop the request. RFID emulation feeds TIM2 ARR and CCR3 from two
+channels on TIM2_UP, and the IR transmitter TIM1 RCR and CCMR2 from two on TIM1_UP.
+
 `furi_hal_infrared` uses exactly that for receiving. A falling edge (a mark starts) is
 captured into CCR2, and a rising edge into CCR1, which also resets the counter. CC3 is
 the end-of-signal timeout.
@@ -251,6 +274,77 @@ reading CCRx. Timestamps keep the measured durations exact: 200/200 NEC frames d
 a soak test. `scripts/fe_ir.py` builds signals with a port of the
 firmware's common encoder (pulse distance/width, Manchester) and its per-protocol data
 layouts.
+
+## Infrared transmit (`flipper_ir.c`, TIM1)
+
+TIM1 is now the full timer model too, with its repetition counter (16-bit RCR) and its
+four interrupt vectors. `furi_hal_infrared` makes the carrier with PWM 2 on CH3N (the
+IR LED, PB9). Two DMA channels on TIM1_UP feed it at every update event:
+- one loads CCMR2, switching OC3M between PWM 2 (a mark) and forced inactive (a
+  space);
+- the other loads RCR, the number of carrier periods until the next update.
+
+Two UG events prime the pipeline (UG raises the update DMA request unless URS is set).
+The board's `update_hook` sees each update at its exact time and passes mark or space
+to `/machine/ir`. When the firmware stops TIM1, the transmission is written as a raw
+`.ir` file with the carrier frequency and duty.
+
+Those DMA channels run in normal mode, and an ISR re-arms them between two updates. The
+last buffer gives it one carrier period (26 µs). So an update whose DMA channels have
+not been re-armed yet waits for them, keeping its exact time (`wb55_dma_ready_for`, up
+to 250 ms). This is the same idea as the receive side's pacing on capture reads.
+
+## 125 kHz RFID (`flipper_rfid.c`, `stm32wb55_comp.c`)
+
+**Reading.** TIM1 drives the antenna on CH1N (PB13). It runs at 125 kHz and 50 % duty
+for ASK and FSK tags, or at 62.5 kHz and 25 % duty for PSK tags; the antenna tank still
+rings at 125 kHz, and the comparator then sees a PSK tag's phase. The tag's load
+modulation, demodulated by the analog front end, reaches COMP1 on PC5. TIM2's TI4,
+remapped to COMP1 by TIM2_OR, captures its edges: CH3 on falling (indirect) and CH4 on
+rising (direct). The ISR restarts the counter on every rising edge, so the firmware
+measures pulse and period.
+
+COMP1/2 are now modelled (`stm32wb55_comp.c`). The analog side is one boolean per
+comparator, which the board sets with an exact time ("input+ above input-"). EN,
+POLARITY, the VALUE bit, LOCK and EXTI lines 20/21 are modelled.
+
+`/machine/rfid` watches TIM1's registers. If CEN, MOE and CC1NE are set with PWM at
+100–150 kHz, there is an ASK field; at 50–75 kHz, a PSK field. A tag in the field is
+what COMP1 sees: one frame of +high/−low µs, repeated for as long as the field powers
+it. A `psk:` frame only answers a PSK-mode read.
+
+Its edges are paced like the IR receiver's: an edge waits until the firmware has read
+the previous capture. The `cap_read` notifier resumes the tag from inside the ISR's
+read, with no polling. Any delay is added to the tag's own timeline (`shift_ns`) instead
+of being caught up in a burst. The firmware's worker decodes in a thread with about
+200 ms of buffers, so bursts overran it on FSK tags (~28k edges/s). Each edge keeps its
+exact timestamp on that timeline, so every captured duration is exact.
+
+With no tag answering, the field carries noise. The firmware depends on it:
+`lfrfid_worker` only checks its 2 s ASK/PSK switch timeout after a buffer of edges
+arrives, so a silent field would keep `rfid read` in ASK mode forever and never find a
+PSK tag. The noise is 17–40 µs spikes (past the worker's 16 µs filter) between gaps of
+150–1500 µs. It is too irregular to decode, and its pulse/period ratio is under the 0.2
+the worker takes for a card.
+
+**Emulating.** TIM2 counts the reader's carrier on ETR (PA15) in external clock mode 2.
+Two DMA channels on TIM2_UP load ARR and CCR3 every period, and CH3 in PWM mode switches
+the antenna load (PA2, RFID_PULL). A virtual 125 kHz reader (`reader`, on by default)
+puts the carrier on ETR and records CH3's edges in carrier cycles. After 100 ms without
+an edge it writes the capture to `devices/NAME/rfid-tx/tx-NNNNN.txt`.
+
+**Encoders.** `scripts/fe_rfid.py` ports the firmware's protocol encoders (`lib/lfrfid`)
+with a Python `bit_lib`. Their output is the emulation waveform, in carrier cycles. The
+comparator sees it unchanged for ASK and FSK (verified: the inverted Manchester does not
+decode), and as the phase for PSK. `scripts/rfid_check.py DEVICE` checks every encoder
+both ways against a running Flipper:
+1. `rfid emulate`, captured by the virtual reader, must be the same loop as the Python
+   encoder, cycle for cycle.
+2. The Python tag must make `rfid read` print the protocol and data.
+
+`capture_frame()` turns any capture into a tag by finding its repeating frame. So a
+protocol only a fork has can still be read back: emulate it, then hold the capture to a
+reading Flipper.
 
 ## Storage
 
