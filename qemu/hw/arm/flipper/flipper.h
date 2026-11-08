@@ -189,6 +189,11 @@ struct FlipperRfidState {
     int64_t next_ns;             /* the next edge on the tag's own timeline */
     int64_t shift_ns;            /* how far that timeline trails virtual time */
     bool waiting;                /* the next edge waits for a capture read */
+    uint64_t n_edges, n_waits, n_forced;    /* "stats" */
+    int64_t delivered_ns;        /* when the last edge reached COMP1 */
+    int64_t read_ns;             /* when the firmware read its capture */
+    int64_t isr_ns;              /* how long that took (moving average) */
+    int64_t gap_ns;              /* the tag's own gap after the last edge */
     bool noise;                  /* comparator noise while no tag answers */
     bool noise_high;
     uint32_t rng;

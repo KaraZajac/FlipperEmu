@@ -320,6 +320,12 @@ of being caught up in a burst. The firmware's worker decodes in a thread with ab
 200 ms of buffers, so bursts overran it on FSK tags (~28k edges/s). Each edge keeps its
 exact timestamp on that timeline, so every captured duration is exact.
 
+After a read, the next edge also waits 3x the measured capture latency (capped at 8x
+the tag's own gap). Here the capture and comparator ISRs take ~73 µs per edge, more
+than an FSK tag's 32 µs. Without that gap the ISRs run back to back and the decoding
+thread starves (BRINGUP_LOG entry 30). `qom-get /machine/rfid stats` shows the
+pacing counters and TIM2's capture state.
+
 With no tag answering, the field carries noise. The firmware depends on it:
 `lfrfid_worker` only checks its 2 s ASK/PSK switch timeout after a buffer of edges
 arrives, so a silent field would keep `rfid read` in ASK mode forever and never find a

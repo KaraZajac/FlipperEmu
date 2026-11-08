@@ -239,10 +239,31 @@ All three are small, self-contained, and suitable for sending upstream.
     frames (FDX-B, Jablotron and GProxII carry their level; AWID and Pyramid their FSK
     phase), so their loops span two or four frames. `capture_frame()` therefore looks
     for the period from the middle of a capture: zero runs repeat inside a frame
-    (Pyramid has 70 zero bits), and the start can carry a glitch (entry 27). On a
-    heavily loaded host (load average ~9) the fastest FSK tags (HIDProx, HIDExt,
-    FDX-A, Pyramid) sometimes overran the firmware's read worker and needed a second
-    `rfid read`.
+    (Pyramid has 70 zero bits), and the start can carry a glitch (entry 27). The
+    fastest FSK tags sometimes failed to read; see entry 30.
+
+30. **FSK reads stuck in ASK: a livelock.** After an EM4100 read and an emulation,
+    `rfid read` of an H10301 card failed 5 times in 6 (on Momentum and official). The
+    field state showed the reader never leaving ASK. The stats showed 20k edges/s
+    delivered, every capture correct (32/40 µs, 64/80 µs), and thousands of paced
+    waits; gdb samples put the guest in the comparator and capture ISRs. The guest
+    took ~73 µs from an edge to reading its capture, more than an FSK tag's 32 µs
+    gap. So pacing released each edge at the read, and the ISRs ran
+    back to back. The decoding thread never ran, no buffer reached it, and the 2 s
+    switch timeout is only checked when one does. Some transient tips the system
+    into this state, and pacing then holds it there. Fix: after a capture read, the
+    next edge also waits 3x the measured capture latency, at most 8x the tag's own
+    gap. The guest then always has time between edges, and fast FSK tags slow down
+    on a slow host (1.5–2.7 s reads). Results:
+    - the failing sequence passes 6 times in 6;
+    - all 24 protocols pass both ways;
+    - with the emulator pinned to one core next to a CPU hog, HIDProx, HIDExt,
+      FDX-A, Pyramid and AWID read in 1.4–2.2 s.
+
+    A dead end first: stretching the tag while the vCPU was not halted (WFI). With a
+    CLI session open, FreeRTOS's idle task spins instead of sleeping, because
+    something wakes sooner than `configEXPECTED_IDLE_TIME_BEFORE_SLEEP` (4 ticks). So
+    the guest never looks idle, and the tag ran at 1/16 speed.
 
 ## Things that were right the first time (and why)
 

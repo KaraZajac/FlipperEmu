@@ -261,9 +261,8 @@ def rfid_emulate_check(mon: Monitor, devdir: pathlib.Path) -> bool:
             tagfile.write_text(fe_rfid.tag_string(frame, mod))
             if mon.cmd(f"qom-set /machine/rfid tag file:{tagfile}"):
                 return False
-            # A fast FSK tag can overrun the firmware's read worker when the
-            # host is busy (BRINGUP_LOG, entry 29): read again, as a person
-            # holding the card would, but say so.
+            # Should read the first time (BRINGUP_LOG, entry 30). If not,
+            # read again as a person holding the card would, and say so.
             for attempt in (1, 2):
                 found, out = cli.watch("rfid read", r"H10301 010203", timeout=12)
                 if found:

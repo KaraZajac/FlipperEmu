@@ -17,7 +17,8 @@
  * tag from a file (long FSK frames do not fit on a monitor command line).
  * "none" (or "") takes the tag away: the field then carries noise only, as
  * a real one does (rfid_segment; the "noise" property turns it off).
- * "field" reads back the reader's state: "125000 ask", "125000 psk", "off".
+ * "field" reads back the reader's state: "125000 ask", "125000 psk", "off";
+ * "stats" the pacing counters and TIM2's capture state.
  *
  * Emulating (furi_hal_rfid_tim_emulate_dma_start): the Flipper is the tag.
  * TIM2 counts a reader's carrier on ETR (PA15, RFID_CARRIER), DMA loads ARR
@@ -42,6 +43,8 @@
 #define RFID_MAX_EDGES 8192
 #define RFID_POWER_UP_NS (1 * SCALE_MS)     /* tag wakes up, then modulates */
 #define RFID_PACE_MAX_NS (250 * SCALE_MS)
+#define RFID_ISR_GAP 3          /* after a capture read: 3x its latency free */
+#define RFID_ISR_CAP 8          /* ... but at most 8x the tag's own gap */
 
 /* the tag answers this field (PSK tags only a PSK-mode read) */
 static bool rfid_answers(FlipperRfidState *s)
@@ -100,6 +103,19 @@ static int64_t rfid_ns(FlipperRfidState *s, uint32_t us)
  * in a burst: the reader then always has at least the real gap between two
  * edges to digest them (furi_hal_rfid's worker decodes in a thread, with
  * buffers for ~200 ms of edges), as it would on silicon.
+ *
+ * Waiting for the read alone is not enough.  On a slow or busy host the
+ * capture and comparator ISRs can take longer than the 32 us between an FSK
+ * tag's edges; an edge released at each read then keeps the guest in ISRs
+ * all the time, and the worker thread that decodes never runs (it also
+ * never switches to PSK: a read stuck in ASK).  So after the firmware has
+ * read a capture, the next edge also waits RFID_ISR_GAP times the measured
+ * capture latency (how long the guest took from the edge to that read), at
+ * most RFID_ISR_CAP times the tag's own gap.  A fast guest never notices;
+ * on a slow one fast FSK tags slow down (here 4-6x, 1.5-3 s reads).  (The
+ * vCPU's WFI state cannot tell how busy the guest is: with a CLI session
+ * open, FreeRTOS's idle task spins instead of sleeping.)  The captured
+ * durations stay exact either way.
  */
 static void rfid_deliver(FlipperRfidState *s)
 {
@@ -111,20 +127,30 @@ static void rfid_deliver(FlipperRfidState *s)
     if (!rfid_active(s)) {
         return;
     }
+    if (s->read_ns >= s->delivered_ns) {    /* the last edge has been read */
+        due = MAX(due, s->read_ns + MIN(RFID_ISR_GAP * s->isr_ns,
+                                        RFID_ISR_CAP * s->gap_ns));
+    }
     if (now < due) {
         timer_mod(s->timer, due);
         return;
     }
-    if (s->tim && wb55_tim_capture_pending(s->tim) &&
-        now < due + RFID_PACE_MAX_NS) {
-        s->waiting = true;              /* rfid_cap_read() resumes */
-        timer_mod(s->timer, due + RFID_PACE_MAX_NS);
-        return;
+    if (s->tim && wb55_tim_capture_pending(s->tim)) {
+        if (now < due + RFID_PACE_MAX_NS) {
+            s->waiting = true;          /* rfid_cap_read() resumes */
+            s->n_waits++;
+            timer_mod(s->timer, due + RFID_PACE_MAX_NS);
+            return;
+        }
+        s->n_forced++;                  /* not read for 250 ms: go anyway */
     }
+    s->n_edges++;
+    s->delivered_ns = now;
     s->shift_ns = now - s->next_ns;     /* late by now: trail a little more */
     d = rfid_segment(s);
     wb55_comp_input(s->comp, 0, d > 0, s->next_ns);
-    s->next_ns += rfid_ns(s, d > 0 ? d : -d);
+    s->gap_ns = rfid_ns(s, d > 0 ? d : -d);
+    s->next_ns += s->gap_ns;
     timer_mod(s->timer, s->next_ns + s->shift_ns);
 }
 
@@ -137,7 +163,13 @@ static void rfid_timer(void *opaque)
 static void rfid_cap_read(Notifier *n, void *data)
 {
     FlipperRfidState *s = container_of(n, FlipperRfidState, cap_read);
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t lat = now - s->delivered_ns;
 
+    if (rfid_active(s) && lat >= 0 && lat < 10 * SCALE_MS) {
+        s->isr_ns += (MIN(lat, 1 * SCALE_MS) - s->isr_ns) / 8;
+        s->read_ns = now;
+    }
     if (s->waiting) {
         rfid_deliver(s);
     }
@@ -393,6 +425,28 @@ static void rfid_set_noise(Object *obj, bool value, Error **errp)
     rfid_restart(s);
 }
 
+static char *rfid_get_stats(Object *obj, Error **errp)
+{
+    FlipperRfidState *s = FLIPPER_RFID(obj);
+    WB55TimState *t = s->tim;
+
+    if (!t) {
+        return g_strdup("no capture timer");
+    }
+    return g_strdup_printf("edges %" PRIu64 " waits %" PRIu64 " forced %" PRIu64
+                           " waiting %d shift %" PRId64 " us isr %" PRId64
+                           " ns; tim2 cap_unread %x "
+                           "dier %x sr %x ccer %x ccmr2 %x ccr3 %u ccr4 %u "
+                           "base %" PRId64 " us ago, next edge %" PRId64 " us ago",
+                           s->n_edges, s->n_waits, s->n_forced, s->waiting,
+                           s->shift_ns / 1000, s->isr_ns, t->cap_unread,
+                           t->regs[0x0C / 4],
+                           t->regs[0x10 / 4], t->regs[0x20 / 4], t->regs[0x1C / 4],
+                           t->regs[0x3C / 4], t->regs[0x40 / 4],
+                           (qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - t->base_ns) / 1000,
+                           (qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->next_ns) / 1000);
+}
+
 static char *rfid_get_field(Object *obj, Error **errp)
 {
     FlipperRfidState *s = FLIPPER_RFID(obj);
@@ -431,6 +485,9 @@ static void rfid_init(Object *obj)
     object_property_add_str(obj, "field", rfid_get_field, NULL);
     object_property_set_description(obj, "field",
         "The reader's field: \"<Hz> ask|psk\" or \"off\"");
+    object_property_add_str(obj, "stats", rfid_get_stats, NULL);
+    object_property_set_description(obj, "stats",
+        "Edges delivered, paced and forced, and TIM2's capture state");
 }
 
 static void rfid_realize(DeviceState *dev, Error **errp)
