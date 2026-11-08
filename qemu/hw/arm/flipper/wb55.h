@@ -315,6 +315,28 @@ struct WB55DbgmcuState {
     uint32_t regs[0x54 / 4];
 };
 
+/* ------------------------------------------------- TIM (general purpose) */
+#define TYPE_WB55_TIM "stm32wb55-tim"
+OBJECT_DECLARE_SIMPLE_TYPE(WB55TimState, WB55_TIM)
+struct WB55TimState {
+    SysBusDevice parent_obj;
+    MemoryRegion mmio;
+    qemu_irq irq;
+    Clock *clk;
+    QEMUTimer *timer;
+    uint32_t width;              /* 16 or 32 bit counter */
+    uint32_t regs[0x70 / 4];
+    bool running;
+    uint32_t cnt_base;           /* CNT at base_ns */
+    int64_t base_ns;
+    int64_t checked_ns;          /* event flags are current up to here */
+    bool ti_level[4];
+};
+/* an edge on input TI1..TI4 (ti 0..3) at virtual time `when` */
+void wb55_tim_input(WB55TimState *s, int ti, bool level, int64_t when);
+/* has the firmware still to service a capture interrupt? */
+bool wb55_tim_capture_pending(WB55TimState *s);
+
 /* Read/write register file used for blocks that only need readback. */
 #define TYPE_WB55_REGFILE "stm32wb55-regfile"
 OBJECT_DECLARE_SIMPLE_TYPE(WB55RegfileState, WB55_REGFILE)
@@ -436,6 +458,7 @@ struct WB55SocState {
     WB55DwtState dwt;
     WB55DbgmcuState dbgmcu;
     WB55UsbState usb;
+    WB55TimState tim2;               /* IR receive, Sub-GHz async RX capture */
     Stm32l4x5GpioState gpio[WB55_NUM_PORTS];
     Stm32l4x5UsartBaseState usart1;
     Stm32l4x5UsartBaseState lpuart1;

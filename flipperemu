@@ -17,6 +17,7 @@ you flash stays flashed, settings and files persist across runs.
   ./flipperemu sd --resources update.tgz     (re)build the SD card
   ./flipperemu cli                           USB CLI of a running device
   ./flipperemu cli "storage list /ext"       run CLI commands, print output
+  ./flipperemu ir NEC 0x04 0x08              point a virtual IR remote at it
   ./flipperemu gdb                           attach gdb to a --gdb run
   ./flipperemu shot out.png | press ok       drive a running device
   ./flipperemu info                          what is on the device
@@ -499,6 +500,37 @@ def cmd_cli(args):
     return 0
 
 
+def cmd_ir(args):
+    import fe_ir
+    from fe_monitor import Monitor
+    dev = Device(args.device)
+    if not dev.running():
+        sys.exit(f"[{dev.name}] not running")
+    sig = args.signal
+    try:
+        if sig[0].lower() == "raw":
+            label, durs = "raw", [abs(int(x)) for x in sig[1:]]
+        elif sig[0].endswith(".ir"):
+            label, durs = fe_ir.parse_ir_file(sig[0], sig[1] if len(sig) > 1 else None)
+        elif len(sig) == 3:
+            proto = next((p for p in fe_ir.SPECS if p.lower() == sig[0].lower()), sig[0])
+            label = f"{proto} A:{int(sig[1], 0):#x} C:{int(sig[2], 0):#x}"
+            durs = fe_ir.encode(proto, int(sig[1], 0), int(sig[2], 0), args.repeat)
+        else:
+            sys.exit("usage: ir PROTOCOL ADDRESS COMMAND | ir raw D1 D2 ... | ir FILE.ir [NAME]")
+    except (ValueError, KeyError, OSError) as e:
+        sys.exit(f"ir: {e}")
+    if not durs:
+        sys.exit("ir: empty signal")
+    m = Monitor(str(dev.monitor))
+    err = m.cmd("qom-set /machine/ir rx " + ",".join(map(str, durs)))
+    m.close()
+    if err:
+        sys.exit(f"ir: {err}")
+    print(f"[{dev.name}] IR {label}: {len(durs)} marks/spaces, {sum(durs) / 1000:.0f} ms")
+    return 0
+
+
 def cmd_shot(args):
     from fe_monitor import Monitor
     print(Monitor(str(Device(args.device).monitor)).screenshot(args.out))
@@ -581,6 +613,15 @@ def main():
                         "(default: interactive session, Ctrl-] quits)")
     p.add_argument("--timeout", type=float, default=30)
     p.set_defaults(func=cmd_cli)
+
+    p = sub.add_parser("ir", help="send an infrared signal to a running device's receiver")
+    p.add_argument("signal", nargs="+",
+                   help="PROTOCOL ADDRESS COMMAND (NEC NECext NEC42 NEC42ext Samsung32 "
+                        "SIRC SIRC15 SIRC20 RC5 RC5X RC6 RCA Pioneer Kaseikyo), "
+                        "raw MARK SPACE MARK ... (µs), or FILE.ir [NAME]")
+    p.add_argument("--repeat", type=int, help="frames to send (default: what the "
+                                              "protocol's encoder sends)")
+    p.set_defaults(func=cmd_ir)
 
     p = sub.add_parser("gdb", help="attach gdb to a running --gdb device")
     p.add_argument("--gdb-port", type=int, default=1234)

@@ -129,4 +129,19 @@ struct FlipperSpeakerState {
 void flipper_speaker_set(FlipperSpeakerState *s, bool on, uint32_t freq_mhz,
                          uint32_t duty_ppm);
 
+/* ------------------------------------------------ infrared receiver */
+#define TYPE_FLIPPER_IR "flipper-ir"
+OBJECT_DECLARE_SIMPLE_TYPE(FlipperIrState, FLIPPER_IR)
+struct FlipperIrState {
+    DeviceState parent_obj;
+    qemu_irq pin;                /* PA0 */
+    struct WB55TimState *tim;    /* TIM2: TI1 captures the edges */
+    QEMUTimer *timer;
+    uint32_t *dur;               /* mark/space durations being played, µs */
+    int len, pos;
+    int64_t next_ns;
+    bool level;
+};
+void flipper_ir_idle(FlipperIrState *s);
+
 #endif

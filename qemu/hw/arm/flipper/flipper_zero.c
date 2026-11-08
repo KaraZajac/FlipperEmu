@@ -51,6 +51,7 @@ struct FlipperZeroState {
     St7567State *lcd;
     Lp5562State *led;
     FlipperSpeakerState *speaker;
+    FlipperIrState *ir;
     Bq27220State *gauge;
     Bq25896State *charger;
     char *name;
@@ -303,6 +304,7 @@ static void flipper_drive_pins(FlipperZeroState *s)
     qemu_set_irq(soc_in(s, 'C', 10), s->sd_present ? 0 : 1); /* SD card detect */
     qemu_set_irq(soc_in(s, 'C', 2), 0);     /* SPI2 MISO idle low */
     qemu_set_irq(soc_in(s, 'B', 4), 0);     /* SPI1 MISO: CC1101 CHIP_RDYn */
+    flipper_ir_idle(s->ir);                 /* IR receiver output idles high */
     for (int b = 0; b < BTN_NUM; b++) {     /* buttons released */
         if (!(s->keys_down & (1u << b))) {
             qemu_set_irq(soc_in(s, buttons[b].port, buttons[b].pin),
@@ -427,6 +429,14 @@ static void flipper_zero_init(MachineState *machine)
     s->speaker = FLIPPER_SPEAKER(dev);
     s->soc.tim16->changed = flipper_tim16_changed;
     s->soc.tim16->changed_opaque = s;
+
+    /* ---- infrared receiver: PA0 and TIM2 TI1 */
+    dev = qdev_new(TYPE_FLIPPER_IR);
+    object_property_add_child(OBJECT(machine), "ir", OBJECT(dev));
+    qdev_realize_and_unref(dev, NULL, &error_fatal);
+    s->ir = FLIPPER_IR(dev);
+    s->ir->tim = &s->soc.tim2;
+    qdev_connect_gpio_out_named(dev, "out", 0, soc_in(s, 'A', 0));
 
     if (!machine->kernel_filename && !drive_get(IF_PFLASH, 0, 0)) {
         warn_report("flipper-zero: no firmware (-kernel) and no flash image "

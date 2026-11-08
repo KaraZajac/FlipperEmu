@@ -141,6 +141,14 @@ All three are small, self-contained, and suitable for sending upstream.
     answers success. STOP2 then idles at 1–2 % of a core with uptime matching wall time,
     and it is now the default for new devices, as on a real Flipper.
 
+19. **IR decoded by `ir rx` but "Unknown, 66 samples" in the Infrared app.** One fewer
+    sample than sent, and a frame the decoder rejected. The injector's QEMU timer runs in
+    the main loop. When it fired late, two edges reached TIM2 back to back, both capture
+    flags were pending, and the firmware's ISR handles the rising edge (CC1) before the
+    falling one (CC2). On silicon the ISR runs microseconds after each edge, and edges
+    are at least ~400 µs apart. Fix: an edge waits until the previous capture has been
+    serviced. Edges carry exact timestamps, so the durations don't change.
+
 ## Things that were right the first time (and why)
 
 - HSEM modelled from RM0434: **reading RLRx is the 1-step lock**. `furi_hal_bt_init()`

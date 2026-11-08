@@ -8,11 +8,13 @@
 
 Boots a throwaway device, waits for the firmware's own log milestones, presses
 Back (dismiss the first scene) and OK (main menu), checks the LCD changed,
-runs `info device` on the CLI over the emulated USB serial port, then reboots
-through the CLI and checks the LCD comes back after the warm reset.
+runs `info device` on the CLI over the emulated USB serial port, receives an
+NEC frame through the virtual IR receiver (`ir rx`), then reboots through the
+CLI and checks the LCD comes back after the warm reset.
 Exit status 0 = pass. Screenshots are kept in the --out directory.
 """
 import argparse
+import os
 import pathlib
 import re
 import shutil
@@ -77,6 +79,32 @@ def reboot_check(mon: Monitor, uart: pathlib.Path, out: pathlib.Path, timeout: f
     return dark_pixels(shot) > 500
 
 
+def ir_check(mon: Monitor) -> bool:
+    """`ir rx` on the CLI, then an NEC frame into the virtual IR receiver."""
+    import select
+    import fe_ir
+    try:
+        cli = FlipperCli(usb_endpoint(mon))
+        try:
+            cli.read_until_prompt(15)
+            cli.write(b"ir rx\r")
+            time.sleep(1.0)
+            mon.cmd("qom-set /machine/ir rx " + ",".join(map(str, fe_ir.encode("NEC", 4, 8))))
+            out, end = b"", time.time() + 3
+            while time.time() < end and b"NEC, A:0x04, C:0x08" not in out:
+                r, _, _ = select.select([cli.fd], [], [], 0.1)
+                if r:
+                    out += cli.sock.recv(4096) if cli.sock else os.read(cli.fd, 4096)
+            cli.write(b"\x03")
+            time.sleep(0.3)
+        finally:
+            cli.close()
+    except (OSError, TimeoutError, ConnectionError, TypeError) as e:
+        print(f"  ir: {e}")
+        return False
+    return b"NEC, A:0x04, C:0x08" in out
+
+
 def usb_cli_check(mon: Monitor) -> bool:
     try:
         cli = FlipperCli(usb_endpoint(mon))
@@ -138,6 +166,7 @@ def main() -> int:
                             desk.read_bytes() != menu.read_bytes()))
             if not args.no_usb:
                 results.append(("usb: CLI 'info device' over CDC", usb_cli_check(mon)))
+                results.append(("ir: NEC frame received and decoded", ir_check(mon)))
                 results.append(("reboot: LCD redrawn after a warm reset",
                                 reboot_check(mon, uart, out, args.timeout)))
             mon.cmd("quit")

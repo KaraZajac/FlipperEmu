@@ -31,6 +31,9 @@ CLI over USB, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed 
 - Boots to the desktop: every `furi_hal` init, all services, the dolphin and the menus.
 - 128×64 ST7567 LCD with backlight, plus RGB LED, vibro and speaker indicators in the
   window.
+- Infrared receive: `./flipperemu ir NEC 0x04 0x08` points a virtual remote at the
+  Flipper (14 protocols, raw timings, or signals from `.ir` files). The Infrared app's
+  Learn screen and the `ir rx` CLI command decode it.
 - Speaker: TIM16's PWM tone plays through QEMU audio (desktop sound or a WAV recording).
   The duty cycle sets the volume, as on the real piezo.
 - Buttons from the keyboard, the QEMU monitor, or `./flipperemu press`.
@@ -55,7 +58,8 @@ CLI over USB, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed 
 - qFlipper and lab.flipper.net: they look for a USB device (VID/PID), not a serial
   port, so they don't see the emulator yet (a USB/IP bridge would fix that). Tools that
   open a serial port path work.
-- Bluetooth (needs a radio stack), and RF signals for Sub-GHz, NFC, RFID, IR and iButton.
+- Bluetooth (needs a radio stack), RF signals for Sub-GHz, NFC, RFID and iButton, and IR
+  transmit (IR receive works).
 - LP5562 engine programs are approximated (steady-state brightness only).
 - Not yet exercised: XIP app loaders that run code from internal flash, and the
   radio-stack stage of updates (the emulated CPU2 can't install a stack).
@@ -106,6 +110,7 @@ are erased). Without `-f` it boots whatever is already flashed.
 | `run --update PKG` | install an update package through the firmware's own updater (keeps settings and files) |
 | `stop` | shut a running device down cleanly (saves its NVRAM) |
 | `cli ["CMD" …]` | the device's CLI over USB: interactive, or run commands and print their output |
+| `ir PROTO ADDR CMD` \| `ir raw …` \| `ir FILE.ir [NAME]` | send an infrared signal to the device's receiver |
 | `flash FW [--erase-all]` | program `.elf` / `.dfu` / `.bin` / update `.tgz` into `flash.img` |
 | `sd [--resources X] [--size 512M]` | rebuild the microSD from a resources tgz, update package or folder |
 | `press ok down down ok …` | press buttons on a running device |
@@ -127,8 +132,9 @@ scripts/smoke_test.py path/to/firmware.elf|.dfu|update.tgz [--no-sd]
 ```
 
 Boots a throwaway device headless and checks: "Startup complete", "card mounted", the
-LCD draws, OK changes the screen, `info device` answers on the USB CLI, the LCD comes back
-after `power reboot`, and no `[CRASH]` in the log. Exit code 0 means pass, so
+LCD draws, OK changes the screen, `info device` answers on the USB CLI, an NEC frame from the
+virtual IR remote is decoded, the LCD comes back after `power reboot`, and no `[CRASH]` in
+the log. Exit code 0 means pass, so
 it slots into a pre-flash habit or CI.
 
 ### Updating like qFlipper does
@@ -173,6 +179,23 @@ Hello World!
 | | |
 |:-:|:-:|
 | ![badusb](docs/img/09-badusb-hid.png) | Bad USB with the emulator's host as the "PC": the script runs to 100 %, and its keystrokes show up on `devices/NAME/usb.tty` |
+
+### Infrared
+
+```sh
+./flipperemu ir NEC 0x04 0x08            # NEC NECext NEC42 NEC42ext Samsung32 SIRC SIRC15
+./flipperemu ir Samsung32 0x07 0x02      #   SIRC20 RC5 RC5X RC6 RCA Pioneer Kaseikyo
+./flipperemu ir raw 9000 4500 560 560 …  # mark/space µs, starting with a mark
+./flipperemu ir tv.ir Power              # a signal from a Flipper .ir file (parsed or raw)
+```
+
+The signals are built the way the firmware's own encoders build them, so the firmware's
+decoders see what a real remote would send. Open Infrared → Learn New Remote, or run `ir
+rx` on the CLI, and the signal is decoded:
+
+| | |
+|:-:|:-:|
+| ![ir](docs/img/11-ir-learn.png) | `./flipperemu ir Samsung32 0x07 0x02` with the Infrared app's Learn screen open |
 
 ### Sound
 
@@ -239,7 +262,7 @@ flipperemu             launcher / device manager
 qemu/hw/arm/flipper/   the QEMU machine + STM32WB55 SoC + board devices (C)
 qemu/patches/          fixes to upstream QEMU (SysTick, ssi-sd, SD SPI state)
 scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_monitor.py,
-                       fe_cli.py, smoke_test.py
+                       fe_cli.py, fe_ir.py, smoke_test.py
 devices/ firmware/ build/ third_party/    generated, git-ignored
 ```
 

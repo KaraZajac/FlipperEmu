@@ -56,9 +56,11 @@ NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
 - ☐ LP5562 engine interpreter (blinks, ramps)
 - ◐ Battery/USB power: monitor control done (`qom-set /machine/gauge soc 5`, `/machine/charger usb true`); window UI todo
 - ☑ STOP2 deep sleep (CPU2 performs the SHCI clock switch); now the default, 1–2 % host CPU idle
-- ☐ IR TX decoding to the log, IR RX injection
+- ◐ IR: receive ☑ (TIM2 input capture + virtual receiver; 14 protocols, raw, .ir files;
+      decoded by the Infrared app and `ir rx`), transmit capture ☐ (TIM1 + DMA bursts)
 
 ## M5: virtual RF ☐
+TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX uses.
 - ☐ Sub-GHz: CC1101 async RX from `.sub` RAW timings (GDO0 → TIM2 capture), TX capture
       to `.sub`
 - ☐ NFC: ST25R3916 transparent mode / virtual tags from `.nfc` files

@@ -17,14 +17,15 @@ it; the file comments name that function. Register layouts come from RM0434 and 
   stm32wb55_soc.c  (SoC: memory map, NVIC lines, DMA requests, GPIO fan-out)
         │   Cortex-M4F (QEMU armv7m, 63 IRQs, MPU, FPU)
         │   rcc pwr flash hsem ipcc(+CPU2) exti syscfg rtc lptim×2 spi×2 i2c×2
-        │   dma(+dmamux) rng dwt dbgmcu usb(+virtual host)
+        │   dma(+dmamux) rng dwt dbgmcu usb(+virtual host) tim2
         │   gpio×6 usart1 lpuart1 (QEMU L4x5 models)
-        │   tim1/2/16/17 adc aes pka crc comp iwdg … (register files)
+        │   tim1/16/17 adc aes pka crc comp iwdg … (register files)
         │
    SPI2 ── st7567 (LCD, CS PC11, A0 PB1, RST PB0)   ── ssi-sd + sd-card-spi (CS PC12, CD PC10)
    SPI1 ── cc1101 (CS PD0, GDO0 → PA1)              ── st25r3916 (CS PE4, IRQ → PA2)
    I2C1 ── bq27220 @0x55   bq25896 @0x6B   lp5562 @0x30
    TIM16 CH1 (PB8) ── piezo → flipper-speaker → QEMU audio (desktop or WAV)
+   PA0 + TIM2 TI1  ←─ IR receiver ← /machine/ir rx (marks/spaces)
    USB ─── built-in host ── CDC ACM ⇄ chardev "usb" (pty/socket)  ·  HID → text on it
 ```
 
@@ -199,6 +200,30 @@ does, then sends `update install` over the USB CLI. The emulated CPU2 can't inst
 radio stack, so the launcher blanks the package's radio stage. It keeps every manifest
 line, because the firmware reads the manifest's optional keys in order and stops at the
 first missing one.
+
+## Timers (`stm32wb55_tim.c`) and the IR receiver
+
+TIM2 is a real timer model, written for TIM1/16/17's layout too:
+- The counter runs in virtual time and is computed lazily (PSC, ARR, CNT, CEN, UG,
+  one-pulse mode). Update and compare events set their flags as time passes. A QEMU timer
+  is armed only for events with an enabled interrupt, rounded up so it never fires early.
+- Input capture takes edges that the board reports with an exact virtual timestamp.
+  CCxS selects direct or indirect inputs, CCxP/CCxNP the polarity, and CCxOF flags
+  overcapture.
+- The slave controller's reset mode works on TI1FP1, TI2FP2 and TI1F_ED.
+
+`furi_hal_infrared` uses exactly that for receiving. A falling edge (a mark starts) is
+captured into CCR2, and a rising edge into CCR1, which also resets the counter. CC3 is
+the end-of-signal timeout.
+
+The IR receiver (`/machine/ir`) drives PA0 and TIM2 TI1, idling high and going low for a
+mark. Writing durations to its `rx` property plays them. On silicon the capture
+interrupt is serviced long before the next edge. QEMU's main loop can run late and
+deliver two edges together, which would reorder them for the firmware's ISR. So each
+edge waits (up to 10 ms) until the previous capture has been serviced; timestamps keep
+the measured durations exact. `scripts/fe_ir.py` builds signals with a port of the
+firmware's common encoder (pulse distance/width, Manchester) and its per-protocol data
+layouts.
 
 ## Storage
 

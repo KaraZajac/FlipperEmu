@@ -138,6 +138,7 @@ static void wb55_soc_init(Object *obj)
     object_initialize_child(obj, "dwt", &s->dwt, TYPE_WB55_DWT);
     object_initialize_child(obj, "dbgmcu", &s->dbgmcu, TYPE_WB55_DBGMCU);
     object_initialize_child(obj, "usb", &s->usb, TYPE_WB55_USB);
+    object_initialize_child(obj, "tim2", &s->tim2, TYPE_WB55_TIM);
     for (int i = 0; i < WB55_NUM_PORTS; i++) {
         g_autofree char *name = g_strdup_printf("gpio%c", "abcdeh"[i]);
         object_initialize_child(obj, name, &s->gpio[i], TYPE_STM32L4X5_GPIO);
@@ -399,7 +400,12 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
     /* ---- read-back register files (no behaviour the firmware needs yet) */
     dev = soc_regfile("tim1", 0x40012C00, 0x400, WB55_RF_TIM);
     wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_APB2RSTR, 11, dev);
-    dev = soc_regfile("tim2", 0x40000000, 0x400, WB55_RF_TIM);
+    /* TIM2: 32-bit general-purpose timer (IR receive, Sub-GHz capture) */
+    dev = DEVICE(&s->tim2);
+    qdev_prop_set_uint32(dev, "width", 32);
+    qdev_connect_clock_in(dev, "clk", hclk);
+    soc_map(SYS_BUS_DEVICE(dev), 0x40000000, errp);
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, NVIC(WB55_IRQ_TIM2));
     wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_APB1RSTR1, 0, dev);
     dev = soc_regfile("tim16", 0x40014400, 0x400, WB55_RF_TIM);
     wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_APB2RSTR, 17, dev);
