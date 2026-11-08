@@ -50,6 +50,7 @@ struct FlipperZeroState {
     WB55SocState soc;
     St7567State *lcd;
     Lp5562State *led;
+    FlipperSpeakerState *speaker;
     Bq27220State *gauge;
     Bq25896State *charger;
     char *name;
@@ -188,9 +189,36 @@ static void flipper_vibro(void *opaque, int n, int level)
     s->lcd->status_dirty = true;
 }
 
-static void flipper_speaker(void *opaque, int n, int level)
+/*
+ * The piezo on PB8 is driven by TIM16 CH1 PWM: furi_hal_speaker sets the tone
+ * with the timer period, HCLK / ((PSC+1)(ARR+1)), and the volume with the
+ * duty cycle, CCR1 / (ARR+1). Outputs need CEN, CC1E and MOE (BDTR).
+ */
+static void flipper_tim16_changed(void *opaque)
 {
-    /* PB8 toggles under TIM16 PWM; only used as an activity indicator */
+    FlipperZeroState *s = opaque;
+    const uint32_t *r = s->soc.tim16->regs;
+    uint32_t psc = r[0x28 / 4] & 0xFFFF, arr = r[0x2C / 4] & 0xFFFF;
+    uint32_t ccr1 = r[0x34 / 4] & 0xFFFF, ccmr1 = r[0x18 / 4];
+    int oc1m = ((ccmr1 >> 4) & 7) | ((ccmr1 >> 13) & 8);
+    bool on = (r[0x00 / 4] & 1) && (r[0x20 / 4] & 1) &&
+              (r[0x44 / 4] & (1u << 15)) && (oc1m == 6 || oc1m == 7) && arr;
+    uint32_t freq_mhz = 0, duty = 0;
+
+    if (on) {
+        uint64_t clk = clock_get_hz(s->soc.rcc.hclk);
+
+        freq_mhz = clk * 1000 / ((uint64_t)(psc + 1) * (arr + 1));
+        duty = MIN((uint64_t)ccr1 * 1000000 / (arr + 1), 1000000);
+        if (oc1m == 7) {
+            duty = 1000000 - duty;      /* PWM mode 2 */
+        }
+    }
+    flipper_speaker_set(s->speaker, on, freq_mhz, duty);
+    if (s->lcd->speaker != (on && duty)) {
+        s->lcd->speaker = on && duty;
+        s->lcd->status_dirty = true;
+    }
 }
 
 /* ------------------------------------------------- OTP / unique device ID */
@@ -390,7 +418,15 @@ static void flipper_zero_init(MachineState *machine)
                                            &flipper_input_handler);
     qemu_input_handler_activate(s->input);
     soc_out(s, 'A', 8, qemu_allocate_irq(flipper_vibro, s, 0));
-    soc_out(s, 'B', 8, qemu_allocate_irq(flipper_speaker, s, 0));
+    dev = qdev_new(TYPE_FLIPPER_SPEAKER);
+    if (machine->audiodev) {
+        qdev_prop_set_string(dev, "audiodev", machine->audiodev);
+    }
+    object_property_add_child(OBJECT(machine), "speaker", OBJECT(dev));
+    qdev_realize_and_unref(dev, NULL, &error_fatal);
+    s->speaker = FLIPPER_SPEAKER(dev);
+    s->soc.tim16->changed = flipper_tim16_changed;
+    s->soc.tim16->changed_opaque = s;
 
     if (!machine->kernel_filename && !drive_get(IF_PFLASH, 0, 0)) {
         warn_report("flipper-zero: no firmware (-kernel) and no flash image "
@@ -486,6 +522,7 @@ static void flipper_zero_class_init(ObjectClass *oc, const void *data)
     mc->default_cpus = 1;
     mc->min_cpus = 1;
     mc->max_cpus = 1;
+    machine_add_audiodev_property(mc);  /* -M flipper-zero,audiodev=ID: speaker */
     object_class_property_add_str(oc, "name", flipper_get_name,
                                   flipper_set_name);
     object_class_property_add_str(oc, "nvram", flipper_get_nvram,

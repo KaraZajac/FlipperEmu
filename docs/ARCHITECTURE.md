@@ -24,6 +24,7 @@ it; the file comments name that function. Register layouts come from RM0434 and 
    SPI2 ── st7567 (LCD, CS PC11, A0 PB1, RST PB0)   ── ssi-sd + sd-card-spi (CS PC12, CD PC10)
    SPI1 ── cc1101 (CS PD0, GDO0 → PA1)              ── st25r3916 (CS PE4, IRQ → PA2)
    I2C1 ── bq27220 @0x55   bq25896 @0x6B   lp5562 @0x30
+   TIM16 CH1 (PB8) ── piezo → flipper-speaker → QEMU audio (desktop or WAV)
    USB ─── built-in host ── CDC ACM ⇄ chardev "usb" (pty/socket)  ·  HID → text on it
 ```
 
@@ -225,6 +226,12 @@ firmware keeps `/int` on the card as `/ext/.int`.
   MARCSTATE, PATABLE, and GDO0/GDO2 driven from IOCFG (self-test passes).
 - **ST25R3916**: register spaces A and B, IC identity 0x2A, IRQ status (clear on read) and
   mask registers driving the IRQ pin, oscillator-ready and VDD measurement.
+- **Speaker**: the piezo on PB8 is TIM16 CH1 in PWM mode. Every TIM16 write recomputes
+  the tone: HCLK / ((PSC+1)(ARR+1)), duty CCR1/(ARR+1), and sound only while CEN, CC1E
+  and MOE are set. `flipper-speaker` plays that pulse wave, with DC removed, through a
+  QEMU audio backend (`-M …,audiodev=`), so the volume follows the duty cycle as on the
+  piezo. It closes its voice from an exit notifier, because QEMU never finalizes
+  machine devices and the `wav` driver only writes its RIFF sizes on close.
 - **Pins held by the board** (re-applied after every reset, because a GPIO port reset
   releases external drivers): SD card detect, idle-low MISO lines (the CC1101 driver waits
   for CHIP_RDYn on MISO), and released buttons.

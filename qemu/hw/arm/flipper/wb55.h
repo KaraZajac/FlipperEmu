@@ -326,6 +326,9 @@ struct WB55RegfileState {
     uint32_t *regs;
     uint32_t kind;               /* WB55_RF_* special behaviour */
     bool warned;
+    /* board hook, called after every write and after reset (e.g. TIM16 -> speaker) */
+    void (*changed)(void *opaque);
+    void *changed_opaque;
 };
 enum { WB55_RF_PLAIN = 0, WB55_RF_ADC, WB55_RF_TIM, WB55_RF_AES, WB55_RF_CRC };
 
@@ -441,6 +444,8 @@ struct WB55SocState {
     MemoryRegion sram1, sram2a, sram2b;
     MemoryRegion sram2a_alias, sram2b_alias;
     MemoryRegion boot_flash, boot_sysmem, boot_sram1;
+
+    WB55RegfileState *tim16;         /* speaker PWM (TIM16 CH1 on PB8) */
 
     qemu_irq *gpio_tap;
     qemu_irq gpio_out[WB55_PINS];    /* pin levels for board devices */

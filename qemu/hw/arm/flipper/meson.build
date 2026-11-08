@@ -20,5 +20,6 @@ arm_common_ss.add(when: 'CONFIG_FLIPPER_ZERO', if_true: files(
   'st7567.c',
   'flipper_power.c',
   'flipper_rf.c',
+  'flipper_speaker.c',
   'flipper_zero.c',
 ))

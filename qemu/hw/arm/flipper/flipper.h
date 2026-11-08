@@ -10,6 +10,7 @@
 #include "hw/ssi/ssi.h"
 #include "hw/i2c/i2c.h"
 #include "qom/object.h"
+#include "qemu/notify.h"
 
 /* ---------------------------------------------------------- ST7567 LCD */
 #define TYPE_ST7567 "st7567"
@@ -110,5 +111,22 @@ struct St25r3916State {
     bool read, space_b, prefix_b;
     qemu_irq irq;
 };
+
+/* --------------------------------------------- piezo speaker (TIM16) */
+#define TYPE_FLIPPER_SPEAKER "flipper-speaker"
+OBJECT_DECLARE_SIMPLE_TYPE(FlipperSpeakerState, FLIPPER_SPEAKER)
+struct FlipperSpeakerState {
+    DeviceState parent_obj;
+    struct AudioBackend *audio_be;
+    struct SWVoiceOut *voice;
+    bool on;
+    uint32_t freq_mhz;           /* tone, milli-Hz */
+    uint32_t duty_ppm;           /* PWM duty: how the firmware sets volume */
+    uint32_t phase, phase_inc, threshold;
+    int16_t hi, lo;
+    Notifier exit;               /* close the voice: finishes WAV headers */
+};
+void flipper_speaker_set(FlipperSpeakerState *s, bool on, uint32_t freq_mhz,
+                         uint32_t duty_ppm);
 
 #endif

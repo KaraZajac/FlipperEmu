@@ -215,7 +215,7 @@ static bool st7567_update(void *opaque)
             }
         }
     }
-    /* status strip: RGB LED and vibro indicators */
+    /* status strip: RGB LED, vibro and speaker indicators */
     int sy = 64 * sc + 2 * b, r = s->status_h / 3;
     if (s->status_h) {
         uint32_t led = s->led_rgb;

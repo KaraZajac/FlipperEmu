@@ -265,6 +265,37 @@ def cmd_sd(args):
     dev.make_sd(args.resources, args.size, force=True)
 
 
+def audio_backends():
+    """Audio drivers compiled into our QEMU (configure enables PipeWire,
+    PulseAudio, ALSA or SDL when their development headers are installed)."""
+    try:
+        out = subprocess.run([str(QEMU), "-audiodev", "help"], capture_output=True,
+                             text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [l.strip() for l in out.splitlines()[1:] if l.strip()]
+
+
+def audio_args(args):
+    """-audiodev for the speaker: none | wav:PATH | a QEMU audio driver | auto"""
+    choice = args.audio
+    if choice == "auto":
+        if args.headless or args.print_cmd:
+            return []
+        have = audio_backends()
+        choice = next((b for b in ("pipewire", "pa", "alsa", "sdl") if b in have), None)
+        if not choice:
+            print("(no speaker: this QEMU has no PipeWire/PulseAudio/ALSA/SDL audio; "
+                  "install e.g. pipewire-devel and re-run scripts/setup_qemu.sh, "
+                  "or record with --audio wav:FILE)")
+            return []
+    if choice == "none":
+        return []
+    if choice.startswith("wav:"):
+        return ["-audiodev", f"wav,id=snd0,path={pathlib.Path(choice[4:]).resolve()}"]
+    return ["-audiodev", f"{choice},id=snd0"]
+
+
 def qemu_cmd(dev: Device, args):
     machine = (f"flipper-zero,name={args.name or dev.name[:8]},lcd-scale={args.scale}"
                f",nvram={dev.nvram}")
@@ -282,7 +313,10 @@ def qemu_cmd(dev: Device, args):
         sys.exit(f"--usb: expected pty, unix, tcp:PORT or none, not {args.usb!r}")
     if usb:
         machine += ",usb-serial=usb"
-    cmd = [str(QEMU), "-M", machine, *usb,
+    audio = audio_args(args)
+    if audio:
+        machine += ",audiodev=snd0"
+    cmd = [str(QEMU), "-M", machine, *usb, *audio,
            "-drive", f"if=pflash,format=raw,file={dev.flash}",
            "-rtc", "base=localtime",
            "-monitor", f"unix:{dev.monitor},server=on,wait=off",
@@ -511,6 +545,9 @@ def main():
     p.add_argument("--usb", default="pty",
                    help="USB serial port (CLI/RPC): pty (default), unix "
                         "(devices/<name>/usb.sock), tcp:PORT, none (cable unplugged)")
+    p.add_argument("--audio", default="auto",
+                   help="speaker: auto (a desktop audio driver if QEMU has one; silent "
+                        "when headless), wav:FILE (record), pipewire, pa, alsa, sdl, none")
     p.add_argument("--serial", default="stdio",
                    help="USART1 log: stdio (default), file:PATH, pty, tcp:PORT, null")
     p.add_argument("--gdb", action="store_true", help="enable the gdb stub")

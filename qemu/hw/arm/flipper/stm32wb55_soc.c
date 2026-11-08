@@ -403,6 +403,7 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
     wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_APB1RSTR1, 0, dev);
     dev = soc_regfile("tim16", 0x40014400, 0x400, WB55_RF_TIM);
     wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_APB2RSTR, 17, dev);
+    s->tim16 = WB55_REGFILE(dev);
     dev = soc_regfile("tim17", 0x40014800, 0x400, WB55_RF_TIM);
     wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_APB2RSTR, 18, dev);
     dev = soc_regfile("adc1", 0x50040000, 0x400, WB55_RF_ADC);

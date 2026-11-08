@@ -317,6 +317,9 @@ static void wb55_regfile_write(void *opaque, hwaddr addr, uint64_t val,
     case WB55_RF_AES: regfile_aes_write(s, addr, val); break;
     default:          s->regs[addr / 4] = val; break;
     }
+    if (s->changed) {
+        s->changed(s->changed_opaque);
+    }
 }
 
 static const MemoryRegionOps wb55_regfile_ops = {
@@ -324,7 +327,8 @@ static const MemoryRegionOps wb55_regfile_ops = {
     .write = wb55_regfile_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .impl.min_access_size = 1, .impl.max_access_size = 4,
-    .valid.min_access_size = 1, .valid.max_access_size = 4,
+    /* LDRD/STRD arrive as one 8-byte access; split it like the bus does */
+    .valid.min_access_size = 1, .valid.max_access_size = 8,
 };
 
 static void wb55_regfile_reset_hold(Object *obj, ResetType type)
@@ -336,6 +340,15 @@ static void wb55_regfile_reset_hold(Object *obj, ResetType type)
         if (s->kind == WB55_RF_ADC) {
             s->regs[0x08 / 4] = 1u << 29;   /* DEEPPWD */
         }
+    }
+}
+
+static void wb55_regfile_reset_exit(Object *obj, ResetType type)
+{
+    WB55RegfileState *s = WB55_REGFILE(obj);
+
+    if (s->changed) {
+        s->changed(s->changed_opaque);
     }
 }
 
@@ -362,6 +375,7 @@ static void wb55_regfile_class_init(ObjectClass *klass, const void *data)
     dc->realize = wb55_regfile_realize;
     device_class_set_props(dc, wb55_regfile_props);
     RESETTABLE_CLASS(klass)->phases.hold = wb55_regfile_reset_hold;
+    RESETTABLE_CLASS(klass)->phases.exit = wb55_regfile_reset_exit;
 }
 
 static const TypeInfo wb55_misc_types[] = {

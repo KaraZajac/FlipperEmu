@@ -29,7 +29,10 @@ CLI over USB, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed 
 
 **Works**
 - Boots to the desktop: every `furi_hal` init, all services, the dolphin and the menus.
-- 128×64 ST7567 LCD with backlight, plus RGB LED and vibro indicators in the window.
+- 128×64 ST7567 LCD with backlight, plus RGB LED, vibro and speaker indicators in the
+  window.
+- Speaker: TIM16's PWM tone plays through QEMU audio (desktop sound or a WAV recording).
+  The duty cycle sets the volume, as on the real piezo.
 - Buttons from the keyboard, the QEMU monitor, or `./flipperemu press`.
 - microSD over SPI2 + DMA: card detect, mount, read, write. Settings land in
   `/ext/.int`, dolphin animations load from the card, and `.fap` apps launch.
@@ -53,7 +56,7 @@ CLI over USB, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed 
   port, so they don't see the emulator yet (a USB/IP bridge would fix that). Tools that
   open a serial port path work.
 - Bluetooth (needs a radio stack), and RF signals for Sub-GHz, NFC, RFID, IR and iButton.
-- Speaker audio. LP5562 engine programs are approximated (steady-state brightness only).
+- LP5562 engine programs are approximated (steady-state brightness only).
 - Not yet exercised: XIP app loaders that run code from internal flash, and the
   radio-stack stage of updates (the emulated CPU2 can't install a stack).
 - The GTK window is QEMU's standard display. It hasn't been tested on a desktop session
@@ -67,7 +70,8 @@ Flipper's CPU2. Press Back.
 
 ```sh
 # 1. build QEMU with the Flipper machine (about 6 min the first time; no root needed:
-#    needs gcc, ninja, python3, glib2/pixman/gtk3 headers)
+#    needs gcc, ninja, python3, glib2/pixman/gtk3 headers; for live sound also the
+#    PipeWire or PulseAudio headers, e.g. pipewire-devel / libpipewire-0.3-dev)
 scripts/setup_qemu.sh
 
 # 2. fetch an official release (SHA-256 verified)
@@ -110,7 +114,8 @@ are erased). Without `-f` it boots whatever is already flashed.
 | `info` | which firmware is on the device |
 
 `--serial` (the USART1 log) takes `stdio` (default), `file:PATH`, `pty`, `tcp:PORT` or
-`null`. `--usb` (the USB serial port) takes `pty` (default), `unix`
+`null`. `--audio` takes `auto` (default), `wav:FILE`, a QEMU audio driver or `none`.
+`--usb` (the USB serial port) takes `pty` (default), `unix`
 (`devices/NAME/usb.sock`), `tcp:PORT` or `none` (cable unplugged). Anything after `--` is
 passed straight to QEMU, e.g. `-- -icount shift=auto` for deterministic timing, or
 `-- -d in_asm,cpu -D trace.log`.
@@ -169,6 +174,16 @@ Hello World!
 |:-:|:-:|
 | ![badusb](docs/img/09-badusb-hid.png) | Bad USB with the emulator's host as the "PC": the script runs to 100 %, and its keystrokes show up on `devices/NAME/usb.tty` |
 
+### Sound
+
+The speaker plays through QEMU's audio. `--audio` picks the output: by default a desktop
+driver if your QEMU build has one (PipeWire, PulseAudio, ALSA or SDL; silent when
+`--headless`). `wav:FILE` records instead, which works everywhere:
+
+```sh
+./flipperemu run --audio wav:flipper.wav     # e.g. then: ./flipperemu cli "buzzer note C5 1s"
+```
+
 ### Battery and USB power
 
 The fuel gauge and charger are live QOM objects. From the monitor
@@ -210,7 +225,8 @@ build/qemu/qemu-system-arm -M flipper-zero,name=Qemu,nvram=nv.bin,usb-serial=usb
 
 Machine options: `name=` (OTP device name, ≤8 chars), `lcd-scale=`, `region=` (OTP
 region), `legacy-sleep=on|off` (default off: STOP2), `nvram=`, `usb-serial=` (chardev id for the USB port;
-plugs the cable in). `-global stm32wb55-usb.debug=on` traces the USB host.
+plugs the cable in), `audiodev=` (the speaker's `-audiodev` id). `-global
+stm32wb55-usb.debug=on` traces the USB host.
 
 ## Layout
 
