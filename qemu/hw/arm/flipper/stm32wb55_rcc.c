@@ -101,6 +101,18 @@ static void wb55_rcc_update_clocks(WB55RccState *s)
     }
 }
 
+/* CPU2 owns the system clock switch while the radio stack runs. */
+void wb55_rcc_c2_set_sysclk(WB55RccState *s, int sw, bool pll_off)
+{
+    uint32_t cfgr = s->regs[R_CFGR] & ~0xFu;
+
+    s->regs[R_CFGR] = cfgr | (sw & 3) | ((sw & 3) << 2);
+    if (pll_off) {
+        s->regs[R_CR] &= ~((1u << 24) | (1u << 25));    /* PLLON, PLLRDY */
+    }
+    wb55_rcc_update_clocks(s);
+}
+
 void wb55_rcc_add_reset_hook(WB55RccState *s, uint16_t off, int bit,
                              DeviceState *dev)
 {

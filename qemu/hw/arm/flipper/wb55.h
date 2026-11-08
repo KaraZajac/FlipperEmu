@@ -104,6 +104,7 @@ struct WB55RccState {
 void wb55_rcc_add_reset_hook(WB55RccState *s, uint16_t off, int bit,
                              DeviceState *dev);
 void wb55_rcc_request_reset(WB55RccState *s, uint32_t csr_flag);
+void wb55_rcc_c2_set_sysclk(WB55RccState *s, int sw, bool pll_off);
 
 /* ----------------------------------------------------------------- PWR */
 #define TYPE_WB55_PWR "stm32wb55-pwr"
@@ -160,6 +161,7 @@ struct WB55IpccState {
     uint32_t fus_version;
     uint64_t uid64;
     WB55FlashState *flash;       /* IPCCBR option byte -> table address */
+    WB55RccState *rcc;           /* SHCI SET_SYSTEM_CLOCK switches SYSCLK */
     uint32_t unknown_cmd_log;
 };
 

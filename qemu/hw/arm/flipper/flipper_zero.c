@@ -461,7 +461,7 @@ static void flipper_zero_instance_init(Object *obj)
     s->name = g_strdup("Qemu");
     s->scale = 4;
     s->region = 2;                      /* US/CA/AU */
-    s->legacy_sleep = true;
+    s->legacy_sleep = false;            /* the firmware's default: STOP2 */
     object_property_add_uint32_ptr(obj, "lcd-scale", &s->scale,
                                    OBJ_PROP_FLAG_READWRITE);
     object_property_add_uint32_ptr(obj, "region", &s->region,

@@ -182,7 +182,8 @@ qom-set /machine/soc/usb attached false   # pull the USB cable (data and VBUS)
 ```
 
 With `--usb` (the default) the virtual cable is plugged in, so the Flipper shows
-charging.
+charging. As on hardware, a Flipper on USB never enters deep sleep: expect about 20 % of
+a host core while idle, against 1–2 % with `--usb none` or the cable pulled.
 
 ### Debugging firmware
 
@@ -208,7 +209,7 @@ build/qemu/qemu-system-arm -M flipper-zero,name=Qemu,nvram=nv.bin,usb-serial=usb
 ```
 
 Machine options: `name=` (OTP device name, ≤8 chars), `lcd-scale=`, `region=` (OTP
-region), `legacy-sleep=on|off`, `nvram=`, `usb-serial=` (chardev id for the USB port;
+region), `legacy-sleep=on|off` (default off: STOP2), `nvram=`, `usb-serial=` (chardev id for the USB port;
 plugs the cable in). `-global stm32wb55-usb.debug=on` traces the USB host.
 
 ## Layout

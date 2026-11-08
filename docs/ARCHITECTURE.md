@@ -59,10 +59,19 @@ bus resets therefore reset the peripheral device itself, *not* its child buses: 
 firmware pulses `I2C1RST`/`SPI2RST` around transactions, and resetting what hangs off
 those buses would wipe the LED driver, the display RAM and the SD card.
 
-The virtual device ships with Sleep Method = **Legacy** (an RTC backup-register flag the
-firmware owns). The firmware's default STOP2 path asks CPU2 to switch the system clock,
-which a FUS without a stack refuses, and then the idle task would spin. Use
-`--no-legacy-sleep` to try it anyway.
+New devices use the firmware's default Sleep Method, **STOP2**. Before stopping, CPU1 asks
+CPU2 (`SHCI_C2_SetSystemClock`) to move SYSCLK from PLL to HSE, and back to PLL after
+waking. The CPU2 model performs that switch on the RCC. It's the one radio-stack command
+it answers: without it, `furi_hal_power_deep_sleep()` returns before its WFI, and the
+idle task spins at 100 % of a host core. Updates clear the firmware's legacy-sleep flag,
+so every updated device takes this path. `--legacy-sleep` starts a new device with Sleep
+Method = Legacy (light sleep only). Either way, timekeeping holds: RTOS uptime matches
+wall time across long sleeps.
+
+While the USB cable is attached, the firmware never stops (USB insomnia, as on
+hardware). It takes the 1 kHz tick with WFI in between, about 20 % of a host core,
+versus 1–2 % with the cable out (`--usb none`, or `qom-set /machine/soc/usb attached
+false`).
 
 ## Interrupts: EXTI and SYSCFG
 
@@ -100,7 +109,8 @@ CPU2 runs ST's closed radio firmware, so it's modelled by behaviour instead:
 - It links an `SHCI_SUB_EVT_CODE_READY / FUS_FW_RUNNING` event into CPU1's
   system queue (spare buffer from the memory-manager table) and raises IPCC channel 2.
 - System commands are answered synchronously in the command buffer: `FUS_GET_STATE` →
-  idle, and everything else → status 0x01, as a FUS with no keys and no stack would.
+  idle, `SET_SYSTEM_CLOCK` → the clock switch STOP2 needs (see Clocks and time), and
+  everything else → status 0x01, as a FUS with no keys and no stack would.
 - Buffers released on channel 4 are taken back.
 
 The firmware reacts exactly as on a stackless device: "C2 boot completed, mode: FUS",

@@ -133,6 +133,14 @@ All three are small, self-contained, and suitable for sending upstream.
     refuse to touch a device whose monitor socket answers, and there is a `stop`
     command.
 
+18. **Idle burned 112 % of a host core after any update.** Updaters clear the firmware's
+    legacy-sleep flag, as on a real Flipper, so the device tried STOP2.
+    `furi_hal_clock_switch_pll2hse()` sends `SHCI_C2_SetSystemClock` (opcode 0xFC79, seen
+    with `-d unimp`), which the FUS model refused. The function then returns before its
+    WFI, so the idle task spins. Fix: CPU2 performs the PLL⇄HSE switch on the RCC and
+    answers success. STOP2 then idles at 1–2 % of a core with uptime matching wall time,
+    and it is now the default for new devices, as on a real Flipper.
+
 ## Things that were right the first time (and why)
 
 - HSEM modelled from RM0434: **reading RLRx is the 1-step lock**. `furi_hal_bt_init()`

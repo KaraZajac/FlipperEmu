@@ -268,8 +268,8 @@ def cmd_sd(args):
 def qemu_cmd(dev: Device, args):
     machine = (f"flipper-zero,name={args.name or dev.name[:8]},lcd-scale={args.scale}"
                f",nvram={dev.nvram}")
-    if args.no_legacy_sleep:
-        machine += ",legacy-sleep=off"
+    if args.legacy_sleep:
+        machine += ",legacy-sleep=on"
     usb = []
     if args.usb == "pty":
         usb = ["-chardev", "pty,id=usb"]
@@ -518,8 +518,9 @@ def main():
     p.add_argument("--gdb-port", type=int, default=1234)
     p.add_argument("--scale", type=int, default=4, help="LCD pixel size (default 4)")
     p.add_argument("--name", help="device name in OTP (max 8 chars)")
-    p.add_argument("--no-legacy-sleep", action="store_true",
-                   help="use the firmware's default STOP2 sleep (needs a radio stack)")
+    p.add_argument("--legacy-sleep", action="store_true",
+                   help="new device starts with Sleep Method = Legacy (light sleep "
+                        "only) instead of the firmware's default STOP2")
     p.add_argument("--print-cmd", action="store_true", help="show the QEMU command and exit")
     p.add_argument("qemu_args", nargs="*", help="extra QEMU arguments after --")
     p.set_defaults(func=cmd_run)

@@ -49,6 +49,7 @@
 
 /* SHCI */
 #define SHCI_OPCODE_FUS_GET_STATE      0xFC52
+#define SHCI_OPCODE_C2_SET_SYSTEM_CLOCK 0xFC79
 #define SHCI_EVTCODE                   0xFF
 #define SHCI_SUB_EVT_CODE_READY        0x9200
 #define FUS_FW_RUNNING                 0x01
@@ -218,6 +219,22 @@ static void cpu2_system_command(WB55IpccState *s)
         status = 0x00;                  /* FUS_STATE_IDLE */
         extra[0] = 0x00;                /* FUS_STATE_NO_ERROR */
         nextra = 1;
+        break;
+    case SHCI_OPCODE_C2_SET_SYSTEM_CLOCK:
+        /*
+         * Strictly a stack command, but it is the one the firmware's STOP2
+         * entry (furi_hal_power_deep_sleep) depends on: CPU1 asks CPU2 to
+         * move SYSCLK PLL -> HSE before stopping and HSE -> PLL after.
+         * Refusing it makes the idle task spin instead of sleeping, which
+         * is what every device does after an update clears the
+         * legacy-sleep flag. Payload: 0 HSE->PLL, 1 PLL(on)->HSE,
+         * 2 PLL(off)->HSE.
+         */
+        if (s->rcc) {
+            uint8_t sel = rd8(buf + 12);
+            wb55_rcc_c2_set_sysclk(s->rcc, sel ? 2 : 3, sel == 2);
+            status = 0x00;
+        }
         break;
     default:
         /* No keys, no stack, no clock switch: the FUS refuses. */

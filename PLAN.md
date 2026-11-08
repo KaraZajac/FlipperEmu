@@ -54,6 +54,7 @@ NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
 - ☐ Speaker: TIM16 CH1 PWM → QEMU audio
 - ☐ LP5562 engine interpreter (blinks, ramps)
 - ◐ Battery/USB power: monitor control done (`qom-set /machine/gauge soc 5`, `/machine/charger usb true`); window UI todo
+- ☑ STOP2 deep sleep (CPU2 performs the SHCI clock switch); now the default, 1–2 % host CPU idle
 - ☐ IR TX decoding to the log, IR RX injection
 
 ## M5: virtual RF ☐

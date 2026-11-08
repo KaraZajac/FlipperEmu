@@ -304,6 +304,7 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
     soc_map(SYS_BUS_DEVICE(&s->hsem), 0x58001400, errp);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->hsem), 0, NVIC(WB55_IRQ_HSEM));
     s->ipcc.flash = &s->flash;
+    s->ipcc.rcc = &s->rcc;
     soc_map(SYS_BUS_DEVICE(&s->ipcc), 0x58000C00, errp);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->ipcc), 0, NVIC(WB55_IRQ_IPCC_C1_RX));
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->ipcc), 1, NVIC(WB55_IRQ_IPCC_C1_TX));
