@@ -53,6 +53,7 @@ struct FlipperZeroState {
     FlipperSpeakerState *speaker;
     FlipperIrState *ir;
     FlipperRfidState *rfid;
+    FlipperIbuttonState *ibutton;
     Cc1101State *cc1101;
     bool tim1_running;
     Bq27220State *gauge;
@@ -392,11 +393,42 @@ static void flipper_drive_pins(FlipperZeroState *s)
     qemu_set_irq(soc_in(s, 'C', 2), 0);     /* SPI2 MISO idle low */
     qemu_set_irq(soc_in(s, 'B', 4), 0);     /* SPI1 MISO: CC1101 CHIP_RDYn */
     flipper_ir_idle(s->ir);                 /* IR receiver output idles high */
+    flipper_ibutton_reset(s->ibutton);      /* iButton line pulled up */
     for (int b = 0; b < BTN_NUM; b++) {     /* buttons released */
         if (!(s->keys_down & (1u << b))) {
             qemu_set_irq(soc_in(s, buttons[b].port, buttons[b].pin),
                          buttons[b].active_high ? 0 : 1);
         }
+    }
+}
+
+/* a read of GPIOB's IDR while the firmware's drive of PB14 is off: if a
+ * 1-Wire key holds the line low for it, that read has sampled it */
+static void flipper_idr_read(void *opaque, int port)
+{
+    FlipperZeroState *s = opaque;
+
+    if (port == 1 && (s->soc.gpio[1].odr & (1u << 14))) {
+        flipper_ibutton_sampled(s->ibutton);
+    }
+}
+
+/* COMP1 on with the 125 kHz field off: the iButton reader (Cyfral, Metakom) */
+static void flipper_comp_en(void *opaque, int n, bool en)
+{
+    FlipperZeroState *s = opaque;
+
+    if (n == 0) {
+        flipper_ibutton_comp(s->ibutton, en);
+    }
+}
+
+static void flipper_comp_val_read(void *opaque, int n)
+{
+    FlipperZeroState *s = opaque;
+
+    if (n == 0) {
+        flipper_ibutton_comp_read(s->ibutton);
     }
 }
 
@@ -568,6 +600,24 @@ static void flipper_zero_init(MachineState *machine)
     s->soc.tim1.changed_opaque = s;
     s->soc.tim1.update_hook = flipper_tim1_update;  /* IR transmit */
     s->soc.tim1.update_opaque = s;
+
+    /* ---- iButton: PB14, open drain with a pull-up (1-Wire keys);
+     *      COMP1 with the 125 kHz field off (Cyfral, Metakom) */
+    dev = qdev_new(TYPE_FLIPPER_IBUTTON);
+    s->ibutton = FLIPPER_IBUTTON(dev);
+    s->ibutton->comp = &s->soc.comp;
+    s->ibutton->rfid = s->rfid;
+    s->ibutton->dwt = &s->soc.dwt;
+    object_property_add_child(OBJECT(machine), "ibutton", OBJECT(dev));
+    qdev_realize_and_unref(dev, NULL, &error_fatal);
+    soc_out(s, 'B', 14, qdev_get_gpio_in_named(dev, "line", 0));
+    qdev_connect_gpio_out_named(dev, "pull", 0, soc_in(s, 'B', 14));
+    s->soc.idr_read = flipper_idr_read;
+    s->soc.idr_opaque = s;
+    s->soc.comp.en_changed = flipper_comp_en;
+    s->soc.comp.en_opaque = s;
+    s->soc.comp.val_read = flipper_comp_val_read;
+    s->soc.comp.val_opaque = s;
 
     if (!machine->kernel_filename && !drive_get(IF_PFLASH, 0, 0)) {
         warn_report("flipper-zero: no firmware (-kernel) and no flash image "

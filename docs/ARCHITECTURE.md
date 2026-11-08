@@ -406,6 +406,49 @@ both ways against a running Flipper:
 protocol only a fork has can still be read back: emulate it, then hold the capture to a
 reading Flipper.
 
+## iButton (`flipper_ibutton.c`)
+
+The iButton pad is PB14, open drain with a pull-up. `/machine/ibutton` holds one key on
+it, from `scripts/fe_ibutton.py` (a `.ibtn` file, or a new key).
+
+**Dallas keys** are a 1-Wire slave. The firmware is the master
+(`lib/one_wire/one_wire_host.c`): with interrupts off it drives PB14 low, busy-waits on
+DWT->CYCCNT, and samples the pin. The slave sees the pin's edges with their virtual
+times:
+- A long low is a reset. The slave answers with a presence pulse, and a standard-length
+  reset also returns it to standard speed.
+- Every other low is a slot. The master writes a 1 as a 9 µs low and a 0 as 64 µs (1 and
+  8 µs in overdrive). An emulated master's lows only ever stretch: overdrive's 1 µs takes
+  2–4 µs. So the threshold sits just under a 0's time (56 µs, 7 µs), not at the midpoint.
+- To send a 0, the slave pulls the line low at the master's falling edge. On silicon it
+  lets go after a fixed time, well after the master samples. Here the host can preempt
+  the vCPU while virtual time runs on, so the sample can land past any fixed time. So the
+  slave lets go once the master has sampled. The SoC overlays each GPIO port's IDR
+  (`soc_idr_read`): the board learns of every read after its value is taken. A read of
+  GPIOB with the firmware's own drive of PB14 off is the master's sample. A 1 ms timer
+  lets go anyway.
+
+The slave answers SEARCH ROM, READ ROM, MATCH ROM, SKIP ROM and the overdrive ROM
+commands. Memory keys also answer READ MEMORY: a 2-byte address on a DS1992 or DS1996
+(the firmware reads a DS1996's 8 KB at overdrive speed), and one byte on a DS1971. QEMU's
+STM32L4x5 GPIO model needed a fix to let a device release an open-drain line
+(`qemu/patches/0004`).
+
+**Cyfral and Metakom keys** modulate their current on the contact. The Flipper senses
+that through the RFID front end, with COMP1 on and the 125 kHz field off. While the
+firmware has COMP1 enabled with no field (`en_changed`), such a key plays its waveform
+into COMP1. These edges are timed in software: the COMP ISR reads COMP1's VALUE, then
+DWT->CYCCNT. On silicon the ISR runs within a fraction of a microsecond. The emulated
+one runs tens of microseconds later, by a varying amount, which turned 41 µs segments
+into 82 µs ones and produced wrong keys with valid parity. So:
+- the ISR's read of COMP1 (`val_read`) stamps the next CYCCNT read with the edge's time
+  on the key's own timeline (`wb55_dwt_stamp_next`), as the hardware would have read it;
+- each edge waits until the ISR has read the previous one, so two edges never merge into
+  one interrupt;
+- the timeline resyncs if delivery falls 1 ms behind it.
+
+Both kinds then read in about half a second.
+
 ## NFC (`st25r3916.c`, `nfc_card.c`)
 
 The ST25R3916 is modelled one frame at a time:

@@ -52,25 +52,37 @@ static uint64_t comp_read(void *opaque, hwaddr addr, unsigned size)
     WB55CompState *s = opaque;
     int n = addr / 4;
 
+    uint32_t v;
+
     if (n > 1) {
         return 0;
     }
-    return (s->csr[n] & ~CSR_VALUE) | (s->out[n] ? CSR_VALUE : 0);
+    v = (s->csr[n] & ~CSR_VALUE) | (s->out[n] ? CSR_VALUE : 0);
+    if (s->val_read) {
+        s->val_read(s->val_opaque, n);
+    }
+    return v;
 }
 
 static void comp_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
 {
     WB55CompState *s = opaque;
     int n = addr / 4;
+    bool was_en;
 
     if (n > 1 || (s->csr[n] & CSR_LOCK)) {
         return;                         /* LOCK: read-only until reset */
     }
+    was_en = s->csr[n] & CSR_EN;
+
     if (size < 4) {
         val = deposit32(s->csr[n], (addr & 3) * 8, size * 8, val);
     }
     s->csr[n] = val & ~CSR_VALUE;
     comp_update(s, n, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    if (!(s->csr[n] & CSR_EN) != !was_en && s->en_changed) {
+        s->en_changed(s->en_opaque, n, s->csr[n] & CSR_EN);
+    }
 }
 
 static const MemoryRegionOps comp_ops = {

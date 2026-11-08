@@ -281,6 +281,47 @@ struct FlipperRfidState {
     QEMUTimer *t5_timer;         /* a command can end with the field on */
 };
 #define FLIPPER_RFID_READER_HZ 125000
+
+#define TYPE_FLIPPER_IBUTTON "flipper-ibutton"
+OBJECT_DECLARE_SIMPLE_TYPE(FlipperIbuttonState, FLIPPER_IBUTTON)
+struct FlipperIbuttonState {
+    DeviceState parent_obj;
+    struct WB55CompState *comp;  /* COMP1: what the contact senses */
+    FlipperRfidState *rfid;      /* its field off: COMP1 is the iButton reader's */
+    qemu_irq pull;               /* PB14: 0 pulls the line low, 1 lets go */
+    QEMUTimer *timer;            /* lets go if the master never samples */
+    QEMUTimer *wave_timer;
+    char *key_str;
+    int kind;
+    /* a 1-Wire key */
+    uint8_t rom[8];
+    uint8_t *mem;
+    uint32_t mem_len;
+    int addr_bytes;              /* READ MEMORY's address: 2 bytes, 1, 0 none */
+    bool level;                  /* the line, as last seen */
+    bool self;                   /* inside its own pull or release */
+    bool pulling, presence;
+    bool od;                     /* overdrive speed */
+    int64_t fall_ns;             /* the master's last falling edge */
+    int state, bit, phase, count;
+    uint8_t rx;
+    uint32_t addr;
+    /* a Cyfral or Metakom key */
+    int32_t *wave;               /* +high/-low µs, repeated */
+    int wave_len, wave_pos;
+    bool comp_on, playing;
+    bool awaiting;               /* the last edge waits for the ISR's read */
+    int64_t edge_t, next_t;      /* that edge and the next on the key's timeline */
+    struct WB55DwtState *dwt;    /* stamps the ISR's CYCCNT read */
+};
+/* COMP1 was enabled or disabled */
+void flipper_ibutton_comp(FlipperIbuttonState *s, bool on);
+/* the CPU read COMP1's CSR */
+void flipper_ibutton_comp_read(FlipperIbuttonState *s);
+/* the CPU read GPIOB's IDR with its own drive of PB14 off: it sampled */
+void flipper_ibutton_sampled(FlipperIbuttonState *s);
+/* a system reset: the line pulled up, the slave idle */
+void flipper_ibutton_reset(FlipperIbuttonState *s);
 /* the reader's antenna drive (TIM1 CH1N PWM) frequency, 0 = off */
 void flipper_rfid_set_drive(FlipperRfidState *s, uint32_t drive_hz);
 /* emulating: the load on the antenna (TIM2 CH3 on RFID_PULL) changed */

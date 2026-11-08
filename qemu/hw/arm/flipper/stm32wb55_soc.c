@@ -47,6 +47,38 @@ static void soc_gpio_tap(void *opaque, int n, int level)
     qemu_set_irq(s->gpio_out[n], level);
 }
 
+/*
+ * IDR, read through an overlay so the board learns of each read: a device
+ * on a bit-banged bus (a 1-Wire key) holds its answer until the CPU has
+ * sampled it, whatever the timing.  The value is taken before the hook
+ * runs, so the CPU still reads what the line was.
+ */
+static uint64_t soc_idr_read(void *opaque, hwaddr addr, unsigned size)
+{
+    struct WB55IdrTap *tap = opaque;
+    WB55SocState *s = tap->soc;
+    uint32_t v = s->gpio[tap->port].idr;
+
+    if (s->idr_read) {
+        s->idr_read(s->idr_opaque, tap->port);
+    }
+    return v;
+}
+
+static void soc_idr_write(void *opaque, hwaddr addr, uint64_t val,
+                          unsigned size)
+{
+    /* IDR is read-only */
+}
+
+static const MemoryRegionOps soc_idr_ops = {
+    .read = soc_idr_read,
+    .write = soc_idr_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl.min_access_size = 4, .impl.max_access_size = 4,
+    .valid.min_access_size = 1, .valid.max_access_size = 4,
+};
+
 static void soc_gpio_in(void *opaque, int n, int level)
 {
     WB55SocState *s = opaque;
@@ -325,6 +357,13 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
         for (int p = 0; p < 16; p++) {
             qdev_connect_gpio_out(dev, p, s->gpio_tap[i * 16 + p]);
         }
+        s->idr_tap[i].soc = s;
+        s->idr_tap[i].port = i;
+        memory_region_init_io(&s->idr_tap[i].mr, OBJECT(s), &soc_idr_ops,
+                              &s->idr_tap[i], "gpio-idr", 4);
+        memory_region_add_subregion_overlap(get_system_memory(),
+                                            gpio_addr[i] + 0x10,
+                                            &s->idr_tap[i].mr, 1);
     }
 
     /* ---- power, semaphores, IPCC + behavioural CPU2 */

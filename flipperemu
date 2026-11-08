@@ -753,6 +753,57 @@ def cmd_nfc(args):
     return 0
 
 
+def cmd_ibutton(args):
+    import fe_ibutton
+    from fe_monitor import Monitor
+    dev = Device(args.device)
+    if not dev.running():
+        sys.exit(f"[{dev.name}] not running")
+    key = args.key
+    label, desc = None, None
+    try:
+        if not key:
+            pass
+        elif key == ["none"]:
+            label = "no key"
+        elif len(key) == 1 and key[0].endswith(".ibtn"):
+            desc = fe_ibutton.describe(fe_ibutton.parse_ibtn(key[0]))
+            label = f"{desc.splitlines()[0][2:]} ({pathlib.Path(key[0]).name})"
+        elif len(key) >= 2:
+            desc = fe_ibutton.describe_new(key[0], fe_ibutton.hexbytes(" ".join(key[1:])))
+            label = desc.splitlines()[0][2:]
+        else:
+            sys.exit("usage: ibutton FILE.ibtn | ibutton ds1990|ds1992|ds1996|ds1971|dallas "
+                     "ROM | ibutton cyfral DATA | ibutton metakom DATA | ibutton none")
+    except (ValueError, KeyError, OSError) as e:
+        sys.exit(f"ibutton: {e}")
+    if desc:
+        rom = next((l[4:] for l in desc.splitlines() if l.startswith("rom ")), None)
+        if rom:
+            label += f" {rom.upper()}"
+    m = Monitor(str(dev.monitor))
+    try:
+        if label is None:
+            cur = m.cmd("qom-get /machine/ibutton key").strip().strip('"')
+            first = ""
+            if cur.startswith("file:") and pathlib.Path(cur[5:]).is_file():
+                first = pathlib.Path(cur[5:]).read_text().splitlines()[0][2:]
+            print(f"[{dev.name}] key on the iButton contact: {first or 'none'}")
+            return 0
+        value = "none"
+        if desc is not None:
+            path = dev.dir / "ibutton-key.txt"
+            path.write_text(desc)
+            value = f"file:{path}"
+        err = m.cmd(f"qom-set /machine/ibutton key {value}")
+        if err:
+            sys.exit(f"ibutton: {err}")
+        print(f"[{dev.name}] iButton contact: {label}")
+    finally:
+        m.close()
+    return 0
+
+
 def cmd_shot(args):
     from fe_monitor import Monitor
     print(Monitor(str(Device(args.device).monitor)).screenshot(args.out))
@@ -889,6 +940,13 @@ def main():
                    help="a reader's field around the Flipper with no reader talking "
                         "(what NFC field detection sees)")
     p.set_defaults(func=cmd_nfc)
+
+    p = sub.add_parser("ibutton", help="touch an iButton key to a running device")
+    p.add_argument("key", nargs="*",
+                   help="FILE.ibtn, ds1990|ds1992|ds1996|ds1971|dallas ROM (7 bytes: "
+                        "CRC added), cyfral DATA (2 bytes), metakom DATA (4 bytes), "
+                        "or none; nothing: show the key")
+    p.set_defaults(func=cmd_ibutton)
 
     p = sub.add_parser("gdb", help="attach gdb to a running --gdb device")
     p.add_argument("--gdb-port", type=int, default=1234)

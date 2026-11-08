@@ -27,6 +27,7 @@ arm_common_ss.add(when: 'CONFIG_FLIPPER_ZERO', if_true: files(
   'flipper_speaker.c',
   'flipper_ir.c',
   'flipper_rfid.c',
+  'flipper_ibutton.c',
   't5577.c',
   'flipper_zero.c',
 ))

@@ -97,13 +97,20 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
 - ☑ Field detection (2026-11-08): RFID (TIM2 counting the virtual reader's carrier,
       TIM1 + DMA every 100 ms) and NFC (efd_o; `nfc --field on`); Momentum's NFC/RFID
       detector shows both. Timer update DMA requests are now pulses (BRINGUP_LOG 39)
-- ☐ iButton 1-Wire / Cyfral / Metakom (the COMP1 interrupt is modelled)
+- ☑ iButton read (2026-11-08): a 1-Wire slave on PB14 for Dallas keys (DS1990A,
+      DS1992, DS1971, DS1996 at overdrive, any family) that lets go once the
+      master has sampled (IDR tap); Cyfral and Metakom waveforms into COMP1, the
+      ISR's CYCCNT read stamped with the edge's time; `ikey read` and the app read
+      all of them (`ibutton_check.py`)
+- ☐ iButton emulation (a virtual 1-Wire master; Cyfral/Metakom captures) and writing
+      blanks (RW1990, TM2004, TM01x)
 
 ## M6: research tooling ☐
 - ☐ Snapshot workflow (`savevm` on qcow2 images; boot once, jump straight to an app)
 - ☐ TCG plugin for coverage/trace of firmware or a single FAP
 - ☐ Fuzzing harness (AFL++/libafl QEMU mode) for parsers in the firmware
-- ☐ Upstream the three QEMU patches; consider upstreaming the machine
+- ☐ Upstream the four QEMU patches (0004: open-drain GPIO lines, 2026-11-08); consider
+      upstreaming the machine
 
 ## Non-goals (for now)
 - Running ST's radio stack on an emulated CPU2 (closed, encrypted binary)

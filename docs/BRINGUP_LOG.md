@@ -372,6 +372,45 @@ All three are small, self-contained, and suitable for sending upstream.
       `fe_monitor.screenshot()` now waits for the dump's size to settle and the image
       to decode.
 
+## iButton (M5)
+
+40. **QEMU's GPIO model could not let a 1-Wire key release the line.** The first read
+    saw one falling edge and then nothing. `stm32l4x5_gpio` refused an external high
+    on any output pin, open drain included. A MODER or OTYPER write also disconnected
+    an open-drain pin held high from outside (dropping the pull-up), and
+    `update_gpio_idr()` had no case for an open-drain pin connected high. So the pin
+    floated and kept reading low after the master's first low. All three are fixed in
+    `qemu/patches/0004`.
+
+41. **SEARCH ROM failed at a random bit: the master read a 0 as a 1.** The slave held
+    each 0 for a fixed 30 µs. Virtual time is host time, so when the host preempts the
+    vCPU during the master's 9 µs wait, the master samples past the hold, sees both the
+    bit and its complement as 1 (no device), and gives up. Releasing on CYCCNT reads
+    made it worse: the read that ends the master's wait came first and let go just
+    before it sampled. So the slave now lets go once the master has sampled. The SoC
+    overlays every GPIO port's IDR and tells the board after each read, and a GPIOB
+    read with the firmware's drive of PB14 off is the sample.
+
+42. **Overdrive (DS1996) write slots misread.** The master's overdrive write-1 is a
+    1 µs low, which took 2–4 µs emulated; 480 slots measured exactly 4 µs, the old
+    threshold. Judging a bit by its slot's shape (low against the following high) fixed
+    those but broke the last bit of each byte, whose high includes the master's
+    function-call overhead (`33` read as `B3`). The master busy-waits at least the
+    nominal time and only ever runs longer. So the threshold now sits just under a 0's
+    time (56 µs, 7 µs overdrive), and a 1 may stretch that far.
+
+43. **Cyfral and Metakom: slow reads, then a wrong key.** The firmware times these
+    edges with DWT->CYCCNT inside the COMP ISR. With emulated interrupt latency, Cyfral
+    took 11 s or failed, and Metakom once read `EB77BB0F` for `C355330F`: two 41 µs
+    segments per byte measured as 82 µs, which keeps the byte's parity valid. STOP2
+    was not the cause (`--legacy-sleep` was no better).
+    - Pacing each edge on the ISR's read of COMP1 helped (0.4–6 s) but still misread
+      once.
+    - Exact now: the ISR's CYCCNT read is stamped with the edge's own time
+      (`wb55_dwt_stamp_next`). On silicon the ISR runs within a fraction of a
+      microsecond, so that is the value it would read. Sixteen reads of assorted values
+      then all decoded correctly, most in 0.4 s.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

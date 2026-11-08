@@ -318,7 +318,14 @@ struct WB55DwtState {
     uint64_t base_cycles;        /* CYCCNT at base_ns */
     int64_t base_ns;
     uint32_t comp[16];
+    bool stamped;                /* the next CYCCNT read gives stamp_ns's count */
+    int64_t stamp_ns;
 };
+/* The next read of CYCCNT returns its value at virtual time "when", as if
+ * the CPU read it then: an ISR that times edges in software reads the
+ * edge's own time, as on silicon where it runs within a fraction of a
+ * microsecond, not the emulated interrupt's latency. */
+void wb55_dwt_stamp_next(WB55DwtState *s, int64_t when);
 
 #define TYPE_WB55_DBGMCU "stm32wb55-dbgmcu"
 OBJECT_DECLARE_SIMPLE_TYPE(WB55DbgmcuState, WB55_DBGMCU)
@@ -393,6 +400,13 @@ struct WB55CompState {
     /* SoC hook: an output changed at an exact virtual time */
     void (*out_changed)(void *opaque, int n, bool level, int64_t when);
     void *out_opaque;
+    /* board hook: comparator n was enabled or disabled */
+    void (*en_changed)(void *opaque, int n, bool en);
+    void *en_opaque;
+    /* board hook: the CPU read comparator n's CSR (its VALUE): an ISR
+     * timing edges in software has taken this one */
+    void (*val_read)(void *opaque, int n);
+    void *val_opaque;
 };
 /* the board's analog side: is comparator n's input+ above input-? */
 void wb55_comp_input(WB55CompState *s, int n, bool above, int64_t when);
@@ -562,6 +576,15 @@ struct WB55SocState {
 
     qemu_irq *gpio_tap;
     qemu_irq gpio_out[WB55_PINS];    /* pin levels for board devices */
+    /* board hook: the CPU read a port's IDR (its value already taken), so
+     * a device on a bit-banged bus knows when the CPU has sampled it */
+    void (*idr_read)(void *opaque, int port);
+    void *idr_opaque;
+    struct WB55IdrTap {
+        struct WB55SocState *soc;
+        int port;
+        MemoryRegion mr;         /* IDR, overlaid on the port's registers */
+    } idr_tap[WB55_NUM_PORTS];
     uint8_t pin_level[WB55_PINS];
 };
 

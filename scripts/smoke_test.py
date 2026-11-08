@@ -13,7 +13,8 @@ NEC frame through the virtual IR receiver (`ir rx`), captures an `ir tx` and
 decodes it back, receives a Princeton key over the virtual air (`subghz rx`),
 captures a `subghz tx`, reads a 125 kHz EM4100
 tag (`rfid read`), reads back its own H10301 emulation (`rfid emulate`),
-writes an H10301 to a virtual T5577 (`rfid write`),
+writes an H10301 to a virtual T5577 (`rfid write`), reads a DS1990A iButton
+(`ikey read`),
 reads an NTAG215 (`mfu info`) and dumps a MIFARE Classic 1K over NFC, has a
 virtual reader read an NTAG215 the firmware emulates,
 enumerates over USB/IP, then reboots through the CLI and checks the LCD comes
@@ -305,6 +306,32 @@ def rfid_write_check(mon: Monitor) -> bool:
     return bool(found) and blocks.startswith("00107060")      # FSK2a RF/50, 3 blocks
 
 
+def ibutton_check(mon: Monitor, devdir: pathlib.Path) -> bool:
+    """A DS1990A on the iButton contact: `ikey read` (1-Wire SEARCH ROM and
+    READ ROM on PB14) must print its ROM."""
+    import fe_ibutton
+    desc = fe_ibutton.describe_new("ds1990", bytes.fromhex("01A1B2C3D4E5F6"))
+    rom = next(l[4:] for l in desc.splitlines() if l.startswith("rom ")).replace(" ", "")
+    key = devdir / "ibutton-key.txt"
+    key.write_text(desc)
+    try:
+        if mon.cmd(f"qom-set /machine/ibutton key file:{key}"):
+            return False
+        cli = FlipperCli(usb_endpoint(mon))
+        try:
+            cli.read_until_prompt(15)
+            found, out = cli.watch("ikey read", f"Dallas {rom.upper()}", timeout=15)
+        finally:
+            cli.close()
+            mon.cmd("qom-set /machine/ibutton key none")
+    except (OSError, TimeoutError, ConnectionError, TypeError) as e:
+        print(f"  ibutton: {e}")
+        return False
+    if not found:
+        print(f"  ibutton: {out.strip()[-200:]!r}")
+    return bool(found)
+
+
 def nfc_check(mon: Monitor, devdir: pathlib.Path):
     """An NTAG215 in the NFC field: `mfu info` in the NFC shell must read
     its UID and all 135 pages.  None (skip) without the NFC shell."""
@@ -560,6 +587,8 @@ def main() -> int:
                                 rfid_emulate_check(mon, devdir)))
                 results.append(("rfid: H10301 written to a T5577, verified",
                                 rfid_write_check(mon)))
+                results.append(("ibutton: DS1990A read over 1-Wire",
+                                ibutton_check(mon, devdir)))
                 results.append(("nfc: NTAG215 read by `mfu info` (all 135 pages)",
                                 nfc_check(mon, devdir)))
                 results.append(("nfc: MIFARE Classic 1K dumped (Crypto1, 16 sectors)",

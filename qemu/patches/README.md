@@ -10,6 +10,7 @@ written to be suitable for upstream submission.
 | 0001 | `hw/timer/armv7m_systick.c` | clock-update callbacks lack `return`, so a refclk change re-times SysTick even when CLKSOURCE selects the CPU clock |
 | 0002 | `hw/sd/ssi-sd.c` | after a response the model eats one byte, swallowing the next command when the host clocks its padding with CS high |
 | 0003 | `hw/sd/sd.c` | SPI mode only reached transfer state via CMD9/CMD10; data commands right after ACMD41 were rejected |
+| 0004 | `hw/gpio/stm32l4x5_gpio.c` | a device on an open-drain line could pull it low but never let it go: an external high was refused, disconnected on the next MODER/OTYPER write, and read as floating |
 
 **Licence:** these patches modify QEMU's own source files, which are GPL-2.0-or-later,
 so the patches are GPL-2.0-or-later too, unlike the rest of this repository (BSD-3-Clause).

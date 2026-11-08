@@ -81,14 +81,25 @@ static void wb55_rng_class_init(ObjectClass *klass, const void *data)
 
 /* ------------------------------------------------------------------- DWT */
 
-static uint64_t dwt_cycles(WB55DwtState *s)
+static uint64_t dwt_cycles_at(WB55DwtState *s, int64_t when)
 {
     if (!(s->ctrl & 1)) {
         return s->base_cycles;
     }
-    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    return s->base_cycles + muldiv64(now - s->base_ns, clock_get_hz(s->clk),
+    return s->base_cycles + muldiv64(MAX(when - s->base_ns, 0),
+                                     clock_get_hz(s->clk),
                                      NANOSECONDS_PER_SECOND);
+}
+
+static uint64_t dwt_cycles(WB55DwtState *s)
+{
+    return dwt_cycles_at(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+}
+
+void wb55_dwt_stamp_next(WB55DwtState *s, int64_t when)
+{
+    s->stamped = true;
+    s->stamp_ns = when;
 }
 
 static void dwt_rebase(WB55DwtState *s)
@@ -113,6 +124,10 @@ static uint64_t wb55_dwt_read(void *opaque, hwaddr addr, unsigned size)
     case 0x000:
         return s->ctrl | 0x40000000;    /* NUMCOMP = 4 */
     case 0x004:
+        if (s->stamped) {
+            s->stamped = false;
+            return (uint32_t)dwt_cycles_at(s, s->stamp_ns);
+        }
         return (uint32_t)dwt_cycles(s);
     }
     if (addr >= 0x020 && addr < 0x060) {
@@ -157,6 +172,7 @@ static void wb55_dwt_reset_hold(Object *obj, ResetType type)
     WB55DwtState *s = WB55_DWT(obj);
 
     s->ctrl = 0;
+    s->stamped = false;
     s->base_cycles = 0;
     s->base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     memset(s->comp, 0, sizeof(s->comp));

@@ -1,0 +1,80 @@
+From: FlipperEmu
+Subject: [PATCH] hw/gpio/stm32l4x5_gpio: let a device release an open-drain line
+
+stm32l4x5_gpio_set() refuses an external level on an output pin, except
+level 0 on an open-drain output. So a device that shares an open-drain
+line (a bus like 1-Wire or I2C, wired-AND with a pull-up) can pull it low
+once but never let it go: the pin stays "connected low" and reads low
+for good, even after the device has released it.
+
+An open-drain output only ever pulls the line low, so an external level
+of 1 cannot fight it; accept both levels for open-drain outputs. With ODR
+1 the line then reads what the other device does, high when it lets go;
+with ODR 0 it reads low as before. Push-pull outputs still refuse an
+external level. Two places assumed no external high on an open-drain
+output: a MODER or OTYPER write disconnected such a pin (dropping the
+pull-up, so the pin floated and kept reading low), and update_gpio_idr()
+had no case for an open-drain output with ODR 1 whose pin is connected
+high (it took the pin as floating and kept a stale IDR). Now only
+push-pull outputs are disconnected, and that case reads high.
+
+Seen with the Flipper Zero model: the firmware reads iButton keys as a
+1-Wire host on an open-drain pin, and a key (the 1-Wire slave) must pull
+the line low for its presence pulse and 0 bits, then release it.
+
+Signed-off-by: FlipperEmu
+---
+--- a/hw/gpio/stm32l4x5_gpio.c
++++ b/hw/gpio/stm32l4x5_gpio.c
+@@ -95,11 +95,13 @@
+ {
+     Stm32l4x5GpioState *s = opaque;
+     /*
+-     * The pin isn't set if line is configured in output mode
+-     * except if level is 0 and the output is open-drain.
+-     * This way there will be no short-circuit prone situations.
++     * The pin isn't set if line is configured in push-pull output mode.
++     * This way there will be no short-circuit prone situations.  An
++     * open-drain output only ever pulls the line low, so another device on
++     * the line may both pull it low and let it go again (level 1: the line
++     * then reads high while ODR is 1, as with an external pull-up).
+      */
+-    if (is_output(s, line) && !(is_open_drain(s, line) && (level == 0))) {
++    if (is_output(s, line) && !is_open_drain(s, line)) {
+         qemu_log_mask(LOG_GUEST_ERROR, "Line %d can't be driven externally\n",
+                       line);
+         return;
+@@ -137,6 +139,9 @@
+                 /* open-drain ODR 1 with pin connected low */
+                 new_idr_mask |= (1 << i);
+                 new_idr &= ~(1 << i);
++            } else if (!(s->disconnected_pins & (1 << i))) {
++                /* open-drain ODR 1 with pin connected high */
++                new_idr_mask |= (1 << i);
+             /* open-drain ODR 1 with unactive pin */
+             } else if (is_pull_up(s, i)) {
+                 new_idr_mask |= (1 << i);
+@@ -196,9 +201,9 @@
+ }
+ 
+ /*
+- * Return mask of pins that are both configured in output
+- * mode and externally driven (except pins in open-drain
+- * mode externally set to 0).
++ * Return mask of pins that are both configured in push-pull
++ * output mode and externally driven (an open-drain output
++ * shares its line: it only ever pulls it low).
+  */
+ static uint32_t get_gpio_pinmask_to_disconnect(Stm32l4x5GpioState *s)
+ {
+@@ -206,8 +211,8 @@
+     for (int i = 0; i < GPIO_NUM_PINS; i++) {
+         /* for each connected pin in output mode */
+         if (!(s->disconnected_pins & (1 << i)) && is_output(s, i)) {
+-            /* if either push-pull or high level */
+-            if (is_push_pull(s, i) || s->pins_connected_high & (1 << i)) {
++            /* if push-pull */
++            if (is_push_pull(s, i)) {
+                 pins_to_disconnect |= (1 << i);
+                 qemu_log_mask(LOG_GUEST_ERROR,
+                               "Line %d can't be driven externally\n",
