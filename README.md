@@ -38,6 +38,9 @@ CLI over USB, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed 
   Princeton key) on the air at its frequency. The CC1101 hears it while it listens on that
   frequency, so the Sub-GHz app's Read and Read RAW, and `subghz rx`, receive and decode
   it.
+- Sub-GHz transmit: every transmission is saved to `devices/NAME/subghz-tx/` as a `.sub`
+  RAW file. It has the exact timings, the tuned frequency, and the radio's live register
+  set as a custom preset, so a real Flipper can replay it.
 - Speaker: TIM16's PWM tone plays through QEMU audio (desktop sound or a WAV recording).
   The duty cycle sets the volume, as on the real piezo.
 - Buttons from the keyboard, the QEMU monitor, or `./flipperemu press`.
@@ -62,8 +65,7 @@ CLI over USB, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed 
 - qFlipper and lab.flipper.net: they look for a USB device (VID/PID), not a serial
   port, so they don't see the emulator yet (a USB/IP bridge would fix that). Tools that
   open a serial port path work.
-- Bluetooth (needs a radio stack); NFC, 125 kHz RFID and iButton signals; transmitting
-  (IR and Sub-GHz receive work).
+- Bluetooth (needs a radio stack); NFC, 125 kHz RFID and iButton signals; IR transmit.
 - LP5562 engine programs are approximated (steady-state brightness only).
 - Not yet exercised: XIP app loaders that run code from internal flash, and the
   radio-stack stage of updates (the emulated CPU2 can't install a stack).
@@ -221,6 +223,21 @@ the firmware's own decoders take it from there:
 
 Key files are encoded for Princeton. For other protocols, use a RAW capture (Read RAW
 on a real Flipper records one).
+
+Transmissions go the other way. Whatever the emulated Flipper sends (Sub-GHz → Send, a
+saved signal, `subghz tx …` on the CLI) is written to `devices/NAME/subghz-tx/tx-NNNNN.sub`.
+That file can go straight back in with `./flipperemu subghz` (decoded exactly), or onto a
+real Flipper:
+
+```
+Filetype: Flipper SubGhz RAW File
+Frequency: 433920000
+Preset: FuriHalSubGhzPresetCustom
+Custom_preset_module: CC1101
+Custom_preset_data: 02 0D 03 07 08 32 0B 06 10 17 11 32 12 30 … 00 00 00 C0 00 00 00 00 00 00
+Protocol: RAW
+RAW_Data: 1170 -390 390 -1170 390 -1170 1170 -390 …
+```
 
 ### Sound
 

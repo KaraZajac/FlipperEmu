@@ -37,11 +37,12 @@ static void ir_level(FlipperIrState *s, bool level, int64_t when)
  * At next_ns the duration `pos` starts: even = mark (low), odd = space.
  *
  * Edges are spaced hundreds of microseconds apart, and on silicon the capture
- * interrupt is serviced long before the next one.  QEMU's main loop can run
- * this timer late and deliver two edges back to back, and the firmware's ISR
- * would then see the rising-edge capture before the falling one.  So an edge
- * waits (up to 10 ms) until the previous capture has been serviced.  Edges
- * keep their timestamps, so the measured durations stay exact.
+ * interrupt is serviced long before the next one.  Here QEMU's main loop can
+ * run this timer late, and the vCPU can lag (virtual time follows the host
+ * clock even when the vCPU thread is not running).  Two captures in a row
+ * would reach the firmware's ISR out of order or overwritten.  So an edge
+ * waits until the firmware has read the previous capture (up to 250 ms).
+ * Edges keep their timestamps, so the measured durations stay exact.
  */
 static void ir_edge(void *opaque)
 {
@@ -50,7 +51,7 @@ static void ir_edge(void *opaque)
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
     if (s->tim && wb55_tim_capture_pending(s->tim) &&
-        now < when + 10 * SCALE_MS) {
+        now < when + 250 * SCALE_MS) {
         timer_mod(s->timer, now + 20 * SCALE_US);
         return;
     }

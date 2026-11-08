@@ -106,7 +106,14 @@ struct Cc1101State {
     uint32_t air_freq;
     bool carrier;                /* the air level right now */
     bool gdo0_level;             /* what GDO0 drives */
+    /* transmit capture: GDO0 is the data input while in TX */
+    char *tx_dir;                /* write each transmission here as .sub */
+    GArray *tx;                  /* int32 +high/-low µs */
+    int64_t tx_edge_ns;
+    bool tx_level, tx_active;
+    char *tx_last;               /* "@freq,+d,-d,..." of the last one */
 };
+void cc1101_tx_data(Cc1101State *s, bool level, int64_t when);
 
 /* ---------------------------------------------------- ST25R3916 NFC */
 #define TYPE_ST25R3916 "st25r3916"

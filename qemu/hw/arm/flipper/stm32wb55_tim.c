@@ -10,8 +10,14 @@
  *    CCxS direct/indirect selection, CCxP/CCxNP polarity, CCxIF/CCxOF;
  *  - the slave controller's reset mode on TI1FP1/TI2FP2/TI1F_ED (furi_hal_
  *    infrared measures marks and spaces that way).
- *  Not modelled (yet): output pins, DMA requests, encoder/gated modes,
- *  input prescalers and filters, down/centre counting.
+ *  - update DMA requests (UDE) and output compare toggle at update
+ *    (CCRx = 0): while those are in use, every update is processed at its
+ *    exact time, with the DMA's write landing in that instant.  That is how
+ *    furi_hal_subghz transmits: DMA feeds ARR from a circular buffer, and
+ *    CH2 toggles the CC1101's data pin at each update.  ARR = 0 blocks the
+ *    counter, which is how the firmware ends a transmission.
+ *  Not modelled (yet): PWM output pins, DMA on compare events, encoder and
+ *  gated modes, input prescalers and filters, down/centre counting.
  *
  * Copyright (c) 2026, Kara Zajac
  * SPDX-License-Identifier: BSD-3-Clause
@@ -47,6 +53,43 @@
 #define SR_IRQS  0xFFu                  /* UIF CC1-4IF COMIF TIF BIF */
 
 #define REG(s, off) ((s)->regs[(off) / 4])
+#define DIER_UDE (1u << 8)
+
+static int64_t tim_now(WB55TimState *s)
+{
+    return s->now_override ? s->now_override
+                           : qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+}
+
+static int oc_mode(WB55TimState *s, int ch)
+{
+    uint32_t ccmr = ch < 2 ? REG(s, R_CCMR1) : REG(s, R_CCMR2);
+    int sh = (ch & 1) * 8;
+
+    return ((ccmr >> (sh + 4)) & 7) | ((ccmr >> (sh + 13)) & 8);
+}
+
+/* channels that toggle their pin at every update (OCxM toggle, CCRx = 0) */
+static uint32_t tim_update_toggles(WB55TimState *s)
+{
+    uint32_t mask = 0;
+
+    for (int ch = 0; ch < 4; ch++) {
+        uint32_t ccmr = ch < 2 ? REG(s, R_CCMR1) : REG(s, R_CCMR2);
+
+        if (((ccmr >> ((ch & 1) * 8)) & 3) == 0 && oc_mode(s, ch) == 3 &&
+            REG(s, R_CCR1 + 4 * ch) == 0 && (REG(s, R_CCER) & (1u << (4 * ch)))) {
+            mask |= 1u << ch;
+        }
+    }
+    return mask;
+}
+
+/* updates must be handled one by one, at their exact time */
+static bool tim_event_driven(WB55TimState *s)
+{
+    return s->running && ((REG(s, R_DIER) & DIER_UDE) || tim_update_toggles(s));
+}
 
 static uint32_t tim_arr(WB55TimState *s)
 {
@@ -63,8 +106,8 @@ static uint64_t tim_hz(WB55TimState *s)
 /* ticks counted between base_ns and when (no wrapping) */
 static uint64_t tim_ticks(WB55TimState *s, int64_t when)
 {
-    if (!s->running || when <= s->base_ns) {
-        return 0;
+    if (!s->running || when <= s->base_ns || !tim_arr(s)) {
+        return 0;                       /* stopped, or blocked by ARR = 0 */
     }
     return muldiv64(when - s->base_ns, tim_hz(s), NANOSECONDS_PER_SECOND);
 }
@@ -158,10 +201,10 @@ static void tim_schedule(WB55TimState *s, int64_t now)
     uint64_t t = s->cnt_base + tim_ticks(s, now), next = UINT64_MAX;
 
     timer_del(s->timer);
-    if (!s->running) {
-        return;
+    if (!s->running || !tim_arr(s)) {
+        return;                         /* stopped, or blocked by ARR = 0 */
     }
-    if (dier & SR_UIF) {
+    if ((dier & SR_UIF) || tim_event_driven(s)) {
         next = (t / period + 1) * period;
     }
     for (int ch = 0; ch < 4; ch++) {
@@ -182,11 +225,64 @@ static void tim_schedule(WB55TimState *s, int64_t now)
     }
 }
 
+/*
+ * One update event at its exact time t: the counter wraps to 0, toggling
+ * channels flip their pins, and an update DMA request lets the DMA write
+ * (typically ARR, the next period) as if at t.
+ */
+static void tim_update_event(WB55TimState *s, int64_t t)
+{
+    uint32_t toggles = tim_update_toggles(s);
+
+    tim_rebase(s, 0, t);
+    if (!(REG(s, R_CR1) & CR1_UDIS)) {
+        REG(s, R_SR) |= SR_UIF;
+    }
+    for (int ch = 0; ch < 4; ch++) {
+        if (toggles & (1u << ch)) {
+            s->oc_level[ch] = !s->oc_level[ch];
+            if (s->oc_changed) {
+                s->oc_changed(s->oc_opaque, ch, s->oc_level[ch], t);
+            }
+        }
+    }
+    if (REG(s, R_DIER) & DIER_UDE) {
+        /* the DMA runs synchronously; its write to us acknowledges the
+         * request (tim_write), so exactly one beat happens per update */
+        s->now_override = t;
+        s->dma_up_pending = true;
+        qemu_set_irq(s->dma_up, 1);
+        if (s->dma_up_pending) {        /* channel off: nobody took it */
+            s->dma_up_pending = false;
+            qemu_set_irq(s->dma_up, 0);
+        }
+        s->now_override = 0;
+    }
+    if (REG(s, R_CR1) & CR1_OPM) {
+        REG(s, R_CR1) &= ~CR1_CEN;
+        s->running = false;
+    }
+}
+
 static void tim_tick(void *opaque)
 {
     WB55TimState *s = opaque;
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
+    /* updates the firmware feeds by DMA: replay each at its own time */
+    for (int guard = 0; guard < 4096 && tim_event_driven(s) && tim_arr(s);
+         guard++) {
+        uint64_t period = (uint64_t)tim_arr(s) + 1;
+        uint64_t t = s->cnt_base + tim_ticks(s, now);
+        uint64_t next = (s->cnt_base / period + 1) * period;
+        int64_t when;
+
+        if (t < next) {
+            break;                      /* the next update is still ahead */
+        }
+        when = tim_time_of_tick(s, next - s->cnt_base);
+        tim_update_event(s, when);
+    }
     tim_catch_up(s, now);
     tim_update_irq(s);
     tim_schedule(s, now);
@@ -234,6 +330,7 @@ void wb55_tim_input(WB55TimState *s, int ti, bool level, int64_t when)
         }
         REG(s, R_SR) |= 1u << (ch + 1);
         REG(s, R_CCR1 + 4 * ch) = cnt;
+        s->cap_unread |= 1u << ch;
     }
 
     /* slave controller, reset mode: TS 100 TI1F_ED, 101 TI1FP1, 110 TI2FP2 */
@@ -252,15 +349,21 @@ void wb55_tim_input(WB55TimState *s, int ti, bool level, int64_t when)
     tim_schedule(s, now);
 }
 
+/*
+ * A capture the firmware has not consumed yet: CCRx not read since it was
+ * captured (only for channels with their interrupt enabled).  The flag is
+ * not enough: the ISR clears CCxIF first and reads CCRx after, and an edge
+ * in between would overwrite the value it is about to read.
+ */
 bool wb55_tim_capture_pending(WB55TimState *s)
 {
-    return REG(s, R_SR) & REG(s, R_DIER) & 0x1E;  /* CCxIF with CCxIE */
+    return s->cap_unread & (REG(s, R_DIER) >> 1) & 0xF;
 }
 
 static uint64_t tim_read(void *opaque, hwaddr addr, unsigned size)
 {
     WB55TimState *s = opaque;
-    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t now = tim_now(s);
 
     if (addr >= sizeof(s->regs)) {
         return 0;
@@ -272,6 +375,9 @@ static uint64_t tim_read(void *opaque, hwaddr addr, unsigned size)
         break;
     case R_CNT:
         return s->running ? tim_cnt_at(s, now) : s->cnt_base;
+    case R_CCR1: case R_CCR1 + 4: case R_CCR1 + 8: case R_CCR1 + 12:
+        s->cap_unread &= ~(1u << ((addr - R_CCR1) / 4));
+        break;
     }
     return s->regs[addr / 4];
 }
@@ -279,7 +385,7 @@ static uint64_t tim_read(void *opaque, hwaddr addr, unsigned size)
 static void tim_write(void *opaque, hwaddr addr, uint64_t val64, unsigned size)
 {
     WB55TimState *s = opaque;
-    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t now = tim_now(s);
     uint32_t val = val64;
     uint32_t cnt;
 
@@ -289,6 +395,10 @@ static void tim_write(void *opaque, hwaddr addr, uint64_t val64, unsigned size)
     if (size < 4) {                     /* byte/halfword: read-modify-write */
         val = deposit32(s->regs[addr / 4], (addr & 3) * 8, size * 8, val);
         addr &= ~3;
+    }
+    if (s->dma_up_pending) {            /* the DMA's beat: request served */
+        s->dma_up_pending = false;
+        qemu_set_irq(s->dma_up, 0);
     }
     tim_catch_up(s, now);
     cnt = s->running ? tim_cnt_at(s, now) : s->cnt_base;
@@ -330,14 +440,16 @@ static void tim_write(void *opaque, hwaddr addr, uint64_t val64, unsigned size)
     case R_PSC:
     case R_ARR:
         REG(s, addr) = val;             /* preload ignored: effective now */
-        tim_rebase(s, MIN(cnt, tim_arr(s)), now);
+        tim_rebase(s, tim_arr(s) ? MIN(cnt, tim_arr(s)) : 0, now);
         break;
     default:
         s->regs[addr / 4] = val;
         break;
     }
     tim_update_irq(s);
-    tim_schedule(s, now);
+    if (!s->now_override) {             /* inside an update: tim_tick rearms */
+        tim_schedule(s, now);
+    }
 }
 
 static const MemoryRegionOps tim_ops = {
@@ -355,6 +467,10 @@ static void tim_reset_hold(Object *obj, ResetType type)
     memset(s->regs, 0, sizeof(s->regs));
     REG(s, R_ARR) = s->width == 32 ? 0xFFFFFFFF : 0xFFFF;
     s->running = false;
+    s->now_override = 0;
+    s->dma_up_pending = false;
+    s->cap_unread = 0;
+    memset(s->oc_level, 0, sizeof(s->oc_level));
     tim_rebase(s, 0, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     if (s->timer) {
         timer_del(s->timer);
@@ -374,6 +490,7 @@ static void tim_init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mmio);
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
     s->clk = qdev_init_clock_in(DEVICE(obj), "clk", NULL, NULL, 0);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->dma_up, "dma-up", 1);
 }
 
 static void tim_realize(DeviceState *dev, Error **errp)

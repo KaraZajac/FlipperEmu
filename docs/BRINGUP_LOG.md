@@ -149,6 +149,20 @@ All three are small, self-contained, and suitable for sending upstream.
     are at least ~400 µs apart. Fix: an edge waits until the previous capture has been
     serviced. Edges carry exact timestamps, so the durations don't change.
 
+20. **The first Sub-GHz transmission hung QEMU.** A host gdb backtrace showed the main
+    loop inside `dma_run`, called from the timer's update. The DMA model is
+    level-triggered and runs synchronously while a request is high, and the timer only
+    lowered its request after `qemu_set_irq()` returned. So one update DMAed the
+    circular buffer a million times. Fix: the DMA's write to the timer acknowledges the
+    request, as the hardware handshake does.
+
+21. **About 3 % of IR frames decoded as RAW garbage** (durations like 1073741254, i.e.
+    −570 in the firmware's 30-bit LevelDuration). Pacing on CCxIF released the next edge
+    between the ISR clearing the flag and reading CCRx, so the capture was overwritten
+    first. Then the vCPU sometimes lagged virtual time by more than the 10 ms cap
+    (virtual time runs with the host clock even when the vCPU thread isn't). Fix: wait
+    for the CCRx *read*, with a 250 ms cap. 200/200 frames decode in a soak test.
+
 ## Things that were right the first time (and why)
 
 - HSEM modelled from RM0434: **reading RLRx is the 1-step lock**. `furi_hal_bt_init()`

@@ -27,6 +27,7 @@ it; the file comments name that function. Register layouts come from RM0434 and 
    TIM16 CH1 (PB8) ── piezo → flipper-speaker → QEMU audio (desktop or WAV)
    PA0 + TIM2 TI1  ←─ IR receiver ← /machine/ir rx (marks/spaces)
    PA1 + TIM2 TI2  ←─ CC1101 GDO0 (async RX) ← /machine/subghz rx (the "air")
+   TIM2 CH2 (DMA → ARR) ──→ CC1101 GDO0 (async TX) → devices/NAME/subghz-tx/*.sub
    USB ─── built-in host ── CDC ACM ⇄ chardev "usb" (pty/socket)  ·  HID → text on it
 ```
 
@@ -212,6 +213,14 @@ TIM2 is a real timer model, written for TIM1/16/17's layout too:
   CCxS selects direct or indirect inputs, CCxP/CCxNP the polarity, and CCxOF flags
   overcapture.
 - The slave controller's reset mode works on TI1FP1, TI2FP2 and TI1F_ED.
+- Update DMA requests (UDE) and output-compare toggle at update (CCRx = 0). While these
+  are in use, each update is processed at its exact time. The pin toggles, the request
+  pulses, and the DMA (which runs synchronously) writes as if at that instant. Its write
+  to the timer is the request's acknowledgement, so exactly one beat happens per update.
+  This is furi_hal_subghz's transmitter: a circular DMA buffer feeds ARR, CH2 toggles
+  GDO0, and ARR = 0 blocks the counter to end the transmission. Pacing, as on the receive
+  side, isn't done yet. A guest lagging by more than half the DMA buffer (several ms)
+  would get stale durations from it.
 
 `furi_hal_infrared` uses exactly that for receiving. A falling edge (a mark starts) is
 captured into CCR2, and a rising edge into CCR1, which also resets the counter. CC3 is
@@ -219,10 +228,12 @@ the end-of-signal timeout.
 
 The IR receiver (`/machine/ir`) drives PA0 and TIM2 TI1, idling high and going low for a
 mark. Writing durations to its `rx` property plays them. On silicon the capture
-interrupt is serviced long before the next edge. QEMU's main loop can run late and
-deliver two edges together, which would reorder them for the firmware's ISR. So each
-edge waits (up to 10 ms) until the previous capture has been serviced; timestamps keep
-the measured durations exact. `scripts/fe_ir.py` builds signals with a port of the
+interrupt is serviced long before the next edge. Here the main loop can fire late, and
+the vCPU can lag: virtual time follows the host clock even while the vCPU thread is
+descheduled. So each edge waits until the firmware has *read* the previous capture
+register (up to 250 ms). The flag alone isn't enough, because the ISR clears it before
+reading CCRx. Timestamps keep the measured durations exact: 200/200 NEC frames decode in
+a soak test. `scripts/fe_ir.py` builds signals with a port of the
 firmware's common encoder (pulse distance/width, Manchester) and its per-protocol data
 layouts.
 
@@ -255,7 +266,10 @@ firmware keeps `/int` on the card as `/ext/.int`.
   data), GDO0 follows the carrier while the chip is in RX and tuned within 500 kHz, and
   RSSI reads −40 dBm (−100 dBm otherwise). GDO0 is PA1 and TIM2 TI2, so
   `furi_hal_subghz_start_async_rx` captures it the same way the IR receiver path does,
-  with the same pacing.
+  with the same pacing. Transmit: in TX, GDO0 is the data input. The model records it
+  from TIM2's output compare with exact timestamps. On leaving TX it writes a `.sub` RAW
+  file (frequency and a custom preset from the live registers and PATABLE) to `tx-dir`,
+  and keeps it as the `tx` property.
 - **ST25R3916**: register spaces A and B, IC identity 0x2A, IRQ status (clear on read) and
   mask registers driving the IRQ pin, oscillator-ready and VDD measurement.
 - **Speaker**: the piezo on PB8 is TIM16 CH1 in PWM mode. Every TIM16 write recomputes

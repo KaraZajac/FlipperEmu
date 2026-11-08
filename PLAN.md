@@ -63,7 +63,9 @@ NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
 TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX uses.
 - ☑ Sub-GHz receive: `.sub` RAW captures and Princeton keys on a virtual air, heard by the
       CC1101 in RX within 500 kHz (GDO0 → TIM2 capture); decoded by Read / `subghz rx`
-- ☐ Sub-GHz transmit capture to `.sub` (TIM2 output compare + DMA), more key encoders
+- ☑ Sub-GHz transmit capture: every transmission → `devices/NAME/subghz-tx/*.sub` (exact
+      timings, frequency, custom preset from the live registers); TX → RX loopback decodes
+- ☐ TX-side pacing against DMA refill lag; more key encoders (CAME, Nice FLO, …)
 - ☐ NFC: ST25R3916 transparent mode / virtual tags from `.nfc` files
 - ☐ 125 kHz RFID via COMP1 / TIM, iButton 1-Wire
 

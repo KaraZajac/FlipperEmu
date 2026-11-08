@@ -406,6 +406,7 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
     qdev_connect_clock_in(dev, "clk", hclk);
     soc_map(SYS_BUS_DEVICE(dev), 0x40000000, errp);
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, NVIC(WB55_IRQ_TIM2));
+    qdev_connect_gpio_out_named(dev, "dma-up", 0, DREQ(WB55_DREQ_TIM2_UP));
     wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_APB1RSTR1, 0, dev);
     dev = soc_regfile("tim16", 0x40014400, 0x400, WB55_RF_TIM);
     wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_APB2RSTR, 17, dev);

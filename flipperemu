@@ -319,6 +319,8 @@ def qemu_cmd(dev: Device, args):
     if audio:
         machine += ",audiodev=snd0"
     cmd = [str(QEMU), "-M", machine, *usb, *audio,
+           # every Sub-GHz transmission is saved as a .sub RAW file
+           "-global", f"cc1101.tx-dir={dev.dir / 'subghz-tx'}",
            "-drive", f"if=pflash,format=raw,file={dev.flash}",
            "-rtc", "base=localtime",
            "-monitor", f"unix:{dev.monitor},server=on,wait=off",

@@ -333,6 +333,14 @@ static void flipper_zero_reset(MachineState *machine, ResetType type)
     wb55_soc_sync_pins(&FLIPPER_ZERO(machine)->soc);
 }
 
+/* Sub-GHz transmit: TIM2 CH2 drives PA1, the CC1101's GDO0 data input. */
+static void flipper_tim2_oc(void *opaque, int ch, bool level, int64_t when)
+{
+    if (ch == 1) {
+        cc1101_tx_data(CC1101(opaque), level, when);
+    }
+}
+
 /* The virtual USB cable also carries VBUS to the charger. */
 static void flipper_usb_vbus(void *opaque, bool on)
 {
@@ -403,6 +411,8 @@ static void flipper_zero_init(MachineState *machine)
     soc_out(s, 'D', 0, qdev_get_gpio_in_named(dev, SSI_GPIO_CS, 0));
     qdev_connect_gpio_out_named(dev, "gdo0", 0, soc_in(s, 'A', 1));
     CC1101(dev)->tim = &s->soc.tim2;    /* GDO0 is also TIM2 TI2 */
+    s->soc.tim2.oc_changed = flipper_tim2_oc;   /* TX: TIM2 CH2 -> GDO0 */
+    s->soc.tim2.oc_opaque = dev;
     dev = spi_named(machine, spi1, TYPE_ST25R3916, 1, "nfc");
     soc_out(s, 'E', 4, qdev_get_gpio_in_named(dev, SSI_GPIO_CS, 0));
     qdev_connect_gpio_out_named(dev, "irq", 0, soc_in(s, 'A', 2));

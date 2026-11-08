@@ -66,6 +66,7 @@ enum {
     WB55_DREQ_I2C3_RX = 12, WB55_DREQ_I2C3_TX = 13,
     WB55_DREQ_USART1_RX = 14, WB55_DREQ_USART1_TX = 15,
     WB55_DREQ_LPUART1_RX = 16, WB55_DREQ_LPUART1_TX = 17,
+    WB55_DREQ_TIM1_UP = 25, WB55_DREQ_TIM2_UP = 32,
     WB55_DREQ_NUM = 41,
 };
 
@@ -330,7 +331,15 @@ struct WB55TimState {
     uint32_t cnt_base;           /* CNT at base_ns */
     int64_t base_ns;
     int64_t checked_ns;          /* event flags are current up to here */
+    int64_t now_override;        /* processing an update: its exact time */
     bool ti_level[4];
+    uint8_t cap_unread;          /* captured, CCRx not read yet (bitmask) */
+    bool oc_level[4];            /* output compare pins (OCxREF) */
+    qemu_irq dma_up;             /* update DMA request (DMAMUX TIMx_UP) */
+    bool dma_up_pending;         /* raised, not yet acknowledged */
+    /* board hook: an output compare pin changed at an exact time */
+    void (*oc_changed)(void *opaque, int ch, bool level, int64_t when);
+    void *oc_opaque;
 };
 /* an edge on input TI1..TI4 (ti 0..3) at virtual time `when` */
 void wb55_tim_input(WB55TimState *s, int ti, bool level, int64_t when);

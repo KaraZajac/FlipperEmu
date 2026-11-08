@@ -153,6 +153,29 @@ def subghz_check(mon: Monitor) -> bool:
     return False
 
 
+def subghz_tx_check(mon: Monitor):
+    """`subghz tx` of a Princeton key; the capture must hold its timings.
+    None (skip) where the CLI cannot start the internal radio (Unleashed)."""
+    import re
+    try:
+        cli = FlipperCli(usb_endpoint(mon))
+        try:
+            cli.read_until_prompt(15)
+            out = cli.run("subghz tx 95D5D4 433920000 390 4 0", timeout=20)
+        finally:
+            cli.close()
+    except (OSError, TimeoutError, ConnectionError, TypeError) as e:
+        print(f"  subghz tx: {e}")
+        return False
+    if "failed to start" in out:
+        return None
+    tx = mon.cmd("qom-get /machine/subghz tx").strip().strip('"')
+    durs = [int(v) for v in re.findall(r"[+-]?\d+", tx.split(",", 1)[-1])]
+    # 0x95D5D4: 1 = 1170/-390, 0 = 390/-1170, then the 30-TE guard
+    bits = [1 if d > 700 else 0 for d in durs[0:48:2]]
+    return tx.startswith("@433920000") and int("".join(map(str, bits)), 2) == 0x95D5D4
+
+
 def usb_cli_check(mon: Monitor) -> bool:
     try:
         cli = FlipperCli(usb_endpoint(mon))
@@ -217,6 +240,8 @@ def main() -> int:
                 results.append(("ir: NEC frame received and decoded", ir_check(mon)))
                 results.append(("subghz: Princeton key received at 433.92 MHz",
                                 subghz_check(mon)))
+                results.append(("subghz: transmission captured with exact timings",
+                                subghz_tx_check(mon)))
                 results.append(("reboot: LCD redrawn after a warm reset",
                                 reboot_check(mon, uart, out, args.timeout)))
             mon.cmd("quit")
@@ -231,9 +256,9 @@ def main() -> int:
 
     width = max(len(r[0]) for r in results)
     for label, ok in results:
-        print(f"  {'PASS' if ok else 'FAIL'}  {label:{width}}")
+        print(f"  {'SKIP' if ok is None else 'PASS' if ok else 'FAIL'}  {label:{width}}")
     print(f"  screenshots: {out}")
-    return 0 if all(ok for _, ok in results) else 1
+    return 0 if all(ok is not False for _, ok in results) else 1
 
 
 if __name__ == "__main__":

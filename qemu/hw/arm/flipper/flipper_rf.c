@@ -12,6 +12,12 @@
  * GDO0 (IOCFG0 = 0x0D), GDO0 follows the carrier, and RSSI reads strong.
  * GDO0 is PA1 and TIM2's TI2, which is how furi_hal_subghz captures it.
  *
+ * Sub-GHz transmit: in TX, GDO0 is the chip's data input, driven by TIM2 CH2
+ * toggling at each DMA-fed update.  Each transmission is recorded and, when
+ * the chip leaves TX, written to the "tx-dir" property's directory as a
+ * Flipper .sub RAW file at the tuned frequency.  Its preset is a custom one
+ * with the CC1101's live register values, so a real Flipper can replay it.
+ *
  * Copyright (c) 2026, Kara Zajac
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -19,8 +25,10 @@
 #include "qemu/log.h"
 #include "qemu/timer.h"
 #include "qemu/cutils.h"
+#include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "wb55.h"
 #include "flipper.h"
 
@@ -91,7 +99,7 @@ static void cc1101_update_gdo(Cc1101State *s)
 
 /*
  * One edge of the air signal.  Like the IR receiver, an edge that would
- * reach the capture timer waits (up to 10 ms) for the firmware to service
+ * reach the capture timer waits (up to 250 ms) until the firmware has read
  * the previous capture; the timestamp keeps the measured duration exact.
  */
 static void cc1101_air_edge(void *opaque)
@@ -102,7 +110,7 @@ static void cc1101_air_edge(void *opaque)
     bool level;
 
     if (s->tim && cc1101_hears(s) && wb55_tim_capture_pending(s->tim) &&
-        now < when + 10 * SCALE_MS) {
+        now < when + 250 * SCALE_MS) {
         timer_mod(s->air_timer, now + 20 * SCALE_US);
         return;
     }
@@ -191,6 +199,113 @@ static void cc1101_set_rx(Object *obj, const char *value, Error **errp)
     timer_mod(s->air_timer, s->air_next_ns);
 }
 
+/* ---- transmit capture */
+
+void cc1101_tx_data(Cc1101State *s, bool level, int64_t when)
+{
+    if (s->tx_active && level != s->tx_level) {
+        int64_t us = (when - s->tx_edge_ns) / 1000;
+
+        if (us > 0) {
+            int32_t d = s->tx_level ? us : -us;
+
+            g_array_append_val(s->tx, d);
+        }
+        s->tx_edge_ns = when;
+    }
+    s->tx_level = level;
+}
+
+static void cc1101_tx_begin(Cc1101State *s)
+{
+    if (s->tx_active) {
+        return;
+    }
+    s->tx_active = true;
+    s->tx = g_array_new(false, false, sizeof(int32_t));
+    s->tx_edge_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+}
+
+/* the registers Flipper presets set, as .sub Custom_preset_data */
+static void cc1101_preset_data(Cc1101State *s, GString *out)
+{
+    static const uint8_t regs[] = {
+        0x02, 0x03, 0x08, 0x0B, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
+        0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x20, 0x21, 0x22,
+    };
+
+    for (size_t i = 0; i < ARRAY_SIZE(regs); i++) {
+        g_string_append_printf(out, "%02X %02X ", regs[i], s->regs[regs[i]]);
+    }
+    g_string_append(out, "00 00");
+    for (int i = 0; i < 8; i++) {
+        g_string_append_printf(out, " %02X", s->patable[i]);
+    }
+}
+
+static void cc1101_tx_end(Cc1101State *s)
+{
+    int32_t *d;
+    guint first = 0, n;
+    uint32_t freq = cc1101_freq_hz(s);
+    g_autoptr(GString) sub = g_string_new(NULL);
+    g_autoptr(GString) last = g_string_new(NULL);
+
+    if (!s->tx_active) {
+        return;
+    }
+    cc1101_tx_data(s, !s->tx_level, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    s->tx_active = false;
+    d = (int32_t *)s->tx->data;
+    n = s->tx->len;
+    while (first < n && d[first] < 0) {
+        first++;                        /* the idle time before the first edge */
+    }
+    while (n > first && d[n - 1] < 0) {
+        n--;                            /* and after the last */
+    }
+    if (n > first) {
+        freq = (freq + 500) / 1000 * 1000;
+        g_string_printf(sub, "Filetype: Flipper SubGhz RAW File\nVersion: 1\n"
+                        "Frequency: %u\nPreset: FuriHalSubGhzPresetCustom\n"
+                        "Custom_preset_module: CC1101\nCustom_preset_data: ", freq);
+        cc1101_preset_data(s, sub);
+        g_string_append(sub, "\nProtocol: RAW");
+        g_string_printf(last, "@%u", freq);
+        for (guint i = first; i < n; i++) {
+            if ((i - first) % 512 == 0) {
+                g_string_append(sub, "\nRAW_Data:");
+            }
+            g_string_append_printf(sub, " %d", d[i]);
+            g_string_append_printf(last, ",%d", d[i]);
+        }
+        g_string_append_c(sub, '\n');
+        g_free(s->tx_last);
+        s->tx_last = g_strdup(last->str);
+        if (s->tx_dir) {
+            g_autoptr(GError) err = NULL;
+            g_autofree char *path = NULL;
+
+            g_mkdir_with_parents(s->tx_dir, 0755);
+            for (int k = 1; k < 100000; k++) {
+                g_free(path);
+                path = g_strdup_printf("%s/tx-%05d.sub", s->tx_dir, k);
+                if (!g_file_test(path, G_FILE_TEST_EXISTS)) {
+                    break;
+                }
+            }
+            if (g_file_set_contents(path, sub->str, sub->len, &err)) {
+                info_report("flipper-zero: Sub-GHz transmission at %.3f MHz, "
+                            "%u levels -> %s", freq / 1e6, n - first, path);
+            } else {
+                warn_report("flipper-zero: %s", err->message);
+            }
+        }
+    }
+    g_array_free(s->tx, true);
+    s->tx = NULL;
+}
+
 static uint8_t cc1101_status(Cc1101State *s)
 {
     uint8_t st;
@@ -204,18 +319,28 @@ static uint8_t cc1101_status(Cc1101State *s)
     return st << 4 | (s->read ? 0 : 0x0F);  /* CHIP_RDYn = 0 */
 }
 
+static void cc1101_set_state(Cc1101State *s, uint8_t state)
+{
+    if (state == MARC_TX) {
+        cc1101_tx_begin(s);
+    } else if (s->state == MARC_TX) {
+        cc1101_tx_end(s);
+    }
+    s->state = state;
+}
+
 static void cc1101_strobe(Cc1101State *s, uint8_t cmd)
 {
     switch (cmd) {
     case 0x30:                          /* SRES */
+        cc1101_set_state(s, MARC_IDLE);
         memcpy(s->regs, cc1101_defaults, sizeof(s->regs));
-        s->state = MARC_IDLE;
         break;
-    case 0x31: s->state = MARC_FSTXON; break;
-    case 0x32: case 0x33: case 0x36: s->state = MARC_IDLE; break;
-    case 0x34: case 0x38: s->state = MARC_RX; break;
-    case 0x35: s->state = MARC_TX; break;
-    case 0x39: s->state = MARC_SLEEP; break;
+    case 0x31: cc1101_set_state(s, MARC_FSTXON); break;
+    case 0x32: case 0x33: case 0x36: cc1101_set_state(s, MARC_IDLE); break;
+    case 0x34: case 0x38: cc1101_set_state(s, MARC_RX); break;
+    case 0x35: cc1101_set_state(s, MARC_TX); break;
+    case 0x39: cc1101_set_state(s, MARC_SLEEP); break;
     default: break;                     /* SFRX SFTX SWORRST SNOP */
     }
     cc1101_update_gdo(s);
@@ -306,8 +431,16 @@ static void cc1101_realize(SSIPeripheral *d, Error **errp)
     s->air_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, cc1101_air_edge, s);
 }
 
+static char *cc1101_get_tx(Object *obj, Error **errp)
+{
+    return g_strdup(CC1101(obj)->tx_last ?: "");
+}
+
 static void cc1101_init(Object *obj)
 {
+    object_property_add_str(obj, "tx", cc1101_get_tx, NULL);
+    object_property_set_description(obj, "tx",
+        "The last transmission: @freq_hz,+high,-low,... in µs");
     object_property_add_str(obj, "rx", cc1101_get_rx, cc1101_set_rx);
     object_property_set_description(obj, "rx",
         "Put a signal on the air: [@freq_hz,]+high,-low,... in µs, or file:PATH");
@@ -317,6 +450,7 @@ static void cc1101_reset_hold(Object *obj, ResetType type)
 {
     Cc1101State *s = CC1101(obj);
 
+    cc1101_tx_end(s);
     memcpy(s->regs, cc1101_defaults, sizeof(s->regs));
     memset(s->patable, 0, sizeof(s->patable));
     s->patable[0] = 0xC6;
@@ -333,11 +467,16 @@ static void cc1101_reset_exit(Object *obj, ResetType type)
     cc1101_update_gdo(s);
 }
 
+static const Property cc1101_props[] = {
+    DEFINE_PROP_STRING("tx-dir", Cc1101State, tx_dir),
+};
+
 static void cc1101_class_init(ObjectClass *klass, const void *data)
 {
     SSIPeripheralClass *k = SSI_PERIPHERAL_CLASS(klass);
     ResettableClass *rc = RESETTABLE_CLASS(klass);
 
+    device_class_set_props(DEVICE_CLASS(klass), cc1101_props);
     k->realize = cc1101_realize;
     k->transfer = cc1101_transfer;
     k->set_cs = cc1101_set_cs;
