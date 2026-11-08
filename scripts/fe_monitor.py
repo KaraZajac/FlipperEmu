@@ -57,15 +57,27 @@ class Monitor:
         fd, ppm = tempfile.mkstemp(suffix=".ppm")
         os.close(fd)
         self.cmd(f"screendump {ppm}")
-        for _ in range(50):              # the dump is written asynchronously
-            if os.path.getsize(ppm) > 0:
+        last = -1                        # written asynchronously: wait for
+        for _ in range(100):             # the size to settle
+            size = os.path.getsize(ppm)
+            if size > 0 and size == last:
                 break
+            last = size
             time.sleep(0.05)
         if png_path.endswith(".ppm"):
             os.replace(ppm, png_path)
             return png_path
         from PIL import Image
-        Image.open(ppm).save(png_path)
+        for attempt in range(20):        # ... and for the whole image
+            try:
+                with Image.open(ppm) as im:
+                    im.load()
+                    im.save(png_path)
+                break
+            except (OSError, SyntaxError):
+                if attempt == 19:
+                    raise
+                time.sleep(0.1)
         os.unlink(ppm)
         return png_path
 

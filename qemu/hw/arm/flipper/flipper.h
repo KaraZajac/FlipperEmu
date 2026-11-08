@@ -146,6 +146,7 @@ struct St25r3916State {
     char *rd_prog;               /* "scan", "ntag" while a session runs */
     int rd_step, rd_tries, rd_sent;
     bool rd_field;               /* its field is on */
+    bool ext_field;              /* a reader's field with no session ("field") */
     bool rd_waiting;             /* a command is out, the answer due */
     bool pt_sleep;               /* passive-target logic in SLEEP (HLTA) */
     uint8_t rd_ans[NFC_AIR_MAX]; /* the Flipper's answer, as bytes */
@@ -216,6 +217,31 @@ void flipper_ir_tx_end(FlipperIrState *s);
 
 /* ------------------------------------------- 125 kHz RFID (virtual tag) */
 #define TYPE_FLIPPER_RFID "flipper-rfid"
+/* a T5577 in the 125 kHz field (t5577.c) */
+typedef struct T5577 {
+    uint32_t blk[8];             /* page 0; block 0 is the configuration */
+    uint32_t p1[4];              /* page 1 */
+    uint8_t lock;                /* page 0 blocks locked */
+    bool on;                     /* the field, as the tag last saw it */
+    int64_t since;               /* ... since then */
+    int64_t on_start;            /* when the field came on before this gap */
+    int64_t prev_on;             /* Tc of field before this gap */
+    bool cmd;                    /* receiving a command */
+    bool pushed;                 /* this gap's opening pushed a bit */
+    int nbits;
+    uint8_t bits[72];
+} T5577;
+#define T5577_DEFAULT_CONFIG 0x000880E8  /* Manchester RF/32, blocks 1-7, ST */
+void t5577_blank(T5577 *t);
+/* the field went on or off: true when page 0 changed (a new frame) */
+bool t5577_field(T5577 *t, bool on, int64_t now, int64_t tc_ns);
+/* when to poll: a command can close with the field still on (-1: none) */
+int64_t t5577_deadline(const T5577 *t, int64_t tc_ns);
+bool t5577_poll(T5577 *t, int64_t now, int64_t tc_ns);
+/* what the comparator sees of the tag: +high/-low µs at 125 kHz, at most
+ * max of them (-1: more; 0: silent); *psk for a PSK modulation */
+int t5577_frame(const T5577 *t, int32_t *dur, int max, bool *psk);
+
 OBJECT_DECLARE_SIMPLE_TYPE(FlipperRfidState, FLIPPER_RFID)
 struct FlipperRfidState {
     DeviceState parent_obj;
@@ -249,6 +275,10 @@ struct FlipperRfidState {
     QEMUTimer *tx_timer;         /* ends a capture after a silence */
     char *tx_dir;                /* write each capture here */
     char *tx_last;               /* the latest capture file */
+    /* a T5577 instead of a fixed tag: written through the field's gaps */
+    T5577 *t5;
+    int64_t t5_tc_ns;            /* the field clock, as last seen */
+    QEMUTimer *t5_timer;         /* a command can end with the field on */
 };
 #define FLIPPER_RFID_READER_HZ 125000
 /* the reader's antenna drive (TIM1 CH1N PWM) frequency, 0 = off */

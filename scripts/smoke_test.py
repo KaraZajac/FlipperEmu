@@ -12,7 +12,8 @@ runs `info device` on the CLI over the emulated USB serial port, receives an
 NEC frame through the virtual IR receiver (`ir rx`), captures an `ir tx` and
 decodes it back, receives a Princeton key over the virtual air (`subghz rx`),
 captures a `subghz tx`, reads a 125 kHz EM4100
-tag (`rfid read`) and reads back its own H10301 emulation (`rfid emulate`),
+tag (`rfid read`), reads back its own H10301 emulation (`rfid emulate`),
+writes an H10301 to a virtual T5577 (`rfid write`),
 reads an NTAG215 (`mfu info`) and dumps a MIFARE Classic 1K over NFC, has a
 virtual reader read an NTAG215 the firmware emulates,
 enumerates over USB/IP, then reboots through the CLI and checks the LCD comes
@@ -282,6 +283,28 @@ def rfid_emulate_check(mon: Monitor, devdir: pathlib.Path) -> bool:
     return found is not None
 
 
+def rfid_write_check(mon: Monitor) -> bool:
+    """A blank T5577 in the field: `rfid write` must answer "Written!", which
+    the firmware says only after reading the tag back and comparing it."""
+    try:
+        if mon.cmd("qom-set /machine/rfid t5577 blank"):
+            return False
+        cli = FlipperCli(usb_endpoint(mon))
+        try:
+            cli.read_until_prompt(15)
+            found, out = cli.watch("rfid write H10301 2A1F7B", r"Written!", timeout=40)
+        finally:
+            cli.close()
+            blocks = mon.cmd("qom-get /machine/rfid t5577").strip().strip('"')
+            mon.cmd("qom-set /machine/rfid tag none")
+    except (OSError, TimeoutError, ConnectionError, TypeError) as e:
+        print(f"  rfid write: {e}")
+        return False
+    if not found:
+        print(f"  rfid write: {out.strip()[-200:]!r} (T5577: {blocks})")
+    return bool(found) and blocks.startswith("00107060")      # FSK2a RF/50, 3 blocks
+
+
 def nfc_check(mon: Monitor, devdir: pathlib.Path):
     """An NTAG215 in the NFC field: `mfu info` in the NFC shell must read
     its UID and all 135 pages.  None (skip) without the NFC shell."""
@@ -535,6 +558,8 @@ def main() -> int:
                                 rfid_read_check(mon, devdir)))
                 results.append(("rfid: H10301 emulation captured, read back",
                                 rfid_emulate_check(mon, devdir)))
+                results.append(("rfid: H10301 written to a T5577, verified",
+                                rfid_write_check(mon)))
                 results.append(("nfc: NTAG215 read by `mfu info` (all 135 pages)",
                                 nfc_check(mon, devdir)))
                 results.append(("nfc: MIFARE Classic 1K dumped (Crypto1, 16 sectors)",

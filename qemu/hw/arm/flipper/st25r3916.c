@@ -380,7 +380,7 @@ static uint8_t st25_read_reg(St25r3916State *s, uint8_t a, bool b)
     case REG_AUX_DISPLAY:
         return ((s->rega[REG_OP_CONTROL] & OP_EN) ? 0x10 : 0) |      /* osc_ok */
                (st25_field(s) ? 0x20 : 0) |                         /* tx_on */
-               (s->rd_field ? 0x40 : 0);                            /* efd_o */
+               (s->rd_field || s->ext_field ? 0x40 : 0);            /* efd_o */
     }
     return s->rega[a & 0x3F];
 }
@@ -462,6 +462,23 @@ static void st25_direct(St25r3916State *s, uint8_t cmd)
 
 enum { RD_FIELD_ON, RD_ACTIVATE, RD_VERSION, RD_SIG, RD_PAGES, RD_COUNTER,
        RD_HALT, RD_FIELD_OFF };
+
+/* a reader's field around the Flipper: a session's, or a standing one
+ * ("field"); the chip's external field detector reports either */
+static void st25_ext_field(St25r3916State *s, bool session, bool standing)
+{
+    bool was = s->rd_field || s->ext_field;
+
+    s->rd_field = session;
+    s->ext_field = standing;
+    if ((session || standing) != was) {
+        if (was) {
+            st25_raise(s, I_EOF);
+        } else {
+            st25_raise(s, I_EON);
+        }
+    }
+}
 #define RD_ANSWER_NS (100 * SCALE_MS)   /* no answer by then: none */
 #define RD_GAP_NS    (1 * SCALE_MS)     /* an answer to the next command */
 #define RD_TRIES     3                  /* sends of one command, at most */
@@ -620,8 +637,7 @@ static void st25_rd_timer(void *opaque)
     }
     switch (s->rd_step) {
     case RD_FIELD_ON:
-        s->rd_field = true;
-        st25_raise(s, I_EON);
+        st25_ext_field(s, true, s->ext_field);
         s->rd_step = RD_ACTIVATE;
         s->rd_tries = 0;
         timer_mod(s->rd_timer, now + 5 * SCALE_MS);
@@ -724,11 +740,22 @@ static void st25_rd_timer(void *opaque)
     case RD_FIELD_OFF:
         break;
     }
-    s->rd_field = false;                /* RD_FIELD_OFF: done */
-    st25_raise(s, I_EOF);
+    st25_ext_field(s, false, s->ext_field);   /* RD_FIELD_OFF: done */
     st25_rd_write(s);
     g_free(s->rd_prog);
     s->rd_prog = NULL;
+}
+
+static bool st25_get_field(Object *obj, Error **errp)
+{
+    return ST25R3916(obj)->ext_field;
+}
+
+static void st25_set_field(Object *obj, bool value, Error **errp)
+{
+    St25r3916State *s = ST25R3916(obj);
+
+    st25_ext_field(s, s->rd_field, value);
 }
 
 static char *st25_get_reader(Object *obj, Error **errp)
@@ -894,6 +921,10 @@ static void st25_init(Object *obj)
     object_property_add_str(obj, "reader", st25_get_reader, st25_set_reader);
     object_property_set_description(obj, "reader",
         "Put a virtual reader in front of an emulating Flipper: scan | ntag");
+    object_property_add_bool(obj, "field", st25_get_field, st25_set_field);
+    object_property_set_description(obj, "field",
+        "A reader's field around the Flipper with no reader talking (what "
+        "field detection sees; \"reader\" brings its own)");
     object_property_add_str(obj, "tx", st25_get_tx, NULL);
     object_property_set_description(obj, "tx",
         "What the virtual reader last read, as a .nfc file");

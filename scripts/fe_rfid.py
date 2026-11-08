@@ -572,6 +572,32 @@ def tag(protocol, data):
     return tag_string(frame, mod)
 
 
+# ------------------------------------------------------------------ T5577
+
+T5577_MODULATIONS = {
+    0x00: "direct", 0x01: "PSK1", 0x02: "PSK2", 0x03: "PSK3", 0x04: "FSK1",
+    0x05: "FSK2", 0x06: "FSK1a", 0x07: "FSK2a", 0x08: "Manchester",
+    0x10: "bi-phase", 0x18: "differential bi-phase",
+}
+
+
+def t5577_config(b0):
+    """A T5577's block 0 in words (basic or extended mode)."""
+    xmode = bool(b0 & 0x20000) and (b0 >> 28) in (6, 9)
+    rate = (2 * ((b0 >> 18) & 0x3F) + 2 if xmode else
+            (8, 16, 32, 40, 50, 64, 100, 128)[(b0 >> 18) & 7])
+    mod = (b0 >> 12) & 0x1F
+    maxblk = (b0 >> 5) & 7
+    words = [T5577_MODULATIONS.get(mod, f"modulation {mod:#04x}"), f"RF/{rate}",
+             f"blocks 1-{maxblk}" if maxblk > 1 else
+             "block 1" if maxblk else "block 0 only"]
+    if b0 & 0x10:
+        words.append("password")
+    if xmode:
+        words.append("extended mode")
+    return ", ".join(words)
+
+
 # ------------------------------------------- emulation captures (rfid-tx)
 
 def parse_capture(path):

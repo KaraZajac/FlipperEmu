@@ -596,12 +596,20 @@ def cmd_rfid(args):
     if not dev.running():
         sys.exit(f"[{dev.name}] not running")
     tag = args.tag
-    label, value = None, None
+    label, value, t5577 = None, None, None
     try:
         if not tag:
             pass
         elif tag == ["none"]:
             label, value = "no tag", "none"
+        elif tag[0].lower() == "t5577":
+            blocks = [int(b, 16) for b in tag[1:]]
+            if len(blocks) > 8 or any(b >> 32 for b in blocks):
+                raise ValueError("a T5577 has blocks 0-7, 32-bit hex words")
+            b0 = blocks[0] if blocks else 0x000880E8
+            label = (f"a T5577 ({'blank, ' if not blocks else ''}"
+                     f"{fe_rfid.t5577_config(b0)}) that the firmware can write")
+            t5577 = ",".join(f"{b:08X}" for b in blocks) or "blank"
         elif len(tag) == 1 and tag[0].endswith(".rfid"):
             proto, data = fe_rfid.parse_rfid(tag[0])
             label = f"{proto} {data.hex(' ').upper()} ({pathlib.Path(tag[0]).name})"
@@ -618,7 +626,7 @@ def cmd_rfid(args):
             value = fe_rfid.tag_string(frame, mod)
         else:
             sys.exit("usage: rfid PROTOCOL DATA | rfid FILE.rfid | rfid CAPTURE.txt | "
-                     "rfid none | rfid --list")
+                     "rfid t5577 [BLOCK0 ...] | rfid none | rfid --list")
     except (ValueError, KeyError, OSError) as e:
         sys.exit(f"rfid: {e}")
     m = Monitor(str(dev.monitor))
@@ -628,7 +636,12 @@ def cmd_rfid(args):
                 err = m.cmd(f"qom-set /machine/rfid {prop} {'on' if on == 'on' else 'off'}")
                 if err:
                     sys.exit(f"rfid: {err}")
-        if value is not None:
+        if t5577 is not None:
+            err = m.cmd(f"qom-set /machine/rfid t5577 {t5577}")
+            if err:
+                sys.exit(f"rfid: {err}")
+            print(f"[{dev.name}] 125 kHz field: {label}")
+        elif value is not None:
             if value != "none":
                 path = dev.dir / "rfid-tag.txt"     # long frames: past HMP line limits
                 path.write_text(value + "\n")
@@ -642,7 +655,10 @@ def cmd_rfid(args):
             onoff = lambda prop: "on" if get(prop) == "true" else "off"
             print(f"[{dev.name}] its reader's field: {get('field')}; tag in it: "
                   f"{'yes' if get('tag') else 'none'}; field noise: {onoff('noise')}; "
-                  f"virtual reader (for emulation): {onoff('reader')}")
+                  f"a virtual reader's field around it: {onoff('reader')}")
+            t5 = get("t5577")
+            if t5:
+                print(f"T5577 ({fe_rfid.t5577_config(int(t5.split()[0], 16))}): {t5}")
             last = get("tx")
             if last:
                 print(f"latest emulation capture: {last}")
@@ -658,6 +674,17 @@ def cmd_nfc(args):
     if not dev.running():
         sys.exit(f"[{dev.name}] not running")
     card = args.card
+    if args.field:
+        m = Monitor(str(dev.monitor))
+        try:
+            err = m.cmd(f"qom-set /machine/nfc field {args.field}")
+        finally:
+            m.close()
+        if err:
+            sys.exit(f"nfc: {err}")
+        print(f"[{dev.name}] an NFC reader's field around it: {args.field}")
+        if not card and not args.reader:
+            return 0
     if args.reader:
         m = Monitor(str(dev.monitor))
         try:
@@ -707,8 +734,10 @@ def cmd_nfc(args):
     m = Monitor(str(dev.monitor))
     try:
         if label is None:
+            field = m.cmd("qom-get /machine/nfc field").strip() == "true"
             print(f"[{dev.name}] card in the field: "
-                  f"{m.cmd('qom-get /machine/nfc card').strip().strip(chr(34)) or 'none'}")
+                  f"{m.cmd('qom-get /machine/nfc card').strip().strip(chr(34)) or 'none'}"
+                  f"; a reader's field around it: {'on' if field else 'off'}")
             return 0
         value = "none"
         if desc is not None:
@@ -836,10 +865,13 @@ def main():
     p.add_argument("tag", nargs="*",
                    help="PROTOCOL DATA (EM4100 DEADBEEF01, H10301 010203, ...), "
                         "FILE.rfid, an emulation capture "
-                        "(devices/NAME/rfid-tx/*.txt), or none; nothing: show state")
+                        "(devices/NAME/rfid-tx/*.txt), t5577 [BLOCK0 ... BLOCK7] "
+                        "(a writable tag; blank without blocks), or none; "
+                        "nothing: show state")
     p.add_argument("--list", action="store_true", help="list the protocols")
     p.add_argument("--reader", choices=("on", "off"),
-                   help="the virtual reader that clocks and records emulation")
+                   help="a virtual reader's field around the Flipper (default on): "
+                        "it clocks and records emulation, and field detection sees it")
     p.add_argument("--noise", choices=("on", "off"),
                    help="comparator noise while no tag answers (as on hardware)")
     p.set_defaults(func=cmd_rfid)
@@ -853,6 +885,9 @@ def main():
     p.add_argument("--reader", choices=("scan", "ntag"),
                    help="instead: hold a virtual reader to an emulating Flipper and "
                         "print what it reads (scan: UID/ATQA/SAK; ntag: a Type 2 tag)")
+    p.add_argument("--field", choices=("on", "off"),
+                   help="a reader's field around the Flipper with no reader talking "
+                        "(what NFC field detection sees)")
     p.set_defaults(func=cmd_nfc)
 
     p = sub.add_parser("gdb", help="attach gdb to a running --gdb device")

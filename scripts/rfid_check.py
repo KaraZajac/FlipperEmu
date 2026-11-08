@@ -3,13 +3,15 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Check fe_rfid.py's tag encoders against a running emulated Flipper.
 
-For every protocol (or the ones named), two checks:
+For every protocol (or the ones named), three checks:
   emulate: `rfid emulate` on the Flipper, captured by the virtual reader,
            must be the same loop as fe_rfid.py's encoder produces;
   read:    fe_rfid.py's tag in the field must make `rfid read` print the
-           protocol and data.
+           protocol and data;
+  write:   `rfid write` onto a blank virtual T5577 must succeed (the
+           firmware reads the tag back and compares it itself).
 
-    scripts/rfid_check.py DEVICE [PROTOCOL ...]
+    scripts/rfid_check.py DEVICE [--checks emulate,read,write] [PROTOCOL ...]
 """
 import pathlib
 import re
@@ -121,12 +123,36 @@ def read_check(mon, cli, dev, name, data):
     return True, f"{time.time() - t0:.1f} s"
 
 
+def write_check(mon, cli, name, data):
+    """A blank T5577 in the field, then `rfid write`: "Written!" comes only
+    after the firmware has read the tag back and found the same data."""
+    if " " in name:
+        return None, "the CLI reads a protocol name only up to a space"
+    err = mon.cmd("qom-set /machine/rfid t5577 blank")
+    if err:
+        return False, err
+    t0 = time.time()
+    found, out = cli.watch(f"rfid write {name} {data.hex().upper()}",
+                           r"Written!|cannot be written", timeout=40)
+    blocks = mon.cmd("qom-get /machine/rfid t5577").strip().strip('"').split()
+    mon.cmd("qom-set /machine/rfid tag none")
+    if not found or b"Written" not in found.group(0):
+        return False, (out.strip().splitlines() or ["no answer"])[-1]
+    return True, f"{time.time() - t0:.1f} s, block 0 {blocks[0]}, {len(blocks)} blocks"
+
+
 def main():
-    if len(sys.argv) < 2:
+    args = sys.argv[1:]
+    checks = ("emulate", "read", "write")
+    if "--checks" in args:
+        i = args.index("--checks")
+        checks = tuple(args[i + 1].split(","))
+        del args[i:i + 2]
+    if not args:
         print(__doc__)
         return 2
-    dev = ROOT / "devices" / sys.argv[1]
-    names = sys.argv[2:] or list(SAMPLES)
+    dev = ROOT / "devices" / args[0]
+    names = args[1:] or list(SAMPLES)
     mon = Monitor(str(dev / "monitor.sock"))
     cli = FlipperCli(usb_endpoint(mon))
     cli.read_until_prompt(10)
@@ -136,10 +162,14 @@ def main():
         for name in names:
             data = fe_rfid.parse_hex(SAMPLES[name])
             for what, fn in (("emulate", lambda: emulate_check(mon, cli, name, data)),
-                             ("read", lambda: read_check(mon, cli, dev, name, data))):
+                             ("read", lambda: read_check(mon, cli, dev, name, data)),
+                             ("write", lambda: write_check(mon, cli, name, data))):
+                if what not in checks:
+                    continue
                 ok, info = fn()
-                failed += not ok
-                print(f"{'PASS' if ok else 'FAIL'}  {name:11} {what:8} {info}", flush=True)
+                failed += ok is False
+                status = "SKIP" if ok is None else "PASS" if ok else "FAIL"
+                print(f"{status}  {name:11} {what:8} {info}", flush=True)
     finally:
         cli.close()
         mon.close()

@@ -284,6 +284,7 @@ struct WB55DmaState {
     uint32_t muxccr[14];
     uint64_t req;                /* request line levels (bit = DMAMUX input) */
     uint16_t latched;            /* channels owed a beat by a request edge */
+    uint64_t pulse;              /* requests that are events (timers), not levels */
     uint16_t served[64];         /* per request: channels of its last edge */
     bool in_service;
     bool dirty;
@@ -293,6 +294,9 @@ struct WB55DmaState {
  * to do (enabled, count left)?  A timer waits for that before its next
  * update when the firmware re-arms normal-mode DMA from an ISR */
 bool wb55_dma_ready_for(WB55DmaState *s, int req);
+/* a request that signals events (a timer's update): one beat per channel
+ * each time it rises, however long it stays up */
+void wb55_dma_set_pulse(WB55DmaState *s, int req);
 
 /* ------------------------------------------------- small misc devices */
 #define TYPE_WB55_RNG "stm32wb55-rng"

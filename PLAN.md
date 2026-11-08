@@ -90,10 +90,14 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       cycle for cycle against its emulation by `rfid_check.py`); app Read and `rfid read`
 - ☑ 125 kHz RFID emulate: a virtual reader clocks TIM2 (ETR), records CH3's PWM load →
       `devices/NAME/rfid-tx/`; captures replay as tags (any protocol the firmware has)
-- ☐ T5577 writes (carrier gaps on TIM1: a virtual T5577 that takes them and then
-      answers with the new data), RFID reader detection (TIM1 is a full timer now:
-      check `furi_hal_rfid_field_detect_*`), iButton 1-Wire / Cyfral / Metakom (the
-      COMP1 interrupt is modelled)
+- ☑ T5577 writes (2026-11-08): a virtual T5577 (`rfid t5577`) decodes the firmware's
+      writes from the gaps in TIM1's field and answers as block 0 says (Manchester,
+      bi-phase, diphase, direct, FSK, PSK; password and lock bits); all 24 protocols
+      write and verify (`rfid_check.py`; Radio Key through the app)
+- ☑ Field detection (2026-11-08): RFID (TIM2 counting the virtual reader's carrier,
+      TIM1 + DMA every 100 ms) and NFC (efd_o; `nfc --field on`); Momentum's NFC/RFID
+      detector shows both. Timer update DMA requests are now pulses (BRINGUP_LOG 39)
+- ☐ iButton 1-Wire / Cyfral / Metakom (the COMP1 interrupt is modelled)
 
 ## M6: research tooling ☐
 - ☐ Snapshot workflow (`savevm` on qcow2 images; boot once, jump straight to an app)

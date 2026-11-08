@@ -20,9 +20,9 @@ QEMU, so none has QEMU's speed, built-in GDB stub, snapshots or tracing plugins.
 ## Status
 
 Verified on 2026-11-08 with `scripts/smoke_test.py` (boot, SD mount, LCD, input, CLI over
-USB, IR receive and transmit, Sub-GHz receive and transmit, 125 kHz RFID read and
-emulate, NFC read (NTAG215, MIFARE Classic 1K) and emulate, USB/IP export, warm reboot, no
-crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed unlshd-094**.
+USB, IR receive and transmit, Sub-GHz receive and transmit, 125 kHz RFID read, emulate
+and T5577 write, NFC read (NTAG215, MIFARE Classic 1K) and emulate, USB/IP export, warm
+reboot, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed unlshd-094**.
 
 | | |
 |:-:|:-:|
@@ -67,6 +67,11 @@ crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed unlshd-094**.
 - 125 kHz RFID emulate: a virtual reader powers the emulated tag and records it to
   `devices/NAME/rfid-tx/`. The capture can go back in as a tag, so any protocol the
   firmware emulates can be read back.
+- 125 kHz RFID write: `./flipperemu rfid t5577` holds a blank T5577. The firmware's
+  Write (app or `rfid write`) programs it through the gaps in its field and verifies it,
+  and the T5577 then answers as the protocol it was written with.
+- Field detection: the virtual readers' 125 kHz and 13.56 MHz fields are what
+  `furi_hal_rfid`/`furi_hal_nfc` field detection sees (Momentum's NFC/RFID detector).
 - NFC read: `./flipperemu nfc card.nfc` holds a card to the Flipper (from a Flipper
   `.nfc` file, or a new one). It can be an NTAG21x, a MIFARE Ultralight or Ultralight
   EV1, or a MIFARE Classic Mini, 1K or 4K with real Crypto1 authentication and access
@@ -87,7 +92,7 @@ crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed unlshd-094**.
 **Not yet** (see [PLAN.md](PLAN.md))
 - qFlipper's firmware *update* includes a radio-stack stage that the emulated CPU2
   cannot install; use `./flipperemu run --update` for updates.
-- Bluetooth (needs a radio stack); iButton; writing T5577 tags.
+- Bluetooth (needs a radio stack); iButton.
 - NFC: Ultralight C, ISO14443-4 (DESFire, bank cards), ISO14443B, ISO15693 and FeliCa
   cards. When the Flipper emulates a MIFARE Classic, the virtual reader gets as far as
   its UID, ATQA and SAK: the Crypto1 answers go out through a bit-banged pin that the
@@ -146,6 +151,8 @@ are erased). Without `-f` it boots whatever is already flashed.
 | `ir PROTO ADDR CMD` \| `ir raw …` \| `ir FILE.ir [NAME]` | send an infrared signal to the device's receiver |
 | `subghz FILE.sub` \| `subghz princeton KEY` \| `subghz raw +H -L …` | put a Sub-GHz signal on the air (`--freq`) |
 | `rfid PROTO DATA` \| `rfid FILE.rfid` \| `rfid CAPTURE.txt` \| `rfid none` | hold a 125 kHz tag to the device (`--list`; no argument: show state) |
+| `rfid t5577 [BLOCK0 …]` | hold a writable T5577 (blank, or with these blocks); `rfid` shows its blocks |
+| `rfid --reader on\|off` \| `nfc --field on\|off` | a reader's field around the device (125 kHz: on by default) |
 | `nfc FILE.nfc` \| `nfc ntag215 UID [URL]` \| `nfc mfc1k UID` \| `nfc none` | hold an NFC card to the device |
 | `nfc --reader ntag` \| `nfc --reader scan` | hold an NFC reader to an emulating device and print what it reads |
 | `flash FW [--erase-all]` | program `.elf` / `.dfu` / `.bin` / update `.tgz` into `flash.img` |
@@ -178,7 +185,8 @@ It then tests each radio through the firmware's own CLI:
   decodes back;
 - Sub-GHz: a Princeton key on the virtual air is decoded, and a `subghz tx` capture keeps
   its timings;
-- 125 kHz RFID: an EM4100 tag is read, and an H10301 emulation reads back;
+- 125 kHz RFID: an EM4100 tag is read, an H10301 emulation reads back, and an H10301
+  is written to a virtual T5577;
 - NFC: an NTAG215 is read with `mfu info`, a MIFARE Classic 1K is dumped, and the virtual
   reader reads an emulated NTAG215.
 
@@ -355,9 +363,36 @@ records the load it switches. The recording is in carrier cycles, saved to
 `devices/NAME/rfid-tx/tx-NNNNN.txt` once the field goes quiet. Hold that capture to a
 reading Flipper with `./flipperemu rfid devices/NAME/rfid-tx/tx-00001.txt` and its
 reader decodes it. That works for any protocol your firmware can emulate, including ones
-`fe_rfid.py` has no encoder for. `scripts/rfid_check.py DEVICE` runs both directions for
-every protocol (the Python encoder against the firmware's emulation, and the Python tag
-through `rfid read`).
+`fe_rfid.py` has no encoder for.
+
+Writing needs a tag that can be written:
+
+```sh
+./flipperemu rfid t5577                        # a blank T5577 (factory configuration)
+# then on the Flipper: 125 kHz RFID -> Saved -> a key -> Write, or `rfid write H10301 2A1F7B`
+./flipperemu rfid                              # shows the T5577's blocks and configuration
+```
+
+The T5577 decodes the firmware's write commands from the gaps in the reader's field, as
+the real chip does. It stores the blocks, then answers in the modulation and bit rate
+that block 0 sets. The firmware's Write only reports success after reading the tag back
+and comparing it, so a "Success!" is a full round trip. A password-protected T5577 (block
+0's PWD bit, password in block 7) refuses writes without it, and every write and refusal
+is logged. `./flipperemu rfid t5577 BLOCK0 … BLOCK7` puts back a T5577 saved that way.
+
+`scripts/rfid_check.py DEVICE` runs three checks for every protocol: the Python encoder
+against the firmware's emulation, the Python tag through `rfid read`, and `rfid write`
+onto a blank T5577.
+
+| | |
+|:-:|:-:|
+| ![t5577 write](docs/img/17-t5577-write.png) | ![field detect](docs/img/18-field-detect.png) |
+| 125 kHz RFID → Saved → Write onto the virtual T5577, verified by the firmware | Momentum's NFC/RFID detector in the virtual readers' fields |
+
+The Flipper sits in a virtual reader's 125 kHz field by default. That field powers
+emulated tags, and field detection reads its frequency. `./flipperemu rfid --reader off`
+takes it away, and `./flipperemu nfc --field on|off` does the same for a 13.56 MHz
+reader's field.
 
 ### NFC
 

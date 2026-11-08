@@ -345,6 +345,33 @@ All three are small, self-contained, and suitable for sending upstream.
     answer is missing or garbled (a NAK is final). It also leaves 1 ms between an
     answer and the next command, instead of 0.5 ms.
 
+## 125 kHz RFID: writing and field detection (M5)
+
+38. **T5577 writes verified on the first run, all 24 protocols** (23 with `rfid write`;
+    Radio Key, whose name the CLI cuts at its space, through the app). The T5577's downlink
+    is the reader's own field. The firmware pauses TIM1's outputs for gaps and times
+    them with `furi_delay_us()`, and DWT->CYCCNT counts virtual time, so the gaps reach
+    the board model with exact timestamps. The uplink reuses the conventions of the
+    firmware's emulation encoders, which its T5577 write requests are made for. One
+    convention was the opposite of the first guess: FSK2a means "1 = RF/10", because
+    HID's encoder sends a 0 as 8-cycle periods and a 1 as 10. The EM4305 commands the
+    firmware sends after each T5577 write decode as an opcode 0x, which a real T5577
+    ignores too; logged block writes confirm they changed nothing.
+
+39. **The NFC/RFID detector app froze QEMU (the monitor stopped answering).** The main
+    thread ran at 100 % while the vCPU sat idle. gdb showed `tim_run_updates()` for
+    TIM1 replaying update events 35 s behind virtual time, each event inside
+    `dma_run()`. RFID field detection runs TIM1 at 1 kHz with two circular DMA channels
+    on TIM1_UP. Every 100 ms they copy TIM2's counter (the reader's carrier on ETR) to
+    RAM and clear it. They never touch TIM1, so the request line, held high during the
+    synchronous run, was never "acknowledged" by an access to the timer. `dma_ready()`
+    took the level as a request, and each update ran the 1M-beat guard. On silicon the
+    DMA acknowledges a timer's request with its first transfer. TIM1_UP and TIM2_UP are
+    now pulse requests: one beat per channel per edge (the latch).
+    - The same session found that screenshots could catch a half-written screen dump;
+      `fe_monitor.screenshot()` now waits for the dump's size to settle and the image
+      to decode.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

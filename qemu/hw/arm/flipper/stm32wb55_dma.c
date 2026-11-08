@@ -137,7 +137,19 @@ static bool dma_ready(WB55DmaState *s, int c)
     }
     req = s->muxccr[c] & 0x3F;
     return req != 0 && req < 64 &&
-           (((s->req >> req) & 1) || (s->latched & (1u << c)));
+           ((((s->req & ~s->pulse) >> req) & 1) || (s->latched & (1u << c)));
+}
+
+/*
+ * A timer's update request is an event.  On silicon the DMA acknowledges
+ * it with its first transfer, whatever that transfer touches; here a
+ * channel's latch is that one transfer.  Taken as a level, a circular
+ * channel that never touches the timer itself (RFID field detection: TIM1's
+ * update copies TIM2's counter to RAM) would run without end.
+ */
+void wb55_dma_set_pulse(WB55DmaState *s, int req)
+{
+    s->pulse |= 1ull << req;
 }
 
 static void dma_run(WB55DmaState *s)

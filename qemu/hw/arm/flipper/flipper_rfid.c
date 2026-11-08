@@ -28,6 +28,12 @@
  * emulation goes quiet; each capture is written to "tx-dir" (the launcher:
  * devices/NAME/rfid-tx/), and "tx" names the latest.
  *
+ * Writing (lib/lfrfid/tools/t5577.c): "t5577" puts a T5577 in the field
+ * instead of a fixed tag (qom-set /machine/rfid t5577 blank, or its blocks
+ * 0-7 as hex words).  The reader's gaps in its field are the T5577's
+ * downlink, so the firmware's writes land in its blocks, and the tag then
+ * answers as its block 0 says (t5577.c); "t5577" reads the blocks back.
+ *
  * Copyright (c) 2026, Kara Zajac
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -175,6 +181,62 @@ static void rfid_cap_read(Notifier *n, void *data)
     }
 }
 
+static void rfid_restart(FlipperRfidState *s);
+
+/* the T5577 in the field is the tag: its frame, from its blocks */
+static void rfid_t5_reload(FlipperRfidState *s)
+{
+    g_autofree int32_t *dur = g_new0(int32_t, RFID_MAX_EDGES);
+    bool psk = false;
+    int n = t5577_frame(s->t5, dur, RFID_MAX_EDGES, &psk);
+
+    if (n < 0) {
+        warn_report("flipper-zero: the T5577's configuration %08X makes a "
+                    "frame too long to model; it stays silent", s->t5->blk[0]);
+        n = 0;
+    }
+    g_free(s->tag);
+    s->tag = n ? g_steal_pointer(&dur) : NULL;
+    s->len = n;
+    s->psk = psk;
+    g_free(s->tag_str);
+    s->tag_str = g_strdup("t5577");
+    rfid_restart(s);
+}
+
+/* the field went on or off: to the T5577, a gap may be a bit */
+static void rfid_t5_field(FlipperRfidState *s, uint32_t field)
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t deadline;
+
+    if (!s->t5) {
+        return;
+    }
+    if (field) {
+        s->t5_tc_ns = NANOSECONDS_PER_SECOND / field;
+    }
+    if (t5577_field(s->t5, field != 0, now, s->t5_tc_ns)) {
+        rfid_t5_reload(s);
+    }
+    deadline = t5577_deadline(s->t5, s->t5_tc_ns);
+    if (deadline >= 0) {
+        timer_mod(s->t5_timer, deadline);
+    } else {
+        timer_del(s->t5_timer);
+    }
+}
+
+static void rfid_t5_timer(void *opaque)
+{
+    FlipperRfidState *s = opaque;
+
+    if (s->t5 && t5577_poll(s->t5, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
+                            s->t5_tc_ns)) {
+        rfid_t5_reload(s);
+    }
+}
+
 /* (re)start or stop the tag after a change of field or tag */
 static void rfid_restart(FlipperRfidState *s)
 {
@@ -202,6 +264,9 @@ void flipper_rfid_set_drive(FlipperRfidState *s, uint32_t drive_hz)
     } else if (drive_hz >= 50000 && drive_hz <= 75000) {
         field = 2 * drive_hz;           /* the tank rings at twice the drive */
         psk = true;
+    }
+    if (!field != !s->field_hz) {
+        rfid_t5_field(s, field);
     }
     if (field == s->field_hz && psk == s->psk_mode) {
         return;
@@ -280,7 +345,63 @@ static void rfid_set_tag(Object *obj, const char *value, Error **errp)
     s->tag_str = n ? g_strdup(value) : NULL;
     s->len = n;
     s->psk = psk;
+    g_free(s->t5);                      /* a fixed tag takes the T5577's place */
+    s->t5 = NULL;
+    timer_del(s->t5_timer);
     rfid_restart(s);
+}
+
+static char *rfid_get_t5577(Object *obj, Error **errp)
+{
+    FlipperRfidState *s = FLIPPER_RFID(obj);
+    GString *out;
+
+    if (!s->t5) {
+        return g_strdup("");
+    }
+    out = g_string_new(NULL);
+    for (int i = 0; i < 8; i++) {
+        g_string_append_printf(out, "%s%08X", i ? " " : "", s->t5->blk[i]);
+    }
+    if (s->t5->lock) {
+        g_string_append_printf(out, " lock=%02X", s->t5->lock);
+    }
+    return g_string_free(out, false);
+}
+
+static void rfid_set_t5577(Object *obj, const char *value, Error **errp)
+{
+    FlipperRfidState *s = FLIPPER_RFID(obj);
+    g_auto(GStrv) parts = g_strsplit_set(value, " ,;:\t", -1);
+    T5577 t;
+    int n = 0;
+
+    t5577_blank(&t);
+    if (!strcmp(value, "none")) {
+        rfid_set_tag(obj, "none", errp);    /* no tag at all */
+        return;
+    }
+    if (strcmp(value, "blank") && *value) {
+        for (int i = 0; parts[i]; i++) {
+            uint64_t v;
+
+            if (!*parts[i]) {
+                continue;
+            }
+            if (n == 8 || qemu_strtou64(parts[i], NULL, 16, &v) < 0 ||
+                v > UINT32_MAX) {
+                error_setg(errp, "t5577: blank, none, or up to 8 blocks as hex "
+                           "words (block 0 first), not '%s'", parts[i]);
+                return;
+            }
+            t.blk[n++] = v;
+        }
+    }
+    g_free(s->t5);
+    s->t5 = g_memdup2(&t, sizeof(t));
+    s->t5->on = s->field_hz != 0;
+    s->t5->since = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    rfid_t5_reload(s);
 }
 
 /* ---------------------------------------- emulation: the virtual reader */
@@ -463,6 +584,8 @@ static void rfid_init(Object *obj)
 
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, rfid_timer, s);
     s->tx_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, rfid_tx_timer, s);
+    s->t5_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, rfid_t5_timer, s);
+    s->t5_tc_ns = NANOSECONDS_PER_SECOND / FLIPPER_RFID_READER_HZ;
     s->cap_read.notify = rfid_cap_read;
     s->reader = true;
     object_property_add_bool(obj, "reader", rfid_get_reader, rfid_set_reader);
@@ -472,6 +595,11 @@ static void rfid_init(Object *obj)
     object_property_add_str(obj, "tx", rfid_get_tx, NULL);
     object_property_set_description(obj, "tx",
         "The latest emulation capture file");
+    object_property_add_str(obj, "t5577", rfid_get_t5577, rfid_set_t5577);
+    object_property_set_description(obj, "t5577",
+        "A T5577 in the field instead of a fixed tag, which the firmware can "
+        "write: \"blank\" (factory), or blocks 0-7 as hex words; reads back "
+        "the blocks (empty: no T5577)");
     object_property_add_str(obj, "tag", rfid_get_tag, rfid_set_tag);
     object_property_set_description(obj, "tag",
         "The tag in the field: what COMP1 sees, one frame of +high/-low µs "

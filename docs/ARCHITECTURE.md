@@ -278,6 +278,13 @@ request, each rising edge owes every one of them a beat, even after the first be
 made the peripheral drop the request. RFID emulation feeds TIM2 ARR and CCR3 from two
 channels on TIM2_UP, and the IR transmitter TIM1 RCR and CCMR2 from two on TIM1_UP.
 
+Timer update requests are also pulses: on silicon the DMA acknowledges one with its first
+transfer, whatever that transfer touches. So for TIM1_UP and TIM2_UP only that per-edge
+latch makes a channel ready, never the level of the line. RFID field detection shows why:
+TIM1's update copies TIM2's counter to RAM through two circular channels that never touch
+TIM1. Treated as a level, they beat a million times per update. QEMU's main loop then
+spent about a second on each 100 ms update and fell further behind for good.
+
 `furi_hal_infrared` uses exactly that for receiving. A falling edge (a mark starts) is
 captured into CCR2, and a rising edge into CCR1, which also resets the counter. CC3 is
 the end-of-signal timeout.
@@ -357,6 +364,35 @@ the antenna load (PA2, RFID_PULL). A virtual 125 kHz reader (`reader`, on by def
 puts the carrier on ETR and records CH3's edges in carrier cycles. After 100 ms without
 an edge it writes the capture to `devices/NAME/rfid-tx/tx-NNNNN.txt`.
 
+**Writing a T5577** (`t5577.c`). `rfid t5577` puts a T5577 in the field instead of a fixed
+tag. Its downlink is the reader's field itself: `t5577_write()` pauses TIM1's outputs
+(MOE) for gaps, timed with `furi_delay_us()` on DWT->CYCCNT, which counts virtual time.
+So the gaps reach `flipper_rfid_set_drive()` with exact virtual timestamps, and the tag
+decodes them as a T5577 does:
+- a start gap after enough field powers it up and opens a command;
+- each stretch of field between two gaps is a bit (24 field clocks a 0, 56 a 1);
+- a long stretch closes the command.
+
+The decoder accepts what the firmware sends (opcode, optional password, lock bit, 32 data
+bits, 3-bit address). Its windows are wide, because an emulated reader's gaps run long
+when the host is busy. The EM4305 command that follows each write starts with a 0 bit,
+which makes it an opcode 0x that a T5577 ignores. Password mode and lock bits are
+honoured.
+
+The tag then answers as block 0 says: blocks 1..MAXBLK, in Manchester, bi-phase,
+differential bi-phase, direct, FSK1/2(a) or PSK1/2/3, at RF/8–RF/128, or RF/(2n+2) in
+extended mode (Keri). The waveforms follow the firmware's encoders, which its T5577 write
+requests are made for: FSK as `fsk_osc`'s whole cycles, PSK1 on an RF/2 subcarrier.
+`rfid_check.py` writes every protocol the CLI can name, through the firmware's own
+write-and-verify. All 23 passed on the first run. Radio Key, whose name the CLI cuts at
+the space, passed through the app's Write: all 24 protocols write.
+
+**Field detection.** `furi_hal_rfid_field_detect_*` counts the reader's carrier on TIM2's
+ETR. TIM1 at 1 kHz copies the count to RAM every 100 ms by DMA and clears it. The virtual
+reader's carrier (`reader`, on by default) is that field, so the Flipper always sits on a
+125 kHz reader until `rfid --reader off`. Momentum's NFC/RFID detector app reads
+125.00 kHz.
+
 **Encoders.** `scripts/fe_rfid.py` ports the firmware's protocol encoders (`lib/lfrfid`)
 with a Python `bit_lib`. Their output is the emulation waveform, in carrier cycles. The
 comparator sees it unchanged for ASK and FSK (verified: the inverted Manchester does not
@@ -422,7 +458,9 @@ virtual reader (`qom-set /machine/nfc reader scan|ntag`) does the same:
 - what the firmware transmits (TRANSMIT_WITHOUT_CRC, with the CRC in the FIFO) is the
   answer.
 
-GOTO_SLEEP after a HLTA, and GOTO_SENSE, are tracked. The reader waits up to 100 ms for
+GOTO_SLEEP after a HLTA, and GOTO_SENSE, are tracked. The `field` property is a reader's
+field with no reader talking: it raises I_eon/I_eof and holds efd_o, which is all NFC
+field detection (`furi_hal_nfc_field_is_present`) reads. The reader waits up to 100 ms for
 an answer. It sends a command up to three times when the answer is missing or garbled
 (a NAK is final), and leaves 1 ms between an answer and its next command: an emulated
 CPU on a busy host can miss a command that comes right on its heels. At the end the
