@@ -19,8 +19,9 @@ QEMU, so none has QEMU's speed, built-in GDB stub, snapshots or tracing plugins.
 
 ## Status
 
-Verified on 2026-11-07 with `scripts/smoke_test.py` (headless boot, SD mount, LCD, input,
-CLI over USB, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed unlshd-094**.
+Verified on 2026-11-08 with `scripts/smoke_test.py` (boot, SD mount, LCD, input, CLI over
+USB, IR receive, Sub-GHz receive and transmit, warm reboot, no crash): **official 1.5.1**,
+**Momentum mntm-012**, **Unleashed unlshd-094**.
 
 | | |
 |:-:|:-:|
@@ -31,6 +32,18 @@ CLI over USB, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed 
 - Boots to the desktop: every `furi_hal` init, all services, the dolphin and the menus.
 - 128×64 ST7567 LCD with backlight, plus RGB LED, vibro and speaker indicators in the
   window.
+- Buttons from the keyboard, the QEMU monitor, or `./flipperemu press`.
+- microSD over SPI2 + DMA: card detect, mount, read, write. Settings land in
+  `/ext/.int`, dolphin animations load from the card, and `.fap` apps launch.
+- Persistent devices: the internal flash (`flash.img`) and the battery-backed state (fuel
+  gauge data memory and RTC backup domain, `nvram.bin`) survive restarts.
+- USART1 log console (`[I][Flipper] Startup complete`, …) on stdio, a file, a pty or TCP.
+- USB: the firmware enumerates on a built-in virtual host. Its USB serial port (the CLI
+  and the protobuf RPC) is bridged to a pty or socket, and `./flipperemu cli` talks to
+  it. When an app switches the port to HID (Bad USB, USB remote), the host plays the
+  PC and shows what the Flipper types.
+- Over-the-air updates through the firmware's own updater (`run --update`): /int backup,
+  updater in RAM, flash write and verify, resources and splash, then a normal boot.
 - Infrared receive: `./flipperemu ir NEC 0x04 0x08` points a virtual remote at the
   Flipper (14 protocols, raw timings, or signals from `.ir` files). The Infrared app's
   Learn screen and the `ir rx` CLI command decode it.
@@ -43,22 +56,12 @@ CLI over USB, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed 
   set as a custom preset, so a real Flipper can replay it.
 - Speaker: TIM16's PWM tone plays through QEMU audio (desktop sound or a WAV recording).
   The duty cycle sets the volume, as on the real piezo.
-- Buttons from the keyboard, the QEMU monitor, or `./flipperemu press`.
-- microSD over SPI2 + DMA: card detect, mount, read, write. Settings land in
-  `/ext/.int`, dolphin animations load from the card, and `.fap` apps launch.
-- Persistent devices: the internal flash (`flash.img`) and the battery-backed state (fuel
-  gauge data memory and RTC backup domain, `nvram.bin`) survive restarts.
-- USART1 log console (`[I][Flipper] Startup complete`, …) on stdio, a file, a pty or TCP.
-- Over-the-air updates through the firmware's own updater (`run --update`): /int backup,
-  updater in RAM, flash write and verify, resources and splash, then a normal boot.
-- USB: the firmware enumerates on a built-in virtual host. Its USB serial port (the CLI
-  and the protobuf RPC) is bridged to a pty or socket, and `./flipperemu cli` talks to
-  it. When an app switches the port to HID (Bad USB, USB remote), the host plays the
-  PC and shows what the Flipper types.
+- Power: STOP2 deep sleep (1–2 % of a host core when idle), fuel gauge and charger you can
+  set from the monitor, and a USB cable that carries VBUS.
 - CPU2 modelled as ST's FUS with no wireless stack. That's a real device state, and it
   keeps the crypto-enclave and BT paths healthy.
-- Sub-GHz CC1101 self-test passes (`Init OK`) and the NFC ST25R3916 initialises (chip ID,
-  oscillator, VDD measurement). Both are register-level only, with no RF.
+- The NFC ST25R3916 initialises (chip ID, oscillator, VDD measurement), at register
+  level only, with no field.
 - GDB stub with the release `.elf` symbols.
 
 **Not yet** (see [PLAN.md](PLAN.md))
