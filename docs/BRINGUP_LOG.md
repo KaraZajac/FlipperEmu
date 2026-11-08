@@ -298,6 +298,53 @@ All three are small, self-contained, and suitable for sending upstream.
     Classic check writes the NFC app's key cache (`/ext/nfc/.cache/UID.keys`) over the
     CLI so that `dump` can authenticate every sector without the GUI.
 
+35. **Card emulation: the chip does the anticollision.** When the Flipper emulates a
+    card, the firmware loads the ST25R3916's passive-target memory (UID, ATQA, a SAK
+    per cascade level) and sets target mode. The real chip then answers REQA,
+    anticollision and select in hardware and raises only I_wu_a. So the virtual reader
+    does the same from that memory, then puts each command in the FIFO behind
+    I_rxs/I_rxe and takes whatever the firmware TRANSMITs as the answer. The official
+    firmware's NTAG215 emulation read back identically: UID, version, signature, all
+    135 pages and the counter. `--reader scan` also activates a MIFARE Classic
+    emulation. Classic's encrypted answers go out by transparent mode on a bit-banged
+    pin, which is not decoded.
+
+36. **Unleashed crashed in USB_LP during the NFC checks: `furi_check failed`.** The
+    crash LR (0x0808c859) pointed at Unleashed's `cli_vcp_signal_internal_event()`:
+    `furi_check(furi_message_queue_put(queue, &event, 0) == FuriStatusOk)`, with r0 =
+    FuriStatusErrorResource, a full queue. The CLI's CDC service queues one event per
+    completed packet in an 8-entry queue and takes one per pass. Its thread also
+    re-arms the endpoints from the pipe callbacks.
+    - A trace of every transaction, written to stderr, hid the race. A ring buffer
+      dumped when the firmware dropped off the bus caught it. The crash came during
+      the 1.2 KB `storage write_chunk` upload of the key cache. Every OUT packet was
+      read at once, but by the "space freed" callback, so the queued Rx events piled
+      up behind the reads. The ninth Rx event (r5 = 5, `usbd_evt_eprx`; r6 = 1, the
+      CDC OUT endpoint) crashed it.
+    - The host was answering 20 µs after each re-arm, while the emulated firmware took
+      150–700 µs from interrupt to re-arm. The PC was under heavy IO pressure. On a
+      real STM32 that is a few microseconds against a 51 µs packet.
+    - Same code in official 1.5.1 (`cli_vcp.c`, pipe, event loop), so this is not an
+      Unleashed bug; Unleashed's timing just hit it. A full queue in the ISR is a crash
+      rather than a lost wakeup, so a slow consumer takes the device down.
+    - The fix is in the host. Bulk transactions now take full-speed bus time. The host
+      also waits twice the firmware's measured turnaround (a packet's completion to the
+      CPU re-arming that endpoint) after each re-arm (ARCHITECTURE.md, USB).
+    - Unleashed then ran 3/3 clean. On the loaded host, CLI transfers dropped from 65 to
+      30 KiB/s; the firmware itself needed ~1 ms per packet there.
+    - The first version paced the HID interrupt endpoint too, and Bad USB typed "Hlo"
+      for "Hello". `hid_send_report()` waits only `HID_INTERVAL * 2` ms for the previous
+      report, then drops the next one. Interrupt endpoints keep plain bInterval polling.
+    - The smoke test had sent QEMU's output into a pipe it never read; a full pipe
+      would stall QEMU. The output now goes to `qemu.log` in the device directory, and
+      `--keep` keeps that directory.
+
+37. **The virtual NFC reader gave up after one silence.** On the same busy host, the
+    reader sometimes read 120 or 128 of 135 pages: one READ unanswered within 20 ms
+    ended the read. It now waits 100 ms and sends a command up to three times when the
+    answer is missing or garbled (a NAK is final). It also leaves 1 ms between an
+    answer and the next command, instead of 0.5 ms.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

@@ -141,6 +141,23 @@ struct St25r3916State {
     bool field_on;
     NfcCard *card;
     char *card_str;
+    /* listen mode: a virtual reader in front of the emulating Flipper */
+    QEMUTimer *rd_timer;
+    char *rd_prog;               /* "scan", "ntag" while a session runs */
+    int rd_step, rd_tries, rd_sent;
+    bool rd_field;               /* its field is on */
+    bool rd_waiting;             /* a command is out, the answer due */
+    bool pt_sleep;               /* passive-target logic in SLEEP (HLTA) */
+    uint8_t rd_ans[NFC_AIR_MAX]; /* the Flipper's answer, as bytes */
+    int rd_ans_bits;             /* -1: none */
+    uint8_t rd_uid[10], rd_atqa[2], rd_sak;
+    int rd_uid_len;
+    bool rd_has_version, rd_has_sig, rd_has_cnt;
+    uint8_t rd_version[8], rd_sig[32], rd_cnt[3];
+    uint8_t rd_mem[256 * 4];
+    int rd_pages, rd_pages_read;
+    char *tx_dir;                /* the reader's results go here as .nfc */
+    char *tx_last;
 };
 /* ISO14443A helpers (st25r3916.c): CRC_A, bytes <-> air bits with parity */
 uint16_t nfc_crc_a(const uint8_t *d, int n);

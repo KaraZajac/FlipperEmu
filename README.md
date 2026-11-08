@@ -21,8 +21,8 @@ QEMU, so none has QEMU's speed, built-in GDB stub, snapshots or tracing plugins.
 
 Verified on 2026-11-08 with `scripts/smoke_test.py` (boot, SD mount, LCD, input, CLI over
 USB, IR receive and transmit, Sub-GHz receive and transmit, 125 kHz RFID read and
-emulate, NFC read, USB/IP export, warm reboot, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed
-unlshd-094**.
+emulate, NFC read (NTAG215, MIFARE Classic 1K) and emulate, USB/IP export, warm reboot, no
+crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed unlshd-094**.
 
 | | |
 |:-:|:-:|
@@ -73,6 +73,9 @@ unlshd-094**.
   conditions. The ST25R3916 is modelled frame by frame, so the NFC app's Read
   (dictionary attack included), NDEF parsing, `nfc scanner`, `mfu info` and `dump` all
   work against it.
+- NFC emulate: `./flipperemu nfc --reader ntag` holds a virtual reader to a Flipper
+  that is emulating a card, reads it like a phone reads an NTAG, and saves what it read
+  to `devices/NAME/nfc-tx/` as a `.nfc` file.
 - Speaker: TIM16's PWM tone plays through QEMU audio (desktop sound or a WAV recording).
   The duty cycle sets the volume, as on the real piezo.
 - Power: STOP2 deep sleep (1–2 % of a host core when idle), fuel gauge and charger you can
@@ -86,7 +89,9 @@ unlshd-094**.
   cannot install; use `./flipperemu run --update` for updates.
 - Bluetooth (needs a radio stack); iButton; writing T5577 tags.
 - NFC: Ultralight C, ISO14443-4 (DESFire, bank cards), ISO14443B, ISO15693 and FeliCa
-  cards, and the Flipper emulating a card.
+  cards. When the Flipper emulates a MIFARE Classic, the virtual reader gets as far as
+  its UID, ATQA and SAK: the Crypto1 answers go out through a bit-banged pin that the
+  model does not decode.
 - LP5562 engine programs are approximated (steady-state brightness only).
 - Not yet exercised: XIP app loaders that run code from internal flash, and the
   radio-stack stage of updates (the emulated CPU2 can't install a stack).
@@ -142,6 +147,7 @@ are erased). Without `-f` it boots whatever is already flashed.
 | `subghz FILE.sub` \| `subghz princeton KEY` \| `subghz raw +H -L …` | put a Sub-GHz signal on the air (`--freq`) |
 | `rfid PROTO DATA` \| `rfid FILE.rfid` \| `rfid CAPTURE.txt` \| `rfid none` | hold a 125 kHz tag to the device (`--list`; no argument: show state) |
 | `nfc FILE.nfc` \| `nfc ntag215 UID [URL]` \| `nfc mfc1k UID` \| `nfc none` | hold an NFC card to the device |
+| `nfc --reader ntag` \| `nfc --reader scan` | hold an NFC reader to an emulating device and print what it reads |
 | `flash FW [--erase-all]` | program `.elf` / `.dfu` / `.bin` / update `.tgz` into `flash.img` |
 | `sd [--resources X] [--size 512M]` | rebuild the microSD from a resources tgz, update package or folder |
 | `press ok down down ok …` | press buttons on a running device |
@@ -159,14 +165,27 @@ passed straight to QEMU, e.g. `-- -icount shift=auto` for deterministic timing, 
 ### Smoke-testing a build
 
 ```sh
-scripts/smoke_test.py path/to/firmware.elf|.dfu|update.tgz [--no-sd]
+scripts/smoke_test.py path/to/firmware.elf|.dfu|update.tgz [--no-sd] [--keep] [-- QEMU-ARGS]
 ```
 
-Boots a throwaway device headless and checks: "Startup complete", "card mounted", the
-LCD draws, OK changes the screen, `info device` answers on the USB CLI, an NEC frame from the
-virtual IR remote and a Princeton key over the virtual air are decoded, the LCD comes back
-after `power reboot`, and no `[CRASH]` in the log. Exit code 0 means pass, so
-it slots into a pre-flash habit or CI.
+Boots a throwaway device headless and checks that:
+- the firmware reports "Startup complete" and "card mounted";
+- the LCD draws, and OK changes the screen;
+- `info device` answers on the USB CLI.
+
+It then tests each radio through the firmware's own CLI:
+- infrared: an NEC frame from the virtual remote is decoded, and an `ir tx` capture
+  decodes back;
+- Sub-GHz: a Princeton key on the virtual air is decoded, and a `subghz tx` capture keeps
+  its timings;
+- 125 kHz RFID: an EM4100 tag is read, and an H10301 emulation reads back;
+- NFC: an NTAG215 is read with `mfu info`, a MIFARE Classic 1K is dumped, and the virtual
+  reader reads an emulated NTAG215.
+
+Finally, a USB/IP client enumerates the device, the LCD comes back after `power reboot`,
+and the log must have no `[CRASH]`. Exit code 0 means pass, so it slots into a
+pre-flash habit or CI. `--keep` keeps the device directory (`uart.log`, `qemu.log`, the
+captures) to look at afterwards.
 
 ### qFlipper, lab.flipper.net and other PC tools (USB/IP)
 
@@ -369,6 +388,29 @@ dump, blocks that were never read are zeros, and unknown keys are FF FF FF FF FF
 
 So far: NTAG213/215/216, MIFARE Ultralight and Ultralight EV1 (Type 2), MIFARE
 Classic Mini/1K/4K. Other card families are next.
+
+Emulation goes the other way, as with 125 kHz RFID. Start the Flipper emulating a card
+(NFC → Saved → a card → Emulate, or `emulate -f /ext/nfc/tag.nfc` in the `nfc` shell),
+then hold a reader to it:
+
+```sh
+./flipperemu nfc --reader ntag     # read it like a phone reads an NTAG
+./flipperemu nfc --reader scan     # only activate it: UID, ATQA and SAK
+```
+
+The reader's field wakes the emulation. The ST25R3916 runs anticollision and select by
+itself from what the firmware loaded into its passive-target memory, as the real chip
+does. After that, each reader command reaches the firmware through the FIFO, and what
+the firmware transmits is the answer. `ntag` asks for the version, the signature, every
+page and the NFC counter. What the reader read is printed and saved to
+`devices/NAME/nfc-tx/read-NNNNN.nfc`, a Flipper `.nfc` file; an `ntag` read can go back
+in as a card with `./flipperemu nfc`. To make a file for the Flipper to emulate:
+
+```sh
+scripts/fe_nfc.py --nfc-file --ntag215 04A1B2C3D4E5F6 https://flipperzero.one > tag.nfc
+```
+
+Or read a virtual card with NFC → Read and save it on the Flipper.
 
 ### Sound
 

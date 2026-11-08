@@ -452,6 +452,10 @@ struct WB55UsbState {
     uint16_t cntr, istr, istr_seen, daddr, btable, lpmcsr, bcdr;
     uint8_t pma[1024];
     int64_t frame_base_ns;
+    int64_t ep_armed[8];         /* the CPU last (re)armed EPn, or it last moved data */
+    int64_t ep_done[8];          /* EPn's last transaction, until the CPU re-arms it */
+    int64_t bus_last;            /* the last bulk/interrupt transaction */
+    int64_t turn_ns;             /* the firmware's turnaround, averaged */
 
     /* built-in host */
     CharFrontend chr;            /* CDC ACM data <-> this chardev */

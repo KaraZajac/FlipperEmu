@@ -13,7 +13,8 @@ NEC frame through the virtual IR receiver (`ir rx`), captures an `ir tx` and
 decodes it back, receives a Princeton key over the virtual air (`subghz rx`),
 captures a `subghz tx`, reads a 125 kHz EM4100
 tag (`rfid read`) and reads back its own H10301 emulation (`rfid emulate`),
-reads an NTAG215 (`mfu info`) and dumps a MIFARE Classic 1K over NFC,
+reads an NTAG215 (`mfu info`) and dumps a MIFARE Classic 1K over NFC, has a
+virtual reader read an NTAG215 the firmware emulates,
 enumerates over USB/IP, then reboots through the CLI and checks the LCD comes
 back after the warm reset.
 Exit status 0 = pass. Screenshots are kept in the --out directory.
@@ -331,6 +332,7 @@ def mfc_check(mon: Monitor, devdir: pathlib.Path):
         try:
             cli.read_until_prompt(15)
             cli.run("storage mkdir /ext/nfc/.cache", timeout=5)
+            cli.run(f"storage remove /ext/nfc/.cache/{uid.hex().upper()}.keys", timeout=5)
             cli.write(f"storage write_chunk /ext/nfc/.cache/{uid.hex().upper()}.keys "
                       f"{len(keys)}\r".encode())
             time.sleep(0.5)
@@ -356,6 +358,56 @@ def mfc_check(mon: Monitor, devdir: pathlib.Path):
         return False
     return ("Block 63: FF FF FF FF FF FF FF 07 80 69 FF FF FF FF FF FF" in text and
             "Block 0: 11 22 33 44 44 08 04 00" in text)
+
+
+def nfc_emulate_check(mon: Monitor):
+    """`emulate -f` an NTAG215 (with an NDEF URL) in the NFC shell, then a
+    virtual reader reads it: all 135 pages must come back.  None (skip)
+    without the NFC shell."""
+    import fe_nfc
+    uid = bytes.fromhex("04A1B2C3D4E5F6")
+    nfc = fe_nfc.nfc_file(fe_nfc.blank("ntag215", uid, "https://flipperzero.one"))
+    want = [l for l in nfc.splitlines() if l.startswith("Page ")]
+    try:
+        cli = FlipperCli(usb_endpoint(mon))
+        try:
+            cli.read_until_prompt(15)
+            cli.run("storage remove /ext/nfc/emu.nfc", timeout=5)   # write_chunk appends
+            cli.write(f"storage write_chunk /ext/nfc/emu.nfc {len(nfc)}\r".encode())
+            time.sleep(0.5)
+            cli.write(nfc.encode())
+            cli.read_until_prompt(5)
+            found, _ = cli.watch("nfc", r"\[nfc\]>: ", timeout=8, stop=False)
+            if not found:
+                cli.write(b"\x03")
+                return None
+            found, _ = cli.watch("emulate -f /ext/nfc/emu.nfc", r"Emulating",
+                                 timeout=8, stop=False)
+            if not found:
+                return False
+            before = mon.cmd("qom-get /machine/nfc tx").strip().strip('"')
+            mon.cmd("qom-set /machine/nfc reader ntag")
+            for _ in range(100):
+                time.sleep(0.1)
+                if not mon.cmd("qom-get /machine/nfc reader").strip().strip('"'):
+                    break
+            path = mon.cmd("qom-get /machine/nfc tx").strip().strip('"')
+            cli.write(b"\x03")
+            time.sleep(0.3)
+            cli.read_until_prompt(5)
+            cli.run("exit", timeout=5)
+        finally:
+            cli.close()
+    except (OSError, TimeoutError, ConnectionError, TypeError) as e:
+        print(f"  nfc emulate: {e}")
+        return False
+    if not path or path == before:
+        print("  nfc emulate: the reader read nothing")
+        return False
+    got = [l for l in pathlib.Path(path).read_text().splitlines() if l.startswith("Page ")]
+    if got != want:
+        print(f"  nfc emulate: {len(got)} pages read, {len(want)} expected ({path})")
+    return got == want
 
 
 def usbip_check(port: int) -> bool:
@@ -415,6 +467,9 @@ def main() -> int:
     ap.add_argument("--no-usb", action="store_true", help="skip the USB CLI check")
     ap.add_argument("--timeout", type=float, default=30)
     ap.add_argument("--out", default=None, help="keep screenshots here")
+    ap.add_argument("--keep", action="store_true",
+                    help="keep the device directory (UART and QEMU logs)")
+    ap.add_argument("qemu_args", nargs="*", help="extra QEMU arguments after --")
     args = ap.parse_args()
 
     name = f"smoke-{int(time.time())}"
@@ -435,8 +490,13 @@ def main() -> int:
             usbip_port = probe.getsockname()[1]
         cmd += ["--usbip", str(usbip_port)]
 
+    if args.qemu_args:
+        cmd += ["--", *args.qemu_args]
+
     results = []
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    devdir.mkdir(parents=True, exist_ok=True)
+    qemu_log = open(devdir / "qemu.log", "wb")     # a pipe nobody reads fills up
+    proc = subprocess.Popen(cmd, stdout=qemu_log, stderr=subprocess.STDOUT)
     try:
         ok = wait_for(uart, r"Startup complete", args.timeout)
         results.append(("boot: 'Startup complete'", ok))
@@ -479,6 +539,8 @@ def main() -> int:
                                 nfc_check(mon, devdir)))
                 results.append(("nfc: MIFARE Classic 1K dumped (Crypto1, 16 sectors)",
                                 mfc_check(mon, devdir)))
+                results.append(("nfc: emulated NTAG215 read by a virtual reader",
+                                nfc_emulate_check(mon)))
                 results.append(("usbip: enumerated by a USB/IP client, CLI over URBs",
                                 usbip_check(usbip_port)))
                 results.append(("reboot: LCD redrawn after a warm reset",
@@ -491,12 +553,16 @@ def main() -> int:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
-        shutil.rmtree(devdir, ignore_errors=True)
+        qemu_log.close()
+        if not args.keep:
+            shutil.rmtree(devdir, ignore_errors=True)
 
     width = max(len(r[0]) for r in results)
     for label, ok in results:
         print(f"  {'SKIP' if ok is None else 'PASS' if ok else 'FAIL'}  {label:{width}}")
     print(f"  screenshots: {out}")
+    if args.keep:
+        print(f"  device:      {devdir}")
     return 0 if all(ok is not False for _, ok in results) else 1
 
 

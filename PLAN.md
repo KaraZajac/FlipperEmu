@@ -32,6 +32,9 @@ qFlipper / lab.flipper.net / `ufbt launch` only run over USB CDC.
 - ☑ USB/IP export (`--usbip`, `sudo scripts/usbip_attach.py`): the PC's kernel attaches
       the emulated Flipper as a real USB device for qFlipper & co. Verified with a
       kernel-role client; real-kernel/qFlipper run pending
+- ☑ Bus time (2026-11-08): bulk transactions take full-speed bus time and wait for the
+      firmware's measured turnaround, so a slow emulated CPU can't overflow the CLI's
+      CDC event queue (`furi_check` in USB_LP; BRINGUP_LOG 36)
 - ☐ A minimal BLE stack on CPU2, so qFlipper's updates (radio stage) and the BT service work
 - ☐ Stretch: second CDC port of the dual-CDC mode; mass storage
 
@@ -76,8 +79,12 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       NTAG21x / Ultralight / Ultralight EV1 ☑ (app Read with NDEF, `mfu info`, `dump`);
       MIFARE Classic Mini/1K/4K ☑ (Crypto1 from the paper, nested auth, access bits;
       the app's dictionary attack, `dump` from the key cache).
+      Card emulation ☑ (2026-11-08): a virtual reader in front of the emulating Flipper
+      (`nfc --reader scan|ntag`; target mode, passive-target memory, I_wu_a); an NTAG
+      reads back page for page → `devices/NAME/nfc-tx/*.nfc`. Classic emulation's
+      transparent-mode answers are not decoded yet.
       Next: Ultralight C (3DES), ISO14443-4 (DESFire, EMV), ISO14443B, ISO15693/SLIX,
-      FeliCa; card emulation (a virtual reader)
+      FeliCa; decode transparent mode (Classic emulation)
 - ☑ 125 kHz RFID read: COMP1 → TIM2 TI4 capture, a virtual tag in the reader's field
       (ASK/FSK/PSK, field noise), encoders ported from the firmware (`fe_rfid.py`, checked
       cycle for cycle against its emulation by `rfid_check.py`); app Read and `rfid read`

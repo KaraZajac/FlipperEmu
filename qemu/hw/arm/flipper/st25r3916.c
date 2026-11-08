@@ -24,6 +24,19 @@
  * The card: qom-set /machine/nfc card file:PATH (scripts/fe_nfc.py writes
  * PATH from a Flipper .nfc file), "none" to take it away.
  *
+ * Listening (the firmware emulates a card): a virtual reader can be put in
+ * front of the Flipper (qom-set /machine/nfc reader scan|ntag).  Its field
+ * raises I_eon; then, as the real chip does on its own from the passive-
+ * target memory the firmware loaded (UID, ATQA, SAK per cascade level),
+ * anticollision and select complete and I_wu_a fires.  After that every
+ * reader command arrives in the FIFO with I_rxs/I_rxe, and what the
+ * firmware TRANSMITs is the answer.  "ntag" reads a Type 2 tag (version,
+ * signature, every page, the NFC counter).  When done the field goes off
+ * (I_eof) and what the reader saw is written as a Flipper .nfc file to
+ * "tx-dir" (the launcher: devices/NAME/nfc-tx/); "tx" names the latest.
+ * (Custom-parity answers, MIFARE Classic's, go out by transparent mode on
+ * a bit-banged pin, which this does not decode.)
+ *
  * Copyright (c) 2026, Kara Zajac
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -32,6 +45,7 @@
 #include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "flipper.h"
 
 #define REG_IO_CONF1      0x00
@@ -67,6 +81,10 @@
 #define I_TXE  0, 0x08
 #define I_DCT  1, 0x80
 #define I_NRE  1, 0x40
+#define I_EON  1, 0x10
+#define I_EOF  1, 0x08
+#define I_WU_A 3, 0x01
+#define MODE_TARG 0x80
 #define I_CRC  2, 0x80
 #define I_PAR  2, 0x40
 
@@ -230,6 +248,10 @@ static void st25_tx_end(St25r3916State *s, int64_t now)
 {
     st25_raise(s, I_TXE);
     s->nrx = 0;
+    if (s->rega[REG_MODE] & MODE_TARG) {
+        s->stage = STAGE_IDLE;          /* the virtual reader has it already */
+        return;
+    }
     if (s->card && s->field_on && (s->rega[REG_OP_CONTROL] & OP_RX_EN)) {
         s->nrx = nfc_card_rx(s->card, s->tx, s->ntx, s->rx);
     }
@@ -276,6 +298,8 @@ static void st25_timer(void *opaque)
     }
 }
 
+static void st25_rd_answer(St25r3916State *s);
+
 /* TRANSMIT_*: build the frame on the air, end it after its own duration */
 static void st25_transmit(St25r3916State *s, uint8_t cmd)
 {
@@ -313,6 +337,9 @@ static void st25_transmit(St25r3916State *s, uint8_t cmd)
     s->stage = STAGE_TX;
     timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
                         (int64_t)(s->ntx + 2) * BIT_NS);
+    if (s->rega[REG_MODE] & MODE_TARG) {
+        st25_rd_answer(s);              /* listening: this answers the reader */
+    }
 }
 
 /* ------------------------------------------------------------ registers */
@@ -352,7 +379,8 @@ static uint8_t st25_read_reg(St25r3916State *s, uint8_t a, bool b)
         return (((s->fifo_len - s->fifo_rd) >> 8) & 3) << 6 | (s->fifo_lb & 7) << 1;
     case REG_AUX_DISPLAY:
         return ((s->rega[REG_OP_CONTROL] & OP_EN) ? 0x10 : 0) |      /* osc_ok */
-               (st25_field(s) ? 0x20 : 0);                          /* tx_on */
+               (st25_field(s) ? 0x20 : 0) |                         /* tx_on */
+               (s->rd_field ? 0x40 : 0);                            /* efd_o */
     }
     return s->rega[a & 0x3F];
 }
@@ -406,6 +434,12 @@ static void st25_direct(St25r3916State *s, uint8_t cmd)
     case 0xC4: case 0xC5: case 0xC6: case 0xC7:     /* TRANSMIT_* */
         st25_transmit(s, cmd);
         break;
+    case 0xCD:                          /* GOTO_SENSE */
+        s->pt_sleep = false;
+        break;
+    case 0xCE:                          /* GOTO_SLEEP (after HLTA) */
+        s->pt_sleep = true;
+        break;
     case 0xE8:                          /* STOP_NRT */
         if (s->stage == STAGE_NRT) {
             st25_stop(s);
@@ -422,6 +456,311 @@ static void st25_direct(St25r3916State *s, uint8_t cmd)
     default:
         break;
     }
+}
+
+/* ---------------------------------------------- listen: virtual reader */
+
+enum { RD_FIELD_ON, RD_ACTIVATE, RD_VERSION, RD_SIG, RD_PAGES, RD_COUNTER,
+       RD_HALT, RD_FIELD_OFF };
+#define RD_ANSWER_NS (100 * SCALE_MS)   /* no answer by then: none */
+#define RD_GAP_NS    (1 * SCALE_MS)     /* an answer to the next command */
+#define RD_TRIES     3                  /* sends of one command, at most */
+
+/* a reader command reaches the firmware: into the FIFO, RXS then RXE */
+static void st25_rd_send(St25r3916State *s, const uint8_t *cmd, int n)
+{
+    uint16_t crc = nfc_crc_a(cmd, n);
+
+    st25_fifo_clear(s);
+    memcpy(s->fifo, cmd, n);
+    s->fifo[n] = crc & 0xFF;
+    s->fifo[n + 1] = crc >> 8;
+    s->fifo_len = n + 2;
+    s->rd_ans_bits = -1;
+    s->rd_waiting = true;
+    st25_raise(s, I_RXS);
+    st25_raise(s, I_RXE);
+    timer_mod(s->rd_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + RD_ANSWER_NS);
+}
+
+/* the firmware transmitted: that is the answer to the reader's command */
+static void st25_rd_answer(St25r3916State *s)
+{
+    bool ok;
+
+    if (!s->rd_waiting) {
+        return;
+    }
+    s->rd_ans_bits = nfc_air_decode(s->tx, s->ntx, s->rd_ans, &ok);
+    s->rd_waiting = false;
+    timer_mod(s->rd_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                           (int64_t)(s->ntx + 2) * BIT_NS + RD_GAP_NS);
+}
+
+/* an answer of n data bytes plus a good CRC_A? */
+static bool rd_ok(St25r3916State *s, int n)
+{
+    return s->rd_ans_bits == (n + 2) * 8 && nfc_crc_a(s->rd_ans, n + 2) == 0;
+}
+
+/*
+ * The reader's current command: sent, and sent again after no answer or a
+ * garbled one, as readers retry (RD_TRIES sends in all).  True while its
+ * answer is awaited; false once an answer is in (a NAK too) or the tries
+ * are spent, and rd_ok() then tells whether it is the one wanted.  An
+ * emulated CPU on a busy host can be late, or miss a command that came too
+ * soon after its last answer; a real one is not.
+ */
+static bool rd_ask(St25r3916State *s, const uint8_t *cmd, int n, int want)
+{
+    if (rd_ok(s, want) || s->rd_ans_bits == 4 || s->rd_sent >= RD_TRIES) {
+        s->rd_sent = 0;
+        return false;
+    }
+    s->rd_sent++;
+    st25_rd_send(s, cmd, n);
+    return true;
+}
+
+/* on to the next step, a moment after the last answer */
+static void rd_next(St25r3916State *s, int step, int64_t now)
+{
+    s->rd_ans_bits = -1;
+    s->rd_step = step;
+    timer_mod(s->rd_timer, now + RD_GAP_NS);
+}
+
+static void hex_line(GString *f, const uint8_t *b, int n)
+{
+    for (int i = 0; i < n; i++) {
+        g_string_append_printf(f, "%s%02X", i ? " " : "", b[i]);
+    }
+    g_string_append_c(f, '\n');
+}
+
+static void st25_rd_write(St25r3916State *s)
+{
+    static const struct { uint8_t size; int pages; const char *name; } t2[] = {
+        { 0x0B, 20, "Mifare Ultralight 11" }, { 0x0E, 41, "Mifare Ultralight 21" },
+        { 0x0F, 45, "NTAG213" }, { 0x11, 135, "NTAG215" }, { 0x13, 231, "NTAG216" },
+    };
+    g_autoptr(GString) f = g_string_new("Filetype: Flipper NFC device\nVersion: 4\n");
+    g_autoptr(GError) err = NULL;
+    g_autofree char *path = NULL;
+    const char *type = "Mifare Ultralight";
+
+    if (!s->tx_dir || !s->rd_uid_len) {
+        return;
+    }
+    for (int i = 0; i < ARRAY_SIZE(t2) && s->rd_has_version; i++) {
+        if (s->rd_version[6] == t2[i].size) {
+            type = t2[i].name;
+        }
+    }
+    if (!strcmp(s->rd_prog, "ntag")) {
+        g_string_append(f, "Device type: NTAG/Ultralight\nUID: ");
+    } else {
+        g_string_append(f, "Device type: ISO14443-3A\nUID: ");
+    }
+    hex_line(f, s->rd_uid, s->rd_uid_len);
+    g_string_append_printf(f, "ATQA: %02X %02X\nSAK: %02X\n", s->rd_atqa[1],
+                           s->rd_atqa[0], s->rd_sak);   /* v4: ATQA MSB first */
+    if (!strcmp(s->rd_prog, "ntag")) {
+        g_string_append_printf(f, "Data format version: 2\nNTAG/Ultralight type: %s\n",
+                               type);
+        g_string_append(f, "Signature: ");
+        hex_line(f, s->rd_sig, 32);
+        g_string_append(f, "Mifare version: ");
+        hex_line(f, s->rd_version, 8);
+        for (int i = 0; i < 3; i++) {
+            g_string_append_printf(f, "Counter %d: %u\nTearing %d: 00\n", i,
+                                   i == 2 && s->rd_has_cnt ?
+                                   s->rd_cnt[0] | s->rd_cnt[1] << 8 |
+                                   s->rd_cnt[2] << 16 : 0, i);
+        }
+        g_string_append_printf(f, "Pages total: %d\nPages read: %d\n",
+                               MAX(s->rd_pages, s->rd_pages_read), s->rd_pages_read);
+        for (int p = 0; p < s->rd_pages_read; p++) {
+            g_string_append_printf(f, "Page %d: ", p);
+            hex_line(f, &s->rd_mem[p * 4], 4);
+        }
+        g_string_append(f, "Failed authentication attempts: 0\n");
+    }
+    g_mkdir_with_parents(s->tx_dir, 0755);
+    for (int k = 1; k < 100000; k++) {
+        g_free(path);
+        path = g_strdup_printf("%s/read-%05d.nfc", s->tx_dir, k);
+        if (!g_file_test(path, G_FILE_TEST_EXISTS)) {
+            break;
+        }
+    }
+    if (g_file_set_contents(path, f->str, f->len, &err)) {
+        info_report("flipper-zero: NFC reader read the emulated card -> %s", path);
+        g_free(s->tx_last);
+        s->tx_last = g_steal_pointer(&path);
+    } else {
+        warn_report("flipper-zero: %s", err->message);
+    }
+}
+
+/* the reader's program, one step per timer tick */
+static void st25_rd_timer(void *opaque)
+{
+    St25r3916State *s = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    bool ntag = s->rd_prog && !strcmp(s->rd_prog, "ntag");
+    uint8_t cmd[4];
+
+    if (!s->rd_prog) {
+        return;
+    }
+    if (s->rd_waiting) {                /* timed out: no answer */
+        s->rd_waiting = false;
+        s->rd_ans_bits = -1;
+    }
+    switch (s->rd_step) {
+    case RD_FIELD_ON:
+        s->rd_field = true;
+        st25_raise(s, I_EON);
+        s->rd_step = RD_ACTIVATE;
+        s->rd_tries = 0;
+        timer_mod(s->rd_timer, now + 5 * SCALE_MS);
+        return;
+    case RD_ACTIVATE: {
+        /* what the chip answers by itself from the passive-target memory */
+        bool listening = (s->rega[REG_MODE] & MODE_TARG) &&
+                         (s->rega[REG_OP_CONTROL] & OP_EN) && !s->pt_sleep;
+
+        if (!listening) {
+            if (++s->rd_tries < 40) {   /* the firmware may start late: 4 s */
+                timer_mod(s->rd_timer, now + 100 * SCALE_MS);
+                return;
+            }
+            s->rd_step = RD_FIELD_OFF;
+            break;
+        }
+        s->rd_uid_len = (s->rega[REG_AUX] & 0x30) ? 7 : 4;
+        memcpy(s->rd_uid, s->pt_mem, s->rd_uid_len);
+        s->rd_atqa[0] = s->pt_mem[10];
+        s->rd_atqa[1] = s->pt_mem[11];
+        s->rd_sak = s->pt_mem[s->rd_uid_len == 4 ? 12 : 13];
+        st25_raise(s, I_WU_A);
+        s->rd_step = ntag ? RD_VERSION : RD_HALT;
+        timer_mod(s->rd_timer, now + 1 * SCALE_MS);
+        return;
+    }
+    case RD_VERSION:
+        cmd[0] = 0x60;
+        if (rd_ask(s, cmd, 1, 8)) {
+            return;
+        }
+        if (rd_ok(s, 8)) {
+            memcpy(s->rd_version, s->rd_ans, 8);
+            s->rd_has_version = true;
+            switch (s->rd_version[6]) {     /* storage size: pages */
+            case 0x0B: s->rd_pages = 20; break;
+            case 0x0E: s->rd_pages = 41; break;
+            case 0x0F: s->rd_pages = 45; break;
+            case 0x11: s->rd_pages = 135; break;
+            case 0x13: s->rd_pages = 231; break;
+            }
+        }
+        rd_next(s, s->rd_has_version ? RD_SIG : RD_PAGES, now);
+        return;
+    case RD_SIG:
+        cmd[0] = 0x3C;
+        cmd[1] = 0x00;
+        if (rd_ask(s, cmd, 2, 32)) {
+            return;
+        }
+        if (rd_ok(s, 32)) {
+            memcpy(s->rd_sig, s->rd_ans, 32);
+            s->rd_has_sig = true;
+        }
+        rd_next(s, RD_PAGES, now);
+        return;
+    case RD_PAGES: {
+        int limit = s->rd_pages ? s->rd_pages : 256;
+
+        if (s->rd_pages_read < limit) {
+            cmd[0] = 0x30;
+            cmd[1] = s->rd_pages_read;
+            if (rd_ask(s, cmd, 2, 16)) {
+                return;
+            }
+            if (rd_ok(s, 16)) {             /* four pages; a NAK past the end */
+                memcpy(&s->rd_mem[s->rd_pages_read * 4], s->rd_ans,
+                       MIN(16, (limit - s->rd_pages_read) * 4));
+                s->rd_pages_read = MIN(s->rd_pages_read + 4, limit);
+                if (s->rd_pages_read < limit) {
+                    rd_next(s, RD_PAGES, now);
+                    return;
+                }
+            }
+        }
+        rd_next(s, s->rd_has_version ? RD_COUNTER : RD_HALT, now);
+        return;
+    }
+    case RD_COUNTER:
+        cmd[0] = 0x39;
+        cmd[1] = 0x02;
+        if (rd_ask(s, cmd, 2, 3)) {
+            return;
+        }
+        if (rd_ok(s, 3)) {
+            memcpy(s->rd_cnt, s->rd_ans, 3);
+            s->rd_has_cnt = true;
+        }
+        rd_next(s, RD_HALT, now);
+        return;
+    case RD_HALT:
+        cmd[0] = 0x50;
+        cmd[1] = 0x00;
+        st25_rd_send(s, cmd, 2);
+        s->rd_waiting = false;          /* HLTA has no answer */
+        s->rd_step = RD_FIELD_OFF;
+        timer_mod(s->rd_timer, now + 2 * SCALE_MS);
+        return;
+    case RD_FIELD_OFF:
+        break;
+    }
+    s->rd_field = false;                /* RD_FIELD_OFF: done */
+    st25_raise(s, I_EOF);
+    st25_rd_write(s);
+    g_free(s->rd_prog);
+    s->rd_prog = NULL;
+}
+
+static char *st25_get_reader(Object *obj, Error **errp)
+{
+    return g_strdup(ST25R3916(obj)->rd_prog ?: "");
+}
+
+static void st25_set_reader(Object *obj, const char *value, Error **errp)
+{
+    St25r3916State *s = ST25R3916(obj);
+
+    if (strcmp(value, "scan") && strcmp(value, "ntag")) {
+        error_setg(errp, "nfc reader: scan (activate and identify) or ntag "
+                   "(read a Type 2 tag)");
+        return;
+    }
+    timer_del(s->rd_timer);
+    g_free(s->rd_prog);
+    s->rd_prog = g_strdup(value);
+    s->rd_step = RD_FIELD_ON;
+    s->rd_waiting = false;
+    s->rd_ans_bits = -1;
+    s->rd_uid_len = 0;
+    s->rd_has_version = s->rd_has_sig = s->rd_has_cnt = false;
+    s->rd_pages = s->rd_pages_read = 0;
+    s->rd_tries = s->rd_sent = 0;
+    timer_mod(s->rd_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1 * SCALE_MS);
+}
+
+static char *st25_get_tx(Object *obj, Error **errp)
+{
+    return g_strdup(ST25R3916(obj)->tx_last ?: "");
 }
 
 /* ------------------------------------------------------------------ SPI */
@@ -544,6 +883,7 @@ static void st25_realize(SSIPeripheral *d, Error **errp)
 
     qdev_init_gpio_out_named(DEVICE(d), &s->irq, "irq", 1);
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, st25_timer, s);
+    s->rd_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, st25_rd_timer, s);
 }
 
 static void st25_init(Object *obj)
@@ -551,7 +891,17 @@ static void st25_init(Object *obj)
     object_property_add_str(obj, "card", st25_get_card, st25_set_card);
     object_property_set_description(obj, "card",
         "The card in the field: file:PATH (from scripts/fe_nfc.py) or none");
+    object_property_add_str(obj, "reader", st25_get_reader, st25_set_reader);
+    object_property_set_description(obj, "reader",
+        "Put a virtual reader in front of an emulating Flipper: scan | ntag");
+    object_property_add_str(obj, "tx", st25_get_tx, NULL);
+    object_property_set_description(obj, "tx",
+        "What the virtual reader last read, as a .nfc file");
 }
+
+static const Property st25_props[] = {
+    DEFINE_PROP_STRING("tx-dir", St25r3916State, tx_dir),
+};
 
 static void st25_reset_hold(Object *obj, ResetType type)
 {
@@ -578,6 +928,7 @@ static void st25_class_init(ObjectClass *klass, const void *data)
     ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     k->realize = st25_realize;
+    device_class_set_props(DEVICE_CLASS(klass), st25_props);
     k->transfer = st25_transfer;
     k->set_cs = st25_set_cs;
     k->cs_polarity = SSI_CS_LOW;

@@ -9,6 +9,7 @@ holds in its field (see qemu/hw/arm/flipper/nfc_card.c):
     fe_nfc.py card.nfc                      -> the description, on stdout
     fe_nfc.py --ntag215 04112233445566      -> a blank NTAG215 with that UID
     fe_nfc.py --ntag215 04112233445566 https://flipperzero.one   (with a URL)
+    fe_nfc.py --nfc-file --ntag215 04112233445566 [URL]  -> as a Flipper .nfc file
 
     fe_nfc.py --mfc1k 11223344              -> a factory MIFARE Classic 1K
 
@@ -176,8 +177,50 @@ def blank_mfc(kind, uid):
     return "\n".join(out) + "\n"
 
 
+T2_NAMES = {45: "NTAG213", 135: "NTAG215", 231: "NTAG216"}
+
+
+def nfc_file(desc):
+    """A Flipper .nfc file (format 4) for a Type 2 card description: what
+    the firmware loads to emulate it (NFC -> Saved, or `emulate -f`)."""
+    kv, mem = {}, bytearray()
+    for line in desc.splitlines():
+        key, _, val = line.partition(" ")
+        if key == "mem":
+            mem += hexbytes(val)
+        elif key and not key.startswith("#"):
+            kv[key] = val
+    if kv.get("type") != "t2":
+        raise ValueError("only Type 2 cards can be written as .nfc here")
+    pages = len(mem) // 4
+    atqa = hexbytes(kv["atqa"])
+    up = lambda b: b.hex(" ").upper()
+    out = ["Filetype: Flipper NFC device", "Version: 4",
+           "Device type: NTAG/Ultralight", f"UID: {up(hexbytes(kv['uid']))}",
+           f"ATQA: {up(atqa[::-1])}", f"SAK: {kv.get('sak', '00').upper()}",
+           "Data format version: 2",
+           f"NTAG/Ultralight type: {T2_NAMES.get(pages, 'Mifare Ultralight')}",
+           f"Signature: {up(hexbytes(kv.get('signature', '00 ' * 32)))}",
+           f"Mifare version: {up(hexbytes(kv.get('version', '00 ' * 8)))}"]
+    for i in range(3):
+        out += [f"Counter {i}: {kv.get(f'counter{i}', '0')}", f"Tearing {i}: 00"]
+    out += [f"Pages total: {pages}", f"Pages read: {pages}"]
+    out += [f"Page {i}: {up(mem[i * 4:i * 4 + 4])}" for i in range(pages)]
+    out.append("Failed authentication attempts: 0")
+    return "\n".join(out) + "\n"
+
+
 def main():
     args = sys.argv[1:]
+    as_file = "--nfc-file" in args
+    args = [a for a in args if a != "--nfc-file"]
+    if as_file:
+        if len(args) in (2, 3) and args[0].lstrip("-") in BLANK:
+            print(nfc_file(blank(args[0].lstrip("-"), bytes.fromhex(args[1]),
+                                 args[2] if len(args) == 3 else None)), end="")
+            return 0
+        print(__doc__)
+        return 2
     if len(args) == 1 and args[0].endswith(".nfc"):
         print(describe(parse_nfc(args[0])), end="")
     elif len(args) == 2 and args[0].lstrip("-").lower() in ("mfcmini", "mfc1k", "mfc4k"):

@@ -185,6 +185,24 @@ Host sequence, as a PC does it:
 Mode switches re-enumerate on their own. Opening Bad USB turns the CDC port into a HID
 keyboard (`046d:c529`); leaving the app turns it back.
 
+**Bus time.** A full-speed bulk transaction (token, data, handshake and the gaps between
+them) takes about 103 + 8n bit times at 12 Mbit/s: 51 µs for 64 bytes. The host
+completes one no sooner than that after the CPU arms the endpoint, or after the bus
+last carried a transaction.
+
+Firmware also depends on being fast next to the bus. The CLI's CDC service (`cli_vcp.c`)
+queues one event per completed packet, from USB_LP, in an 8-entry queue. Its thread
+takes one event per pass, but it also re-arms the endpoints from two other callbacks
+(the shell read from its pipe; the shell wrote to it). A packet that completes between
+such a re-arm and the next pass leaves one more event queued, and the ninth fails a
+`furi_check()` in the interrupt. A real STM32 finishes the pass in a few microseconds,
+while the next packet takes 51 µs. An emulated CPU can be a hundred times slower, and
+slower still on a busy host. So the host measures the firmware's turnaround: from a bulk
+packet's completion to the CPU re-arming that endpoint, averaged, each sample capped at
+2 ms. After each re-arm it waits twice that. Interrupt endpoints get no such wait: the
+host polls them every bInterval, as a PC does, because Bad USB drops a report that the
+host has not taken within two intervals.
+
 **USB/IP export** (`usbip` chardev, a TCP server, default port 3240). The device can be
 handed to the PC's kernel instead of the built-in class drivers:
 - Before import, OP_REQ_DEVLIST and OP_REQ_IMPORT are answered from the descriptors the
@@ -393,9 +411,29 @@ After that every frame is encrypted, parity bits included (each one with the nex
 keystream bit). READ, WRITE and HALT obey the sector trailer's access bits, by the
 MF1S50 tables, and Key A always reads back as zeros.
 
+**Listen mode** (the Flipper emulating a card). The firmware sets the chip's target
+mode and loads its passive-target memory: the UID (`AUX.nfc_id` selects 4 or 7 bytes),
+the ATQA at bytes 10 and 11, and a SAK per cascade level from byte 12. A real ST25R3916
+then runs anticollision and select by itself and reports only the outcome (I_wu_a). The
+virtual reader (`qom-set /machine/nfc reader scan|ntag`) does the same:
+- its field raises I_eon, and AUX_DISPLAY's efd_o;
+- it takes the UID, ATQA and SAK from that memory and raises I_wu_a;
+- each later command goes into the FIFO with its CRC, behind I_rxs and I_rxe;
+- what the firmware transmits (TRANSMIT_WITHOUT_CRC, with the CRC in the FIFO) is the
+  answer.
+
+GOTO_SLEEP after a HLTA, and GOTO_SENSE, are tracked. The reader waits up to 100 ms for
+an answer. It sends a command up to three times when the answer is missing or garbled
+(a NAK is final), and leaves 1 ms between an answer and its next command: an emulated
+CPU on a busy host can miss a command that comes right on its heels. At the end the
+field goes off (I_eof) and the reader writes what it read as a `.nfc` file. A MIFARE
+Classic emulation answers through transparent mode, bit-banged on a GPIO with Crypto1's
+own parity bits, which is not decoded.
+
 `scripts/fe_nfc.py` converts a Flipper `.nfc` file into the card description (newer
 files store ATQA MSB first, and this swaps it back). It can also make a new NTAG with
-an NDEF URL record, or a factory MIFARE Classic.
+an NDEF URL record, or a factory MIFARE Classic, and write an NTAG as a `.nfc` file for
+the Flipper to emulate (`--nfc-file`).
 
 ## Storage
 

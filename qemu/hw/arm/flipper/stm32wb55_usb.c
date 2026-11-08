@@ -187,6 +187,77 @@ static void usb_update_irq(WB55UsbState *s)
     qemu_set_irq(s->irq_lp, (usb_istr(s) & s->cntr & CNTR_MASKS) != 0);
 }
 
+static void host_wake(WB55UsbState *s, int64_t when);
+
+/*
+ * Bus time.  A full-speed bulk transaction (token, data with its PID and
+ * CRC, handshake, and the gaps between them) takes about 103 + 8n bit
+ * times at 12 Mbit/s: 51 us for 64 bytes.  The host completes one no
+ * sooner than that after the CPU armed the endpoint, or after the bus last
+ * carried a transaction.  (Interrupt endpoints wait for the host's poll
+ * every bInterval instead: Bad USB drops a report that is not taken within
+ * two intervals.)
+ *
+ * Firmware also relies on being fast next to the bus.  The CLI's CDC
+ * service (cli_vcp.c) queues an event per completed packet in an 8-entry
+ * queue, from USB_LP, and its thread takes one event per pass; but the
+ * same thread re-arms the endpoint from other callbacks too (the shell
+ * read from its pipe; the shell wrote more).  A packet that completes
+ * between those and the next pass leaves one more event queued, and nine
+ * end in furi_check() in USB_LP.  On a real STM32 the pass takes a few
+ * microseconds against the 51 us packet; an emulated CPU can be a hundred
+ * times slower than that, and slower still on a busy host.  So the host
+ * also leaves the firmware twice its own recent turnaround (a packet's
+ * completion to the CPU re-arming that endpoint) after each re-arm.
+ */
+#define TURN_MAX_NS     (2 * MS)        /* a turnaround sample's ceiling */
+
+static int64_t usb_wire_ns(int len)
+{
+    return ((103 + 8 * (int64_t)len) * 1000 + 11) / 12;
+}
+
+static bool usb_is_bulk(WB55UsbState *s, int n)
+{
+    return (s->epr[n] & EP_TYPE) == EPT_BULK;
+}
+
+/* true (and the host woken when it may proceed) while the bus is busy */
+static bool usb_paced(WB55UsbState *s, int n, int len)
+{
+    int64_t wire = usb_wire_ns(len);
+    int64_t due = MAX(s->ep_armed[n] + MAX(wire, 2 * s->turn_ns),
+                      s->bus_last + wire);
+
+    if (!usb_is_bulk(s, n) || now_ns() >= due) {
+        return false;
+    }
+    host_wake(s, due);
+    return true;
+}
+
+/* a transaction on EPn completed */
+static void usb_moved(WB55UsbState *s, int n)
+{
+    if (usb_is_bulk(s, n)) {
+        s->ep_armed[n] = s->bus_last = s->ep_done[n] = now_ns();
+    }
+}
+
+/* the CPU armed EPn: after a transaction, that measures its turnaround */
+static void usb_armed(WB55UsbState *s, int n)
+{
+    int64_t now = now_ns();
+
+    if (s->ep_done[n]) {
+        int64_t t = MIN(now - s->ep_done[n], TURN_MAX_NS);
+
+        s->turn_ns = s->turn_ns ? (3 * s->turn_ns + t) / 4 : t;
+        s->ep_done[n] = 0;
+    }
+    s->ep_armed[n] = now;
+}
+
 /* A double-buffered IN endpoint reads NAK while software owns the buffer
  * the USB side would send next (DTOG_TX == SW_BUF), VALID otherwise. */
 static void usb_dbl_tx_stat(WB55UsbState *s, int n)
@@ -212,6 +283,9 @@ static void usb_epr_write(WB55UsbState *s, int n, uint16_t val)
               | (old & EP_SETUP);
     s->epr_seen[n] &= ~clr;
     usb_dbl_tx_stat(s, n);
+    if (val & EP_TOGGLE) {
+        usb_armed(s, n);
+    }
 }
 
 static uint16_t usb_fnr(WB55UsbState *s)
@@ -397,6 +471,11 @@ static bool usb_rx_store(WB55UsbState *s, int n, int slot,
     return true;
 }
 
+static int usb_tx_count(WB55UsbState *s, int n, int slot)
+{
+    return MIN(pma_r16(s, s->btable + n * 8 + slot * 4 + 2) & 0x3FF, 64);
+}
+
 static int usb_tx_fetch(WB55UsbState *s, int n, int slot, uint8_t *buf)
 {
     uint32_t ent = s->btable + n * 8 + slot * 4;
@@ -460,17 +539,28 @@ static UsbTx usb_out(WB55UsbState *s, int ea, const uint8_t *data, int len)
         if (dtog == !!(r & EP_SWBUF_RX)) {
             return TX_NAK;           /* both buffers belong to software */
         }
+        if (usb_paced(s, n, len)) {
+            return TX_NAK;
+        }
         if (!usb_rx_store(s, n, dtog, data, len)) {
             return TX_NORESP;
         }
         r ^= EP_DTOG_RX;
+        usb_moved(s, n);
     } else {
+        bool ctl = (r & EP_TYPE) == EPT_CONTROL;
+
+        if (!ctl && usb_paced(s, n, len)) {
+            return TX_NAK;
+        }
         if (!usb_rx_store(s, n, 1, data, len)) {
             return TX_NORESP;
         }
         r = ((r & ~EP_STAT_RX) | (STAT_NAK << 12)) ^ EP_DTOG_RX;
-        if ((r & EP_TYPE) == EPT_CONTROL) {
+        if (ctl) {
             r &= ~EP_SETUP;
+        } else {
+            usb_moved(s, n);
         }
     }
     s->epr[n] = r | EP_CTR_RX;
@@ -507,10 +597,20 @@ static UsbTx usb_in(WB55UsbState *s, int ea, uint8_t *buf, int *plen)
         if (dtog == !!(r & EP_SWBUF_TX)) {
             return TX_NAK;
         }
+        if (usb_paced(s, n, usb_tx_count(s, n, dtog))) {
+            return TX_NAK;
+        }
+        usb_moved(s, n);
         *plen = usb_tx_fetch(s, n, dtog, buf);
         s->epr[n] = (r ^ EP_DTOG_TX) | EP_CTR_TX;
         usb_dbl_tx_stat(s, n);
     } else {
+        if ((r & EP_TYPE) != EPT_CONTROL) {
+            if (usb_paced(s, n, usb_tx_count(s, n, 0))) {
+                return TX_NAK;
+            }
+            usb_moved(s, n);
+        }
         *plen = usb_tx_fetch(s, n, 0, buf);
         r = ((r & ~EP_STAT_TX) | (STAT_NAK << 4)) ^ EP_DTOG_TX;
         s->epr[n] = r | EP_CTR_TX;
@@ -1850,6 +1950,9 @@ static void usb_reset_hold(Object *obj, ResetType type)
 
     memset(s->epr, 0, sizeof(s->epr));
     memset(s->epr_seen, 0, sizeof(s->epr_seen));
+    memset(s->ep_armed, 0, sizeof(s->ep_armed));
+    memset(s->ep_done, 0, sizeof(s->ep_done));
+    s->bus_last = s->turn_ns = 0;
     s->cntr = CNTR_FRES | CNTR_PDWN;
     s->istr = s->istr_seen = 0;
     s->daddr = s->btable = s->lpmcsr = s->bcdr = 0;

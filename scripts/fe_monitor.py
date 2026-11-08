@@ -25,7 +25,10 @@ class Monitor:
         self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.s.settimeout(timeout)
         self.s.connect(path)
-        self._read()
+        if "(qemu)" not in self._read():
+            self.s.close()
+            raise ConnectionError(f"{path}: the monitor did not answer; is another "
+                                  "client connected? (it takes one at a time)")
 
     def close(self):
         self.s.close()
