@@ -163,6 +163,8 @@ static void wb55_soc_init(Object *obj)
     object_initialize_child(obj, "usb", &s->usb, TYPE_WB55_USB);
     object_initialize_child(obj, "tim1", &s->tim1, TYPE_WB55_TIM);
     object_initialize_child(obj, "tim2", &s->tim2, TYPE_WB55_TIM);
+    object_initialize_child(obj, "tim17", &s->tim17, TYPE_WB55_TIM);
+    object_initialize_child(obj, "tim17-or", &s->tim17_or, TYPE_OR_IRQ);
     object_initialize_child(obj, "comp", &s->comp, TYPE_WB55_COMP);
     for (int i = 0; i < WB55_NUM_PORTS; i++) {
         g_autofree char *name = g_strdup_printf("gpio%c", "abcdeh"[i]);
@@ -430,7 +432,14 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
     soc_map(SYS_BUS_DEVICE(dev), 0x40012C00, errp);
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 1, NVIC(WB55_IRQ_TIM1_UP_TIM16));
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 2, NVIC(WB55_IRQ_TIM1_CC));
-    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 3, NVIC(WB55_IRQ_TIM1_TRG_COM_TIM17));
+    /* TIM1 trigger/commutation and all of TIM17 share one vector */
+    object_property_set_int(OBJECT(&s->tim17_or), "num-lines", 2, &error_abort);
+    if (!qdev_realize(DEVICE(&s->tim17_or), NULL, errp)) {
+        return;
+    }
+    qdev_connect_gpio_out(DEVICE(&s->tim17_or), 0, NVIC(WB55_IRQ_TIM1_TRG_COM_TIM17));
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 3,
+                       qdev_get_gpio_in(DEVICE(&s->tim17_or), 0));
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 4, NVIC(WB55_IRQ_TIM1_BRK));
     qdev_connect_gpio_out_named(dev, "dma-up", 0, DREQ(WB55_DREQ_TIM1_UP));
     s->tim1.dma_ready = soc_tim1_dma_ready;
@@ -448,7 +457,13 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
     dev = soc_regfile("tim16", 0x40014400, 0x400, WB55_RF_TIM);
     wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_APB2RSTR, 17, dev);
     s->tim16 = WB55_REGFILE(dev);
-    dev = soc_regfile("tim17", 0x40014800, 0x400, WB55_RF_TIM);
+    /* TIM17: NFC block-TX timer (one-pulse, update interrupt) */
+    dev = DEVICE(&s->tim17);
+    qdev_prop_set_uint32(dev, "rcr-bits", 8);
+    qdev_connect_clock_in(dev, "clk", hclk);
+    soc_map(SYS_BUS_DEVICE(dev), 0x40014800, errp);
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
+                       qdev_get_gpio_in(DEVICE(&s->tim17_or), 1));
     wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_APB2RSTR, 18, dev);
     dev = soc_regfile("adc1", 0x50040000, 0x400, WB55_RF_ADC);
     wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_AHB2RSTR, 13, dev);

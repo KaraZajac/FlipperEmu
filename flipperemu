@@ -20,6 +20,7 @@ you flash stays flashed, settings and files persist across runs.
   ./flipperemu ir NEC 0x04 0x08              point a virtual IR remote at it
   ./flipperemu subghz capture.sub            put a Sub-GHz signal on the air
   ./flipperemu rfid EM4100 DEADBEEF01        hold a 125 kHz tag to it (or a .rfid)
+  ./flipperemu nfc card.nfc                  hold an NFC card to it (NTAG, Ultralight)
   ./flipperemu gdb                           attach gdb to a --gdb run
   ./flipperemu shot out.png | press ok       drive a running device
   ./flipperemu info                          what is on the device
@@ -648,6 +649,52 @@ def cmd_rfid(args):
     return 0
 
 
+def cmd_nfc(args):
+    import fe_nfc
+    from fe_monitor import Monitor
+    dev = Device(args.device)
+    if not dev.running():
+        sys.exit(f"[{dev.name}] not running")
+    card = args.card
+    try:
+        if not card:
+            label = None
+        elif card == ["none"]:
+            label, desc = "no card", None
+        elif len(card) == 1 and card[0].endswith(".nfc"):
+            fields = fe_nfc.parse_nfc(card[0])
+            desc = fe_nfc.describe(fields)
+            label = f"{desc.splitlines()[0][2:]} {fields['UID']} ({pathlib.Path(card[0]).name})"
+        elif len(card) in (2, 3) and card[0].lower().lstrip("-") in fe_nfc.BLANK:
+            uid = bytes.fromhex(card[1].replace(":", "").replace(" ", ""))
+            url = card[2] if len(card) == 3 else None
+            desc = fe_nfc.blank(card[0].lower().lstrip("-"), uid, url)
+            label = (f"an {card[0].upper()} {uid.hex(' ').upper()}" +
+                     (f" with {url}" if url else ", blank"))
+        else:
+            sys.exit("usage: nfc FILE.nfc | nfc ntag215 UID [URL] | nfc none")
+    except (ValueError, KeyError, OSError) as e:
+        sys.exit(f"nfc: {e}")
+    m = Monitor(str(dev.monitor))
+    try:
+        if label is None:
+            print(f"[{dev.name}] card in the field: "
+                  f"{m.cmd('qom-get /machine/nfc card').strip().strip(chr(34)) or 'none'}")
+            return 0
+        value = "none"
+        if desc is not None:
+            path = dev.dir / "nfc-card.txt"
+            path.write_text(desc)
+            value = f"file:{path}"
+        err = m.cmd(f"qom-set /machine/nfc card {value}")
+        if err:
+            sys.exit(f"nfc: {err}")
+        print(f"[{dev.name}] NFC field: {label}")
+    finally:
+        m.close()
+    return 0
+
+
 def cmd_shot(args):
     from fe_monitor import Monitor
     print(Monitor(str(Device(args.device).monitor)).screenshot(args.out))
@@ -767,6 +814,13 @@ def main():
     p.add_argument("--noise", choices=("on", "off"),
                    help="comparator noise while no tag answers (as on hardware)")
     p.set_defaults(func=cmd_rfid)
+
+    p = sub.add_parser("nfc", help="hold an NFC card to a running device")
+    p.add_argument("card", nargs="*",
+                   help="FILE.nfc (NTAG21x, Ultralight, Ultralight EV1), "
+                        "ntag213|ntag215|ntag216 UID [URL] (a new tag, its NDEF "
+                        "a URL), or none; nothing: show the card")
+    p.set_defaults(func=cmd_nfc)
 
     p = sub.add_parser("gdb", help="attach gdb to a running --gdb device")
     p.add_argument("--gdb-port", type=int, default=1234)

@@ -13,7 +13,7 @@ NEC frame through the virtual IR receiver (`ir rx`), captures an `ir tx` and
 decodes it back, receives a Princeton key over the virtual air (`subghz rx`),
 captures a `subghz tx`, reads a 125 kHz EM4100
 tag (`rfid read`) and reads back its own H10301 emulation (`rfid emulate`),
-enumerates over USB/IP, then reboots through the CLI and checks the LCD comes
+reads an NTAG215 over NFC (`mfu info`), enumerates over USB/IP, then reboots through the CLI and checks the LCD comes
 back after the warm reset.
 Exit status 0 = pass. Screenshots are kept in the --out directory.
 """
@@ -280,6 +280,38 @@ def rfid_emulate_check(mon: Monitor, devdir: pathlib.Path) -> bool:
     return found is not None
 
 
+def nfc_check(mon: Monitor, devdir: pathlib.Path):
+    """An NTAG215 in the NFC field: `mfu info` in the NFC shell must read
+    its UID and all 135 pages.  None (skip) without the NFC shell."""
+    import fe_nfc
+    uid = bytes.fromhex("04F11E7A2C4180")
+    card = devdir / "nfc-card.txt"
+    card.write_text(fe_nfc.blank("ntag215", uid, "https://flipperzero.one"))
+    try:
+        if mon.cmd(f"qom-set /machine/nfc card file:{card}"):
+            return False
+        cli = FlipperCli(usb_endpoint(mon))
+        try:
+            cli.read_until_prompt(15)
+            found, _ = cli.watch("nfc", r"\[nfc\]>: ", timeout=8, stop=False)
+            if not found:
+                cli.write(b"\x03")
+                return None
+            _, out = cli.watch("mfu info", r"\[nfc\]>: ", timeout=15, stop=False)
+            cli.write(b"\x03")
+            time.sleep(0.3)
+        finally:
+            cli.close()
+            mon.cmd("qom-set /machine/nfc card none")
+    except (OSError, TimeoutError, ConnectionError, TypeError) as e:
+        print(f"  nfc: {e}")
+        return False
+    ok = "Type: NTAG215" in out and "04 F1 1E 7A 2C 41 80" in out and "135/135" in out
+    if not ok:
+        print(f"  nfc: {out.strip()[-300:]!r}")
+    return ok
+
+
 def usbip_check(port: int) -> bool:
     """Play the PC's kernel over USB/IP: import, enumerate, configure, CLI."""
     import select
@@ -397,6 +429,8 @@ def main() -> int:
                                 rfid_read_check(mon, devdir)))
                 results.append(("rfid: H10301 emulation captured, read back",
                                 rfid_emulate_check(mon, devdir)))
+                results.append(("nfc: NTAG215 read by `mfu info` (all 135 pages)",
+                                nfc_check(mon, devdir)))
                 results.append(("usbip: enumerated by a USB/IP client, CLI over URBs",
                                 usbip_check(usbip_port)))
                 results.append(("reboot: LCD redrawn after a warm reset",

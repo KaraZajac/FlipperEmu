@@ -22,6 +22,8 @@ arm_common_ss.add(when: 'CONFIG_FLIPPER_ZERO', if_true: files(
   'st7567.c',
   'flipper_power.c',
   'flipper_rf.c',
+  'st25r3916.c',
+  'nfc_card.c',
   'flipper_speaker.c',
   'flipper_ir.c',
   'flipper_rfid.c',

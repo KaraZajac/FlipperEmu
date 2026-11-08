@@ -21,7 +21,7 @@ QEMU, so none has QEMU's speed, built-in GDB stub, snapshots or tracing plugins.
 
 Verified on 2026-11-08 with `scripts/smoke_test.py` (boot, SD mount, LCD, input, CLI over
 USB, IR receive and transmit, Sub-GHz receive and transmit, 125 kHz RFID read and
-emulate, USB/IP export, warm reboot, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed
+emulate, NFC read, USB/IP export, warm reboot, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed
 unlshd-094**.
 
 | | |
@@ -67,20 +67,24 @@ unlshd-094**.
 - 125 kHz RFID emulate: a virtual reader powers the emulated tag and records it to
   `devices/NAME/rfid-tx/`. The capture can go back in as a tag, so any protocol the
   firmware emulates can be read back.
+- NFC read: `./flipperemu nfc card.nfc` holds an NTAG21x, MIFARE Ultralight or
+  Ultralight EV1 card to the Flipper (from a Flipper `.nfc` file, or a new tag with a
+  URL). The ST25R3916 is modelled frame by frame, so the NFC app's Read, NDEF parsing,
+  `nfc scanner`, `mfu info` and `dump` work against it.
 - Speaker: TIM16's PWM tone plays through QEMU audio (desktop sound or a WAV recording).
   The duty cycle sets the volume, as on the real piezo.
 - Power: STOP2 deep sleep (1–2 % of a host core when idle), fuel gauge and charger you can
   set from the monitor, and a USB cable that carries VBUS.
 - CPU2 modelled as ST's FUS with no wireless stack. That's a real device state, and it
   keeps the crypto-enclave and BT paths healthy.
-- The NFC ST25R3916 initialises (chip ID, oscillator, VDD measurement), at register
-  level only, with no field.
 - GDB stub with the release `.elf` symbols.
 
 **Not yet** (see [PLAN.md](PLAN.md))
 - qFlipper's firmware *update* includes a radio-stack stage that the emulated CPU2
   cannot install; use `./flipperemu run --update` for updates.
-- Bluetooth (needs a radio stack); NFC and iButton signals; writing T5577 tags.
+- Bluetooth (needs a radio stack); iButton; writing T5577 tags.
+- NFC: MIFARE Classic, Ultralight C, ISO14443-4 (DESFire, bank cards), ISO14443B,
+  ISO15693 and FeliCa cards, and the Flipper emulating a card.
 - LP5562 engine programs are approximated (steady-state brightness only).
 - Not yet exercised: XIP app loaders that run code from internal flash, and the
   radio-stack stage of updates (the emulated CPU2 can't install a stack).
@@ -135,6 +139,7 @@ are erased). Without `-f` it boots whatever is already flashed.
 | `ir PROTO ADDR CMD` \| `ir raw …` \| `ir FILE.ir [NAME]` | send an infrared signal to the device's receiver |
 | `subghz FILE.sub` \| `subghz princeton KEY` \| `subghz raw +H -L …` | put a Sub-GHz signal on the air (`--freq`) |
 | `rfid PROTO DATA` \| `rfid FILE.rfid` \| `rfid CAPTURE.txt` \| `rfid none` | hold a 125 kHz tag to the device (`--list`; no argument: show state) |
+| `nfc FILE.nfc` \| `nfc ntag215 UID [URL]` \| `nfc none` | hold an NFC card to the device |
 | `flash FW [--erase-all]` | program `.elf` / `.dfu` / `.bin` / update `.tgz` into `flash.img` |
 | `sd [--resources X] [--size 512M]` | rebuild the microSD from a resources tgz, update package or folder |
 | `press ok down down ok …` | press buttons on a running device |
@@ -332,6 +337,28 @@ reader decodes it. That works for any protocol your firmware can emulate, includ
 `fe_rfid.py` has no encoder for. `scripts/rfid_check.py DEVICE` runs both directions for
 every protocol (the Python encoder against the firmware's emulation, and the Python tag
 through `rfid read`).
+
+### NFC
+
+```sh
+./flipperemu nfc tag.nfc                                    # a Flipper .nfc dump
+./flipperemu nfc ntag215 04F11E7A2C4180 https://flipperzero.one   # a new tag, NDEF URL
+./flipperemu nfc none                                       # take it away
+```
+
+The card stays in the field until you take it away. Open NFC → Read, or the `nfc`
+shell on the CLI (`scanner`, `mfu info`, `dump`, `raw`). The reader gets the same
+answers a real card gives. That covers anticollision and select over 4, 7 or 10-byte
+UIDs, and GET_VERSION, READ, FAST_READ, READ_SIG, the counters and tearing flags. It
+also covers PWD_AUTH with the tag's AUTH0/PROT, and writes. So a password-protected
+NTAG reads only as far as AUTH0, and a factory one unlocks with the default password.
+
+| | |
+|:-:|:-:|
+| ![nfc read](docs/img/15-nfc-read.png) | NFC → Read: the NTAG215 and its NDEF URL record |
+
+So far: NTAG213/215/216, MIFARE Ultralight and Ultralight EV1 (Type 2). MIFARE
+Classic and the other card families are next.
 
 ### Sound
 

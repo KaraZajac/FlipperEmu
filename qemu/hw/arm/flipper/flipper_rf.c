@@ -1,10 +1,9 @@
 /*
  * Flipper Zero radio front-ends on SPI1: TI CC1101 (sub-GHz, CS=PD0,
- * GDO0=PA1) and ST25R3916 (NFC, CS=PE4, IRQ=PA2).
+ * GDO0=PA1).  The ST25R3916 (NFC, CS=PE4, IRQ=PA2) is in st25r3916.c.
  *
- * Register-level models: enough for the firmware's own bring-up
- * (furi_hal_subghz_init() GDO0 self-test, furi_hal_nfc_init() chip id,
- * oscillator and VDD measurement) and for apps to configure the chips.
+ * Register-level model: enough for the firmware's own bring-up
+ * (furi_hal_subghz_init()'s GDO0 self-test) and for apps to configure it.
  *
  * Sub-GHz receive: a signal can be put "on the air" through the CC1101's
  * "rx" property (+high/-low µs, optionally at a frequency).  While the chip
@@ -485,198 +484,6 @@ static void cc1101_class_init(ObjectClass *klass, const void *data)
     rc->phases.exit = cc1101_reset_exit;
 }
 
-/* ------------------------------------------------------------ ST25R3916 */
-
-#define REG_OP_CONTROL   0x02
-#define REG_IRQ_MASK0    0x16
-#define REG_IRQ_MAIN     0x1A
-#define REG_AD_RESULT    0x25
-#define REG_AUX_DISPLAY  0x31
-#define REG_IC_IDENTITY  0x3F
-
-static void st25_update_irq(St25r3916State *s)
-{
-    bool pending = false;
-
-    for (int i = 0; i < 4; i++) {
-        pending |= s->irq_status[i] & ~s->irq_mask[i];
-    }
-    qemu_set_irq(s->irq, pending);
-}
-
-static void st25_raise(St25r3916State *s, int reg, uint8_t bits)
-{
-    s->irq_status[reg] |= bits;
-    st25_update_irq(s);
-}
-
-static void st25_defaults(St25r3916State *s)
-{
-    memset(s->rega, 0, sizeof(s->rega));
-    memset(s->regb, 0, sizeof(s->regb));
-    memset(s->irq_status, 0, sizeof(s->irq_status));
-    memset(s->irq_mask, 0, sizeof(s->irq_mask));
-    s->rega[0x00] = 0x10;               /* IO_CONF1 */
-    s->rega[0x03] = 0x08;               /* MODE: ISO14443A */
-    s->rega[REG_IC_IDENTITY] = 0x2A;    /* ic_type 5 (ST25R3916), rev 2 */
-}
-
-static uint8_t st25_read_reg(St25r3916State *s, uint8_t a, bool b)
-{
-    if (b) {
-        return s->regb[a & 0x3F];
-    }
-    if (a >= REG_IRQ_MASK0 && a < REG_IRQ_MASK0 + 4) {
-        return s->irq_mask[a - REG_IRQ_MASK0];
-    }
-    if (a >= REG_IRQ_MAIN && a < REG_IRQ_MAIN + 4) {
-        uint8_t v = s->irq_status[a - REG_IRQ_MAIN];
-        s->irq_status[a - REG_IRQ_MAIN] = 0;    /* read clears */
-        st25_update_irq(s);
-        return v;
-    }
-    if (a == REG_AUX_DISPLAY) {
-        return (s->rega[REG_OP_CONTROL] & 0x80) ? 0x10 : 0x00;  /* osc_ok */
-    }
-    return s->rega[a & 0x3F];
-}
-
-static void st25_write_reg(St25r3916State *s, uint8_t a, bool b, uint8_t v)
-{
-    if (b) {
-        s->regb[a & 0x3F] = v;
-        return;
-    }
-    if (a >= REG_IRQ_MASK0 && a < REG_IRQ_MASK0 + 4) {
-        s->irq_mask[a - REG_IRQ_MASK0] = v;
-        st25_update_irq(s);
-        return;
-    }
-    if (a >= REG_IRQ_MAIN && a < REG_IRQ_MAIN + 4) {
-        return;                         /* read-only */
-    }
-    if (a == REG_OP_CONTROL) {
-        bool osc_on = (v & 0x80) && !(s->rega[a] & 0x80);
-        s->rega[a] = v;
-        if (osc_on) {
-            st25_raise(s, 0, 0x80);     /* I_osc: oscillator stable */
-        }
-        return;
-    }
-    if (a == REG_IC_IDENTITY || a == REG_AUX_DISPLAY || a == REG_AD_RESULT) {
-        return;
-    }
-    s->rega[a & 0x3F] = v;
-}
-
-static void st25_direct(St25r3916State *s, uint8_t cmd)
-{
-    switch (cmd) {
-    case 0xC1:                          /* SET_DEFAULT */
-        st25_defaults(s);
-        st25_update_irq(s);
-        break;
-    case 0xC2: case 0xDB:               /* STOP, CLEAR_FIFO */
-        break;
-    case 0xDF:                          /* MEASURE_VDD: ~3.3 V */
-        s->rega[REG_AD_RESULT] = 141;
-        st25_raise(s, 1, 0x80);         /* I_dct */
-        break;
-    case 0xD3: case 0xD9: case 0xDD: case 0xDE: case 0xD6: case 0xD8:
-        s->rega[REG_AD_RESULT] = 0x80;  /* measurements / calibrations */
-        st25_raise(s, 1, 0x80);
-        break;
-    default:
-        break;
-    }
-}
-
-static uint32_t st25_transfer(SSIPeripheral *dev, uint32_t val)
-{
-    St25r3916State *s = ST25R3916(dev);
-    uint8_t b = val;
-    uint8_t ret = 0;
-
-    switch (s->phase) {
-    case 0:                             /* command byte */
-        if (b == 0xFB) {                /* space B prefix */
-            s->prefix_b = true;
-            return 0;
-        }
-        if (b == 0xFC) {                /* test register access: ignore */
-            s->phase = 3;
-            return 0;
-        }
-        if ((b & 0xC0) == 0x00 || (b & 0xC0) == 0x40) {
-            s->read = b & 0x40;
-            s->addr = b & 0x3F;
-            s->space_b = s->prefix_b;
-            s->prefix_b = false;
-            s->phase = 1;
-        } else if ((b & 0xC0) == 0x80) {
-            s->phase = 2;               /* FIFO / PT memory */
-        } else {
-            st25_direct(s, b);
-        }
-        return 0;
-    case 1:
-        if (s->read) {
-            ret = st25_read_reg(s, s->addr, s->space_b);
-        } else {
-            st25_write_reg(s, s->addr, s->space_b, b);
-        }
-        s->addr = (s->addr + 1) & 0x3F;
-        return ret;
-    case 3:                             /* test access: swallow the frame */
-        return 0;
-    default:                            /* FIFO: empty */
-        return 0;
-    }
-}
-
-static int st25_set_cs(SSIPeripheral *dev, bool level)
-{
-    St25r3916State *s = ST25R3916(dev);
-
-    s->phase = 0;
-    s->prefix_b = false;
-    return 0;
-}
-
-static void st25_realize(SSIPeripheral *d, Error **errp)
-{
-    St25r3916State *s = ST25R3916(d);
-
-    qdev_init_gpio_out_named(DEVICE(d), &s->irq, "irq", 1);
-}
-
-static void st25_reset_hold(Object *obj, ResetType type)
-{
-    St25r3916State *s = ST25R3916(obj);
-
-    st25_defaults(s);
-    s->phase = 0;
-    s->prefix_b = false;
-}
-
-static void st25_reset_exit(Object *obj, ResetType type)
-{
-    st25_update_irq(ST25R3916(obj));
-}
-
-static void st25_class_init(ObjectClass *klass, const void *data)
-{
-    SSIPeripheralClass *k = SSI_PERIPHERAL_CLASS(klass);
-    ResettableClass *rc = RESETTABLE_CLASS(klass);
-
-    k->realize = st25_realize;
-    k->transfer = st25_transfer;
-    k->set_cs = st25_set_cs;
-    k->cs_polarity = SSI_CS_LOW;
-    rc->phases.hold = st25_reset_hold;
-    rc->phases.exit = st25_reset_exit;
-}
-
 static const TypeInfo flipper_rf_types[] = {
     {
         .name = TYPE_CC1101,
@@ -684,11 +491,6 @@ static const TypeInfo flipper_rf_types[] = {
         .instance_size = sizeof(Cc1101State),
         .instance_init = cc1101_init,
         .class_init = cc1101_class_init,
-    }, {
-        .name = TYPE_ST25R3916,
-        .parent = TYPE_SSI_PERIPHERAL,
-        .instance_size = sizeof(St25r3916State),
-        .class_init = st25_class_init,
     },
 };
 DEFINE_TYPES(flipper_rf_types)

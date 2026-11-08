@@ -71,7 +71,11 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
 - ☑ Sub-GHz transmit capture: every transmission → `devices/NAME/subghz-tx/*.sub` (exact
       timings, frequency, custom preset from the live registers); TX → RX loopback decodes
 - ☐ TX-side pacing against DMA refill lag; more key encoders (CAME, Nice FLO, …)
-- ☐ NFC: ST25R3916 transparent mode / virtual tags from `.nfc` files
+- ◐ NFC: the ST25R3916 frame by frame (FIFO, IRQs, timed TX/RX, parity and CRC
+      handling), TIM17 as a real timer. Virtual ISO14443-3A cards from `.nfc` files:
+      NTAG21x / Ultralight / Ultralight EV1 ☑ (app Read with NDEF, `mfu info`, `dump`).
+      Next: MIFARE Classic (Crypto1), Ultralight C (3DES), ISO14443-4 (DESFire, EMV),
+      ISO14443B, ISO15693/SLIX, FeliCa; card emulation (a virtual reader)
 - ☑ 125 kHz RFID read: COMP1 → TIM2 TI4 capture, a virtual tag in the reader's field
       (ASK/FSK/PSK, field noise), encoders ported from the firmware (`fe_rfid.py`, checked
       cycle for cycle against its emulation by `rfid_check.py`); app Read and `rfid read`

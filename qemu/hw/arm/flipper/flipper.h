@@ -118,15 +118,40 @@ void cc1101_tx_data(Cc1101State *s, bool level, int64_t when);
 /* ---------------------------------------------------- ST25R3916 NFC */
 #define TYPE_ST25R3916 "st25r3916"
 OBJECT_DECLARE_SIMPLE_TYPE(St25r3916State, ST25R3916)
+#define NFC_AIR_MAX 1024         /* bytes of a frame on the air (8192 bits) */
+typedef struct NfcCard NfcCard;  /* a card in the field (nfc_card.c) */
 struct St25r3916State {
     SSIPeripheral parent_obj;
     uint8_t rega[64], regb[64];
     uint8_t irq_mask[4], irq_status[4];
-    int phase;                   /* 0 command, 1 register data, 2 fifo, 3 skip */
+    int phase;                   /* SPI frame phase (PH_*) */
     uint8_t addr;
     bool read, space_b, prefix_b;
     qemu_irq irq;
+    uint8_t fifo[512];
+    uint16_t fifo_len, fifo_rd;  /* bytes in, bytes read out */
+    uint8_t fifo_lb;             /* bits in an incomplete last byte */
+    uint8_t pt_mem[48];          /* passive-target memory (listen mode) */
+    unsigned pt_pos;
+    bool pt_read;
+    QEMUTimer *timer;
+    int stage;                   /* what the timer ends: TX, RX start/end */
+    uint8_t tx[NFC_AIR_MAX], rx[NFC_AIR_MAX];   /* frames on the air */
+    int ntx, nrx;                /* their lengths in bits */
+    bool field_on;
+    NfcCard *card;
+    char *card_str;
 };
+/* ISO14443A helpers (st25r3916.c): CRC_A, bytes <-> air bits with parity */
+uint16_t nfc_crc_a(const uint8_t *d, int n);
+int nfc_air_encode(const uint8_t *data, int nbits, uint8_t *air);
+int nfc_air_decode(const uint8_t *air, int nbits, uint8_t *data, bool *parity_ok);
+/* the card (nfc_card.c) */
+NfcCard *nfc_card_new(const char *desc, Error **errp);
+void nfc_card_free(NfcCard *c);
+void nfc_card_field(NfcCard *c, bool on);
+/* a frame from the reader, as air bits; returns the answer's bits (0: none) */
+int nfc_card_rx(NfcCard *c, const uint8_t *air, int nbits, uint8_t *out);
 
 /* --------------------------------------------- piezo speaker (TIM16) */
 #define TYPE_FLIPPER_SPEAKER "flipper-speaker"

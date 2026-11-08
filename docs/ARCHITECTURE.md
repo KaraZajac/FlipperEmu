@@ -352,6 +352,36 @@ both ways against a running Flipper:
 protocol only a fork has can still be read back: emulate it, then hold the capture to a
 reading Flipper.
 
+## NFC (`st25r3916.c`, `nfc_card.c`)
+
+The ST25R3916 is modelled one frame at a time:
+- the SPI protocol (register spaces A and B, FIFO load and read, passive-target
+  memory, direct commands);
+- the 512-byte FIFO with its byte count and the bits of an incomplete last byte;
+- the four clear-on-read interrupt registers driving the IRQ pin (PA2).
+
+A TRANSMIT command turns the FIFO (NUM_TX_BYTES bits) into a frame on the air: a bit
+stream, LSB first, with an odd parity bit after each full byte. With
+ISO14443A_NFC.no_tx_par set, the FIFO already holds the parity bits, as MIFARE
+Classic's encrypted parity needs. The card in the field answers with a bit stream,
+which is decoded back into the FIFO (raw with no_rx_par) and checked for parity and,
+unless AUX.no_crc_rx is set, CRC. The interrupts follow 106 kbit/s: TXE, then RXS and
+RXE. The answer starts 40 µs after TX end rather than the real ~90 µs. That keeps RXS
+well inside the firmware's frame waiting time (1172+500 fc, counted by TIM1), so the
+chip's interrupt never races the timer interrupt that would declare a timeout. The NFC
+stack also needs TIM17 (block-TX guard time, one-pulse), now a real timer sharing its
+vector with TIM1's trigger and commutation interrupts.
+
+`nfc_card.c` works on those air bits:
+- ISO14443-3A: power-up with the field, REQA/WUPA, anticollision and select over
+  cascade levels, HLTA, and the IDLE/READY/ACTIVE/HALT states.
+- Type 2 commands, with AUTH0/PROT access control and a NAK that sends the tag back
+  to IDLE.
+
+`scripts/fe_nfc.py` converts a Flipper `.nfc` file into the card description (newer
+files store ATQA MSB first, and this swaps it back). It can also make a new NTAG with
+an NDEF URL record.
+
 ## Storage
 
 The SD card is QEMU's `ssi-sd` + `sd-card-spi` (with two fixes, see BRINGUP_LOG), behind

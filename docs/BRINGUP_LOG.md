@@ -265,8 +265,27 @@ All three are small, self-contained, and suitable for sending upstream.
     something wakes sooner than `configEXPECTED_IDLE_TIME_BEFORE_SLEEP` (4 ticks). So
     the guest never looks idle, and the tag ran at 1/16 speed.
 
+## NFC (M5)
+
+31. **NFC needed TIM17.** After every answer, `furi_hal_nfc` starts a one-pulse
+    "block TX" guard timer on TIM17 and waits for its update interrupt before it
+    transmits again. TIM17 was a plain register file, so it never would have fired.
+    It is now the timer model too, on the vector it shares with TIM1's trigger and
+    commutation interrupts. The frame waiting time is TIM1's, and the frame model
+    raises RXS 40 µs after TX end so that the chip's interrupt always beats that
+    timer's.
+
+32. **An Ultralight EV1 dump read "UID: , Pages Read: 0/0".** The debug log (set
+    through gdb: `set var furi_log.log_level = FuriLogLevelDebug`) said "Read
+    signature failed". That dump comes from a non-NXP clone with an all-zero
+    signature, and the converter had dropped it, so the card NAKed READ_SIG. Every
+    EV1 and NTAG21x answers READ_SIG; the card now does too.
+
 ## Things that were right the first time (and why)
 
+- **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
+  first build: the TX/RX interrupt sequence, the FIFO status bits and 3A activation
+  with a 7-byte UID.
 - HSEM modelled from RM0434: **reading RLRx is the 1-step lock**. `furi_hal_bt_init()`
   asserts it gets semaphore 5 that way, and the RNG path spins on RLR0. (A Renode project
   treated RLR as a passive view and needed per-semaphore hacks.)

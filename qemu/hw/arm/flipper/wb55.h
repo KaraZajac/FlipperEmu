@@ -538,11 +538,13 @@ struct WB55SocState {
     WB55UsbState usb;
     WB55TimState tim1;               /* RFID carrier, IR transmit */
     WB55TimState tim2;               /* IR receive, Sub-GHz async RX capture */
+    WB55TimState tim17;              /* NFC block-TX timer */
     WB55CompState comp;              /* COMP1: 125 kHz RFID demodulator */
     Stm32l4x5GpioState gpio[WB55_NUM_PORTS];
     Stm32l4x5UsartBaseState usart1;
     Stm32l4x5UsartBaseState lpuart1;
     OrIRQState exti_or[3];           /* EXTI9_5, EXTI15_10, COMP */
+    OrIRQState tim17_or;             /* TIM1_TRG_COM_TIM17 vector */
 
     MemoryRegion sram1, sram2a, sram2b;
     MemoryRegion sram2a_alias, sram2b_alias;
