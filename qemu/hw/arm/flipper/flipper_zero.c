@@ -285,8 +285,10 @@ static void flipper_drive_pins(FlipperZeroState *s)
 
 static void flipper_zero_reset(MachineState *machine, ResetType type)
 {
+    wb55_soc_latch_boot(&FLIPPER_ZERO(machine)->soc);
     qemu_devices_reset(type);
     flipper_drive_pins(FLIPPER_ZERO(machine));
+    wb55_soc_sync_pins(&FLIPPER_ZERO(machine)->soc);
 }
 
 /* The virtual USB cable also carries VBUS to the charger. */

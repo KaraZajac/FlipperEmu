@@ -10,6 +10,9 @@ you flash stays flashed, settings and files persist across runs.
   ./flipperemu run  -f firmware.elf          flash + boot (GTK window)
   ./flipperemu run                           boot whatever is flashed
   ./flipperemu run -f update.tgz --headless  update package, no window
+  ./flipperemu run --update update.tgz       install it through the firmware's own
+                                             updater (OTA, keeps settings and files)
+  ./flipperemu stop                          shut a running device down cleanly
   ./flipperemu flash fw.dfu                  just program the flash
   ./flipperemu sd --resources update.tgz     (re)build the SD card
   ./flipperemu cli                           USB CLI of a running device
@@ -30,8 +33,10 @@ import io
 import json
 import os
 import pathlib
+import re
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -127,6 +132,25 @@ class Device:
         self.usb_sock = self.dir / "usb.sock"   # --usb unix
         self.usb_tty = self.dir / "usb.tty"     # --usb pty: symlink to the pty
 
+    def running(self):
+        """Is a QEMU serving this device's monitor socket?"""
+        if not self.monitor.exists():
+            return False
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(1)
+        try:
+            s.connect(str(self.monitor))
+            return True
+        except OSError:
+            return False
+        finally:
+            s.close()
+
+    def refuse_if_running(self):
+        # two emulators (or mtools) on one flash/SD image corrupt it
+        if self.running():
+            sys.exit(f"[{self.name}] is running: ./flipperemu -d {self.name} stop first")
+
     def info(self):
         try:
             return json.loads(self.meta.read_text())
@@ -186,16 +210,57 @@ def find_resources_for(fw: pathlib.Path):
     return None
 
 
+def stage_update(dev: Device, pkg: pathlib.Path, keep_radio: bool) -> str:
+    """Put an update package on the SD card the way qFlipper does; return the
+    manifest path as the firmware sees it.
+
+    The emulated CPU2 is ST's FUS without a radio stack and cannot install
+    one, so unless keep_radio is set the radio stage is blanked exactly as
+    `fbt updater_package` writes a package without a stack. Every key stays
+    in place: the firmware reads the manifest's optional keys in file order,
+    and a missing one would hide all the keys after it.
+    """
+    import tempfile
+    from make_sdcard import safe_extract
+    with tempfile.TemporaryDirectory(prefix="fe-update-") as tmp:
+        tmp = pathlib.Path(tmp)
+        if pkg.is_dir():
+            shutil.copytree(pkg, tmp / pkg.name)
+        else:
+            with tarfile.open(pkg, "r:*") as tar:
+                safe_extract(tar, tmp)
+        manifests = sorted(tmp.rglob("update.fuf"))
+        if len(manifests) != 1:
+            sys.exit(f"{pkg}: expected one update.fuf, found {len(manifests)}")
+        pdir = manifests[0].parent
+        if not keep_radio:
+            fuf = pdir / "update.fuf"
+            text = fuf.read_text()
+            text = re.sub(r"(?m)^Radio: .*$", "Radio: ", text)
+            text = re.sub(r"(?m)^Radio version: .*$",
+                          "Radio version: 00 00 00 00 00 00", text)
+            fuf.write_text(text)
+            (pdir / "radio.bin").unlink(missing_ok=True)
+        info = re.search(r"(?m)^Info: *(.+)$", (pdir / "update.fuf").read_text())
+        img = ["-i", str(dev.sd)]
+        subprocess.run(["mmd", *img, "::update"], capture_output=True)
+        subprocess.run(["mdeltree", *img, f"::update/{pdir.name}"], capture_output=True)
+        subprocess.run(["mcopy", *img, "-s", "-Q", str(pdir), "::update/"], check=True)
+    return f"/ext/update/{pdir.name}/update.fuf", (info.group(1).strip() if info else pdir.name)
+
+
 # --------------------------------------------------------------- commands
 
 def cmd_flash(args):
     dev = Device(args.device)
+    dev.refuse_if_running()
     label, _ = dev.program(pathlib.Path(args.firmware), args.erase_all)
     print(f"[{dev.name}] flashed {label} -> {dev.flash}")
 
 
 def cmd_sd(args):
     dev = Device(args.device)
+    dev.refuse_if_running()
     dev.dir.mkdir(parents=True, exist_ok=True)
     dev.make_sd(args.resources, args.size, force=True)
 
@@ -247,6 +312,10 @@ def cmd_run(args):
     if not QEMU.exists():
         sys.exit(f"QEMU not built yet: run scripts/setup_qemu.sh ({QEMU})")
     dev = Device(args.device)
+    if not args.print_cmd:
+        dev.refuse_if_running()
+    if args.update and args.usb == "none":
+        sys.exit("--update starts the install over the USB CLI; drop --usb none")
     if args.firmware:
         fw = pathlib.Path(args.firmware)
         label, resources = dev.program(fw, args.erase_all)
@@ -262,6 +331,14 @@ def cmd_run(args):
     if not dev.sd.exists() and not args.no_sd:
         dev.make_sd(dev.info().get("resources"))
         cmd = qemu_cmd(dev, args)
+    manifest = label = None
+    if args.update:
+        if args.no_sd:
+            sys.exit("--update needs the SD card")
+        manifest, label = stage_update(dev, pathlib.Path(args.update), args.keep_radio)
+        print(f"[{dev.name}] staged {manifest}"
+              + ("" if args.keep_radio else " (radio stage dropped: the emulated "
+                 "CPU2 cannot install a stack)"))
     info = dev.info()
     print(f"[{dev.name}] {info.get('firmware', '?')}  "
           f"(monitor: {dev.monitor}"
@@ -275,8 +352,9 @@ def cmd_run(args):
     # killing the launcher stops the emulator too (Ctrl-C already reaches both)
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, lambda signum, frame: proc.send_signal(signum))
-    if args.usb == "pty":
-        threading.Thread(target=announce_usb_tty, args=(dev, proc),
+    if args.usb == "pty" or manifest:
+        threading.Thread(target=usb_helpers,
+                         args=(dev, proc, args.usb, manifest, label),
                          daemon=True).start()
     try:
         return proc.wait()
@@ -285,9 +363,11 @@ def cmd_run(args):
         return proc.wait()
 
 
-def announce_usb_tty(dev: Device, proc):
-    """Link devices/<name>/usb.tty to QEMU's pty for the USB CDC port."""
-    from fe_cli import usb_endpoint
+def usb_helpers(dev: Device, proc, usb_mode, manifest, label=None):
+    """Link devices/<name>/usb.tty to QEMU's pty for the USB serial port, and
+    start a staged update through the firmware's CLI (as qFlipper does)."""
+    from fe_cli import FlipperCli, usb_endpoint
+    ep = None
     for _ in range(100):
         if proc.poll() is not None:
             return
@@ -296,12 +376,58 @@ def announce_usb_tty(dev: Device, proc):
                 ep = usb_endpoint(dev.monitor)
             except OSError:
                 ep = None
-            if ep and ep[0] == "pty":
-                dev.usb_tty.symlink_to(ep[1])
-                print(f"[{dev.name}] USB serial (CLI/RPC): {ep[1]} -> {dev.usb_tty}"
-                      f"   (./flipperemu -d {dev.name} cli)", flush=True)
-                return
+            if ep:
+                break
         time.sleep(0.1)
+    if not ep:
+        return
+    if ep[0] == "pty":
+        dev.usb_tty.symlink_to(ep[1])
+        print(f"[{dev.name}] USB serial (CLI/RPC): {ep[1]} -> {dev.usb_tty}"
+              f"   (./flipperemu -d {dev.name} cli)", flush=True)
+    if not manifest:
+        return
+    try:
+        cli = FlipperCli(ep)
+        try:
+            cli.read_until_prompt(60)
+            cli.write(f"update install {manifest}\r".encode())
+            out, end = b"", time.time() + 20
+            while time.time() < end and b"BRB" not in out and b"Error" not in out:
+                if cli._fill(0.2):
+                    out += cli.buf
+                    cli.buf = b""
+        finally:
+            cli.close()
+    except (OSError, TimeoutError, ConnectionError) as e:
+        print(f"[{dev.name}] could not start the update over USB: {e}", flush=True)
+        return
+    text = out.decode(errors="replace")
+    if "BRB" in text:
+        print(f"[{dev.name}] updater started: {manifest}", flush=True)
+        dev.save_info(firmware=f"{label} (installed by update)",
+                      flashed=time.strftime("%Y-%m-%d %H:%M:%S"), source=manifest)
+    else:
+        err = re.search(r"Error: [^\r\n]*", text)
+        print(f"[{dev.name}] update refused: {err.group(0) if err else text.strip()}",
+              flush=True)
+
+
+def cmd_stop(args):
+    from fe_monitor import Monitor
+    dev = Device(args.device)
+    if not dev.running():
+        print(f"[{dev.name}] not running")
+        return 0
+    m = Monitor(str(dev.monitor))
+    m.s.sendall(b"quit\n")
+    m.close()
+    for _ in range(100):                # QEMU removes the socket on exit
+        if not dev.monitor.exists():
+            break
+        time.sleep(0.1)
+    print(f"[{dev.name}] stopped")
+    return 0
 
 
 def cmd_gdb(args):
@@ -373,6 +499,12 @@ def main():
 
     p = sub.add_parser("run", help="boot the device (optionally flashing first)")
     p.add_argument("-f", "--firmware", help=".elf/.dfu/.bin/update .tgz to flash first")
+    p.add_argument("--update", metavar="PKG",
+                   help="install an update package (.tgz or folder) through the "
+                        "firmware's own updater, like qFlipper: settings and files stay")
+    p.add_argument("--keep-radio", action="store_true",
+                   help="with --update: keep the radio stack stage (the emulated CPU2 "
+                        "cannot install it, so the updater will fail)")
     p.add_argument("--erase-all", action="store_true", help="wipe flash before programming")
     p.add_argument("--headless", action="store_true", help="no window")
     p.add_argument("--no-sd", action="store_true", help="boot without a microSD card")
@@ -401,6 +533,9 @@ def main():
     p.add_argument("--resources", help="resources .tgz, update package or directory")
     p.add_argument("--size", default="512M")
     p.set_defaults(func=cmd_sd)
+
+    p = sub.add_parser("stop", help="shut a running device down (saves its NVRAM)")
+    p.set_defaults(func=cmd_stop)
 
     p = sub.add_parser("cli", help="the USB CLI of a running device")
     p.add_argument("commands", nargs="*",

@@ -445,6 +445,9 @@ struct WB55SocState {
     uint8_t pin_level[WB55_PINS];
 };
 
+void wb55_soc_latch_boot(WB55SocState *s);
+void wb55_soc_sync_pins(WB55SocState *s);
+
 /* GPIO pin index helpers for the board */
 static inline int wb55_pin(char port, int pin)
 {

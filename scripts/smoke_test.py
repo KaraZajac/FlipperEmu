@@ -7,8 +7,9 @@
     scripts/smoke_test.py ~/fw/build/f7-firmware-D/firmware.elf --no-sd
 
 Boots a throwaway device, waits for the firmware's own log milestones, presses
-Back (dismiss the first scene) and OK (main menu), checks the LCD changed, and
-runs `info device` on the CLI over the emulated USB serial port.
+Back (dismiss the first scene) and OK (main menu), checks the LCD changed,
+runs `info device` on the CLI over the emulated USB serial port, then reboots
+through the CLI and checks the LCD comes back after the warm reset.
 Exit status 0 = pass. Screenshots are kept in the --out directory.
 """
 import argparse
@@ -47,6 +48,33 @@ def dark_pixels(png: pathlib.Path, scale: int = 4) -> int:
     b = 4 * scale
     img = Image.open(png).convert("L").crop((b, b, b + 128 * scale, b + 64 * scale))
     return sum(n for level, n in enumerate(img.histogram()) if level < 60)
+
+
+def reboot_check(mon: Monitor, uart: pathlib.Path, out: pathlib.Path, timeout: float) -> bool:
+    """`power reboot` over USB; after the warm reset the LCD must redraw."""
+    before = uart.read_text(errors="replace").count("Startup complete")
+    try:
+        cli = FlipperCli(usb_endpoint(mon))
+        try:
+            cli.read_until_prompt(15)
+            cli.write(b"power reboot\r")
+            time.sleep(0.5)
+        finally:
+            cli.close()
+    except (OSError, TimeoutError, ConnectionError, TypeError) as e:
+        print(f"  reboot: {e}")
+        return False
+    end = time.time() + timeout
+    while time.time() < end:
+        if uart.read_text(errors="replace").count("Startup complete") > before:
+            break
+        time.sleep(0.2)
+    else:
+        return False
+    time.sleep(2.0)
+    shot = out / "after-reboot.png"
+    mon.screenshot(str(shot))
+    return dark_pixels(shot) > 500
 
 
 def usb_cli_check(mon: Monitor) -> bool:
@@ -110,6 +138,8 @@ def main() -> int:
                             desk.read_bytes() != menu.read_bytes()))
             if not args.no_usb:
                 results.append(("usb: CLI 'info device' over CDC", usb_cli_check(mon)))
+                results.append(("reboot: LCD redrawn after a warm reset",
+                                reboot_check(mon, uart, out, args.timeout)))
             mon.cmd("quit")
         text = uart.read_text(errors="replace") if uart.exists() else ""
         results.append(("no crash in log", not CRASH.search(text)))

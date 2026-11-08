@@ -64,6 +64,36 @@ static void soc_boot_remap(void *opaque, int mode)
     memory_region_set_enabled(&s->boot_sram1, mode == 3);
 }
 
+/*
+ * System reset latches the boot configuration (BOOT0 low, nBOOT1/nSWBOOT0
+ * from the option bytes: main flash) before the core fetches SP and PC.
+ * The RAM updater runs with SRAM1 remapped at 0 and ends with a reset that
+ * must boot the freshly written flash, so this cannot wait for SYSCFG's own
+ * reset, which runs after the CPU has read its vector table.
+ */
+void wb55_soc_latch_boot(WB55SocState *s)
+{
+    soc_boot_remap(s, 0);
+}
+
+/*
+ * QEMU's STM32L4x5 GPIO reset zeroes IDR before recomputing it, so a pin
+ * that was high and is now low or floating never tells the devices on it.
+ * The ST7567's A0 (PB1) is one: after a warm reset the firmware's first
+ * commands (soft reset, display on) would land in display RAM as pixels.
+ * After a reset, re-send every pin whose level the devices have not seen.
+ */
+void wb55_soc_sync_pins(WB55SocState *s)
+{
+    for (int n = 0; n < WB55_PINS; n++) {
+        int level = (s->gpio[n / 16].idr >> (n % 16)) & 1;
+
+        if (level != s->pin_level[n]) {
+            soc_gpio_tap(s, n, level);
+        }
+    }
+}
+
 static DeviceState *soc_regfile(const char *name, hwaddr addr, uint32_t size,
                                 uint32_t kind)
 {

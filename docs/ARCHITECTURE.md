@@ -171,6 +171,24 @@ Host sequence, as a PC does it:
 Mode switches re-enumerate on their own. Opening Bad USB turns the CDC port into a HID
 keyboard (`046d:c529`); leaving the app turns it back.
 
+## Resets and the OTA updater
+
+A system reset (SYSRESETREQ, or `OBL_LAUNCH` after option-byte programming) goes through the machine
+reset hook, which does what silicon does around the core's reset:
+1. **Latch the boot configuration first**: flash goes back to address 0 before any device
+   resets. The firmware starts its updater by copying it to SRAM1, remapping SRAM to 0
+   and jumping, and the updater's final reset must boot the new flash. QEMU's M-profile
+   CPU fetches SP/PC in the hold phase, before SYSCFG's own reset would undo the remap.
+2. Reset all devices, then re-apply the board's pin levels (buttons, card detect, MISO).
+3. **Re-send pin levels the devices missed**: QEMU's L4x5 GPIO reset clears IDR without
+   telling anyone, which left the LCD's A0 line stuck high after warm resets.
+
+`./flipperemu run --update PKG` stages an update package on the SD card as qFlipper
+does, then sends `update install` over the USB CLI. The emulated CPU2 can't install a
+radio stack, so the launcher blanks the package's radio stage. It keeps every manifest
+line, because the firmware reads the manifest's optional keys in order and stops at the
+first missing one.
+
 ## Storage
 
 The SD card is QEMU's `ssi-sd` + `sd-card-spi` (with two fixes, see BRINGUP_LOG), behind

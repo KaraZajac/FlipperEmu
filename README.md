@@ -36,6 +36,8 @@ CLI over USB, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed 
 - Persistent devices: the internal flash (`flash.img`) and the battery-backed state (fuel
   gauge data memory and RTC backup domain, `nvram.bin`) survive restarts.
 - USART1 log console (`[I][Flipper] Startup complete`, …) on stdio, a file, a pty or TCP.
+- Over-the-air updates through the firmware's own updater (`run --update`): /int backup,
+  updater in RAM, flash write and verify, resources and splash, then a normal boot.
 - USB: the firmware enumerates on a built-in virtual host. Its USB serial port (the CLI
   and the protobuf RPC) is bridged to a pty or socket, and `./flipperemu cli` talks to
   it. When an app switches the port to HID (Bad USB, USB remote), the host plays the
@@ -52,8 +54,8 @@ CLI over USB, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed 
   open a serial port path work.
 - Bluetooth (needs a radio stack), and RF signals for Sub-GHz, NFC, RFID, IR and iButton.
 - Speaker audio. LP5562 engine programs are approximated (steady-state brightness only).
-- Implemented but not yet exercised end to end: runtime flash programming (OTA updater,
-  XIP app loaders that run code from internal flash) and option-byte programming.
+- Not yet exercised: XIP app loaders that run code from internal flash, and the
+  radio-stack stage of updates (the emulated CPU2 can't install a stack).
 - The GTK window is QEMU's standard display. It hasn't been tested on a desktop session
   here; all testing so far was headless, with screenshots taken through the monitor.
 
@@ -97,6 +99,8 @@ are erased). Without `-f` it boots whatever is already flashed.
 | command | what it does |
 |---|---|
 | `run [-f FW] [--headless] [--gdb\|--wait-gdb] [--serial S] [--usb U] [--no-sd]` | (flash and) boot |
+| `run --update PKG` | install an update package through the firmware's own updater (keeps settings and files) |
+| `stop` | shut a running device down cleanly (saves its NVRAM) |
 | `cli ["CMD" …]` | the device's CLI over USB: interactive, or run commands and print their output |
 | `flash FW [--erase-all]` | program `.elf` / `.dfu` / `.bin` / update `.tgz` into `flash.img` |
 | `sd [--resources X] [--size 512M]` | rebuild the microSD from a resources tgz, update package or folder |
@@ -118,9 +122,24 @@ scripts/smoke_test.py path/to/firmware.elf|.dfu|update.tgz [--no-sd]
 ```
 
 Boots a throwaway device headless and checks: "Startup complete", "card mounted", the
-LCD draws, OK changes the screen, `info device` answers on the USB CLI, and no `[CRASH]`
-in the log. Exit code 0 means pass, so
+LCD draws, OK changes the screen, `info device` answers on the USB CLI, the LCD comes back
+after `power reboot`, and no `[CRASH]` in the log. Exit code 0 means pass, so
 it slots into a pre-flash habit or CI.
+
+### Updating like qFlipper does
+
+`-f` writes a firmware straight into the flash, like a DFU flash. `--update` installs an
+update package the way a real Flipper does. The firmware backs up `/int`, reboots into
+its updater in RAM, writes and verifies the flash, then unpacks the new resources onto the
+card. Your settings and files stay:
+
+```sh
+./flipperemu -d mine run --update firmware/momentum-mntm-012/flipper-z-f7-update-mntm-012.tgz
+```
+
+| | |
+|:-:|:-:|
+| ![ota](docs/img/10-ota-writing-flash.png) | The stock updater writing the emulated flash. The radio stage of the package is left out: the emulated CPU2 is a FUS without a radio stack and can't install one. |
 
 ### USB: CLI, RPC and Bad USB
 

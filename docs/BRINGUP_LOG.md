@@ -1,7 +1,7 @@
 # Bring-up log
 
 How official firmware 1.5.1 went from "QEMU segfaults" to the desktop running apps from
-the SD card, and then to a CLI over emulated USB, 2026-11-07. Each entry has the symptom, how it was found, and the fix. Read
+the SD card, then to a CLI over emulated USB and over-the-air updates, 2026-11-07. Each entry has the symptom, how it was found, and the fix. Read
 these before modelling anything new; most traps repeat.
 
 Tools that did the work: the firmware's own USART1 log (`-serial stdio`), QEMU's gdb stub
@@ -96,6 +96,43 @@ All three are small, self-contained, and suitable for sending upstream.
     QEMU child, which kept the device's flash and SD images open. Fix: the launcher
     forwards SIGTERM/SIGHUP to QEMU.
 
+## OTA updates (M3)
+
+14. **The RAM updater ran twice, the second time in boot mode 4.** The main firmware
+    starts the updater by copying it to SRAM1, setting `SYSCFG_MEMRMP` to SRAM and
+    jumping (`furi_hal_switch`, no reset). When the updater finishes it resets, and on
+    silicon that reload of the boot configuration maps flash back at 0 before the core
+    fetches SP/PC. Here SYSCFG restored the alias in its *exit* reset phase, but QEMU's
+    M-profile CPU reads its vector table in the *hold* phase, so it booted the updater
+    from SRAM again. Fix: the machine reset latches the boot configuration (flash at 0)
+    before resetting any device.
+
+15. **Resources, option bytes and splash silently skipped.** To leave out the radio stage
+    (the emulated CPU2 can't install a stack), the test deleted the `Radio*` lines from
+    `update.fuf`. The firmware reads a manifest's optional keys in file order with no
+    rewind, so a missing key leaves the stream at EOF and hides every key after it. Fix:
+    blank the radio the way `fbt updater_package` writes a package without a stack
+    (`Radio:` empty, zero version), keeping every line. `./flipperemu run --update`
+    does exactly this.
+
+16. **Blank LCD after any warm reset (the updater, `power reboot`, a crash).** gdb
+    on QEMU itself: the ST7567 had pixel data but `display_on = 0`, and a `dprintf` on
+    its command decoder showed the init sequence (`E2` soft reset … `AF` display on)
+    only on the cold boot. The bug is in QEMU's STM32L4x5 GPIO model: its reset zeroes
+    IDR *before* recomputing it, so a pin that was high and is now low or floating
+    notifies nobody. PB1 (the LCD's A0, command/data) was high from the last pixel
+    write, so the LCD kept treating the next boot's commands as pixel data. Fix: after a
+    machine reset the SoC re-sends every pin level the devices haven't seen. The smoke
+    test now reboots through the CLI and checks the LCD comes back. It fails without the
+    fix.
+
+17. **Two emulators on one device.** While iterating, a test device's directory was
+    recreated while an older QEMU still had the old (now unlinked) images open. The
+    stale instance would have written its NVRAM over the new device's on exit. QEMU
+    locks disk images, but not after they're deleted. Fix: `run`, `flash` and `sd`
+    refuse to touch a device whose monitor socket answers, and there is a `stop`
+    command.
+
 ## Things that were right the first time (and why)
 
 - HSEM modelled from RM0434: **reading RLRx is the 1-step lock**. `furi_hal_bt_init()`
@@ -106,6 +143,9 @@ All three are small, self-contained, and suitable for sending upstream.
   worked as soon as the EXTI issue was gone (998 ticks/s, CPU parked in WFI).
 - DMA beat-by-beat arbitration: SD block reads and writes worked as soon as the
   card answered.
+- Runtime flash programming: the stock updater's erase/program/verify of ~770 KB, the
+  option-byte check and the post-update reboot chain worked on the first run that got
+  that far. The flash model flushes translated code for every programmed page.
 - USB double-buffered endpoints: the STAT semantics derived from libusb's
   `ep_write()`/`ep_read()` (see ARCHITECTURE.md) worked for CDC and RPC the first time
   the control path was race-free.
@@ -117,6 +157,9 @@ All three are small, self-contained, and suitable for sending upstream.
   `BQ27220_CONFIG_APPLY_US` delays).
 - `snake_game.fap` loads from the emulated SD in 48 ms (firmware's own measurement).
 - Idle: the vCPU sleeps in WFI between ticks, so the host CPU stays near idle.
+- OTA (`run --update`): Unleashed → official 1.5.1 in 68 s, including writing the
+  flash and unpacking 1074 resource files to the SD. Momentum's 11 MB resource
+  bundle takes longer.
 - USB: 33 ms from D+ pull-up to enumerated: 25 ms of attach debounce, suspend and
   reset timing (as a PC takes), ~8 ms of control transfers. The CLI banner shows within
   a second of opening the pty (QEMU checks a pty for a reader once a second).

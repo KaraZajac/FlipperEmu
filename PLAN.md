@@ -38,14 +38,17 @@ must read NAK while DTOG_TX == SW_BUF and VALID otherwise), and `ep_read()` only
 OUT endpoint whose STAT_RX reads VALID (so STAT_RX keeps its programmed value; the
 NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
 
-## M3: verify the write paths ☐  *next*
-- ☐ OTA: stage an update package on the SD, run the stock updater (RAM execution via
-      MEMRMP, flash programming, option bytes, radio-stack check, resources) through
-      its reboot chain
+## M3: verify the write paths ◐  *next: XIP*
+- ☑ OTA (2026-11-07): `./flipperemu run --update PKG` stages a package on the SD and starts
+      the stock updater over USB. The whole chain runs: /int backup, RAM updater (MEMRMP,
+      option-byte check, DFU validate, flash write + verify), post-update (restore /int,
+      resources, splash), normal boot. Verified official ⇄ Unleashed, official → Momentum.
+      The radio stage is blanked, because a FUS-only CPU2 cannot install a stack.
 - ☐ XIP app loaders (custom firmwares that program FAP code into internal flash and
       execute it there)
 - ◐ Firmware matrix: official 1.5.1, Momentum mntm-012, Unleashed unlshd-094 pass
-      `scripts/smoke_test.py`; add RogueMaster and run it on a schedule
+      `scripts/smoke_test.py` (now including a warm reboot); add RogueMaster and run it
+      on a schedule
 
 ## M4: senses ☐
 - ☐ Speaker: TIM16 CH1 PWM → QEMU audio
