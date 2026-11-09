@@ -56,6 +56,29 @@
  * fe_ibutton.py ("type onewire", "rom", "addr", "mem" lines, or "type wave"
  * and "wave"), or none.
  *
+ * The other way round, the Flipper emulates a key:
+ * - A Dallas key: its 1-Wire slave (lib/one_wire/one_wire_slave.c) catches
+ *   a reset by EXTI, then busy-polls the pin with interrupts off.  The
+ *   virtual reader ("reader", qom-set /machine/ibutton reader read) is a
+ *   1-Wire master driven by that polling, not by time: it starts a slot on
+ *   the slave's IDR read; writes a 1 by letting go at the read that saw the
+ *   slot, a 0 by holding on 30 us past the slave's next read (its 20 us
+ *   window starts between the two); and reads the slave's bit from its own
+ *   drive, between the slot and the slave's next write of the pin.  It
+ *   reads the ROM, and a memory key's memory, and writes a .ibtn file to
+ *   "tx-dir" (the launcher: devices/NAME/ibutton-tx/); "tx" names it.
+ *   The slave's waits read DWT before the pin, so a host stall of the vCPU
+ *   longer than a window can make it miss a slot, or take a reset: then it
+ *   reads the pin where it would write it, or goes quiet.  The reader then
+ *   resets it, and resumes a memory read at the last whole byte, reading
+ *   the 4 before it again to check that the address came through.
+ * - A Cyfral or Metakom key: the firmware's TIM1 update ISR sets the next
+ *   period (ARR), then the level PB14 holds for it.  The board reports each
+ *   such pair (flipper_ibutton_emulated): the waveform as the firmware
+ *   meant it, where an emulated ISR running late would make TIM1 repeat a
+ *   level.  A capture is written once it is full (4096 levels), or when the
+ *   emulation stops (PB14 no longer an output; or no level for a second).
+ *
  * Copyright (c) 2026, Kara Zajac
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -395,7 +418,7 @@ static void ow_release(FlipperIbuttonState *s)
     }
 }
 
-void flipper_ibutton_sampled(FlipperIbuttonState *s)
+static void ow_sampled(FlipperIbuttonState *s)
 {
     if (s->pulling) {
         ow_release(s);
@@ -434,7 +457,8 @@ static void ow_rise(FlipperIbuttonState *s, int64_t now)
     }                                   /* holding a 0: over once it is sampled */
 }
 
-void flipper_ibutton_master(FlipperIbuttonState *s, bool low)
+/* the firmware, as the master, changed its drive of the line */
+static void ow_master(FlipperIbuttonState *s, bool low)
 {
     if (low == s->m_low) {
         return;
@@ -452,7 +476,441 @@ void flipper_ibutton_master(FlipperIbuttonState *s, bool low)
 
 static void ibtn_timer(void *opaque)
 {
-    flipper_ibutton_sampled(opaque);    /* never sampled: let go anyway */
+    ow_sampled(opaque);                 /* never sampled: let go anyway */
+}
+
+/* ------------------------------------------ reading an emulated key */
+
+enum { RD_OFF, RD_RESET, RD_RESET_HOLD, RD_PRESENCE, RD_READY, RD_DETECT,
+       RD_HOLD0, RD_READBIT };
+enum { OP_RESET, OP_WRITE, OP_READ };
+
+#define RD_RESET_NS      (600 * SCALE_US)   /* after the slave's ISR saw it */
+#define RD_NO_ISR_NS     (5 * SCALE_MS)     /* no slave noticed the reset */
+#define RD_HOLD0_NS      (30 * SCALE_US)    /* a 0 written: past its 20 us */
+#define RD_OVERLAP       4                  /* bytes read again on a resume */
+#define RD_TIMEOUT_NS    (20 * SCALE_MS)    /* no answer (the slave gives up at 15) */
+#define RD_RETRIES       50                 /* in a row, with no byte read */
+
+static void rd_line(FlipperIbuttonState *s, bool low)
+{
+    s->rd_pull = low;
+    qemu_set_irq(s->pull, !low);
+}
+
+static void rd_add(FlipperIbuttonState *s, int op, int arg)
+{
+    s->rd_ops[s->rd_nops][0] = op;
+    s->rd_ops[s->rd_nops][1] = arg;
+    s->rd_nops++;
+}
+
+static void rd_finish(FlipperIbuttonState *s, const char *why);
+static void rd_next_op(FlipperIbuttonState *s);
+
+/* the slave dropped out: start over, or resume a memory read after a reset */
+static void rd_retry(FlipperIbuttonState *s)
+{
+    int family = s->rd_buf[0], memlen = s->rd_len - 8;
+
+    rd_line(s, false);
+    if (s->rd_len > s->rd_retry_len) {  /* it got further: a fresh budget */
+        s->rd_retry_len = s->rd_len;
+        s->rd_stuck = 0;
+    }
+    if (++s->rd_stuck > RD_RETRIES) {
+        rd_finish(s, s->rd_present ? "the key stopped answering" :
+                     "no key answered (is the Flipper emulating one?)");
+        return;
+    }
+    s->rd_retries++;
+    s->rd_byte = s->rd_bit = s->rd_nops = s->rd_op = 0;   /* a partial byte: again */
+    s->rd_skip = 0;
+    rd_add(s, OP_RESET, 0);
+    if (s->rd_len < 8 || s->rd_mem_total == 0) {
+        s->rd_len = 0;                  /* the ROM again */
+        rd_add(s, OP_WRITE, 0x33);
+        rd_add(s, OP_READ, 8);
+        s->rd_left = 8;
+    } else {                            /* the rest of the memory, from a few */
+        int addr = memlen - MIN(memlen, RD_OVERLAP);  /* bytes back: a check */
+
+        s->rd_skip = memlen - addr;     /* that the address came through */
+        rd_add(s, OP_WRITE, 0xCC);      /* SKIP ROM */
+        rd_add(s, OP_WRITE, 0xF0);      /* READ MEMORY */
+        rd_add(s, OP_WRITE, addr & 0xFF);
+        if (family != 0x14) {
+            rd_add(s, OP_WRITE, addr >> 8);
+        }
+        rd_add(s, OP_READ, s->rd_mem_total - addr);
+        s->rd_left = s->rd_mem_total - addr;
+    }
+    rd_next_op(s);
+}
+
+/* the next operation of the program, from the ready state */
+static void rd_next_op(FlipperIbuttonState *s)
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    if (s->rd_op >= s->rd_nops) {
+        rd_finish(s, NULL);
+        return;
+    }
+    if (s->rd_ops[s->rd_op][0] == OP_RESET) {
+        s->rd_op++;
+        s->rd_state = RD_RESET;
+        rd_line(s, true);
+        timer_mod(s->rd_timer, now + RD_NO_ISR_NS);
+        return;
+    }
+    s->rd_state = RD_READY;             /* a slot starts on a later IDR read */
+    s->rd_reads = 0;
+    timer_mod(s->rd_timer, now + RD_TIMEOUT_NS);
+}
+
+/* a slot is over: on to the next bit, byte or operation */
+static void rd_bit_done(FlipperIbuttonState *s, int bit)
+{
+    int op = s->rd_ops[s->rd_op][0];
+
+    if (op == OP_READ && bit) {
+        s->rd_byte |= 1 << s->rd_bit;
+    }
+    if (++s->rd_bit == 8) {
+        s->rd_bit = 0;
+        if (op == OP_READ && s->rd_skip) {      /* read again after a resume */
+            if (s->rd_byte != s->rd_buf[s->rd_len - s->rd_skip]) {
+                /* the address was misheard, or the byte kept was wrong:
+                 * resume before it, checking the bytes before that */
+                s->rd_len -= s->rd_skip;
+                rd_retry(s);
+                return;
+            }
+            s->rd_skip--;
+            s->rd_byte = 0;
+            --s->rd_left;
+            rd_next_op(s);
+            return;
+        }
+        if (op == OP_READ) {
+            s->rd_buf[s->rd_len++] = s->rd_byte;
+            s->rd_byte = 0;
+            if (s->rd_len == 8 && s->rd_op == 2) {      /* the ROM is in */
+                static const uint16_t mem[256] = {
+                    [0x08] = 128, [0x0C] = 8192, [0x14] = 32,
+                };
+                int n = mem[s->rd_buf[0]];
+
+                if (n && s->rd_nops == 3) {             /* READ MEMORY from 0 */
+                    s->rd_mem_total = n;
+                    rd_add(s, OP_WRITE, 0xF0);
+                    rd_add(s, OP_WRITE, 0x00);
+                    if (s->rd_buf[0] != 0x14) {
+                        rd_add(s, OP_WRITE, 0x00);      /* 2-byte address */
+                    }
+                    rd_add(s, OP_READ, n);
+                }
+            }
+            if (--s->rd_left > 0) {
+                rd_next_op(s);
+                return;
+            }
+        }
+        s->rd_op++;
+        if (s->rd_op < s->rd_nops && s->rd_ops[s->rd_op][0] == OP_READ) {
+            s->rd_left = s->rd_ops[s->rd_op][1];
+        }
+    }
+    rd_next_op(s);
+}
+
+/* the slave read IDR: the reader's moves that wait on its polling */
+static void rd_poll(FlipperIbuttonState *s, int64_t now)
+{
+    int op = s->rd_op < s->rd_nops ? s->rd_ops[s->rd_op][0] : -1;
+    int arg = s->rd_op < s->rd_nops ? s->rd_ops[s->rd_op][1] : 0;
+
+    switch (s->rd_state) {
+    case RD_RESET:
+        if (s->rd_pull) {               /* its EXTI ISR saw the reset begin */
+            s->rd_state = RD_RESET_HOLD;
+            timer_mod(s->rd_timer, now + RD_RESET_NS);
+        }
+        return;
+    case RD_READY:
+        if (++s->rd_reads >= 2) {       /* it is waiting for a slot */
+            rd_line(s, true);
+            s->rd_state = RD_DETECT;
+        }
+        return;
+    case RD_DETECT:                     /* this read saw the slot begin */
+        if (op == OP_WRITE && !((arg >> s->rd_bit) & 1)) {
+            s->rd_t = -1;
+            s->rd_state = RD_HOLD0;
+            return;
+        }
+        rd_line(s, false);              /* a 1, or a read: let go now */
+        if (op == OP_WRITE) {
+            rd_bit_done(s, 1);
+        } else {
+            s->rd_fw_pulled = false;
+            s->rd_state = RD_READBIT;
+        }
+        return;
+    case RD_READBIT:
+        /*
+         * Sending a bit, the slave writes the pin and only waits on DWT
+         * between: a read here is not that.  It missed the slot and waits
+         * for one, or a host stall in a wait made it take a reset, whose
+         * presence pulse would read as a 0 here.  It dropped out.
+         */
+        rd_retry(s);
+        return;
+    case RD_HOLD0:
+        /*
+         * The slave times its window from after the read that saw the slot;
+         * a host stall there would shorten a hold timed from that read, and
+         * a 0 would be heard as a 1.  From its first read in the window, a
+         * hold is at least as long as the slave measures.
+         */
+        if (s->rd_t < 0) {
+            s->rd_t = now;
+        } else if (now - s->rd_t >= RD_HOLD0_NS) {
+            rd_line(s, false);
+            rd_bit_done(s, 0);
+        }
+        return;
+    }
+}
+
+/* the slave wrote PB14 (low: it drives the line low) */
+static void rd_fw(FlipperIbuttonState *s, bool low)
+{
+    switch (s->rd_state) {
+    case RD_PRESENCE:
+        if (low) {
+            s->rd_fw_pulled = true;     /* its presence pulse */
+        } else if (s->rd_fw_pulled) {
+            s->rd_present = true;
+            s->rd_op++;                 /* the reset is done */
+            rd_next_op(s);
+        }
+        return;
+    case RD_READBIT:
+        if (low) {
+            s->rd_fw_pulled = true;     /* it sends a 0 */
+        } else {
+            rd_bit_done(s, !s->rd_fw_pulled);
+        }
+        return;
+    case RD_READY:
+        s->rd_reads = 0;                /* it is busy: wait for its polling */
+        return;
+    }
+}
+
+static void rd_timer(void *opaque)
+{
+    FlipperIbuttonState *s = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    switch (s->rd_state) {
+    case RD_RESET:                      /* no slave ISR: release anyway */
+    case RD_RESET_HOLD:
+        rd_line(s, false);
+        s->rd_state = RD_PRESENCE;
+        s->rd_fw_pulled = false;
+        s->rd_op--;                     /* the reset op completes on presence */
+        timer_mod(s->rd_timer, now + RD_TIMEOUT_NS);
+        return;
+    default:
+        rd_retry(s);
+        return;
+    }
+}
+
+static const char *rd_family(uint8_t code)
+{
+    switch (code) {
+    case 0x01: return "DS1990";
+    case 0x08: return "DS1992";
+    case 0x0C: return "DS1996";
+    case 0x14: return "DS1971";
+    default: return "DSGeneric";
+    }
+}
+
+static void rd_finish(FlipperIbuttonState *s, const char *why)
+{
+    g_autoptr(GString) f = g_string_new(NULL);
+    g_autoptr(GError) err = NULL;
+    g_autofree char *path = NULL;
+    const uint8_t *rom = s->rd_buf;
+    int memlen = s->rd_len - 8;
+
+    timer_del(s->rd_timer);
+    rd_line(s, false);
+    s->rd_state = RD_OFF;
+    g_free(s->rd_prog);
+    s->rd_prog = NULL;
+    if (why || s->rd_len < 8) {
+        warn_report("flipper-zero: iButton reader: %s",
+                    why ?: "the ROM did not come through");
+        if (s->rd_len < 8) {
+            return;
+        }
+    }
+    g_string_append_printf(f, "Filetype: Flipper iButton key\nVersion: 2\n"
+                           "Protocol: %s\nRom Data:", rd_family(rom[0]));
+    for (int i = 0; i < 8; i++) {
+        g_string_append_printf(f, " %02X", rom[i]);
+    }
+    g_string_append_c(f, '\n');
+    if (memlen > 0) {
+        g_string_append_printf(f, "%s:", rom[0] == 0x14 ? "Eeprom Data" : "Sram Data");
+        for (int i = 0; i < memlen; i++) {
+            g_string_append_printf(f, " %02X", s->rd_buf[8 + i]);
+        }
+        g_string_append_c(f, '\n');
+    }
+    if (!s->tx_dir) {
+        return;
+    }
+    g_mkdir_with_parents(s->tx_dir, 0755);
+    for (int k = 1; k < 100000; k++) {
+        g_free(path);
+        path = g_strdup_printf("%s/read-%05d.ibtn", s->tx_dir, k);
+        if (!g_file_test(path, G_FILE_TEST_EXISTS)) {
+            break;
+        }
+    }
+    if (g_file_set_contents(path, f->str, f->len, &err)) {
+        g_autofree char *again = s->rd_retries ?
+            g_strdup_printf(" (the key dropped out %d time%s; read on after a reset)",
+                            s->rd_retries, s->rd_retries == 1 ? "" : "s") : g_strdup("");
+
+        info_report("flipper-zero: iButton reader read the emulated key: %s "
+                    "%02X%02X%02X%02X%02X%02X%02X%02X%s%s -> %s%s", rd_family(rom[0]),
+                    rom[0], rom[1], rom[2], rom[3], rom[4], rom[5], rom[6], rom[7],
+                    ow_crc8(rom, 7) == rom[7] ? "" : " (bad CRC)",
+                    memlen > 0 ? " + memory" : "", path, again);
+        g_free(s->tx_last);
+        s->tx_last = g_steal_pointer(&path);
+    } else {
+        warn_report("flipper-zero: %s", err->message);
+    }
+}
+
+/* --------------------------------- capturing an emulated Cyfral/Metakom */
+
+#define CAP_IDLE_NS  (1000 * SCALE_MS)  /* no new level: the capture ends */
+#define CAP_MAX      4096
+
+static void cap_write(FlipperIbuttonState *s)
+{
+    g_autoptr(GString) f = g_string_new(NULL);
+    g_autoptr(GError) err = NULL;
+    g_autofree char *path = NULL;
+    const int32_t *d = (const int32_t *)s->cap->data;
+    guint n = s->cap->len;
+
+    if (n >= 16 && s->tx_dir) {
+        g_string_append(f, "Filetype: FlipperEmu iButton capture\nVersion: 1\n"
+                        "# What an emulated Cyfral or Metakom key put on the iButton "
+                        "pin: each level\n# the firmware set, +high/-low, for its "
+                        "TIM1 period in us. ./flipperemu\n# ibutton FILE reads "
+                        "it back.");
+        for (guint i = 0; i < n; i++) {
+            if (i % 32 == 0) {
+                g_string_append(f, "\nWave:");
+            }
+            g_string_append_printf(f, " %+d", d[i]);
+        }
+        g_string_append_c(f, '\n');
+        g_mkdir_with_parents(s->tx_dir, 0755);
+        for (int k = 1; k < 100000; k++) {
+            g_free(path);
+            path = g_strdup_printf("%s/tx-%05d.txt", s->tx_dir, k);
+            if (!g_file_test(path, G_FILE_TEST_EXISTS)) {
+                break;
+            }
+        }
+        if (g_file_set_contents(path, f->str, f->len, &err)) {
+            info_report("flipper-zero: iButton emulation, %u levels -> %s", n, path);
+            g_free(s->tx_last);
+            s->tx_last = g_steal_pointer(&path);
+        } else {
+            warn_report("flipper-zero: %s", err->message);
+        }
+    }
+}
+
+/* the emulation stopped: write what was captured, unless it was written
+ * full.  The idle timer is only a fallback: a host stall of the vCPU runs
+ * the virtual clock on with no level set, and should not cut a capture. */
+static void cap_timer(void *opaque)
+{
+    FlipperIbuttonState *s = opaque;
+
+    timer_del(s->cap_timer);
+    if (s->cap) {
+        if (!s->cap_done) {
+            cap_write(s);
+        }
+        g_array_free(s->cap, true);
+        s->cap = NULL;
+        s->cap_done = false;
+    }
+}
+
+/* the firmware let go of PB14 (no longer an output): an emulation ended */
+void flipper_ibutton_released(FlipperIbuttonState *s)
+{
+    if (s->cap) {
+        cap_timer(s);
+    }
+}
+
+/* the emulation set a level, held for ns (one TIM1 period) */
+void flipper_ibutton_emulated(FlipperIbuttonState *s, bool high, int64_t ns)
+{
+    int32_t us = (ns + SCALE_US / 2) / SCALE_US;
+
+    if (s->kind != IBTN_NONE || s->rd_state != RD_OFF) {
+        return;                         /* a key on the contact, or reading one */
+    }
+    if (!s->cap) {
+        s->cap = g_array_new(false, false, sizeof(int32_t));
+    }
+    if (!s->cap_done && us > 0) {
+        g_array_append_val(s->cap, (int32_t){ high ? us : -us });
+        if (s->cap->len == CAP_MAX) {   /* full: written now, though the key */
+            cap_write(s);               /* emulates on (the rest repeats it) */
+            s->cap_done = true;
+        }
+    }
+    timer_mod(s->cap_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + CAP_IDLE_NS);
+}
+
+/* ------------------------------------------------- the board's hooks */
+
+void flipper_ibutton_idr_read(FlipperIbuttonState *s, bool fw_released)
+{
+    if (s->rd_state != RD_OFF) {
+        rd_poll(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    } else if (fw_released) {
+        ow_sampled(s);                  /* a key's 0 or presence is read */
+    }
+}
+
+void flipper_ibutton_fw_write(FlipperIbuttonState *s, bool low)
+{
+    if (s->rd_state != RD_OFF) {
+        rd_fw(s, low);
+    } else {
+        ow_master(s, low);
+    }
 }
 
 /* ------------------------------------------------- Cyfral and Metakom */
@@ -682,6 +1140,44 @@ static char *ibtn_get_key(Object *obj, Error **errp)
     return g_strdup(FLIPPER_IBUTTON(obj)->key_str ?: "");
 }
 
+static char *ibtn_get_reader(Object *obj, Error **errp)
+{
+    return g_strdup(FLIPPER_IBUTTON(obj)->rd_prog ?: "");
+}
+
+static void ibtn_set_reader(Object *obj, const char *value, Error **errp)
+{
+    FlipperIbuttonState *s = FLIPPER_IBUTTON(obj);
+
+    if (strcmp(value, "read")) {
+        error_setg(errp, "ibutton reader: read (the ROM, and a memory key's "
+                   "memory, of the key the Flipper emulates)");
+        return;
+    }
+    if (s->kind != IBTN_NONE) {
+        error_setg(errp, "ibutton reader: take the key off the contact first");
+        return;
+    }
+    timer_del(s->rd_timer);
+    g_free(s->rd_prog);
+    s->rd_prog = g_strdup(value);
+    s->rd_nops = s->rd_op = s->rd_len = s->rd_bit = 0;
+    s->rd_retries = s->rd_stuck = s->rd_retry_len = s->rd_mem_total = 0;
+    s->rd_skip = s->rd_byte = 0;
+    s->rd_present = false;
+    memset(s->rd_buf, 0, sizeof(s->rd_buf));
+    rd_add(s, OP_RESET, 0);
+    rd_add(s, OP_WRITE, 0x33);          /* READ ROM */
+    rd_add(s, OP_READ, 8);
+    s->rd_left = 8;
+    rd_next_op(s);
+}
+
+static char *ibtn_get_tx(Object *obj, Error **errp)
+{
+    return g_strdup(FLIPPER_IBUTTON(obj)->tx_last ?: "");
+}
+
 static char *ibtn_get_rom(Object *obj, Error **errp)
 {
     FlipperIbuttonState *s = FLIPPER_IBUTTON(obj);
@@ -700,21 +1196,34 @@ static void ibtn_init(Object *obj)
 
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, ibtn_timer, s);
     s->wave_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, wave_step, s);
+    s->rd_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, rd_timer, s);
+    s->cap_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, cap_timer, s);
     qdev_init_gpio_out_named(DEVICE(obj), &s->pull, "pull", 1);
     object_property_add_str(obj, "key", ibtn_get_key, ibtn_set_key);
     object_property_set_description(obj, "key",
         "The key on the iButton contact: file:PATH (scripts/fe_ibutton.py) "
         "or none");
+    object_property_add_str(obj, "reader", ibtn_get_reader, ibtn_set_reader);
+    object_property_set_description(obj, "reader",
+        "Read the key the Flipper emulates: read (a virtual 1-Wire master)");
+    object_property_add_str(obj, "tx", ibtn_get_tx, NULL);
+    object_property_set_description(obj, "tx",
+        "The latest emulated key read, or Cyfral/Metakom capture");
     object_property_add_str(obj, "rom", ibtn_get_rom, NULL);
     object_property_set_description(obj, "rom",
         "A 1-Wire key's ROM now (a blank's, once written)");
 }
+
+static const Property ibtn_props[] = {
+    DEFINE_PROP_STRING("tx-dir", FlipperIbuttonState, tx_dir),
+};
 
 static void ibtn_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->user_creatable = false;
+    device_class_set_props(dc, ibtn_props);
 }
 
 static const TypeInfo ibtn_types[] = {

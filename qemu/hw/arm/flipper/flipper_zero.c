@@ -402,26 +402,53 @@ static void flipper_drive_pins(FlipperZeroState *s)
     }
 }
 
-/* a read of GPIOB's IDR while the firmware's drive of PB14 is off: if a
- * 1-Wire key holds the line low for it, that read has sampled it */
+/* a read of GPIOB's IDR: the firmware sampled PB14, the iButton line */
 static void flipper_idr_read(void *opaque, int port)
 {
     FlipperZeroState *s = opaque;
 
-    if (port == 1 && (s->soc.gpio[1].odr & (1u << 14))) {
-        flipper_ibutton_sampled(s->ibutton);
+    if (port == 1) {
+        flipper_ibutton_idr_read(s->ibutton,
+                                 s->soc.gpio[1].odr & (1u << 14));
     }
 }
 
-/* GPIOB's MODER/ODR/BSRR/BRR written: does the firmware drive PB14 low? */
-static void flipper_out_written(void *opaque, int port)
+static bool flipper_pb14_output(FlipperZeroState *s)
+{
+    return ((s->soc.gpio[1].moder >> 28) & 3) == 1;
+}
+
+/* a write to GPIOB's MODER/ODR/BSRR/BRR that may concern PB14: what the
+ * firmware drives on the iButton line now (low, or released) */
+static void flipper_out_written(void *opaque, int port, hwaddr reg,
+                                uint32_t data)
 {
     FlipperZeroState *s = opaque;
-    const Stm32l4x5GpioState *b = &s->soc.gpio[1];
+    const uint32_t bit = 1u << 14, *tim = s->soc.tim1.regs;
 
-    if (port == 1) {
-        flipper_ibutton_master(s->ibutton, ((b->moder >> 28) & 3) == 1 &&
-                                           !(b->odr & (1u << 14)));
+    if (port != 1 || (reg == 0x18 && !(data & (bit | bit << 16))) ||
+        (reg == 0x28 && !(data & bit))) {
+        return;                         /* another pin's BSRR/BRR write */
+    }
+    flipper_ibutton_fw_write(s->ibutton, flipper_pb14_output(s) &&
+                                         !(s->soc.gpio[1].odr & bit));
+    if (reg == 0x00 && !flipper_pb14_output(s)) {
+        flipper_ibutton_released(s->ibutton);
+    }
+    /*
+     * Emulating a Cyfral or Metakom key, the firmware's TIM1 update ISR sets
+     * each next period (ARR) and then the level it holds for (BSRR/BRR);
+     * that pair is the key's waveform.  Taken here, not at the updates, it
+     * keeps to the firmware's timeline: a vCPU late to the ISR (a host
+     * thread waking from WFI) would stretch or repeat a level there.
+     */
+    if (reg != 0x00 && flipper_pb14_output(s) && (tim[0x0C / 4] & 1)) {
+        uint64_t ticks = (uint64_t)((tim[0x28 / 4] & 0xFFFF) + 1) *
+                         ((tim[0x2C / 4] & 0xFFFF) + 1);
+
+        flipper_ibutton_emulated(s->ibutton, s->soc.gpio[1].odr & bit,
+                                 muldiv64(ticks, NANOSECONDS_PER_SECOND,
+                                          clock_get_hz(s->soc.rcc.hclk)));
     }
 }
 

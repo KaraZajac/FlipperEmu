@@ -81,7 +81,7 @@ static MemTxResult soc_gpio_tap_write(void *opaque, hwaddr addr, uint64_t data,
 
     if ((addr == 0x00 || addr == 0x14 || addr == 0x18 || addr == 0x28) &&
         s->out_written) {
-        s->out_written(s->gpio_hook_opaque, tap->port);
+        s->out_written(s->gpio_hook_opaque, tap->port, addr, data);
     }
     return r;
 }

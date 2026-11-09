@@ -319,15 +319,36 @@ struct FlipperIbuttonState {
     bool awaiting;               /* the last edge waits for the ISR's read */
     int64_t edge_t, next_t;      /* that edge and the next on the key's timeline */
     struct WB55DwtState *dwt;    /* stamps the ISR's CYCCNT read */
+    /* the Flipper emulates a key: a virtual reader, and captures */
+    char *rd_prog;               /* "read" while a session runs */
+    QEMUTimer *rd_timer;
+    int rd_state, rd_op, rd_nops, rd_bit, rd_left, rd_reads;
+    int rd_retries, rd_mem_total;   /* a memory read resumes after a dropout */
+    int rd_stuck, rd_retry_len;     /* retries since the last new byte */
+    int rd_skip;                    /* bytes read again, to check, on a resume */
+    uint8_t rd_byte;                /* the byte being read */
+    int rd_ops[8][2];            /* reset, write byte, read n bytes */
+    bool rd_pull, rd_fw_pulled, rd_present;
+    int64_t rd_t;
+    uint8_t rd_buf[8 + 8192];    /* ROM, then memory */
+    int rd_len;
+    GArray *cap;                 /* Cyfral/Metakom: +high/-low µs */
+    bool cap_done;               /* written full: the rest is ignored */
+    QEMUTimer *cap_timer;
+    char *tx_dir, *tx_last;
 };
 /* COMP1 was enabled or disabled */
 void flipper_ibutton_comp(FlipperIbuttonState *s, bool on);
 /* the CPU read COMP1's CSR */
 void flipper_ibutton_comp_read(FlipperIbuttonState *s);
-/* the CPU read GPIOB's IDR with its own drive of PB14 off: it sampled */
-void flipper_ibutton_sampled(FlipperIbuttonState *s);
-/* the CPU's drive of PB14 changed: low, or released (or not an output) */
-void flipper_ibutton_master(FlipperIbuttonState *s, bool low);
+/* the CPU read GPIOB's IDR (fw_released: its own drive of PB14 is off) */
+void flipper_ibutton_idr_read(FlipperIbuttonState *s, bool fw_released);
+/* the CPU wrote PB14: it drives the line low, or released (or not an output) */
+void flipper_ibutton_fw_write(FlipperIbuttonState *s, bool low);
+/* emulating a Cyfral/Metakom key, the firmware set PB14 high/low for ns */
+void flipper_ibutton_emulated(FlipperIbuttonState *s, bool high, int64_t ns);
+/* PB14 is no longer an output: a Cyfral/Metakom emulation stopped */
+void flipper_ibutton_released(FlipperIbuttonState *s);
 /* a system reset: the line pulled up, the slave idle */
 void flipper_ibutton_reset(FlipperIbuttonState *s);
 /* the reader's antenna drive (TIM1 CH1N PWM) frequency, 0 = off */

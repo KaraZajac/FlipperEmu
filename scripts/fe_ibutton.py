@@ -15,6 +15,8 @@ contact takes (see qemu/hw/arm/flipper/flipper_ibutton.c):
     fe_ibutton.py rw1990 [ROM]                  -> a blank the Flipper can write:
                                                    rw1990 (.1), rw1990.2, tm2004,
                                                    tm01x (ROM: what it reads now)
+    fe_ibutton.py ibutton-tx/tx-00001.txt       -> the Cyfral/Metakom key an
+                                                   emulation capture holds
 
 Dallas keys are 1-Wire slaves: their ROM (family code, serial, CRC) and,
 for DS1992/DS1996/DS1971, their memory.  Cyfral and Metakom keys are a
@@ -132,6 +134,77 @@ def wave(name, values):
     return f"# {name}\ntype wave\nwave {','.join(f'{v:+d}' for v in merged)}\n"
 
 
+# ------------------------------------------- emulation captures (ibutton-tx)
+
+def parse_capture(path):
+    """Signed microseconds (+ high) from a FlipperEmu iButton capture."""
+    wave, kind = [], None
+    for line in pathlib.Path(path).read_text().splitlines():
+        key, _, value = line.partition(":")
+        if key == "Filetype":
+            kind = value.strip()
+        elif key == "Wave":
+            wave += [int(x) for x in value.split()]
+    if kind != "FlipperEmu iButton capture":
+        raise ValueError(f"{path}: not a FlipperEmu iButton capture")
+    return wave
+
+
+def _runs(wave):
+    """Equal levels merged: [(high, us)]."""
+    out = []
+    for v in wave:
+        if out and out[-1][0] == (v > 0):
+            out[-1] = (out[-1][0], out[-1][1] + abs(v))
+        else:
+            out.append((v > 0, abs(v)))
+    return out
+
+
+def _frames(runs):
+    """Every Cyfral and Metakom frame in the levels, as the firmware's
+    decoders would read them: [(protocol, data bytes)]."""
+    found = []
+    # Metakom: a sync low longer than a period, then high/low pairs: the
+    # start word 010 and 32 bits, MSB first, every byte with even parity.
+    # A bit is its high (long: 1); its low may run into the next sync.
+    for i, (high, us) in enumerate(runs):
+        if high or us <= 1.2 * PERIOD_US or i + 70 > len(runs):
+            continue
+        bits = [int(runs[i + 1 + 2 * k][1] > PERIOD_US / 2) for k in range(35)]
+        if bits[:3] == [0, 1, 0]:
+            data = int("".join(map(str, bits[3:])), 2).to_bytes(4, "little")
+            if all(bin(b).count("1") % 2 == 0 for b in data):
+                found.append(("Metakom", data))
+    # Cyfral: low/high pairs, the start nibble 0001, then 8 nibbles each
+    # with one 0, two data bits apiece
+    nib = {0b1110: 3, 0b1101: 2, 0b1011: 1, 0b0111: 0}
+    for i in range(len(runs) - 71):
+        if runs[i][0]:
+            continue
+        bits = [int(runs[i + 2 * k + 1][1] > runs[i + 2 * k][1]) for k in range(36)]
+        if bits[:4] != [0, 0, 0, 1]:
+            continue
+        nibbles = [int("".join(map(str, bits[4 + 4 * k:8 + 4 * k])), 2) for k in range(8)]
+        if all(n in nib for n in nibbles):
+            value = 0
+            for n in nibbles:
+                value = value << 2 | nib[n]
+            found.append(("Cyfral", value.to_bytes(2, "little")))
+    return found
+
+
+def decode_capture(wave):
+    """(protocol, data bytes) of a captured Cyfral or Metakom emulation: the
+    frame found most often (an emulated key repeats it), and at least twice."""
+    frames = _frames(_runs(wave)[1:-1])         # the ends may be cut short
+    if frames:
+        best = max(set(frames), key=frames.count)
+        if frames.count(best) >= 2:
+            return best
+    raise ValueError("no Cyfral or Metakom frame repeats in the capture")
+
+
 # ------------------------------------------------------------- .ibtn
 
 def parse_ibtn(path):
@@ -187,6 +260,9 @@ def main():
     try:
         if len(args) == 1 and args[0].endswith(".ibtn"):
             print(describe(parse_ibtn(args[0])), end="")
+        elif len(args) == 1 and pathlib.Path(args[0]).is_file():
+            proto, data = decode_capture(parse_capture(args[0]))
+            print(describe_new(proto, data), end="")
         elif len(args) >= 2 or (args and args[0].lower() in BLANKS):
             print(describe_new(args[0], hexbytes(" ".join(args[1:]))), end="")
         else:

@@ -14,8 +14,8 @@ decodes it back, receives a Princeton key over the virtual air (`subghz rx`),
 captures a `subghz tx`, reads a 125 kHz EM4100
 tag (`rfid read`), reads back its own H10301 emulation (`rfid emulate`),
 writes an H10301 to a virtual T5577 (`rfid write`), reads a DS1990A iButton
-(`ikey read`),
-reads an NTAG215 (`mfu info`) and dumps a MIFARE Classic 1K over NFC, has a
+(`ikey read`), has a virtual 1-Wire reader read an emulated DS1990A, captures
+an emulated Metakom key and reads it back, reads an NTAG215 (`mfu info`) and dumps a MIFARE Classic 1K over NFC, has a
 virtual reader read an NTAG215 the firmware emulates,
 enumerates over USB/IP, then reboots through the CLI and checks the LCD comes
 back after the warm reset.
@@ -332,6 +332,88 @@ def ibutton_check(mon: Monitor, devdir: pathlib.Path) -> bool:
     return bool(found)
 
 
+def ibutton_emulate_check(mon: Monitor) -> bool:
+    """`ikey emulate Dallas` a DS1990A: the virtual 1-Wire reader, a master
+    paced by the firmware's 1-Wire slave, must read its ROM."""
+    import fe_ibutton
+    rom = fe_ibutton.rom_of(bytes.fromhex("012B3C4D5E6F70")).hex().upper()
+    try:
+        cli = FlipperCli(usb_endpoint(mon))
+        try:
+            cli.read_until_prompt(15)
+            found, out = cli.watch(f"ikey emulate Dallas {rom}", r"Emulating key",
+                                   timeout=5, stop=False)
+            if not found:
+                print(f"  ibutton emulate: {out.strip()[-200:]!r}")
+                return False
+            time.sleep(0.5)
+            before = mon.cmd("qom-get /machine/ibutton tx").strip().strip('"')
+            if mon.cmd("qom-set /machine/ibutton reader read"):
+                return False
+            for _ in range(300):
+                if not mon.cmd("qom-get /machine/ibutton reader").strip().strip('"'):
+                    break
+                time.sleep(0.1)
+            path = mon.cmd("qom-get /machine/ibutton tx").strip().strip('"')
+        finally:
+            # stop it, and see the prompt: a ^C written just before closing
+            # the port can be lost, and the next command would land in it
+            cli.write(b"\x03")
+            try:
+                cli.read_until_prompt(5)
+            finally:
+                cli.close()
+    except (OSError, TimeoutError, ConnectionError, TypeError) as e:
+        print(f"  ibutton emulate: {e}")
+        return False
+    if path == before or not path.endswith(".ibtn"):
+        print("  ibutton emulate: the reader read nothing")
+        return False
+    got = fe_ibutton.parse_ibtn(path).get("Rom Data", "").replace(" ", "")
+    if got != rom:
+        print(f"  ibutton emulate: read ROM {got}, emulated {rom} ({path})")
+    return got == rom
+
+
+def ibutton_wave_check(mon: Monitor, devdir: pathlib.Path) -> bool:
+    """`ikey emulate Metakom C355330F`: its waveform, captured, must decode
+    back; put on the contact, `ikey read` must read the same key."""
+    import fe_ibutton
+    key = devdir / "ibutton-key.txt"
+    try:
+        cli = FlipperCli(usb_endpoint(mon))
+        try:
+            cli.read_until_prompt(15)
+            before = mon.cmd("qom-get /machine/ibutton tx")
+            cli.watch("ikey emulate Metakom C355330F", r"NEVER", timeout=1.5)
+            for _ in range(50):         # written after 100 ms without a level
+                after = mon.cmd("qom-get /machine/ibutton tx")
+                if after != before:
+                    break
+                time.sleep(0.1)
+            else:
+                print("  ibutton wave: no capture")
+                return False
+            path = after.strip().strip('"')
+            proto, data = fe_ibutton.decode_capture(fe_ibutton.parse_capture(path))
+            if (proto, data.hex().upper()) != ("Metakom", "C355330F"):
+                print(f"  ibutton wave: decoded {proto} {data.hex().upper()} ({path})")
+                return False
+            key.write_text(fe_ibutton.describe_new(proto, data))
+            if mon.cmd(f"qom-set /machine/ibutton key file:{key}"):
+                return False
+            found, out = cli.watch("ikey read", r"Metakom C355330F", timeout=15)
+        finally:
+            cli.close()
+            mon.cmd("qom-set /machine/ibutton key none")
+    except (OSError, TimeoutError, ConnectionError, TypeError, ValueError) as e:
+        print(f"  ibutton wave: {e}")
+        return False
+    if not found:
+        print(f"  ibutton wave: {out.strip()[-200:]!r}")
+    return bool(found)
+
+
 def nfc_check(mon: Monitor, devdir: pathlib.Path):
     """An NTAG215 in the NFC field: `mfu info` in the NFC shell must read
     its UID and all 135 pages.  None (skip) without the NFC shell."""
@@ -589,6 +671,10 @@ def main() -> int:
                                 rfid_write_check(mon)))
                 results.append(("ibutton: DS1990A read over 1-Wire",
                                 ibutton_check(mon, devdir)))
+                results.append(("ibutton: emulated DS1990A read by a virtual reader",
+                                ibutton_emulate_check(mon)))
+                results.append(("ibutton: Metakom emulation captured, read back",
+                                ibutton_wave_check(mon, devdir)))
                 results.append(("nfc: NTAG215 read by `mfu info` (all 135 pages)",
                                 nfc_check(mon, devdir)))
                 results.append(("nfc: MIFARE Classic 1K dumped (Crypto1, 16 sectors)",

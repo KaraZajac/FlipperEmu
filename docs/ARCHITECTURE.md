@@ -463,6 +463,40 @@ into 82 µs ones and produced wrong keys with valid parity. So:
 
 Both kinds then read in about half a second.
 
+**Emulation** turns this round: the Flipper is the key.
+- A Dallas key is the firmware's 1-Wire slave (`lib/one_wire/one_wire_slave.c`). It
+  catches a reset by EXTI, then busy-polls PB14 with interrupts off, timing each wait on
+  DWT->CYCCNT. The virtual reader (`reader`; `./flipperemu ibutton --reader`) is a
+  1-Wire master paced by that polling, through the same IDR and write reports:
+  - a slot starts at the slave's second read while it waits for one;
+  - a 1 is written by letting go at the read that saw the slot. A 0 is written by
+    holding on until 30 µs after the slave's next read: its 20 µs window starts between
+    the two, so a hold measured from the earlier read could end inside it after a host
+    stall;
+  - a read slot's bit is the slave's own drive: a 0 is a write low, then a release.
+    The slave makes no IDR read in between (it waits on DWT), so a read there means it
+    is not sending.
+
+  It sends READ ROM, then READ MEMORY for a memory key, and saves a `.ibtn` file. The
+  slave reads DWT before the pin in each wait, so a host stall at the wrong moment
+  makes it miss a slot, or take a reset and answer it with a presence pulse. Either way
+  the reader sees a read where a bit should be, or nothing. It then resets the slave,
+  and SKIP ROM / READ MEMORY resume from the last whole byte. The 4 bytes before it are
+  read again and must match, so a misheard address is caught. A mismatch drops those
+  bytes as well, so a bad byte that got kept is read again, not checked against forever.
+  A DS1996's 8 KB takes about 5 s, with a few resumes.
+- A Cyfral or Metakom key is TIM1's update ISR (`furi_hal_ibutton_emulate_*`). It sets
+  the next period in ARR, then the level PB14 holds for it. The board takes each
+  BSRR/BRR write of PB14 while TIM1's update interrupt is enabled, with ARR, as one
+  level (`flipper_ibutton_emulated`). Sampling at the update events instead fails:
+  the guest's ISR runs 20–80 µs late (a host thread waking the vCPU from WFI), and
+  TIM1 meanwhile repeats the old period with the old level. A capture
+  (`ibutton-tx/tx-NNNNN.txt`) is written once it holds 4096 levels (about 0.3 s, while
+  the key emulates on), or when the emulation stops and PB14 is no longer an output.
+  An idle timer would be cut short by a host stall of the vCPU, so it is only a 1 s
+  fallback. `fe_ibutton.py` takes the frame that repeats most often in the capture,
+  and the launcher puts it back on the contact.
+
 ## NFC (`st25r3916.c`, `nfc_card.c`)
 
 The ST25R3916 is modelled one frame at a time:

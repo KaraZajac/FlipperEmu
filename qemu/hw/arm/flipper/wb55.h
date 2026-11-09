@@ -581,7 +581,7 @@ struct WB55SocState {
      * already taken: it has sampled the pins), or wrote MODER, ODR, BSRR
      * or BRR (what it drives may have changed) */
     void (*idr_read)(void *opaque, int port);
-    void (*out_written)(void *opaque, int port);
+    void (*out_written)(void *opaque, int port, hwaddr reg, uint32_t data);
     void *gpio_hook_opaque;
     struct WB55GpioTap {
         struct WB55SocState *soc;

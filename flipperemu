@@ -332,6 +332,7 @@ def qemu_cmd(dev: Device, args):
            "-global", f"cc1101.tx-dir={dev.dir / 'subghz-tx'}",
            "-global", f"flipper-ir.tx-dir={dev.dir / 'ir-tx'}",
            "-global", f"flipper-rfid.tx-dir={dev.dir / 'rfid-tx'}",
+           "-global", f"flipper-ibutton.tx-dir={dev.dir / 'ibutton-tx'}",
            "-global", f"st25r3916.tx-dir={dev.dir / 'nfc-tx'}",
            "-drive", f"if=pflash,format=raw,file={dev.flash}",
            "-rtc", "base=localtime",
@@ -761,6 +762,38 @@ def cmd_ibutton(args):
         sys.exit(f"[{dev.name}] not running")
     key = args.key
     label, desc = None, None
+    if args.reader:
+        m = Monitor(str(dev.monitor))
+        try:
+            before = m.cmd("qom-get /machine/ibutton tx").strip().strip('"')
+            err = m.cmd("qom-set /machine/ibutton reader read")
+            if err:
+                sys.exit(f"ibutton: {err}")
+            print(f"[{dev.name}] a virtual iButton reader on the Flipper's contact; "
+                  "reading...", flush=True)
+            for _ in range(1200):           # a DS1996's 8 KB: ~5 s, more if it resumes
+                time.sleep(0.1)
+                if not m.cmd("qom-get /machine/ibutton reader").strip().strip('"'):
+                    break
+            after = m.cmd("qom-get /machine/ibutton tx").strip().strip('"')
+        finally:
+            m.close()
+        if after and after != before and after.endswith(".ibtn"):
+            text = pathlib.Path(after).read_text()
+            print(f"[{dev.name}] it read: {after}")
+            print(text, end="")
+            fields = fe_ibutton.parse_ibtn(after)
+            rom = fe_ibutton.hexbytes(fields.get("Rom Data", ""))
+            _, _, size = fe_ibutton.FAMILIES.get(rom[0] if rom else -1, ("", 0, 0))
+            field = fe_ibutton.MEMORY_KEYS.get(fields.get("Protocol", ""))
+            got = len(fe_ibutton.hexbytes(fields.get(field, ""))) if field else 0
+            if got < size:
+                print(f"[{dev.name}] incomplete: {got} of {size} bytes of memory "
+                      "(the key stopped answering; see qemu.log)")
+                return 1
+            return 0
+        sys.exit(f"[{dev.name}] nothing read: is the Flipper emulating a Dallas key "
+                 "(iButton -> Saved -> Emulate, or `ikey emulate Dallas ...`)?")
     try:
         if not key:
             pass
@@ -769,6 +802,11 @@ def cmd_ibutton(args):
         elif len(key) == 1 and key[0].endswith(".ibtn"):
             desc = fe_ibutton.describe(fe_ibutton.parse_ibtn(key[0]))
             label = f"{desc.splitlines()[0][2:]} ({pathlib.Path(key[0]).name})"
+        elif len(key) == 1 and pathlib.Path(key[0]).is_file():
+            proto, data = fe_ibutton.decode_capture(fe_ibutton.parse_capture(key[0]))
+            desc = fe_ibutton.describe_new(proto, data)
+            label = (f"{proto} {data.hex(' ').upper()}, as emulated in "
+                     f"{pathlib.Path(key[0]).name}")
         elif len(key) >= 2 or key[0].lower() in fe_ibutton.BLANKS:
             desc = fe_ibutton.describe_new(key[0], fe_ibutton.hexbytes(" ".join(key[1:])))
             label = desc.splitlines()[0][2:]
@@ -949,7 +987,11 @@ def main():
                    help="FILE.ibtn, ds1990|ds1992|ds1996|ds1971|dallas ROM (7 bytes: "
                         "CRC added), cyfral DATA (2 bytes), metakom DATA (4 bytes), "
                         "rw1990|rw1990.2|tm2004|tm01x [ROM] (a blank the Flipper can "
-                        "write), or none; nothing: show the key and its ROM")
+                        "write), an emulation capture (devices/NAME/ibutton-tx/*.txt), "
+                        "or none; nothing: show the key and its ROM")
+    p.add_argument("--reader", action="store_true",
+                   help="instead: read the Dallas key the Flipper emulates and print "
+                        "it (a virtual 1-Wire master; saved to devices/NAME/ibutton-tx/)")
     p.set_defaults(func=cmd_ibutton)
 
     p = sub.add_parser("gdb", help="attach gdb to a running --gdb device")

@@ -424,6 +424,64 @@ All three are small, self-contained, and suitable for sending upstream.
     reset is a reset whatever the line shows. TM2004 then only needed its address and
     data states added to the receiving states.
 
+45. **Reading an emulated key: a master paced by the slave.** The firmware's 1-Wire
+    slave catches a reset by EXTI, then polls PB14 with interrupts off, timing every
+    wait on DWT. A master timed on the virtual clock missed it: the vCPU runs at its
+    own pace between polls. So the virtual reader acts on the slave's IDR reads. It
+    starts a slot at the second read of a wait, lets go of a 1 at the read that saw the
+    slot, and takes a read slot's bit from the slave's own writes. DS1990, DS1992 and
+    DS1971 read at once. A DS1996's 8 KB stalled after 713, 2854 and 4083 bytes:
+    a host stall longer than a 135 µs window had made the slave take a reset and drop
+    out. So the reader now resets it and resumes READ MEMORY (SKIP ROM, `F0`, the
+    address) at the last whole byte.
+
+46. **Resumed reads came from the wrong address.** Random memory (not zeros) showed
+    it: the bytes after about half the resumes came from an address with one 0 bit
+    turned to 1 (+4, +128, +4096...). The reader held a written 0 for 30 µs from the
+    read that saw the slot. The slave times its 20 µs window from just after that read,
+    so a host stall between the two shortened the hold below the window, and the 0
+    read as a 1. The hold is now timed from the slave's next read, the first one in
+    its window. The slave's elapsed time then exceeds the hold before it can see the
+    release. Most "natural" dropouts went with it; they had been misheard 0 bits in
+    command bytes. Each resume also rereads the 4 bytes before it, and they must match.
+    With forced dropouts every 13 bytes, a DS1996 read correctly through 638 resumes.
+
+47. **A presence pulse inside a read slot.** One DS1996 read gave up at byte 8102: a
+    stored byte had a 0 in bit 7. A stall had made the slave take a short reset just
+    before the slot (the pin was already high, so it guessed overdrive). Its overdrive
+    presence pulse, a write low and then a release, landed inside the read slot and
+    read as a 0. Every later resume's check then failed against that byte. But a slave
+    sending a bit never reads the pin between seeing the slot and its write (its
+    delays are DWT waits), and the reset path does. So any IDR read during a read slot
+    now counts as a dropout. A mismatch on resume also drops the bytes it checked
+    against, so a bad byte is read again. And the give-up count is retries without a
+    new byte, not retries in total.
+
+48. **Cyfral and Metakom emulation: TIM1 updates were the wrong clock.** The
+    firmware's ISR sets ARR, then the pin, at every TIM1 update. The board first
+    recorded the pin at each update, but the timer model runs an interrupt-only timer
+    by catch-up and never reported those updates. Once it did, the captures held runs
+    of equal levels: the guest's ISR ran 20–80 µs late (each interrupt wakes the vCPU
+    thread from WFI) and sometimes missed an update, so TIM1 repeated the old period.
+    The capture now comes from the ISR's own writes: each BSRR/BRR of PB14 while TIM1's
+    update interrupt is enabled, held for ARR+1 ticks. That is exactly the encoder's
+    level/duration sequence, and the timer model is unchanged. The decoder also had a
+    bug: a Metakom frame's last low runs into the next sync, so its last bit is now
+    read from the high alone.
+
+49. **A lost ^C took the CLI with it.** The smoke test's new emulate check stopped
+    `ikey emulate Dallas` with a ^C and closed the serial port at once. QEMU's pty
+    chardev stops reading at the hangup, so that byte can be lost. The command ran on,
+    and the next check's `ikey emulate Metakom` line waited in its input. That check's
+    own ^C then stopped the Dallas emulation, the waiting line started a Metakom
+    emulation nobody stopped, and every later CLI check found no prompt. So a ^C is now
+    followed by waiting for the prompt (`cli.watch` already did this). A capture is
+    also written as soon as it is full, so an emulation left running still yields one.
+    It used to end after 100 ms without a level, and once on Unleashed that cut a
+    Cyfral capture after 75 levels. The virtual clock runs on through a host stall of
+    the vCPU, so the gap was the host's, not the firmware's. A capture now ends when it
+    is full or when the firmware lets go of PB14, and only falls back to a 1 s timer.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
