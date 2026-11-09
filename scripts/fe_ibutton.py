@@ -12,6 +12,9 @@ contact takes (see qemu/hw/arm/flipper/flipper_ibutton.c):
     fe_ibutton.py cyfral A1 B2                  -> a Cyfral key (2 bytes)
     fe_ibutton.py metakom C3 55 33 0F           -> a Metakom key (4 bytes, each
                                                    with even parity)
+    fe_ibutton.py rw1990 [ROM]                  -> a blank the Flipper can write:
+                                                   rw1990 (.1), rw1990.2, tm2004,
+                                                   tm01x (ROM: what it reads now)
 
 Dallas keys are 1-Wire slaves: their ROM (family code, serial, CRC) and,
 for DS1992/DS1996/DS1971, their memory.  Cyfral and Metakom keys are a
@@ -56,10 +59,19 @@ def rom_of(data):
     return bytes(data)
 
 
-def onewire(rom, mem=b""):
+BLANKS = {"rw1990": "rw1990.1", "rw1990.1": "rw1990.1", "rw1990.2": "rw1990.2",
+          "tm2004": "tm2004", "tm01x": "tm01x"}
+BLANK_ROM = bytes.fromhex("01000000000000")     # a fresh blank reads as this
+
+
+def onewire(rom, mem=b"", blank=None):
     """The description of a Dallas key: ROM, and memory for a memory key."""
     name, addr_bytes, size = FAMILIES.get(rom[0], ("DSGeneric", 0, 0))
+    if blank:
+        name, addr_bytes = f"{blank.upper()} blank", 0
     out = [f"# {name}", "type onewire", f"rom {rom.hex(' ')}"]
+    if blank:
+        out.append(f"blank {blank}")
     if addr_bytes:
         mem = bytes(mem[:size]).ljust(size, b"\0")
         out.append(f"addr {addr_bytes}")
@@ -150,6 +162,8 @@ def describe(fields):
 def describe_new(kind, data):
     """A key made up from its kind and data."""
     kind = kind.lower()
+    if kind in BLANKS:
+        return onewire(rom_of(data or BLANK_ROM), blank=BLANKS[kind])
     if kind == "cyfral":
         return wave("Cyfral", cyfral_wave(data))
     if kind == "metakom":
@@ -173,7 +187,7 @@ def main():
     try:
         if len(args) == 1 and args[0].endswith(".ibtn"):
             print(describe(parse_ibtn(args[0])), end="")
-        elif len(args) >= 2:
+        elif len(args) >= 2 or (args and args[0].lower() in BLANKS):
             print(describe_new(args[0], hexbytes(" ".join(args[1:]))), end="")
         else:
             print(__doc__)

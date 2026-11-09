@@ -411,6 +411,19 @@ All three are small, self-contained, and suitable for sending upstream.
       microsecond, so that is the value it would read. Sixteen reads of assorted values
       then all decoded correctly, most in 0.4 s.
 
+44. **Blank writes: the slave hid the master's edges from itself.** RW1990.1 and TM01x
+    wrote at once; RW1990.2 and TM2004 never did. The firmware's verify stops reading
+    the ROM at the first byte that differs and goes straight on to the next blank's
+    reset. The slave, still sending, took that reset's falling edge for a read slot
+    and pulled the line. While a slave holds the line low, the pin shows none of the
+    master's edges. So it saw the reset only as its own release, answered presence
+    after the master had already sampled, and held that into the next command (`1D`
+    arrived as `6D`). Now the SoC overlays each GPIO port's whole register block and
+    reports writes as well as reads. The slave follows the master's own drive (MODER
+    and ODR of PB14): a new master slot ends whatever the slave still holds, and a
+    reset is a reset whatever the line shows. TM2004 then only needed its address and
+    data states added to the receiving states.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

@@ -413,8 +413,10 @@ it, from `scripts/fe_ibutton.py` (a `.ibtn` file, or a new key).
 
 **Dallas keys** are a 1-Wire slave. The firmware is the master
 (`lib/one_wire/one_wire_host.c`): with interrupts off it drives PB14 low, busy-waits on
-DWT->CYCCNT, and samples the pin. The slave sees the pin's edges with their virtual
-times:
+DWT->CYCCNT, and samples the pin. The SoC overlays each GPIO port's registers with a
+region that passes every access through to QEMU's model and tells the board about IDR
+reads and about MODER/ODR/BSRR/BRR writes. So the slave follows the master's own drive,
+not the pin level, which its own pulls would mask, with virtual times:
 - A long low is a reset. The slave answers with a presence pulse, and a standard-length
   reset also returns it to standard speed.
 - Every other low is a slot. The master writes a 1 as a 9 µs low and a 0 as 64 µs (1 and
@@ -423,14 +425,26 @@ times:
 - To send a 0, the slave pulls the line low at the master's falling edge. On silicon it
   lets go after a fixed time, well after the master samples. Here the host can preempt
   the vCPU while virtual time runs on, so the sample can land past any fixed time. So the
-  slave lets go once the master has sampled. The SoC overlays each GPIO port's IDR
-  (`soc_idr_read`): the board learns of every read after its value is taken. A read of
-  GPIOB with the firmware's own drive of PB14 off is the master's sample. A 1 ms timer
-  lets go anyway.
+  slave lets go once the master has sampled: a read of GPIOB's IDR with the firmware's
+  own drive of PB14 off, reported after its value is taken. The master's next falling
+  edge also ends a hold (the master gave up on a byte mid-way), and a 1 ms timer lets go
+  anyway.
 
 The slave answers SEARCH ROM, READ ROM, MATCH ROM, SKIP ROM and the overdrive ROM
 commands. Memory keys also answer READ MEMORY: a 2-byte address on a DS1992 or DS1996
-(the firmware reads a DS1996's 8 KB at overdrive speed), and one byte on a DS1971. QEMU's
+(the firmware reads a DS1996's 8 KB at overdrive speed), and one byte on a DS1971.
+
+**Blanks** are 1-Wire keys whose ROM can be written, as the firmware writes the four it
+knows (`lib/ibutton/protocols/blanks`):
+- RW1990.1: `D1` and a 0 bit enable writing, `D5` and 64 inverted bits write the ROM, and
+  `D1` with a 1 bit locks it again;
+- RW1990.2: the same, with `1D`, a 1 bit to enable, and plain bits;
+- TM01x: `C1` and a 1 bit, then `C5` and 64 plain bits;
+- TM2004: `3C` and a 2-byte address, then per byte the byte, its CRC back, a programming
+  pulse, and the byte as programmed back.
+
+Each blank answers only its own protocol, and the firmware tries them in that order,
+verifying each with READ ROM. QEMU's
 STM32L4x5 GPIO model needed a fix to let a device release an open-drain line
 (`qemu/patches/0004`).
 

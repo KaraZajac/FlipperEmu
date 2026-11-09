@@ -48,34 +48,49 @@ static void soc_gpio_tap(void *opaque, int n, int level)
 }
 
 /*
- * IDR, read through an overlay so the board learns of each read: a device
- * on a bit-banged bus (a 1-Wire key) holds its answer until the CPU has
- * sampled it, whatever the timing.  The value is taken before the hook
- * runs, so the CPU still reads what the line was.
+ * Each GPIO port's registers are overlaid by a region that passes every
+ * access through to QEMU's GPIO model and then tells the board: a read of
+ * IDR (the CPU has sampled the pins; the value is taken before the hook
+ * runs), or a write that can change what the CPU drives.  A bit-banged bus
+ * (a 1-Wire key on the iButton pin) follows the CPU's own drive this way,
+ * edge for edge, even while the key itself holds the line low.
  */
-static uint64_t soc_idr_read(void *opaque, hwaddr addr, unsigned size)
+static MemTxResult soc_gpio_tap_read(void *opaque, hwaddr addr, uint64_t *data,
+                                     unsigned size, MemTxAttrs attrs)
 {
-    struct WB55IdrTap *tap = opaque;
+    struct WB55GpioTap *tap = opaque;
     WB55SocState *s = tap->soc;
-    uint32_t v = s->gpio[tap->port].idr;
+    MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->gpio[tap->port]), 0);
+    MemTxResult r = memory_region_dispatch_read(mr, addr, data, size_memop(size),
+                                                attrs);
 
-    if (s->idr_read) {
-        s->idr_read(s->idr_opaque, tap->port);
+    if (addr == 0x10 && s->idr_read) {
+        s->idr_read(s->gpio_hook_opaque, tap->port);
     }
-    return v;
+    return r;
 }
 
-static void soc_idr_write(void *opaque, hwaddr addr, uint64_t val,
-                          unsigned size)
+static MemTxResult soc_gpio_tap_write(void *opaque, hwaddr addr, uint64_t data,
+                                      unsigned size, MemTxAttrs attrs)
 {
-    /* IDR is read-only */
+    struct WB55GpioTap *tap = opaque;
+    WB55SocState *s = tap->soc;
+    MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->gpio[tap->port]), 0);
+    MemTxResult r = memory_region_dispatch_write(mr, addr, data, size_memop(size),
+                                                 attrs);
+
+    if ((addr == 0x00 || addr == 0x14 || addr == 0x18 || addr == 0x28) &&
+        s->out_written) {
+        s->out_written(s->gpio_hook_opaque, tap->port);
+    }
+    return r;
 }
 
-static const MemoryRegionOps soc_idr_ops = {
-    .read = soc_idr_read,
-    .write = soc_idr_write,
+static const MemoryRegionOps soc_gpio_tap_ops = {
+    .read_with_attrs = soc_gpio_tap_read,
+    .write_with_attrs = soc_gpio_tap_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
-    .impl.min_access_size = 4, .impl.max_access_size = 4,
+    .impl.min_access_size = 1, .impl.max_access_size = 4,
     .valid.min_access_size = 1, .valid.max_access_size = 4,
 };
 
@@ -357,13 +372,12 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
         for (int p = 0; p < 16; p++) {
             qdev_connect_gpio_out(dev, p, s->gpio_tap[i * 16 + p]);
         }
-        s->idr_tap[i].soc = s;
-        s->idr_tap[i].port = i;
-        memory_region_init_io(&s->idr_tap[i].mr, OBJECT(s), &soc_idr_ops,
-                              &s->idr_tap[i], "gpio-idr", 4);
-        memory_region_add_subregion_overlap(get_system_memory(),
-                                            gpio_addr[i] + 0x10,
-                                            &s->idr_tap[i].mr, 1);
+        s->gpio_tap_mr[i].soc = s;
+        s->gpio_tap_mr[i].port = i;
+        memory_region_init_io(&s->gpio_tap_mr[i].mr, OBJECT(s), &soc_gpio_tap_ops,
+                              &s->gpio_tap_mr[i], "gpio-tap", 0x400);
+        memory_region_add_subregion_overlap(get_system_memory(), gpio_addr[i],
+                                            &s->gpio_tap_mr[i].mr, 1);
     }
 
     /* ---- power, semaphores, IPCC + behavioural CPU2 */

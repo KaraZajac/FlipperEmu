@@ -6,10 +6,12 @@
  * Dallas 1-Wire keys (DS1990A, DS1992, DS1996, DS1971, and any other family
  * with its ROM only) are a 1-Wire slave on the line.  The firmware is the
  * bus master (lib/one_wire/one_wire_host.c): with interrupts off it drives
- * the line low, waits on DWT->CYCCNT, and samples it.  The slave sees the
- * line's edges with their virtual times.  A long low is a reset, which it
- * answers with a presence pulse; after that each slot starts at a falling
- * edge.
+ * the line low, waits on DWT->CYCCNT, and samples it.  The slave follows the
+ * master's own drive (the board reports GPIOB's writes), with virtual
+ * times, so it sees the master's edges even while it holds the line low
+ * itself.  A long low is a reset, which it answers with a presence pulse;
+ * after that each slot starts at a falling edge, which also ends whatever
+ * the slave still held from the last one.
  *
  * A bit the master writes is its low time: 9 us a 1, 64 us a 0 (1 and 8
  * at overdrive speed).  The master busy-waits at least that long, and an
@@ -27,6 +29,15 @@
  *   ROM commands: READ ROM, SEARCH ROM, SKIP ROM, MATCH ROM, and overdrive
  *   SKIP/MATCH ROM (a standard-length reset returns to standard speed).
  *   Function commands: READ MEMORY (a 2-byte address; 1 byte on a DS1971).
+ *
+ * A blank ("blank" line) is a 1-Wire key whose ROM can be written, as the
+ * firmware writes the four kinds it knows (lib/ibutton/protocols/blanks):
+ *   RW1990.1: D1 + a 0 bit enables writing, D5 + 64 bits (inverted) writes
+ *     the ROM, D1 + a 1 bit locks it again;
+ *   RW1990.2: the same with 1D, a 1 bit to enable, and plain bits;
+ *   TM01x: C1 + a 1 bit, then C5 + 64 plain bits;
+ *   TM2004: 3C + a 2-byte address, then per byte: the byte, its CRC back, a
+ *     programming pulse, and the byte as programmed back.
  *
  * Cyfral and Metakom keys modulate their current on the contact, which the
  * Flipper senses through the RFID front end: COMP1, with the 125 kHz field
@@ -64,12 +75,23 @@ enum { IBTN_NONE, IBTN_ONEWIRE, IBTN_WAVE };
 enum {
     OW_IDLE,                    /* not selected: until the next reset */
     OW_ROM_CMD,                 /* receive the ROM command */
-    OW_TX,                      /* READ ROM: send the ROM, then OW_FUNC */
+    OW_TX,                      /* send txbuf, then tx_next */
     OW_SEARCH,                  /* per ROM bit: it, its complement, the choice */
     OW_MATCH,                   /* receive a ROM to compare */
     OW_FUNC,                    /* receive a function command */
     OW_ADDR,                    /* READ MEMORY: receive the address */
     OW_MEM,                     /* READ MEMORY: send memory, until a reset */
+    OW_FLAG,                    /* a blank's write flag: one bit */
+    OW_WROM,                    /* a blank's new ROM: 64 bits */
+    OW_TM_ADDR,                 /* TM2004: the address to write */
+    OW_TM_DATA,                 /* TM2004: a byte to write */
+    OW_TM_PULSE,                /* TM2004: its programming pulse */
+};
+
+enum { BLANK_NONE, BLANK_RW1990_1, BLANK_RW1990_2, BLANK_TM01X, BLANK_TM2004 };
+static const char *const blank_names[] = {
+    [BLANK_RW1990_1] = "rw1990.1", [BLANK_RW1990_2] = "rw1990.2",
+    [BLANK_TM01X] = "tm01x", [BLANK_TM2004] = "tm2004",
 };
 
 #define OW_RESET_NS       (300 * SCALE_US)  /* a longer low: a reset */
@@ -87,9 +109,7 @@ enum {
 /* the line as the slave drives it: low, or let go (the pull-up wins) */
 static void ow_drive(FlipperIbuttonState *s, bool low)
 {
-    s->self = true;
     qemu_set_irq(s->pull, !low);
-    s->self = false;
 }
 
 static uint8_t ow_mem(FlipperIbuttonState *s, uint32_t addr)
@@ -104,7 +124,7 @@ static int ow_tx_bit(FlipperIbuttonState *s)
 
     switch (s->state) {
     case OW_TX:
-        return (s->rom[s->bit / 8] >> (s->bit % 8)) & 1;
+        return (s->txbuf[s->bit / 8] >> (s->bit % 8)) & 1;
     case OW_MEM:
         return (ow_mem(s, s->addr + s->bit / 8) >> (s->bit % 8)) & 1;
     case OW_SEARCH:
@@ -122,14 +142,78 @@ static void ow_goto(FlipperIbuttonState *s, int state)
     s->rx = 0;
 }
 
+/* send these bytes in the coming read slots, then go on to "next" */
+static void ow_send(FlipperIbuttonState *s, const uint8_t *b, int n, int next)
+{
+    memcpy(s->txbuf, b, n);
+    s->tx_bytes = n;
+    s->tx_next = next;
+    ow_goto(s, OW_TX);
+}
+
+static uint8_t ow_crc8(const uint8_t *b, int n)
+{
+    uint8_t crc = 0;
+
+    for (int i = 0; i < n; i++) {
+        uint8_t byte = b[i];
+
+        for (int k = 0; k < 8; k++) {
+            bool mix = (crc ^ byte) & 1;
+
+            crc >>= 1;
+            if (mix) {
+                crc ^= 0x8C;
+            }
+            byte >>= 1;
+        }
+    }
+    return crc;
+}
+
+/* a blank's own ROM commands: true when b was one */
+static bool ow_blank_cmd(FlipperIbuttonState *s, uint8_t b)
+{
+    static const uint8_t flag[] = {
+        [BLANK_RW1990_1] = 0xD1, [BLANK_RW1990_2] = 0x1D, [BLANK_TM01X] = 0xC1,
+    };
+    static const uint8_t wrom[] = {
+        [BLANK_RW1990_1] = 0xD5, [BLANK_RW1990_2] = 0xD5, [BLANK_TM01X] = 0xC5,
+    };
+
+    if (s->blank == BLANK_NONE) {
+        return false;
+    }
+    if (s->blank == BLANK_TM2004) {
+        if (b != 0x3C) {
+            return false;
+        }
+        ow_goto(s, OW_TM_ADDR);
+        s->addr = 0;
+        return true;
+    }
+    if (b == flag[s->blank]) {
+        ow_goto(s, OW_FLAG);
+        return true;
+    }
+    if (b == wrom[s->blank]) {
+        ow_goto(s, OW_WROM);
+        return true;
+    }
+    return false;
+}
+
 /* a whole byte came in */
 static void ow_byte(FlipperIbuttonState *s, uint8_t b)
 {
     switch (s->state) {
     case OW_ROM_CMD:
+        if (ow_blank_cmd(s, b)) {
+            return;
+        }
         switch (b) {
         case 0x33:                      /* READ ROM */
-            ow_goto(s, OW_TX);
+            ow_send(s, s->rom, 8, OW_FUNC);
             return;
         case 0xF0:                      /* SEARCH ROM */
             ow_goto(s, OW_SEARCH);
@@ -175,7 +259,33 @@ static void ow_byte(FlipperIbuttonState *s, uint8_t b)
             s->addr = addr;
         }
         return;
+    case OW_TM_ADDR:
+        s->addr |= (uint32_t)b << (8 * s->count);
+        if (++s->count == 2) {
+            uint32_t addr = s->addr;
+
+            ow_goto(s, OW_TM_DATA);
+            s->addr = addr;
+        }
+        return;
+    case OW_TM_DATA: {                  /* the byte: its CRC back, then a pulse */
+        uint32_t addr = s->addr;
+
+        s->tm_byte = b;
+        ow_send(s, (uint8_t[]){ ow_crc8(&b, 1) }, 1, OW_TM_PULSE);
+        s->addr = addr;
+        return;
     }
+    }
+}
+
+/* a blank's write is in: the new ROM */
+static void ow_written(FlipperIbuttonState *s, const uint8_t *rom)
+{
+    memcpy(s->rom, rom, 8);
+    info_report("flipper-zero: iButton %s blank: ROM <- %02X %02X %02X %02X "
+                "%02X %02X %02X %02X", blank_names[s->blank], rom[0], rom[1],
+                rom[2], rom[3], rom[4], rom[5], rom[6], rom[7]);
 }
 
 /* a slot is over: wbit is what the master wrote (1 in a read slot) */
@@ -186,6 +296,8 @@ static void ow_slot(FlipperIbuttonState *s, int wbit)
     case OW_MATCH:
     case OW_FUNC:
     case OW_ADDR:
+    case OW_TM_ADDR:
+    case OW_TM_DATA:
         s->rx |= wbit << s->bit;
         if (++s->bit == 8) {
             uint8_t b = s->rx;
@@ -196,10 +308,53 @@ static void ow_slot(FlipperIbuttonState *s, int wbit)
         }
         return;
     case OW_TX:
-        if (++s->bit == 64) {
-            ow_goto(s, OW_FUNC);
+        if (++s->bit == 8 * s->tx_bytes) {
+            uint32_t addr = s->addr;
+
+            ow_goto(s, s->tx_next);
+            s->addr = addr;             /* TM2004 writes on from there */
         }
         return;
+    case OW_FLAG:                       /* RW1990.1 enables on a 0, others on 1 */
+        s->wr_enabled = wbit == (s->blank != BLANK_RW1990_1);
+        ow_goto(s, OW_IDLE);
+        return;
+    case OW_WROM:
+        if (wbit) {
+            s->newrom[s->bit / 8] |= 1 << (s->bit % 8);
+        } else {
+            s->newrom[s->bit / 8] &= ~(1 << (s->bit % 8));
+        }
+        if (++s->bit == 64) {
+            if (s->wr_enabled) {
+                uint8_t rom[8];
+
+                for (int i = 0; i < 8; i++) {   /* RW1990.1 takes it inverted */
+                    rom[i] = s->blank == BLANK_RW1990_1 ? ~s->newrom[i] : s->newrom[i];
+                }
+                ow_written(s, rom);
+            }
+            ow_goto(s, OW_ROM_CMD);     /* the lock command needs no reset */
+        }
+        return;
+    case OW_TM_PULSE: {                 /* programmed: the byte back */
+        uint32_t addr = s->addr;
+
+        if (addr < 8) {
+            uint8_t rom[8];
+
+            memcpy(rom, s->rom, 8);
+            rom[addr] = s->tm_byte;
+            if (addr == 7) {
+                ow_written(s, rom);
+            } else {
+                memcpy(s->rom, rom, 8);
+            }
+        }
+        ow_send(s, (uint8_t[]){ addr < 8 ? s->rom[addr] : 0xFF }, 1, OW_TM_DATA);
+        s->addr = addr + 1;
+        return;
+    }
     case OW_MEM:
         s->bit++;                       /* on to the end of memory, then 1s */
         return;
@@ -249,6 +404,9 @@ void flipper_ibutton_sampled(FlipperIbuttonState *s)
 
 static void ow_fall(FlipperIbuttonState *s, int64_t now)
 {
+    if (s->pulling) {
+        ow_release(s);                  /* a new slot: the last one is over */
+    }
     s->fall_ns = now;
     if (ow_tx_bit(s) == 0) {
         ow_pull(s, now, false);
@@ -260,6 +418,10 @@ static void ow_rise(FlipperIbuttonState *s, int64_t now)
     int64_t low = now - s->fall_ns;
 
     if (low >= OW_RESET_NS || (s->od && low >= OW_OD_RESET_NS)) {
+        if (s->pulling) {               /* that was no slot: drop the hold */
+            s->pulling = s->presence = false;
+            ow_drive(s, false);
+        }
         if (low >= OW_RESET_NS) {
             s->od = false;              /* a standard reset: standard speed */
         }
@@ -267,29 +429,24 @@ static void ow_rise(FlipperIbuttonState *s, int64_t now)
         ow_pull(s, now, true);
         return;
     }
-    if (s->state != OW_IDLE) {
+    if (s->state != OW_IDLE && !s->pulling) {
         ow_slot(s, low < (s->od ? OW_OD_BIT_NS : OW_BIT_NS));
-    }
+    }                                   /* holding a 0: over once it is sampled */
 }
 
-/* PB14's level changed: the master's edges (ours are marked self) */
-static void ibtn_line(void *opaque, int n, int level)
+void flipper_ibutton_master(FlipperIbuttonState *s, bool low)
 {
-    FlipperIbuttonState *s = opaque;
-    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-
-    if (s->self || s->kind != IBTN_ONEWIRE) {
-        s->level = level;
+    if (low == s->m_low) {
         return;
     }
-    if (level == s->level) {
+    s->m_low = low;
+    if (s->kind != IBTN_ONEWIRE) {
         return;
     }
-    s->level = level;
-    if (level) {
-        ow_rise(s, now);
+    if (low) {
+        ow_fall(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     } else {
-        ow_fall(s, now);
+        ow_rise(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     }
 }
 
@@ -367,8 +524,7 @@ void flipper_ibutton_comp(FlipperIbuttonState *s, bool on)
 void flipper_ibutton_reset(FlipperIbuttonState *s)
 {
     timer_del(s->timer);
-    s->pulling = s->presence = s->od = false;
-    s->level = true;
+    s->pulling = s->presence = s->od = s->m_low = false;
     ow_goto(s, OW_IDLE);
     ow_drive(s, false);                 /* the pull-up */
     flipper_ibutton_comp(s, false);     /* a reset cleared COMP1 */
@@ -389,6 +545,7 @@ static void ibtn_clear(FlipperIbuttonState *s)
     s->wave = NULL;
     s->mem_len = s->wave_len = s->addr_bytes = 0;
     s->kind = IBTN_NONE;
+    s->blank = BLANK_NONE;
     s->od = false;
     ow_goto(s, OW_IDLE);
 }
@@ -419,7 +576,7 @@ static void ibtn_set_key(Object *obj, const char *value, Error **errp)
     g_autoptr(GByteArray) mem = g_byte_array_new();
     g_autoptr(GArray) wave = g_array_new(false, false, sizeof(int32_t));
     g_auto(GStrv) lines = NULL;
-    int kind = IBTN_NONE, addr_bytes = 0;
+    int kind = IBTN_NONE, addr_bytes = 0, blank = BLANK_NONE;
 
     if (!strcmp(value, "none") || !*value) {
         ibtn_clear(s);
@@ -455,6 +612,14 @@ static void ibtn_set_key(Object *obj, const char *value, Error **errp)
             ok = ibtn_hex(arg, rom);
         } else if (g_str_has_prefix(line, "mem ")) {
             ok = ibtn_hex(arg, mem);
+        } else if (g_str_has_prefix(line, "blank ")) {
+            blank = -1;
+            for (int k = 1; k < ARRAY_SIZE(blank_names); k++) {
+                if (!strcmp(arg, blank_names[k])) {
+                    blank = k;
+                }
+            }
+            ok = blank > 0;
         } else if (g_str_has_prefix(line, "addr ")) {
             addr_bytes = atoi(arg);
             ok = addr_bytes >= 0 && addr_bytes <= 2;
@@ -500,6 +665,8 @@ static void ibtn_set_key(Object *obj, const char *value, Error **errp)
         s->mem_len = mem->len;
         s->mem = g_byte_array_free(g_steal_pointer(&mem), false);
         s->addr_bytes = addr_bytes;
+        s->blank = blank;
+        s->wr_enabled = false;
     } else {
         s->wave_len = wave->len;
         s->wave = (int32_t *)g_array_free(g_steal_pointer(&wave), false);
@@ -515,19 +682,32 @@ static char *ibtn_get_key(Object *obj, Error **errp)
     return g_strdup(FLIPPER_IBUTTON(obj)->key_str ?: "");
 }
 
+static char *ibtn_get_rom(Object *obj, Error **errp)
+{
+    FlipperIbuttonState *s = FLIPPER_IBUTTON(obj);
+    const uint8_t *r = s->rom;
+
+    if (s->kind != IBTN_ONEWIRE) {
+        return g_strdup("");
+    }
+    return g_strdup_printf("%02X %02X %02X %02X %02X %02X %02X %02X",
+                           r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+}
+
 static void ibtn_init(Object *obj)
 {
     FlipperIbuttonState *s = FLIPPER_IBUTTON(obj);
 
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, ibtn_timer, s);
     s->wave_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, wave_step, s);
-    s->level = true;
-    qdev_init_gpio_in_named(DEVICE(obj), ibtn_line, "line", 1);
     qdev_init_gpio_out_named(DEVICE(obj), &s->pull, "pull", 1);
     object_property_add_str(obj, "key", ibtn_get_key, ibtn_set_key);
     object_property_set_description(obj, "key",
         "The key on the iButton contact: file:PATH (scripts/fe_ibutton.py) "
         "or none");
+    object_property_add_str(obj, "rom", ibtn_get_rom, NULL);
+    object_property_set_description(obj, "rom",
+        "A 1-Wire key's ROM now (a blank's, once written)");
 }
 
 static void ibtn_class_init(ObjectClass *klass, const void *data)

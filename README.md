@@ -75,6 +75,9 @@ USB/IP export, warm reboot, no crash): **official 1.5.1**, **Momentum mntm-012**
   the firmware's 1-Wire master, memory reads included (at overdrive speed on a DS1996),
   and Cyfral and Metakom keys play their waveform into the comparator. The iButton
   app's Read and `ikey read` decode them all.
+- iButton write: `./flipperemu ibutton rw1990` (or `rw1990.2`, `tm2004`, `tm01x`) holds
+  a blank. The firmware's Write programs it in that blank's own protocol and verifies
+  it, and the blank then reads as the key that was written.
 - Field detection: the virtual readers' 125 kHz and 13.56 MHz fields are what
   `furi_hal_rfid`/`furi_hal_nfc` field detection sees (Momentum's NFC/RFID detector).
 - NFC read: `./flipperemu nfc card.nfc` holds a card to the Flipper (from a Flipper
@@ -97,7 +100,7 @@ USB/IP export, warm reboot, no crash): **official 1.5.1**, **Momentum mntm-012**
 **Not yet** (see [PLAN.md](PLAN.md))
 - qFlipper's firmware *update* includes a radio-stack stage that the emulated CPU2
   cannot install; use `./flipperemu run --update` for updates.
-- Bluetooth (needs a radio stack); iButton emulation, and writing iButton blanks.
+- Bluetooth (needs a radio stack); iButton emulation.
 - NFC: Ultralight C, ISO14443-4 (DESFire, bank cards), ISO14443B, ISO15693 and FeliCa
   cards. When the Flipper emulates a MIFARE Classic, the virtual reader gets as far as
   its UID, ATQA and SAK: the Crypto1 answers go out through a bit-banged pin that the
@@ -159,6 +162,7 @@ are erased). Without `-f` it boots whatever is already flashed.
 | `rfid t5577 [BLOCK0 …]` | hold a writable T5577 (blank, or with these blocks); `rfid` shows its blocks |
 | `rfid --reader on\|off` \| `nfc --field on\|off` | a reader's field around the device (125 kHz: on by default) |
 | `ibutton FILE.ibtn` \| `ibutton ds1990 ROM` \| `ibutton cyfral DATA` \| `ibutton none` | touch an iButton key to the device (also ds1992, ds1996, ds1971, dallas, metakom) |
+| `ibutton rw1990` \| `ibutton tm2004` \| … | touch a blank the device can write; `ibutton` shows its ROM |
 | `nfc FILE.nfc` \| `nfc ntag215 UID [URL]` \| `nfc mfc1k UID` \| `nfc none` | hold an NFC card to the device |
 | `nfc --reader ntag` \| `nfc --reader scan` | hold an NFC reader to an emulating device and print what it reads |
 | `flash FW [--erase-all]` | program `.elf` / `.dfu` / `.bin` / update `.tgz` into `flash.img` |
@@ -418,7 +422,20 @@ presence pulses, SEARCH ROM, READ ROM, MATCH and SKIP ROM. Memory keys also answ
 MEMORY: a DS1992 or DS1971 at standard speed, a DS1996 at overdrive speed, as the
 firmware reads it. Cyfral and Metakom keys are read through the comparator, as on the
 real board, from waveforms that `scripts/fe_ibutton.py` makes with ports of the
-firmware's encoders. `scripts/ibutton_check.py DEVICE` reads every kind.
+firmware's encoders.
+
+Writing needs a blank:
+
+```sh
+./flipperemu ibutton rw1990          # an RW1990.1 blank (also rw1990.2, tm2004, tm01x)
+# then on the Flipper: iButton -> Saved -> a key -> Write, or `ikey write Dallas 015A6B7C8D9EAF84`
+./flipperemu ibutton                 # the blank's ROM now
+```
+
+The firmware tries each blank protocol in turn (RW1990.1, RW1990.2, TM2004, TM01x) and
+reads the ROM back. Each virtual blank answers only its own protocol, so every path can
+be tested. `scripts/ibutton_check.py DEVICE` reads every kind of key and writes every
+kind of blank.
 
 ### NFC
 

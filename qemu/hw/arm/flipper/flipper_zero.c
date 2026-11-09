@@ -413,6 +413,18 @@ static void flipper_idr_read(void *opaque, int port)
     }
 }
 
+/* GPIOB's MODER/ODR/BSRR/BRR written: does the firmware drive PB14 low? */
+static void flipper_out_written(void *opaque, int port)
+{
+    FlipperZeroState *s = opaque;
+    const Stm32l4x5GpioState *b = &s->soc.gpio[1];
+
+    if (port == 1) {
+        flipper_ibutton_master(s->ibutton, ((b->moder >> 28) & 3) == 1 &&
+                                           !(b->odr & (1u << 14)));
+    }
+}
+
 /* COMP1 on with the 125 kHz field off: the iButton reader (Cyfral, Metakom) */
 static void flipper_comp_en(void *opaque, int n, bool en)
 {
@@ -610,10 +622,10 @@ static void flipper_zero_init(MachineState *machine)
     s->ibutton->dwt = &s->soc.dwt;
     object_property_add_child(OBJECT(machine), "ibutton", OBJECT(dev));
     qdev_realize_and_unref(dev, NULL, &error_fatal);
-    soc_out(s, 'B', 14, qdev_get_gpio_in_named(dev, "line", 0));
     qdev_connect_gpio_out_named(dev, "pull", 0, soc_in(s, 'B', 14));
     s->soc.idr_read = flipper_idr_read;
-    s->soc.idr_opaque = s;
+    s->soc.out_written = flipper_out_written;
+    s->soc.gpio_hook_opaque = s;
     s->soc.comp.en_changed = flipper_comp_en;
     s->soc.comp.en_opaque = s;
     s->soc.comp.val_read = flipper_comp_val_read;

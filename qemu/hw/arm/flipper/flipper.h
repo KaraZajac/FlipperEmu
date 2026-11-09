@@ -298,14 +298,20 @@ struct FlipperIbuttonState {
     uint8_t *mem;
     uint32_t mem_len;
     int addr_bytes;              /* READ MEMORY's address: 2 bytes, 1, 0 none */
-    bool level;                  /* the line, as last seen */
-    bool self;                   /* inside its own pull or release */
+    bool m_low;                  /* the master drives the line low */
     bool pulling, presence;
     bool od;                     /* overdrive speed */
     int64_t fall_ns;             /* the master's last falling edge */
     int state, bit, phase, count;
     uint8_t rx;
     uint32_t addr;
+    uint8_t txbuf[8];            /* what OW_TX sends, then tx_next */
+    int tx_bytes, tx_next;
+    /* a blank: its ROM can be written */
+    int blank;                   /* RW1990.1, RW1990.2, TM01x, TM2004 */
+    bool wr_enabled;             /* its write flag */
+    uint8_t newrom[8];           /* the ROM being written */
+    uint8_t tm_byte;             /* TM2004: the byte being programmed */
     /* a Cyfral or Metakom key */
     int32_t *wave;               /* +high/-low µs, repeated */
     int wave_len, wave_pos;
@@ -320,6 +326,8 @@ void flipper_ibutton_comp(FlipperIbuttonState *s, bool on);
 void flipper_ibutton_comp_read(FlipperIbuttonState *s);
 /* the CPU read GPIOB's IDR with its own drive of PB14 off: it sampled */
 void flipper_ibutton_sampled(FlipperIbuttonState *s);
+/* the CPU's drive of PB14 changed: low, or released (or not an output) */
+void flipper_ibutton_master(FlipperIbuttonState *s, bool low);
 /* a system reset: the line pulled up, the slave idle */
 void flipper_ibutton_reset(FlipperIbuttonState *s);
 /* the reader's antenna drive (TIM1 CH1N PWM) frequency, 0 = off */

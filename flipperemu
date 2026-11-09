@@ -769,12 +769,13 @@ def cmd_ibutton(args):
         elif len(key) == 1 and key[0].endswith(".ibtn"):
             desc = fe_ibutton.describe(fe_ibutton.parse_ibtn(key[0]))
             label = f"{desc.splitlines()[0][2:]} ({pathlib.Path(key[0]).name})"
-        elif len(key) >= 2:
+        elif len(key) >= 2 or key[0].lower() in fe_ibutton.BLANKS:
             desc = fe_ibutton.describe_new(key[0], fe_ibutton.hexbytes(" ".join(key[1:])))
             label = desc.splitlines()[0][2:]
         else:
             sys.exit("usage: ibutton FILE.ibtn | ibutton ds1990|ds1992|ds1996|ds1971|dallas "
-                     "ROM | ibutton cyfral DATA | ibutton metakom DATA | ibutton none")
+                     "ROM | ibutton cyfral DATA | ibutton metakom DATA | ibutton "
+                     "rw1990|rw1990.2|tm2004|tm01x [ROM] | ibutton none")
     except (ValueError, KeyError, OSError) as e:
         sys.exit(f"ibutton: {e}")
     if desc:
@@ -788,7 +789,9 @@ def cmd_ibutton(args):
             first = ""
             if cur.startswith("file:") and pathlib.Path(cur[5:]).is_file():
                 first = pathlib.Path(cur[5:]).read_text().splitlines()[0][2:]
-            print(f"[{dev.name}] key on the iButton contact: {first or 'none'}")
+            rom = m.cmd("qom-get /machine/ibutton rom").strip().strip('"')
+            print(f"[{dev.name}] key on the iButton contact: {first or 'none'}"
+                  + (f", ROM now {rom}" if rom else ""))
             return 0
         value = "none"
         if desc is not None:
@@ -945,7 +948,8 @@ def main():
     p.add_argument("key", nargs="*",
                    help="FILE.ibtn, ds1990|ds1992|ds1996|ds1971|dallas ROM (7 bytes: "
                         "CRC added), cyfral DATA (2 bytes), metakom DATA (4 bytes), "
-                        "or none; nothing: show the key")
+                        "rw1990|rw1990.2|tm2004|tm01x [ROM] (a blank the Flipper can "
+                        "write), or none; nothing: show the key and its ROM")
     p.set_defaults(func=cmd_ibutton)
 
     p = sub.add_parser("gdb", help="attach gdb to a running --gdb device")

@@ -102,8 +102,11 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       master has sampled (IDR tap); Cyfral and Metakom waveforms into COMP1, the
       ISR's CYCCNT read stamped with the edge's time; `ikey read` and the app read
       all of them (`ibutton_check.py`)
-- ☐ iButton emulation (a virtual 1-Wire master; Cyfral/Metakom captures) and writing
-      blanks (RW1990, TM2004, TM01x)
+- ☑ iButton write (2026-11-08): virtual RW1990.1/.2, TM2004 and TM01x blanks take
+      the firmware's writes and verify (`ibutton rw1990`; the slave follows the
+      master's own drive through a GPIO overlay)
+- ☐ iButton emulation: a virtual 1-Wire master for the firmware's busy-polling
+      slave (act on its IDR polls); Cyfral/Metakom captured from PB14
 
 ## M6: research tooling ☐
 - ☐ Snapshot workflow (`savevm` on qcow2 images; boot once, jump straight to an app)
