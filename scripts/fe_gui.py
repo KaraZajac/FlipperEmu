@@ -30,7 +30,7 @@ from PySide6.QtCore import Qt
 
 import fe_gui_widgets as W
 from fe_gui_link import PanelLink
-from fe_gui_view import FlipperView, app_icon
+from fe_gui_view import VIEW_H, VIEW_W, FlipperView, app_icon
 
 WATCHES = (
     ("/machine/soc/usb", "attached"), ("/machine/soc/usb", "device"),
@@ -75,9 +75,12 @@ real one: Back held for 5 seconds on the desktop offers to switch it off.</p>
 Left held after letting go of Back and it starts in DFU mode.</p>
 <p>When it is <b>off</b>, hold Back to switch it on, or plug its USB cable in
 (click the plug).</p>
-<p>Click the <b>USB plug</b> to plug it in and out, the <b>microSD card</b> to
-pull it out and push it back. Right-click for their menus, and anywhere else
-on the Flipper for the Device menu.</p>
+<p>Its ports are where a real one has them. Click the <b>USB plug</b> in the
+lower left face of its nose to plug it in and out, the <b>microSD card</b>
+at the bottom right to pull it out and push it back, the <b>infrared
+window</b> in the upper left face to point a remote at it, and the <b>GPIO
+pins</b> along the top for the log. Right-click for their menus, and anywhere
+else on the Flipper for the Device menu.</p>
 <p>Files dropped on the window go where they belong: .nfc and Proxmark3
 .json cards, .rfid tags, .ibtn keys, .sub captures, .ir remotes, and
 firmware.</p>"""
@@ -110,9 +113,13 @@ class Settings:
 
 
 def default_scale():
+    """3 screen pixels for one of the LCD's, or 2 on a screen too small for
+    the Flipper, its bench and the menus at that size"""
     screen = QtGui.QGuiApplication.primaryScreen()
-    if screen and screen.availableGeometry().height() < 820:
-        return 2
+    if screen:
+        room = screen.availableGeometry()
+        if room.width() < VIEW_W * 3 + 60 or room.height() < VIEW_H * 3 + 280:
+            return 2
     return 3
 
 
@@ -516,6 +523,7 @@ class MainWindow(QtWidgets.QMainWindow):
         V.key.connect(self.on_key)
         V.usb_clicked.connect(self.toggle_usb)
         V.sd_clicked.connect(self.on_sd_click)
+        V.port_clicked.connect(self.on_port_click)
         V.menu_wanted.connect(self.on_context_menu)
         self.runner.output.connect(lambda line: self.log.add(line, "you"))
         self.runner.failed.connect(self.on_failed)
@@ -1353,9 +1361,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.on_failed("no terminal program found: run `flipperemu -d "
                        f"{self.name} cli` in one")
 
+    def on_port_click(self, zone, pos):
+        if zone == "ir":
+            self.menu_ir.popup(pos)
+        elif zone == "gpio":
+            self.show_log()
+
     def on_context_menu(self, zone, pos):
-        menu = {"usb": self.menu_usb, "sd": self.menu_sd}.get(zone,
-                                                              self.menu_device)
+        menu = {"usb": self.menu_usb, "sd": self.menu_sd,
+                "ir": self.menu_ir}.get(zone, self.menu_device)
         menu.popup(pos)
 
     # ------------------------------------------------------------ the view

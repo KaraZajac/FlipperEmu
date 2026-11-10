@@ -3,10 +3,14 @@
 FlipperView is the widget in the middle of the window (fe_gui.py).  It shows
 what the front-panel link reports: the picture on the LCD, the backlight, the
 LED, the vibration motor, the speaker.  It turns the mouse and the keyboard
-into button presses, and it has a USB plug and a microSD card to click.
+into button presses, and its ports are where a Flipper has them, to click:
+the USB plug in the lower face of its nose, the infrared window in the upper
+one, the GPIO sockets along the top, the microSD card at the bottom right.
 
-The drawing is this project's own (a rounded body, a screen, a round pad), in
-units of one LCD pixel, so it is sharp at any zoom.
+The drawing is this project's own, with the proportions of the real thing: a
+body that narrows to a blunt nose at the left and has its top right corner cut
+off, faces that slope away to the edges, a screen in a thin black line, one
+round pad.  It is in units of one LCD pixel, so it is sharp at any zoom.
 
 Copyright (c) 2026, Kara Zajac
 SPDX-License-Identifier: BSD-3-Clause
@@ -15,48 +19,100 @@ import math
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QTransform
 
 # ---- where everything is, in LCD pixels
 
-VIEW_W, VIEW_H = 350, 156
-BX, BY, BW, BH = 22.0, 16.0, 290.0, 124.0
-BODY = QRectF(BX, BY, BW, BH)
-BODY_R = 24.0
-BEZEL = QRectF(BX + 14, BY + 14, 148, 84)       # the dark glass
-LCD = QRectF(BX + 24, BY + 24, 128, 64)
-PAD = QPointF(BX + 222, BY + 58)                # the ring of four, around OK
-PAD_R, PAD_R_IN, OK_R = 38.0, 16.0, 13.5
-BACK = QPointF(BX + 268, BY + 102)
-BACK_R = 10.0
-LED = QPointF(BX + 178, BY + 20)
-USB_Y = BY + 62                                 # the port, on the right edge
+VIEW_W, VIEW_H = 424, 180
+BX, BY, BW, BH = 30.0, 10.0, 380.0, 151.0       # the box around its body
+
+# Its outline, clockwise from the top left, and how far each corner's round
+# reaches.  The nose is at the left: the face above it has the infrared
+# window, the face below it the USB port.
+OUTLINE = ((58, 0, 10), (326, 0, 16), (380, 62, 12), (380, 151, 8),
+           (40, 151, 9), (0, 96, 4.5), (0, 83, 4.5))
+# The flat front.  Between the two are the faces that slope away to the
+# edges, each lit differently: how far towards the light (+) or the shade (-).
+# The light is at the upper right.
+FRONT = ((88, 4, 6), (315, 4, 10), (369, 74, 8), (369, 125, 5),
+         (56, 125, 5), (36, 91, 2), (36, 87, 2))
+SLOPES = (-0.12, 1.0, 0.85, -0.38, -0.5, -0.75, -0.95)
+
+BEZEL = QRectF(BX + 89, BY + 18, 146, 88)       # the black line around ...
+GLASS = BEZEL.adjusted(3, 3, -3, -3)            # ... the lit window, and in it
+LCD = QRectF(BX + 98, BY + 30, 128, 64)         # the 128 x 64 pixels
+PAD = QPointF(BX + 287, BY + 61)                # one round pad, OK in its middle
+PAD_R, OK_R = 41.5, 13.5
+BACK = QPointF(BX + 343, BY + 89)
+BACK_R = 14.0
+LED = QPointF(BX + 246, BY + 100)
+MARK = QRectF(BX + 139, BY + 132.6, 150, 9.2)   # its name, on the bottom face
+
+# The GPIO sockets are in the top edge: 8 of them, a gap, and 10 more
+GPIO_PITCH = 10.3
+GPIO_PINS = ([BX + 82 + i * GPIO_PITCH for i in range(8)]
+             + [BX + 214.3 + i * GPIO_PITCH for i in range(10)])
+GPIO_ROWS = (QRectF(GPIO_PINS[0] - 4.6, BY + 0.5, 7 * GPIO_PITCH + 9.2, 3.9),
+             QRectF(GPIO_PINS[8] - 4.6, BY + 0.5, 9 * GPIO_PITCH + 9.2, 3.9))
+SD_X, SD_W, SD_H = BX + 298, 40.0, 20.0         # the card, in the bottom edge
+SD_OUT = (2.5, 13.0)                            # how far it shows: in, pulled
 USB_OUT = 11.0                                  # how far an unplugged plug is
-SD_X, SD_W, SD_H = BX + 48, 26.0, 16.0          # the card, in the bottom edge
-SD_OUT = (2.5, 12.0)                            # how far it shows: in, pulled
+
+# The two faces of the nose are at an angle, and so is what is in them: each
+# is drawn in a frame of its own.  USB: the origin is the port, x points out
+# of it.  Infrared: the origin is the middle of the window, x runs along the
+# edge, y points into the body.
+USB_T = QTransform().translate(BX + 20, BY + 123.5).rotate(
+    math.degrees(math.atan2(40, -55)))
+IR_T = QTransform().translate(BX + 29, BY + 41.5).rotate(
+    math.degrees(math.atan2(-83, 58)))
+IR_WINDOW = QRectF(-27, 0.5, 54, 4.6)
 
 ZONES = {       # what is not round: where a click means it
-    "usb": QRectF(BX + BW - 4, USB_Y - 11, VIEW_W - BX - BW + 4, 22),
-    "sd": QRectF(SD_X - 4, BY + BH - 6, SD_W + 8, VIEW_H - BY - BH + 6),
-    "gpio": QRectF(BX + 148, BY - 6, 118, 10),
-    "ir": QRectF(BX - 6, BY + 24, 14, BH - 48),
+    "usb": USB_T.map(QtGui.QPolygonF(QRectF(-7, -11, 46, 22))),
+    "ir": IR_T.map(QtGui.QPolygonF(QRectF(-34, -12, 68, 23))),
+    "gpio": QtGui.QPolygonF(QRectF(GPIO_PINS[0] - 8, 0, 17 * GPIO_PITCH + 61.4,
+                                   BY + 9)),
+    "sd": QtGui.QPolygonF(QRectF(SD_X - 4, BY + BH - 7, SD_W + 8,
+                                 VIEW_H - BY - BH + 7)),
 }
+
+# Its name, in letters of this project's own: strokes on a grid, (x, y) with
+# y down, each letter LETTER_H high
+LETTER_H, LETTER_GAP, LETTER_PEN, LETTER_CUT = 8.0, 4.6, 2.3, 1.9
+WORDMARK = "FLIPPEREMU"
+
+
+def letters():
+    h, m, w, c = LETTER_H, LETTER_H / 2, 11.0, LETTER_CUT
+    bowl = [(0, h), (0, 0), (w - c, 0), (w, c), (w, m - c), (w - c, m), (0, m)]
+    return {        # letter: (its width, its strokes)
+        "F": (w, [[(w, 0), (0, 0), (0, h)], [(0, m), (w * 0.7, m)]]),
+        "L": (w, [[(0, 0), (0, h), (w, h)]]),
+        "I": (0, [[(0, 0), (0, h)]]),
+        "P": (w, [bowl]),
+        "E": (w, [[(w, 0), (0, 0), (0, h), (w, h)], [(0, m), (w * 0.7, m)]]),
+        "R": (w, [bowl, [(w * 0.45, m), (w, h)]]),
+        "M": (14.5, [[(0, h), (0, 0), (7.25, h * 0.62), (14.5, 0), (14.5, h)]]),
+        "U": (w, [[(0, 0), (0, h - c), (c, h), (w - c, h), (w, h - c), (w, 0)]]),
+    }
+
 
 THEMES = {
     "white": dict(
-        body="#f6f3ec", body2="#e4e0d5", edge="#b9b4a7", rim="#ffffff",
-        bezel="#17171b", key="#ff8a1f", key_hover="#ff9d42", key_down="#d96c06",
-        key_edge="#b85a05", glyph="#7a3a00", text="#8f897b", accent="#ff8a1f",
-        port="#3b3b40", pin="#c9a227", ir="#3a1418"),
+        body="#f0eeea", light="#ffffff", shade="#c6c3be", edge="#a39f97",
+        bezel="#131316", key="#f26d1f", key_hover="#ff8438", key_down="#d4570f",
+        key_edge="#4a1f06", glyph="#b04a0c", text="#9a958a", accent="#f26d1f",
+        port="#26262b", pin="#c9a227", ir="#3a1418"),
     "black": dict(
-        body="#303033", body2="#1d1d20", edge="#0b0b0d", rim="#47474c",
-        bezel="#0a0a0c", key="#414146", key_hover="#515157", key_down="#29292d",
-        key_edge="#121214", glyph="#ff8a1f", text="#85858c", accent="#ff8a1f",
-        port="#0a0a0c", pin="#c9a227", ir="#2a0c10"),
+        body="#2c2c2f", light="#45454a", shade="#151517", edge="#060607",
+        bezel="#050506", key="#3b3b40", key_hover="#4b4b51", key_down="#252528",
+        key_edge="#0b0b0c", glyph="#ff8a1f", text="#7f7f87", accent="#ff8a1f",
+        port="#08080a", pin="#c9a227", ir="#2a0c10"),
     "mocha": dict(
-        body="#313244", body2="#1e1e2e", edge="#11111b", rim="#45475a",
+        body="#313244", light="#45475a", shade="#1e1e2e", edge="#11111b",
         bezel="#11111b", key="#cba6f7", key_hover="#d9bdfa", key_down="#a67fe0",
-        key_edge="#7f5fb5", glyph="#1e1e2e", text="#a6adc8", accent="#fab387",
+        key_edge="#3b2a5c", glyph="#6c4aa8", text="#a6adc8", accent="#fab387",
         port="#11111b", pin="#f9e2af", ir="#2a1420"),
 }
 
@@ -81,6 +137,55 @@ def mix(a, b, t):
                   f(a.blue(), b.blue()))
 
 
+def faded(colour, alpha):
+    colour = QColor(colour)
+    colour.setAlpha(alpha)
+    return colour
+
+
+def toward(a, b, d):
+    """The point d away from a on the way to b"""
+    length = math.hypot(b.x() - a.x(), b.y() - a.y())
+    return QPointF(a.x() + (b.x() - a.x()) * d / length,
+                   a.y() + (b.y() - a.y()) * d / length)
+
+
+def rounded(points):
+    """A polygon of (x, y, reach) with its corners rounded"""
+    path = QPainterPath()
+    for i, (x, y, reach) in enumerate(points):
+        corner = QPointF(BX + x, BY + y)
+        before = QPointF(BX + points[i - 1][0], BY + points[i - 1][1])
+        after = points[(i + 1) % len(points)]
+        after = QPointF(BX + after[0], BY + after[1])
+        first = toward(corner, before, reach)
+        if i:
+            path.lineTo(first)
+        else:
+            path.moveTo(first)
+        path.quadTo(corner, toward(corner, after, reach))
+    path.closeSubpath()
+    return path
+
+
+def band(c1, r1, c2, r2):
+    """What a band pulled tight around two circles encloses"""
+    theta = math.atan2(c2.y() - c1.y(), c2.x() - c1.x())
+    phi = math.acos((r1 - r2) / math.hypot(c2.x() - c1.x(), c2.y() - c1.y()))
+    points = []
+    for c, r, a0, a1 in ((c2, r2, theta - phi, theta + phi),
+                         (c1, r1, theta + phi, theta - phi + 2 * math.pi)):
+        steps = max(2, round(abs(a1 - a0) / math.radians(3)))
+        for i in range(steps + 1):
+            a = a0 + (a1 - a0) * i / steps
+            points.append(QPointF(c.x() + r * math.cos(a),
+                                  c.y() + r * math.sin(a)))
+    path = QPainterPath()
+    path.addPolygon(QtGui.QPolygonF(points))
+    path.closeSubpath()
+    return path
+
+
 def ring_sector(centre, r_out, r_in, start, span):
     out = QRectF(centre.x() - r_out, centre.y() - r_out, 2 * r_out, 2 * r_out)
     inn = QRectF(centre.x() - r_in, centre.y() - r_in, 2 * r_in, 2 * r_in)
@@ -90,6 +195,50 @@ def ring_sector(centre, r_out, r_in, start, span):
     path.arcTo(inn, start + span, -span)
     path.closeSubpath()
     return path
+
+
+def slope(i):
+    """The face between edge i of the outline and edge i of the front, and
+    the middles of those two edges"""
+    j = (i + 1) % len(OUTLINE)
+    a, b, c, d = (QPointF(BX + x, BY + y) for x, y in (
+        OUTLINE[i][:2], OUTLINE[j][:2], FRONT[j][:2], FRONT[i][:2]))
+    return QtGui.QPolygonF([a, b, c, d]), (a + b) / 2, (c + d) / 2
+
+
+def wordmark():
+    """The device's name as a shape to fill, in MARK, leaning forward"""
+    shapes, strokes, x = letters(), QPainterPath(), 0.0
+    for letter in WORDMARK:
+        width, lines = shapes[letter]
+        for line in lines:
+            strokes.moveTo(x + line[0][0], line[0][1])
+            for px, py in line[1:]:
+                strokes.lineTo(x + px, py)
+        x += width + LETTER_GAP
+    pen = QtGui.QPainterPathStroker()
+    pen.setWidth(LETTER_PEN)
+    pen.setCapStyle(Qt.SquareCap)
+    pen.setJoinStyle(Qt.MiterJoin)
+    shape = pen.createStroke(strokes)
+    shape.setFillRule(Qt.WindingFill)
+    line = QPainterPath()                   # (no points above or below it)
+    line.addRect(QRectF(-LETTER_PEN, -LETTER_PEN / 2, x + 2 * LETTER_PEN,
+                        LETTER_H + LETTER_PEN))
+    lean = QTransform().shear(-0.2, 0).map(shape.intersected(line))
+    box = lean.boundingRect()
+    k = min(MARK.width() / box.width(), MARK.height() / box.height())
+    fit = QTransform().translate(MARK.center().x(), MARK.center().y())
+    fit.scale(k, k)
+    fit.translate(-box.center().x(), -box.center().y())
+    return fit.map(lean)
+
+
+BODY = rounded(OUTLINE)
+FACE = rounded(FRONT)
+SLOPE = [slope(i) for i in range(len(OUTLINE))]
+HOLLOW = band(PAD, PAD_R + 3.4, BACK, BACK_R + 3.4)    # what the buttons sit in
+NAME = wordmark()
 
 
 def lcd_image(frame, bg=LIT_BG, fg=LIT_FG):
@@ -102,25 +251,29 @@ def lcd_image(frame, bg=LIT_BG, fg=LIT_FG):
 
 def app_icon():
     """A small Flipper for the task bar."""
+    t = THEMES["white"]
     pix = QtGui.QPixmap(128, 128)
     pix.fill(Qt.transparent)
     p = QPainter(pix)
     p.setRenderHint(QPainter.Antialiasing)
-    p.setPen(QPen(QColor("#b9b4a7"), 3))
-    p.setBrush(QColor("#f6f3ec"))
-    p.drawRoundedRect(QRectF(6, 34, 116, 60), 20, 20)
+    k = 120 / BW
+    p.translate(4 - BX * k, 64 - (BY + BH / 2) * k)
+    p.scale(k, k)
+    p.setPen(QPen(QColor(t["edge"]), 5))
+    p.setBrush(QColor(t["body"]))
+    p.drawPath(BODY)
     p.setPen(Qt.NoPen)
-    p.setBrush(QColor("#17171b"))
-    p.drawRoundedRect(QRectF(16, 44, 58, 40), 6, 6)
+    p.setBrush(QColor(t["bezel"]))
+    p.drawRoundedRect(BEZEL.adjusted(-4, -4, 4, 4), 10, 10)
     p.setBrush(QColor(LIT_BG))
-    p.drawRect(QRectF(21, 49, 48, 30))
-    p.setBrush(QColor("#ff8a1f"))
-    p.drawEllipse(QPointF(96, 60), 15, 15)
-    p.setBrush(QColor("#f6f3ec"))
-    p.drawEllipse(QPointF(96, 60), 6.5, 6.5)
-    p.setBrush(QColor("#ff8a1f"))
-    p.drawEllipse(QPointF(96, 60), 4.5, 4.5)
-    p.drawEllipse(QPointF(112, 82), 5, 5)
+    p.drawRoundedRect(GLASS.adjusted(4, 4, -4, -4), 4, 4)
+    p.setBrush(QColor(t["key"]))
+    p.drawEllipse(PAD, PAD_R, PAD_R)
+    p.drawEllipse(BACK, BACK_R + 2, BACK_R + 2)
+    p.setBrush(QColor(t["body"]))
+    p.drawEllipse(PAD, OK_R + 5, OK_R + 5)
+    p.setBrush(QColor(t["key"]))
+    p.drawEllipse(PAD, OK_R - 1, OK_R - 1)
     p.end()
     return QtGui.QIcon(pix)
 
@@ -129,6 +282,7 @@ class FlipperView(QtWidgets.QWidget):
     key = QtCore.Signal(str, bool)      # a button went down (True) or up
     usb_clicked = QtCore.Signal()
     sd_clicked = QtCore.Signal()
+    port_clicked = QtCore.Signal(str, QtCore.QPoint)    # "ir" or "gpio"
     menu_wanted = QtCore.Signal(str, QtCore.QPoint)     # zone ("" for none)
 
     def __init__(self, name, scale=3, theme="white", parent=None):
@@ -294,8 +448,8 @@ class FlipperView(QtWidgets.QWidget):
             return "down" if dy > 0 else "up"
         if math.hypot(x - BACK.x(), y - BACK.y()) <= BACK_R + 2:
             return "back"
-        for name, rect in ZONES.items():
-            if rect.contains(x, y):
+        for name, zone in ZONES.items():
+            if zone.containsPoint(QPointF(x, y), Qt.OddEvenFill):
                 return name
         return None
 
@@ -324,11 +478,11 @@ class FlipperView(QtWidgets.QWidget):
                 self.usb_clicked.emit()
             elif zone == "sd":
                 self.sd_clicked.emit()
+            else:
+                self.port_clicked.emit(zone, e.globalPosition().toPoint())
 
     def mouseMoveEvent(self, e):
         zone = self.zone_at(e.position())
-        if zone in ("gpio", "ir"):
-            zone = None                 # they are there to be seen
         if self._set(hover=zone):
             self.setCursor(Qt.PointingHandCursor if zone else Qt.ArrowCursor)
 
@@ -382,8 +536,8 @@ class FlipperView(QtWidgets.QWidget):
             "sd": {True: "The microSD card: click to pull it out",
                    False: "The microSD card: click to push it in",
                    None: "No microSD card in this run"}[self.sd],
-            "gpio": "The GPIO pins: nothing is connected to them here",
-            "ir": "The infrared window",
+            "gpio": "The GPIO pins: click for the log, and a line for its CLI",
+            "ir": "The infrared window: click to point a remote at it",
         }.get(zone, "")
 
     # ---- the drawing
@@ -400,110 +554,141 @@ class FlipperView(QtWidgets.QWidget):
     def draw(self, p, k):
         t = {name: QColor(value) for name, value in self.theme.items()}
         p.setRenderHint(QPainter.Antialiasing)
-        body = QPainterPath()
-        body.addRoundedRect(BODY, BODY_R, BODY_R)
         self.draw_behind(p, t)
         self.draw_cable(p, t)
-        p.setPen(Qt.NoPen)                      # the shadow it casts
-        for grow, alpha in ((4, 5), (3, 8), (2, 12), (1, 16)):
-            p.setBrush(QColor(0, 0, 0, alpha))
-            p.drawRoundedRect(BODY.adjusted(-grow, 1.5 - grow, grow, 2.5 + grow),
-                              BODY_R + grow, BODY_R + grow)
-        shade = QtGui.QLinearGradient(0, BY, 0, BY + BH)
-        shade.setColorAt(0, t["body"])
-        shade.setColorAt(1, t["body2"])
-        p.setPen(QPen(t["edge"], 1.0))
-        p.setBrush(shade)
-        p.drawPath(body)
-        p.setPen(QPen(t["rim"], 0.8))
-        p.setBrush(Qt.NoBrush)
-        p.drawRoundedRect(BODY.adjusted(2.2, 2.2, -2.2, -2.2),
-                          BODY_R - 2.2, BODY_R - 2.2)
-        p.save()                                # its dark end: the IR window
-        p.setClipPath(body)
-        p.fillRect(QRectF(BX, BY, 8.5, BH), t["ir"])
-        p.restore()
-        p.setPen(QPen(t["edge"], 1.0))
-        p.drawPath(body)
-        p.setPen(Qt.NoPen)                      # the slots in its edges
-        p.setBrush(t["port"])
-        p.drawRoundedRect(QRectF(BX + BW - 2.4, USB_Y - 4.5, 2.4, 9), 1, 1)
-        p.drawRoundedRect(QRectF(SD_X - 2, BY + BH - 2.4, SD_W + 4, 2.4), 1, 1)
+        self.draw_body(p, t)
         self.draw_screen(p, t, k)
         self.draw_led(p, t)
         self.draw_keys(p, t)
         self.draw_marks(p, t)
 
     def draw_behind(self, p, t):
-        """What sticks out from behind the body: pins, the card, IR light"""
+        """What sticks out from behind the body: the card, infrared light"""
         p.setPen(Qt.NoPen)
-        p.setBrush(t["port"])
-        p.drawRoundedRect(QRectF(BX + 150, BY - 3.6, 114, 8), 1.5, 1.5)
-        p.setBrush(t["pin"])
-        for i in range(18):
-            p.drawEllipse(QPointF(BX + 156 + i * 6, BY - 1.7), 0.9, 0.9)
         if self.sd is not None:
             out = SD_OUT[0 if self.sd else 1]
             card = QRectF(SD_X, BY + BH + out - SD_H, SD_W, SD_H)
-            p.setBrush(QColor("#4a4c55" if self.hover == "sd" else "#34363d"))
-            p.drawRoundedRect(card, 1.6, 1.6)
-            if not self.sd:
-                p.setBrush(QColor("#c8cad2"))
-                p.drawRoundedRect(QRectF(card.x() + 3, card.bottom() - 8.5,
-                                         SD_W - 6, 5.5), 0.8, 0.8)
+            p.setBrush(QColor("#4b4e58" if self.hover == "sd" else "#34363d"))
+            p.drawRoundedRect(card, 2.0, 2.0)
+            if not self.sd:                     # the lip a nail pulls it by
+                p.setBrush(QColor("#9c9fa8"))
+                p.drawRoundedRect(QRectF(card.x() + 6, card.bottom() - 5.2,
+                                         SD_W - 12, 2.0), 1.0, 1.0)
         if self.clock.elapsed() < self.ir_until:
+            p.save()
+            p.setTransform(IR_T, True)
             p.setBrush(Qt.NoBrush)
-            centre = QPointF(BX + 2, BY + BH / 2)
-            for i, r in enumerate((9, 14, 19)):
-                p.setPen(QPen(QColor(255, 70, 90, 210 - 60 * i), 1.6,
+            for i, r in enumerate((10, 15.5, 21)):
+                p.setPen(QPen(QColor(255, 70, 90, 215 - 60 * i), 1.7,
                               Qt.SolidLine, Qt.RoundCap))
-                p.drawArc(QRectF(centre.x() - r, centre.y() - r, 2 * r, 2 * r),
-                          145 * 16, 70 * 16)
+                p.drawArc(QRectF(-r, -r, 2 * r, 2 * r), 55 * 16, 70 * 16)
+            p.restore()
 
     def draw_cable(self, p, t):
-        """The USB plug in the right edge, or a little way out of it"""
-        x = BX + BW + (USB_OUT if self.cable == "unplugged" else 0)
-        hover = self.hover == "usb"
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#c3c6cd"))           # the metal that goes in
-        p.drawRoundedRect(QRectF(x - 6, USB_Y - 3.6, 8, 7.2), 1.6, 1.6)
-        wire = QPainterPath()
-        wire.moveTo(x + 13, USB_Y)
-        wire.cubicTo(x + 24, USB_Y, VIEW_W - 8, USB_Y + 6, VIEW_W + 4, USB_Y + 26)
+        """The USB plug in the lower face of the nose, or a little way out"""
+        out = 0.0 if self.cable != "unplugged" else USB_OUT
+        end = USB_T.map(QPointF(out + 14, 0))
+        wire = QPainterPath()                   # it hangs down, off the picture
+        wire.moveTo(end)
+        wire.cubicTo(USB_T.map(QPointF(out + 31, 0)),
+                     QPointF(end.x() - 9, VIEW_H - 16),
+                     QPointF(end.x() - 13, VIEW_H + 6))
         p.setPen(QPen(QColor("#2b2c31"), 4.4, Qt.SolidLine, Qt.RoundCap))
         p.setBrush(Qt.NoBrush)
         p.drawPath(wire)
+        p.save()
+        p.setTransform(USB_T, True)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#5a5d66" if hover else "#44464d"))
-        p.drawRoundedRect(QRectF(x, USB_Y - 6.5, 15, 13), 2.6, 2.6)
-        cx = x + 7.5
+        p.setBrush(QColor("#c3c6cd"))           # the metal that goes in
+        p.drawRoundedRect(QRectF(out - 6, -3.6, 8, 7.2), 1.6, 1.6)
+        p.setBrush(QColor("#5a5d66" if self.hover == "usb" else "#44464d"))
+        p.drawRoundedRect(QRectF(out, -6.5, 15, 13), 2.6, 2.6)
+        p.restore()
+        c = USB_T.map(QPointF(out + 7.5, 0))    # what it is plugged into
+        p.setPen(Qt.NoPen)
         if self.cable == "charger":             # a bolt: power, no data
-            bolt = QtGui.QPolygonF([QPointF(cx + 1.6, USB_Y - 4.4),
-                                    QPointF(cx - 2.8, USB_Y + 0.9),
-                                    QPointF(cx - 0.4, USB_Y + 0.9),
-                                    QPointF(cx - 1.6, USB_Y + 4.4),
-                                    QPointF(cx + 2.8, USB_Y - 0.9),
-                                    QPointF(cx + 0.4, USB_Y - 0.9)])
             p.setBrush(QColor("#f9d949"))
-            p.drawPolygon(bolt)
+            p.drawPolygon(QtGui.QPolygonF([
+                QPointF(c.x() + 1.6, c.y() - 4.4), QPointF(c.x() - 2.8, c.y() + 0.9),
+                QPointF(c.x() - 0.4, c.y() + 0.9), QPointF(c.x() - 1.6, c.y() + 4.4),
+                QPointF(c.x() + 2.8, c.y() - 0.9), QPointF(c.x() + 0.4, c.y() - 0.9)]))
         else:                                   # data: a line between two ends
             mark = QColor("#e8e9ee" if self.cable == "computer" else "#8b8e97")
             p.setPen(QPen(mark, 1.1, Qt.SolidLine, Qt.RoundCap))
-            p.drawLine(QPointF(cx - 3.6, USB_Y), QPointF(cx + 2.2, USB_Y))
+            p.drawLine(QPointF(c.x() - 3.4, c.y()), QPointF(c.x() + 2.0, c.y()))
             p.setPen(Qt.NoPen)
             p.setBrush(mark)
-            p.drawEllipse(QPointF(cx - 3.8, USB_Y), 1.3, 1.3)
-            p.drawPolygon(QtGui.QPolygonF([QPointF(cx + 4.6, USB_Y),
-                                           QPointF(cx + 1.8, USB_Y - 1.9),
-                                           QPointF(cx + 1.8, USB_Y + 1.9)]))
+            p.drawEllipse(QPointF(c.x() - 3.5, c.y()), 1.3, 1.3)
+            p.drawPolygon(QtGui.QPolygonF([QPointF(c.x() + 4.4, c.y()),
+                                           QPointF(c.x() + 1.6, c.y() - 1.9),
+                                           QPointF(c.x() + 1.6, c.y() + 1.9)]))
+
+    def draw_body(self, p, t):
+        p.setBrush(Qt.NoBrush)                  # the shadow it casts
+        for width, alpha in ((10, 4), (7.5, 6), (5, 9), (3, 12), (1.4, 16)):
+            p.setPen(QPen(QColor(0, 0, 0, alpha), width, Qt.SolidLine,
+                          Qt.RoundCap, Qt.RoundJoin))
+            p.drawPath(BODY.translated(-0.6, 2.2))
+        p.setPen(Qt.NoPen)
+        p.setBrush(t["body"])
+        p.drawPath(BODY)
+        p.save()                                # the faces that slope away:
+        p.setClipPath(BODY)                     # each a little rounder at
+        for (face, outer, inner), lean in zip(SLOPE, SLOPES):   # its edge
+            to = t["light" if lean > 0 else "shade"]
+            fall = QtGui.QLinearGradient(outer, inner)
+            fall.setColorAt(0.0, mix(t["body"], to, abs(lean)))
+            fall.setColorAt(1.0, mix(t["body"], to, abs(lean) * 0.72))
+            p.setPen(QPen(mix(t["body"], to, abs(lean) * 0.86), 0.4))
+            p.setBrush(fall)                    # (the pen: no seam between two)
+            p.drawPolygon(face)
+        p.restore()
+        front = QtGui.QLinearGradient(0, BY, 0, BY + 125)
+        front.setColorAt(0.0, mix(t["body"], t["light"], 0.35))
+        front.setColorAt(0.7, t["body"])
+        front.setColorAt(1.0, mix(t["body"], t["shade"], 0.2))
+        p.setPen(Qt.NoPen)
+        p.setBrush(front)
+        p.drawPath(FACE)
+        p.save()                                # the infrared window, in the
+        p.setTransform(IR_T, True)              # upper face of the nose
+        glows = self.clock.elapsed() < self.ir_until
+        window = mix(t["ir"], "#ff4660", 0.75) if glows else t["ir"]
+        p.setBrush(mix(window, "#ffffff", 0.16) if self.hover == "ir" else window)
+        p.drawRoundedRect(IR_WINDOW, 1.8, 1.8)
+        p.setBrush(faded("#ffffff", 50))        # the light on its plastic
+        p.drawRoundedRect(QRectF(IR_WINDOW.x() + 3, IR_WINDOW.y() + 0.7,
+                                 IR_WINDOW.width() - 6, 0.9), 0.4, 0.4)
+        p.restore()
+        socket = mix(t["port"], "#ffffff", 0.22 if self.hover == "gpio" else 0)
+        for row in GPIO_ROWS:                   # the GPIO sockets, in the top
+            p.setBrush(socket)
+            p.drawRoundedRect(row, 1.2, 1.2)
+        for x in GPIO_PINS:
+            p.setBrush(QColor("#050506"))
+            p.drawRect(QRectF(x - 2.0, BY + 1.2, 4.0, 2.5))
+            p.setBrush(t["pin"])                # (a glint of the contact in it)
+            p.drawRect(QRectF(x - 0.8, BY + 2.6, 1.6, 1.1))
+        p.setBrush(t["port"])                   # the slots in its edges
+        p.save()
+        p.setTransform(USB_T, True)
+        p.drawRoundedRect(QRectF(-2.6, -5.4, 3.0, 10.8), 1.2, 1.2)
+        p.restore()
+        p.drawRoundedRect(QRectF(SD_X - 2, BY + BH - 2.6, SD_W + 4, 2.6), 1, 1)
+        p.setPen(QPen(t["edge"], 0.9))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(BODY)
 
     def draw_screen(self, p, t, k):
+        dark = self.power != "on" or self.blank or self.frame is None
+        light = self.backlight / 255
+        bg, fg = mix(UNLIT_BG, LIT_BG, light), mix(UNLIT_FG, LIT_FG, light)
         p.setPen(Qt.NoPen)
         p.setBrush(t["bezel"])
-        p.drawRoundedRect(BEZEL, 7, 7)
-        p.fillRect(LCD.adjusted(-1.5, -1.5, 1.5, 1.5), QColor("#050505"))
-        if self.power != "on" or self.blank or self.frame is None:
-            p.fillRect(LCD, QColor(DARK))
+        p.drawRoundedRect(BEZEL, 7.5, 7.5)
+        p.setBrush(QColor(DARK) if dark else bg)    # lit all over, not only
+        p.drawRoundedRect(GLASS, 4.6, 4.6)          # behind the pixels
+        if dark:
             if self.hint and not self.blank:
                 font = QtGui.QFont(self.font())
                 font.setPixelSize(9)
@@ -520,8 +705,6 @@ class FlipperView(QtWidgets.QWidget):
                            Qt.AlignHCenter | Qt.AlignTop | Qt.TextWordWrap,
                            "\n".join(self.hint[1:]))
             return
-        light = self.backlight / 255
-        bg, fg = mix(UNLIT_BG, LIT_BG, light), mix(UNLIT_FG, LIT_FG, light)
         img = QtGui.QImage(self.frame, 128, 64, 16, QtGui.QImage.Format_Mono)
         img.setColorTable([bg.rgb(), fg.rgb()])
         p.setRenderHint(QPainter.SmoothPixmapTransform, False)
@@ -545,85 +728,86 @@ class FlipperView(QtWidgets.QWidget):
         if led:
             colour = QColor(led)
             level = max(colour.red(), colour.green(), colour.blue()) / 255
-            glow = QtGui.QRadialGradient(LED, 11)
-            inner = QColor(colour)
-            inner.setAlpha(round(170 * level))
-            outer = QColor(colour)
-            outer.setAlpha(0)
-            glow.setColorAt(0, inner)
-            glow.setColorAt(1, outer)
+            glow = QtGui.QRadialGradient(LED, 12)
+            glow.setColorAt(0, faded(colour, round(170 * level)))
+            glow.setColorAt(1, faded(colour, 0))
             p.setBrush(glow)
-            p.drawEllipse(LED, 11, 11)
+            p.drawEllipse(LED, 12, 12)
             p.setBrush(mix("#ffffff", colour, 0.55))
         else:
-            p.setBrush(mix(t["body2"], "#000000", 0.25))
-        p.drawEllipse(LED, 2.6, 2.6)
+            p.setBrush(mix(t["shade"], "#000000", 0.45))
+        p.drawEllipse(LED, 2.7, 2.7)
 
-    def key_brush(self, t, name):
-        if self.pressed(name):
-            return t["key_down"]
-        return t["key_hover"] if self.hover == name else t["key"]
+    def key_brush(self, t, name, centre, radius):
+        """A button's colour, lit from the upper left as its plastic is"""
+        colour = (t["key_down"] if self.pressed(name) else
+                  t["key_hover"] if self.hover == name else t["key"])
+        shine = QtGui.QRadialGradient(
+            QPointF(centre.x() - radius * 0.35, centre.y() - radius * 0.45),
+            radius * 1.7)
+        shine.setColorAt(0, mix(colour, "#ffffff", 0.10))
+        shine.setColorAt(1, mix(colour, "#000000", 0.10))
+        return shine
 
     def draw_keys(self, p, t):
-        p.setPen(Qt.NoPen)
-        for name, start in SECTORS.items():
-            p.setBrush(self.key_brush(t, name))
-            p.drawPath(ring_sector(PAD, PAD_R, PAD_R_IN, start, 90))
-        p.setPen(QPen(t["key_edge"], 0.8))
-        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(faded(t["edge"], 150), 0.7))      # what they sit in
+        p.setBrush(mix(t["body"], t["shade"], 0.16))
+        p.drawPath(HOLLOW)
+        p.setPen(QPen(t["key_edge"], 1.0))
+        p.setBrush(self.key_brush(t, "pad", PAD, PAD_R))
         p.drawEllipse(PAD, PAD_R, PAD_R)
-        p.drawEllipse(PAD, PAD_R_IN, PAD_R_IN)
-        for angle in (45, 135, 225, 315):
-            c, s = math.cos(math.radians(angle)), math.sin(math.radians(angle))
-            p.drawLine(QPointF(PAD.x() + c * PAD_R_IN, PAD.y() + s * PAD_R_IN),
-                       QPointF(PAD.x() + c * PAD_R, PAD.y() + s * PAD_R))
-        p.setPen(Qt.NoPen)
-        p.setBrush(t["glyph"])
+        p.setPen(Qt.NoPen)                      # the quarter under a finger
+        for name, start in SECTORS.items():
+            if self.pressed(name) or self.hover == name:
+                p.setBrush(t["key_down" if self.pressed(name) else "key_hover"])
+                p.drawPath(ring_sector(PAD, PAD_R - 0.5, OK_R + 0.6, start, 90))
+        p.setPen(QPen(t["glyph"], 1.15, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(Qt.NoBrush)                  # arrows, cut into the plastic
         for name, (dx, dy) in ARROWS.items():
-            push = 0.6 if self.pressed(name) else 0
-            tip = QPointF(PAD.x() + dx * (30.5 - push), PAD.y() + dy * (30.5 - push))
-            base = QPointF(PAD.x() + dx * (24.5 - push), PAD.y() + dy * (24.5 - push))
+            push = 0.7 if self.pressed(name) else 0
+            tip, base, half = 32.5 - push, 25.0 - push, 5.4
             p.drawPolygon(QtGui.QPolygonF([
-                tip, QPointF(base.x() - dy * 4.8, base.y() + dx * 4.8),
-                QPointF(base.x() + dy * 4.8, base.y() - dx * 4.8)]))
-        p.setPen(QPen(t["key_edge"], 0.8))
-        p.setBrush(self.key_brush(t, "ok"))
+                QPointF(PAD.x() + dx * tip, PAD.y() + dy * tip),
+                QPointF(PAD.x() + dx * base - dy * half,
+                        PAD.y() + dy * base + dx * half),
+                QPointF(PAD.x() + dx * base + dy * half,
+                        PAD.y() + dy * base - dx * half)]))
+        p.setPen(QPen(t["key_edge"], 1.3))
+        p.setBrush(self.key_brush(t, "ok", PAD, OK_R))
         p.drawEllipse(PAD, OK_R, OK_R)
-        p.setBrush(self.key_brush(t, "back"))
+        p.setPen(QPen(t["key_edge"], 1.0))
+        p.setBrush(self.key_brush(t, "back", BACK, BACK_R))
         p.drawEllipse(BACK, BACK_R, BACK_R)
-        x, y = BACK.x(), BACK.y() + (0.5 if self.pressed("back") else 0)
+        x, y = BACK.x() + 0.4, BACK.y() + (0.6 if self.pressed("back") else 0)
         hook = QPainterPath()                   # an arrow that turns back
-        hook.moveTo(x - 3.2, y - 3.2)
-        hook.lineTo(x + 1.2, y - 3.2)
-        hook.arcTo(QRectF(x - 1.6, y - 3.2, 5.6, 5.6), 90, -180)
-        hook.lineTo(x - 4.4, y + 2.4)
-        hook.moveTo(x - 2.3, y + 0.2)
-        hook.lineTo(x - 4.6, y + 2.4)
-        hook.lineTo(x - 2.3, y + 4.6)
-        p.setPen(QPen(t["glyph"], 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        hook.moveTo(x - 4.2, y - 4.2)
+        hook.lineTo(x + 1.6, y - 4.2)
+        hook.arcTo(QRectF(x - 2.1, y - 4.2, 7.4, 7.4), 90, -180)
+        hook.lineTo(x - 5.8, y + 3.2)
+        hook.moveTo(x - 3.0, y + 0.3)
+        hook.lineTo(x - 6.0, y + 3.2)
+        hook.lineTo(x - 3.0, y + 6.1)
+        p.setPen(QPen(t["glyph"], 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         p.setBrush(Qt.NoBrush)
         p.drawPath(hook)
 
     def draw_marks(self, p, t):
-        """Its name under the screen, and the speaker's sign over it"""
+        """Its name on the bottom face, and the speaker's sign by the nose"""
+        p.setPen(Qt.NoPen)
+        p.setBrush(t["accent"])
+        p.drawPath(NAME)
         font = QtGui.QFont(self.font())
-        font.setPixelSize(7)
-        font.setBold(True)
-        font.setLetterSpacing(QtGui.QFont.AbsoluteSpacing, 1.4)
-        p.setFont(font)
-        p.setPen(t["text"])
-        p.drawText(QRectF(BX + 16, BY + 100, 90, 14),
-                   Qt.AlignLeft | Qt.AlignVCenter, "FLIPPEREMU")
-        font.setBold(False)
+        font.setPixelSize(6)
         font.setLetterSpacing(QtGui.QFont.AbsoluteSpacing, 0.4)
         p.setFont(font)
-        name = QtGui.QFontMetricsF(font).elidedText(self.name, Qt.ElideRight, 64)
-        p.drawText(QRectF(BX + 82, BY + 100, 80, 14),
-                   Qt.AlignRight | Qt.AlignVCenter, name)
+        p.setPen(t["text"])
+        name = QtGui.QFontMetricsF(font).elidedText(self.name, Qt.ElideRight, 56)
+        p.drawText(QRectF(BX + 62, BY + 130, 60, 14),
+                   Qt.AlignLeft | Qt.AlignVCenter, name)
         sounding = self.tone and self.power == "on" and not self.muted
         if not (sounding or self.muted):
             return
-        cx, cy = BX + 21.0, BY + 7.5
+        cx, cy = BX + 43.0, BY + 52.0
         colour = t["accent"] if sounding else t["text"]
         p.setPen(Qt.NoPen)
         p.setBrush(colour)

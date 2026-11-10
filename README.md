@@ -191,9 +191,9 @@ are erased). Without `-f` it boots whatever is already flashed.
 ## The window
 
 `./flipperemu run` opens a window with a Flipper in it: a body of FlipperEmu's own
-drawing around the emulated LCD, with its lights, its buttons and its ports. It needs
-PySide6. `--gtk` gives QEMU's own window with the bare LCD instead, and `--headless` no
-window at all.
+drawing around the emulated LCD, with its lights, its buttons, and its ports where a
+real one has them. It needs PySide6. `--gtk` gives QEMU's own window with the bare LCD
+instead, and `--headless` no window at all.
 
 - **The buttons**: click them, or use the keyboard (arrows, Enter/Space = OK,
   Backspace/Esc = Back), and hold them as long as you would a real one. Back held for
@@ -203,14 +203,16 @@ window at all.
   Power, a flat battery off USB), the window stays and shows it off. Hold Back to switch
   it on, or plug its USB cable in. It starts with its battery as it was, and with the
   cards, tags and keys that were held to it.
-- **The USB plug** on the right: click it to unplug the cable, again to plug it back in.
-  The USB menu also has a charger (power without data). Unplugged, the Flipper runs on
-  its battery and sleeps deeply when idle.
-- **The microSD card** at the bottom: click it to pull it out (as rudely as a finger
-  would) and push it back in.
+- **The USB plug** in the lower left face of its nose: click it to unplug the cable,
+  again to plug it back in. The USB menu also has a charger (power without data).
+  Unplugged, the Flipper runs on its battery and sleeps deeply when idle.
+- **The microSD card** at the bottom right: click it to pull it out (as rudely as a
+  finger would) and push it back in.
+- **The infrared window** in the upper left face: click it for the Infrared menu, to
+  point a remote at it. It glows when the Flipper transmits.
+- **The GPIO pins** along the top: click them for the log.
 - **The lights and sounds** show on the body: the LED glows, the body shakes when the
-  motor runs, a speaker sign shows a tone (it plays through `--audio`), and the IR window
-  on the left end flashes when the Flipper transmits.
+  motor runs, and a speaker sign shows a tone (it plays through `--audio`).
 - **The bench** under it has a tile for each of USB, the microSD card, the battery, NFC,
   RFID, iButton, infrared and Sub-GHz. A tile says what is plugged in or held to the
   Flipper and what its radio is doing, with a button for what you do most and a menu
