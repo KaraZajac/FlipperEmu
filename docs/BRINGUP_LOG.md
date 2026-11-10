@@ -836,6 +836,32 @@ All three are small, self-contained, and suitable for sending upstream.
     a pull and a push interrupted, a push and a `cli` killed, the card pulled out in
     the middle of a push and pushed in again.
 
+77. **Starting an app is a conversation with the loader.** `app FILE.fap` is `push`
+    and then `loader close` and `loader open`, as `fbt launch` does it. Three things
+    the firmwares answered that the first version did not expect:
+    - Snake Game, the smallest app on the official card, cannot be closed that way:
+      `Application "Snake Game" has to be closed manually`. It has a message queue of
+      its own and takes no request to exit, as most small apps (and most first apps)
+      do. Every later `app` then failed at its first step. Now the launcher presses
+      Back, which is what "manually" means.
+    - The same `.fap` with the API major in its manifest raised by one: the official
+      firmware refuses it at once (`Preload failed, ...: Update Firmware to use with
+      this Application (ApiTooNew)`). On Momentum and Unleashed `loader open` did not
+      answer at all. Their screens showed why: "App Too New / APP:88 > FW:87 / This
+      app might not work / Continue anyways?", and the CLI command waits for the
+      button. The launcher gave up after 60 s and closed the port, the check's next
+      commands opened it three times more, and that was entry 76's queue of eight
+      again: `[CRASH][ISR USB_LP] furi_check failed`. Now `app` says after 8 s that
+      the Flipper may be asking, waits, and presses Back itself before it leaves
+      (`--wait`); answered with Continue, the app starts and `app` says that it runs.
+    - `loader list` of official 1.5.1 has an empty `Apps:` group. Its main apps are
+      `.fap` files on the card now, and `loader open "Sub-GHz"` finds them by name all
+      the same. `app --list` leaves the empty group out and lists the card's files.
+    `scripts/app_check.py`: 23 checks on each of the three firmwares. The Back button
+    for an app that takes no request is checked on the official one only (the others
+    do not bring Snake Game along under that name); the question on the screen on
+    Momentum and Unleashed only (the official one does not ask).
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

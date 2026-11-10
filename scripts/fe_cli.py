@@ -170,9 +170,13 @@ class FlipperCli:
     def run(self, command, timeout=30.0, color=False):
         """Run one CLI command, return its output (without echo and prompt)."""
         self.write(command.encode() + b"\r")
-        out = self.read_until_prompt(
+        return self.answer(self.read_until_prompt(
             timeout, f"the Flipper's CLI was not done with `{command}` "
-                     f"after {timeout:g} s")
+                     f"after {timeout:g} s"), color)
+
+    @staticmethod
+    def answer(out, color=False):
+        """What a command printed, from all that came up to its prompt"""
         out = out[:-len(PROMPT)]
         first, _, rest = out.partition(b"\r\n")       # the echoed command
         if not color:

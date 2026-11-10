@@ -52,6 +52,9 @@ off-screen.
   `/ext/.int`, dolphin animations load from the card, and `.fap` apps launch.
 - Files to and from the card with `./flipperemu ls`, `push`, `pull`, `rm` and `mkdir`:
   through the firmware when the device runs, in the card's image when it does not.
+- An app from your build directory onto the Flipper and started in one command,
+  `./flipperemu app my_app.fap`: what it was built for, the app that runs closed
+  first, and what the firmware logged about the start.
 - Persistent devices: the internal flash (`flash.img`) and the battery-backed state (fuel
   gauge data memory and RTC backup domain, `nvram.bin`) survive restarts.
 - The firmware's log (USART1: `[I][Flipper] Startup complete`, …) on stdio, a pty or
@@ -281,6 +284,8 @@ level, switches it off and on, and reboots it.
 | `ls [-R] [PATH]` | what is on the SD card (`/ext` when no path is given); `-R`: and in every folder under it |
 | `push [-f] LOCAL… [REMOTE]` \| `pull [-f] REMOTE… [LOCAL]` | copy files and folders to the card, and from it |
 | `rm [-r] [-f] PATH…` \| `mkdir PATH…` | remove files and folders on the card; make folders |
+| `app FILE.fap [ARGS]` \| `app NAME [ARGS]` \| `app /ext/….fap [ARGS]` | put an app on the card and start it; start one of the firmware's own, or one on the card |
+| `app` \| `app --close` \| `app --list` | which app runs; close it; the apps the firmware has and the ones on the card |
 | `log [-f] [-n N] [-l LEVEL] [-g REGEX] [--previous]` | what the firmware logged (its UART), in its colours: follow it, the last N lines, this level and worse, the lines that match |
 | `log --set-level LEVEL` | how much the firmware logs, from its next start: none, error, warn, info, debug, trace or default |
 | `ir PROTO ADDR CMD` \| `ir raw …` \| `ir FILE.ir [NAME]` | send an infrared signal to the device's receiver |
@@ -425,6 +430,61 @@ launcher then says that there is no prompt, and that this may be why.
 `scripts/files_check.py FIRMWARE` checks all of this on a throwaway device: a folder
 copied there and back through the firmware and through the image, each reading what the
 other wrote, and then the interruptions above.
+
+### Apps
+
+```sh
+./flipperemu app dist/my_app.fap                  # copy it to the card, close what runs, start it
+./flipperemu app dist/my_app.fap /ext/my_app/level2.bin    # ... with a file for it to open
+./flipperemu app --to /ext/apps/Mine my_app.fap   # into this folder
+./flipperemu app --no-start my_app.fap            # only copy it (a stopped device takes that too)
+./flipperemu app Sub-GHz "/ext/subghz/My Gate.sub"     # one of the firmware's own, by its name
+./flipperemu app /ext/apps/Games/snake_game.fap   # one that is on the card
+./flipperemu app                                  # which app runs?
+./flipperemu app --close
+./flipperemu app --list                           # the names it takes, and the .fap files on the card
+```
+
+This is the loop for an app you are writing: build it, `app` it, look, change it,
+`app` it again. It is what `fbt launch` does on a real Flipper, through the same
+`loader` commands of the firmware's CLI.
+
+```
+$ ./flipperemu app dist/my_app.fap
+dist/my_app.fap: "My App", built for API 88.2, which is this firmware's
+[default] "My App" closed
+dist/my_app.fap -> /ext/apps/Tools/my_app.fap (26916 bytes)
+[default] "My App" runs
+```
+
+- **What the file is built for** is read from its manifest before anything is copied:
+  its name and the firmware API it was built against, beside the API of the firmware
+  that runs. A file that is no app (a firmware's `.elf`, a text file) is refused there.
+- **Where it goes**: over the app with that file name anywhere under `/ext/apps`, so a
+  new build lands where the menu has it; into `/ext/apps` when there is none; or into
+  `--to FOLDER`. The copy is `push`'s: unchanged bytes are not sent again.
+- **The app that runs is closed first.** The loader asks it to close. An app with a
+  loop of its own (many small ones) does not hear that, and then its Back button is
+  pressed, as a person would: a few short presses, then a long one. If it is still
+  there, the command says so and starts nothing.
+- **After the start** it says whether the app runs. If the firmware logged warnings or
+  errors since, they are shown; if the firmware crashed, its crash message is, and the
+  exit status is 1. `./flipperemu log -f` in another terminal shows all of it.
+- **When the loader refuses** (no such app, an app for another API), its reason is
+  printed, exit status 1.
+- **When the firmware asks first.** Momentum and Unleashed put a question on the
+  Flipper's screen for an app built for another API ("App Too New ... Continue
+  anyways?") and start nothing until a button is pressed. `app` says after eight
+  seconds that the Flipper may be asking, and goes on waiting: answer in the window, or
+  with `./flipperemu press right` from another terminal. A question nobody answered in
+  `--wait` seconds (60) is cancelled with Back, so that a script does not hang and the
+  Flipper's CLI is free again.
+
+ARGS is what the app is started with, spaces and all: for the firmware's own apps the
+path of a file to open.
+
+`scripts/app_check.py FIRMWARE` checks this on a throwaway device with an app the
+firmware brought along: 23 checks on each of the three firmwares.
 
 ### Smoke-testing a build
 
@@ -1055,7 +1115,8 @@ flipperemu             launcher / device manager
 qemu/hw/arm/flipper/   the QEMU machine + STM32WB55 SoC + board devices (C)
 qemu/patches/          fixes to upstream QEMU (SysTick, ssi-sd, SD SPI state)
 scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_monitor.py,
-                       fe_cli.py, fe_files.py (files on the card), fe_ir.py,
+                       fe_cli.py, fe_files.py (files on the card), fe_apps.py
+                       (apps and the loader), fe_ir.py,
                        fe_subghz.py, fe_sdr.py (real radios),
                        fe_nfc_link.py (cards from programs), fe_pm3.py (Proxmark3),
                        fe_enclave.py (the enclave's keys and ciphers), fe_usbip.py,

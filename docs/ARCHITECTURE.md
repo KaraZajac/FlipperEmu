@@ -771,6 +771,27 @@ begun, the firmware sends the file to its end, and a port that is closed on it d
 end the command (see "Hanging up" under USB). So a `pull` that gets Ctrl-C keeps asking
 for the pieces and drops them.
 
+**Apps** (`scripts/fe_apps.py`, the launcher's `app`). A `.fap` is an ELF file with a
+section `.fapmeta`: a magic number, the API version it was built against (major and
+minor), the hardware target, its stack size and its name. The launcher reads that
+before it copies the file, and asks the firmware for its own API (`info device`), so
+a mismatch is said in words before the loader's refusal. The rest is the loader's CLI,
+as `fbt launch` uses it on a real Flipper: `loader close`, `loader open PATH [ARGS]`,
+`loader info`. Three things about it that the launcher has to know:
+- `loader close` sends the app a request to exit, and answers "has to be closed
+  manually" for an app whose thread takes no such request (one with a message queue
+  of its own instead of a view dispatcher or an event loop). The launcher then presses
+  Back through the panel, and asks `loader info` after each press.
+- `loader open` answers when the app is loaded and running, with nothing, or with the
+  loader's reason. On Momentum and Unleashed an app built for another API major is not
+  refused at once: the loader shows a question on the screen and the CLI command waits
+  for the button. A client that gives up and closes the port there leaves the shell
+  inside the command (see "Hanging up"), so the launcher does not: it waits, says what
+  it is waiting for, and cancels the question with Back before it goes.
+- Whether the start went well is not in the CLI's answer when the app fails later, so
+  the launcher marks the end of `devices/NAME/uart.log` before `loader open` and reads
+  what the firmware logged from there on: warnings, errors, and a crash.
+
 ## Board
 
 - **ST7567**: 132×65 RAM, page/column addressing, SEG/COM direction, start line, inverse,

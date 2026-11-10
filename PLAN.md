@@ -179,7 +179,11 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
   - ☑ `ls`, `push`, `pull`, `rm`, `mkdir` in the launcher (2026-11-10): through the
         firmware's `storage` CLI when the device runs, in the card's image (mtools)
         when it is stopped; `scripts/files_check.py` (BRINGUP_LOG 75)
-  - ☐ `app`: install a `.fap`, start it, close it, say what the firmware logged
+  - ☑ `app` (2026-11-10): what a `.fap` is built for, from its manifest; copy it
+        over the app of its name, close what runs (with its Back button if it takes no
+        request), start it with arguments, say whether it runs and what the firmware
+        logged; a question on the Flipper's screen is waited for and then cancelled;
+        `scripts/app_check.py` (BRINGUP_LOG 77)
   - ☐ The window: a dropped `.fap` is installed and started; files to the card
 - ☐ The firmware's own tools against an emulated Flipper (`fbt`/`ufbt` launch and
       debug over the USB serial port), and a page on the developer's loop

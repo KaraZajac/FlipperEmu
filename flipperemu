@@ -28,6 +28,7 @@ you flash stays flashed, settings and files persist across runs.
   ./flipperemu ls /ext/apps                  what is on its SD card
   ./flipperemu push app.fap /ext/apps/Tools  copy files and folders to the card
   ./flipperemu pull /ext/nfc backup          ... and from it (rm, mkdir: as named)
+  ./flipperemu app dist/my_app.fap           put an app on its card and start it
   ./flipperemu log -f                        what the firmware logs, as it logs it
   ./flipperemu ir NEC 0x04 0x08              point a virtual IR remote at it
   ./flipperemu subghz capture.sub            put a Sub-GHz signal on the air
@@ -1199,6 +1200,199 @@ def cmd_pull(args):
     return 0
 
 
+def log_trouble(path, start):
+    """([lines], crash): what the firmware logged from byte `start` of its log
+    on that is a warning or worse, and its crash message if it had one"""
+    import fe_log
+    try:
+        with open(path, "rb") as f:
+            f.seek(start)
+            text = f.read().decode(errors="replace")
+    except OSError:
+        return [], None
+    lines, crash = [], None
+    for raw in text.splitlines():
+        line = fe_log.parse(raw)
+        found = fe_log.crash_of(line)
+        if found:
+            crash = f"{found[1]}"
+        elif line.level in ("W", "E"):
+            # (a line may hold bytes of a file the firmware could not read)
+            text = re.sub(r"[^\x20-\x7e]+", "?", line.plain)
+            lines.append(text if len(text) <= 120 else text[:119] + "…")
+    return lines, crash
+
+
+def app_copy(files, local, to):
+    """Put a .fap on the card: over the app of its file name, else into
+    /ext/apps, or into the folder `to`.  Its path there."""
+    import fe_files
+    remote = fe_files.clean(to) + "/" if to else None
+    (_, target), = fe_files.plan_push(files, [local], remote)[1]
+    with held_interrupt("stopping after this piece") as stop:
+        fe_files.push(files, [local], target, progress=transfer_progress(),
+                      stop=stop)
+    return target
+
+
+def press_back(dev, long=False):
+    m = open_monitor(dev)
+    try:
+        m.press("back", 1200 if long else 120)
+    finally:
+        m.close()
+
+
+def app_close(dev, cli):
+    """Close the app that runs, with its Back button if it has to be.
+    What to say about it: a list, empty when none ran."""
+    import fe_apps
+    return [f'"{name}" closed' + (" (with its Back button: it takes no "
+                                  "request to close)" if pressed else "")
+            for name, pressed in fe_apps.close(
+                cli, back=lambda long=False: press_back(dev, long))]
+
+
+def cmd_app(args):
+    import fe_apps
+    import fe_files
+    dev = Device(args.device)
+    local = fap = None
+    if args.app and not CARD_PATH.match(args.app):
+        path = pathlib.Path(args.app)
+        if path.suffix.lower() == ".fap" or os.sep in args.app:
+            if not path.is_file():
+                sys.exit(f"flipperemu: {args.app}: no such file")
+            local = path
+    if (args.close or args.list) and (args.app or args.no_start or args.to):
+        sys.exit("app: --close and --list stand alone")
+    if args.close and args.list:
+        sys.exit("app: --close or --list, one of them")
+    if (args.to or args.no_start) and not local:
+        sys.exit("app: --to and --no-start are for a .fap file from here")
+    try:
+        if local:
+            try:
+                fap = fe_apps.manifest(local.read_bytes())
+            except fe_apps.AppError as e:
+                sys.exit(f"flipperemu: {local}: {e}")
+        if not dev.running():
+            if not (local and args.no_start):
+                sys.exit(f"[{dev.name}] is not running, and it is its firmware "
+                         f"that starts apps (`./flipperemu -d {dev.name} run`)"
+                         + ("; with --no-start the file is only copied to its "
+                            "card" if local else ""))
+            files, close = open_card(dev)
+            try:
+                print(f"{local}: {fe_apps.about(fap)[0]}")
+                app_copy(files, local, args.to)
+            finally:
+                close()
+            return 0
+        cli = open_cli(dev)
+        try:
+            return app_session(dev, cli, args, local, fap)
+        finally:
+            cli.close()
+    except fe_apps.AppError as e:
+        sys.exit(f"[{dev.name}] {e}")
+
+
+def app_session(dev, cli, args, local, fap):
+    import fe_apps
+    import fe_files
+    if args.list:
+        for title, names in fe_apps.builtin(cli).items():
+            if names:
+                print(f"{title} (in the firmware):")
+            for name in names:
+                print(f"  {name}")
+        try:
+            found = sorted(e.name for e in
+                           fe_files.CliFiles(cli).tree("/ext/apps")
+                           if not e.is_dir and e.name.lower().endswith(".fap"))
+        except fe_files.FilesError:
+            found = []
+        print("On the card:" if found else "On the card: none")
+        for name in found:
+            print(f"  /ext/apps/{name}")
+        return 0
+    if not args.app:
+        if args.close:
+            for text in app_close(dev, cli) or ["no app runs"]:
+                print(f"[{dev.name}] {text}")
+        else:
+            now = fe_apps.running(cli)
+            print(f'[{dev.name}] "{now}" runs' if now
+                  else f"[{dev.name}] no app runs")
+        return 0
+
+    if local:
+        line, warn = fe_apps.about(fap, fe_apps.firmware_api(cli))
+        print(f"{local}: {line}")
+        if warn:
+            print(f"  ({warn})", file=sys.stderr)
+    if not args.no_start:
+        for text in app_close(dev, cli):
+            print(f"[{dev.name}] {text}")
+    what = (app_copy(fe_files.CliFiles(cli), local, args.to) if local
+            else args.app)
+    if args.no_start:
+        return 0
+
+    try:
+        mark = dev.uart.stat().st_size
+    except OSError:
+        mark = None
+
+    def logged():
+        return log_trouble(dev.uart, mark) if mark is not None else ([], None)
+
+    def waiting():
+        left = max(0.0, args.wait - fe_apps.QUESTION)
+        print(f"[{dev.name}] no answer yet: the Flipper may be asking on its "
+              "screen whether to start it.  Answer there (in the window, or "
+              "`press right` / `press back` from another terminal); in "
+              f"{left:g} s it is cancelled with Back.", file=sys.stderr)
+
+    said = lost = now = None
+    cancelled = False
+    try:
+        said, cancelled = fe_apps.start(cli, what, " ".join(args.args),
+                                        wait=args.wait, waiting=waiting,
+                                        back=lambda: press_back(dev))
+        if not said:
+            time.sleep(1.0)                 # an app that fails does it at once
+            if not logged()[1]:
+                now = fe_apps.running(cli)
+    except (ConnectionError, TimeoutError) as e:
+        lost = str(e)
+    lines, crash = logged()
+    if said:                                # the log has the same sentence
+        lines = [text for text in lines if said not in text]
+    if lines:
+        print("  warnings and errors in the firmware's log since then:")
+        for text in lines[-12:]:
+            print(f"    {text}")
+    if crash:
+        why = f"the firmware crashed with it, and started again: {crash}"
+    elif lost:
+        why = lost
+    elif said or cancelled:
+        why = (("nobody answered the Flipper's question, and it was cancelled "
+                "with Back.  " if cancelled else "")
+               + f"The loader did not start it: {said or 'it gave no reason'}")
+        if not cancelled:
+            why = why[0].lower() + why[1:]
+    else:
+        print(f'[{dev.name}] "{now}" runs' if now
+              else f"[{dev.name}] it was started, and has ended already")
+        return 0
+    sys.stdout.flush()
+    print(f"[{dev.name}] {why}", file=sys.stderr)
+    return 1
+
+
 def cmd_rm(args):
     import fe_files
     dev = Device(args.device)
@@ -1831,6 +2025,38 @@ def main():
     p.add_argument("-f", "--force", action="store_true",
                    help="copy what is here unchanged too")
     p.set_defaults(func=cmd_pull)
+
+    p = sub.add_parser(
+        "app", help="put an app (.fap) on the Flipper and start it; start, "
+        "close and list apps",
+        usage="flipperemu app [--to FOLDER] [--no-start] FILE.fap [ARGS]\n"
+        "       flipperemu app NAME | /ext/apps/....fap [ARGS]\n"
+        "       flipperemu app [--close | --list]",
+        description="With a .fap file from here: say what it is built for, "
+        "copy it to the SD card (over the app of its file name under "
+        "/ext/apps, else into /ext/apps, or into --to FOLDER), close the app "
+        "that runs and start it.  With a name (one of the firmware's own "
+        "apps: `--list`) or a path on the Flipper: close the app that runs "
+        "and start that one.  ARGS is what the app is started with: for most "
+        "apps, the path of a file to open.  Alone: say which app runs.  "
+        "After a start it says whether the app runs, and shows what the "
+        "firmware logged at warning or worse since.")
+    p.add_argument("app", nargs="?", metavar="APP")
+    p.add_argument("args", nargs="*", metavar="ARGS")
+    p.add_argument("--to", metavar="FOLDER",
+                   help="the folder on the card for a .fap file from here")
+    p.add_argument("--no-start", action="store_true",
+                   help="only copy the file (a stopped device takes that too)")
+    p.add_argument("--close", action="store_true",
+                   help="close the app that runs")
+    p.add_argument("--list", action="store_true",
+                   help="the apps in the firmware, and the .fap files on the "
+                   "card")
+    p.add_argument("--wait", type=float, default=60.0, metavar="SECONDS",
+                   help="how long the loader's answer is waited for; a "
+                   "question on the Flipper's screen that nobody answered by "
+                   "then is cancelled with Back (default 60)")
+    p.set_defaults(func=cmd_app)
 
     p = sub.add_parser("rm", help="delete files and folders on the SD card",
                        description="Delete files and folders on the SD card."
