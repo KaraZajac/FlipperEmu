@@ -897,6 +897,36 @@ All three are small, self-contained, and suitable for sending upstream.
     `scripts/ufbt_check.py`: 25 checks on the official 1.5.1 with ufbt 0.2.6, eight
     of them on what the launcher hands to `fbt` (a stand-in script that prints its
     arguments). A firmware built by `fbt` in its tree is not tried yet.
+79. **The firmware's flag for a debugger is for a probe.** `./flipperemu gdb` is the
+    toolchain's gdb on QEMU's stub, with the SDK's ELF and the SDK's `flipperapps.py`
+    for the symbols of apps. The script sets `furi_hal_debug_gdb_session_active`
+    when it is loaded and at every stop. With the flag the loader runs `bkpt 0`
+    where an app is about to start, and `furi_crash` runs one where it would restart.
+    A probe halts the processor on that instruction, the script reads the list of
+    loaded apps, and the user sees the stop. Under QEMU's stub nothing halts: the
+    instruction is a fault, and the firmware crashes on the debugger's own flag. So
+    `scripts/fe_gdb.py` takes the script's helper as it is, replaces the one method
+    that sets the flag, and puts breakpoints of gdb's at the two places. On the way:
+    - A breakpoint with `silent` and `commands = "continue"` at the app's start was
+      not enough. The script's stop handler had not run when the command continued:
+      the app started without its symbols, the user's pending breakpoint in it was
+      never placed, and a batch gdb waited for ever. A `gdb.Breakpoint` whose
+      `stop()` calls the script's sync and returns False does it: the symbols are
+      there, the pending breakpoint is placed, and nothing is shown.
+    - The stub is asked of the monitor when gdb is wanted (`gdbserver unix:…`), and
+      `info chardev` says where a device's stub is and whether a gdb is on it, so
+      there is no state of the launcher's to go stale. A second `gdbserver` while
+      one is open fails ("duplicate yank instance"): `gdbserver none` first.
+    - The monitor takes one client at a time and its socket has a backlog of one.
+      Three connections in a row (is it running, is it running, the command) got
+      `EAGAIN` on the third, after a gdb that had died: the launcher fell over just
+      where it was to let the firmware go. The monitor client waits for its turn
+      now, and a device whose monitor is busy counts as running.
+    - A gdb that dies leaves the machine stopped, as QEMU has it. The launcher
+      looks after its gdb has gone, and continues.
+    - The same sources built in another folder are not rebuilt by ufbt (its build
+      folder is one for all), so the debug ELF keeps the first folder's paths.
+      The check names its breakpoint by the file's name alone.
 
 ## Things that were right the first time (and why)
 

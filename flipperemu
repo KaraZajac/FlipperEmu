@@ -37,7 +37,8 @@ you flash stays flashed, settings and files persist across runs.
   ./flipperemu rfid EM4100 DEADBEEF01        hold a 125 kHz tag to it (or a .rfid)
   ./flipperemu nfc card.nfc                  hold an NFC card to it (NTAG, Ultralight)
   ./flipperemu enclave                       the keys in its secure enclave
-  ./flipperemu gdb                           attach gdb to a --gdb run
+  ./flipperemu gdb                           gdb on a running device, with the
+                                             firmware's and its apps' symbols
   ./flipperemu shot out.png | press ok       drive a running device
   ./flipperemu info                          what is on the device
 
@@ -55,6 +56,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -158,6 +160,8 @@ class Device:
         self.nfc_sock = self.dir / "nfc.sock"           # a card on the link (fe_nfc_link.py)
         self.panel_sock = self.dir / "panel.sock"       # its face: the window (fe_gui.py)
         self.held_file = self.dir / "held.json"         # names of what is held to it
+        self.gdb_sock = self.dir / "gdb.sock"           # its gdb stub, once asked for
+        self.gdb_init = self.dir / "gdb.init"           # ... and what gdb is told (cmd_gdb)
 
     def running(self):
         """Is a QEMU serving this device's monitor socket?"""
@@ -167,6 +171,8 @@ class Device:
         s.settimeout(1)
         try:
             s.connect(str(self.monitor))
+            return True
+        except BlockingIOError:         # one is, with others waiting for it
             return True
         except OSError:
             return False
@@ -506,7 +512,7 @@ def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
         cmd += ["-display", "none"]
     cmd += serial_args(dev, args.serial)
     if args.gdb or args.wait_gdb:
-        cmd += ["-gdb", f"tcp::{args.gdb_port}"]
+        cmd += ["-gdb", f"tcp:127.0.0.1:{args.gdb_port}"]
     if args.wait_gdb:
         cmd += ["-S"]
     return cmd + list(args.qemu_args or [])
@@ -594,7 +600,8 @@ class Session:
             args.unplugged = unplugged
         if gauge is not None:
             self.gauge = dict(gauge)
-        for stale in (dev.monitor, dev.usb_tty, dev.panel_sock, dev.held_file):
+        for stale in (dev.monitor, dev.usb_tty, dev.panel_sock, dev.held_file,
+                      dev.gdb_sock):
             try:
                 stale.unlink()
             except FileNotFoundError:
@@ -993,17 +1000,205 @@ def cmd_log(args):
     return 0
 
 
-def cmd_gdb(args):
-    dev = Device(args.device)
-    gdb = shutil.which("gdb-multiarch") or shutil.which("arm-none-eabi-gdb") or "gdb"
-    cmd = [gdb, "-q"]
-    if dev.elf.exists():
-        cmd += ["-ex", f"file {dev.elf}"]
+def sdk_home():
+    """ufbt's folder: its SDK, its toolchain, and what it built"""
+    return pathlib.Path(os.environ.get("UFBT_HOME") or "~/.ufbt").expanduser()
+
+
+def source_tree(start=None):
+    """The firmware source tree a folder is in (None: it is in none)"""
+    here = start or pathlib.Path.cwd()
+    for folder in (here, *here.parents):
+        if (folder / "fbt").is_file() and (folder / "SConstruct").is_file():
+            return folder
+    return None
+
+
+def gdb_stub(m):
+    """A running device's gdb stub: (what gdb's `target remote` takes, whether
+    a gdb is on it), or None when it has none"""
+    for line in m.cmd("info chardev").splitlines():
+        hit = re.match(r"gdb: filename=(disconnected:)?(unix|tcp):(.*?),server=on",
+                       line.strip())
+        if hit:
+            free, kind, where = hit.groups()
+            if kind == "tcp":
+                host, _, port = where.rpartition(":")
+                if host in ("", "0.0.0.0", "::", "[::]"):
+                    host = "localhost"
+                where = f"{host}:{port}"
+            return where, not free
+    return None
+
+
+def gdb_open_stub(dev, port=None):
+    """-> what `target remote` takes.  The stub of a `run --gdb` is used where
+    it is; else one is opened on a socket in the device's folder, or (port)
+    on a TCP port of this computer."""
+    m = open_monitor(dev)
+    try:
+        stub = gdb_stub(m)
+        if stub and stub[1]:
+            sys.exit(f"[{dev.name}] a gdb is on it already (at {stub[0]})")
+        want = f"127.0.0.1:{port}" if port else None
+        if stub and want in (None, stub[0]):
+            return stub[0]
+        if stub:
+            m.cmd("gdbserver none")     # one stub: it moves
+        said = m.cmd(f"gdbserver tcp:{want}" if want else
+                     f'gdbserver "unix:{dev.gdb_sock},server=on,wait=off"')
+        stub = gdb_stub(m)
+        if not stub:
+            sys.exit(f"[{dev.name}] no gdb stub: " + " ".join(said.split()))
+        return stub[0]
+    finally:
+        m.close()
+
+
+def gdb_program(asked, tree):
+    """The gdb to run.  The firmware's toolchain has one for this processor
+    with Python in it, which the symbols of apps need."""
+    if asked:
+        found = shutil.which(asked)
+        if not found:
+            sys.exit(f"flipperemu: no `{asked}`")
+        return found
+    name = "arm-none-eabi-gdb-py3"
+    for home in (os.environ.get("FBT_TOOLCHAIN_PATH"), tree, sdk_home()):
+        if not home:
+            continue
+        base = pathlib.Path(home).expanduser() / "toolchain"
+        for gdb in (base / "current" / "bin" / name, *sorted(base.glob(f"*/bin/{name}"))):
+            if os.access(gdb, os.X_OK):
+                return str(gdb)
+    for name in (name, "arm-none-eabi-gdb", "gdb-multiarch", "gdb"):
+        found = shutil.which(name)
+        if found:
+            return found
+    sys.exit("flipperemu: no gdb.  The firmware's toolchain has one, which ufbt "
+             "gets (`pipx install ufbt`, then `ufbt update`); or your system's "
+             "gdb-multiarch")
+
+
+def gdb_has_python(gdb):
+    try:
+        out = subprocess.run([gdb, "-nx", "-batch", "-ex", "python print(6 * 7)"],
+                             capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "42" in out
+
+
+def flash_has(dev, elf):
+    """Is what this ELF loads what the device's flash holds?"""
+    try:
+        with open(dev.flash, "rb") as flash:
+            for addr, data in parse_elf(elf.read_bytes()):
+                flash.seek(addr - FLASH_BASE)
+                if flash.read(len(data)) != data:
+                    return False
+        return True
+    except (OSError, ValueError, struct.error):
+        return False
+
+
+def gdb_firmware(dev, asked):
+    """-> (the firmware's ELF or None, the folder to look for its source tree
+    from).  Not asked for: the first of what was flashed, a build in the
+    source tree we are in, and ufbt's SDK whose contents are in the flash:
+    an update on the device itself leaves the others behind."""
+    if asked:
+        elf = pathlib.Path(asked).resolve()
+        if not elf.is_file():
+            sys.exit(f"flipperemu: no {asked}")
+        if not flash_has(dev, elf):
+            print(f"[{dev.name}] {asked} is not what its flash holds: what gdb "
+                  "says of the firmware may be off")
+        return elf, elf.parent
+    flashed = dev.info().get("source") or ""
+    flashed = pathlib.Path(flashed) if flashed.endswith(".elf") else None
+    tree = source_tree()
+    for elf, origin in ((flashed, flashed),
+                        (dev.elf, flashed),
+                        (tree and tree / "build" / "latest" / "firmware.elf", None),
+                        (sdk_home() / "current" / "firmware.elf", None)):
+        if elf and elf.is_file() and flash_has(dev, elf):
+            elf = elf.resolve()
+            return elf, (origin or elf).parent
+    return None, None
+
+
+def gdb_kit(elf, origin, apps):
+    """What reads the symbols of apps: (the firmware's gdb scripts, in the
+    order its own `debug` target has them; where the apps' debug ELFs are).
+    They are the firmware's, in its source tree or in ufbt's SDK."""
+    tree = source_tree(origin)
+    if tree and (tree / "scripts" / "debug" / "flipperapps.py").is_file():
+        kit, built = tree / "scripts" / "debug", origin / ".extapps"
     else:
-        print("(no ELF for this firmware: flash an .elf to get symbols)")
-        cmd += ["-ex", "set architecture armv7e-m"]
-    cmd += ["-ex", f"target remote :{args.gdb_port}"]
-    os.execvp(cmd[0], cmd)
+        kit, built = sdk_home() / "current" / "scripts" / "debug", sdk_home() / "build"
+    script = kit / "flipperapps.py"
+    return (script if script.is_file() else None,
+            pathlib.Path(apps).resolve() if apps else built)
+
+
+def cmd_gdb(args):
+    """gdb on a running device.  Its stub is asked of the emulator when it is
+    wanted, on a socket in the device's folder: nothing has to be decided when
+    the device is started, and two devices do not meet on a port."""
+    dev = Device(args.device)
+    if not dev.running():
+        sys.exit(f"[{dev.name}] is not running: `./flipperemu -d {dev.name} run` "
+                 "starts it (`run --wait-gdb`: and has it wait for gdb at its "
+                 "first instruction)")
+    target = gdb_open_stub(dev, args.serve)
+    elf, origin = gdb_firmware(dev, args.elf)
+    gdb = gdb_program(args.program, source_tree(origin) if origin else None)
+    lines = [f"# what `./flipperemu -d {dev.name} gdb` tells gdb: written each time",
+             "set breakpoint pending on"]
+    if elf:
+        lines.append(f'file "{elf}"')
+        print(f"[{dev.name}] the firmware's symbols: {elf}")
+    else:
+        print(f"[{dev.name}] no ELF of the firmware in its flash: no symbols.  "
+              "A firmware flashed from an .elf has them, and so has the "
+              "official release ufbt's SDK is of; --elf FILE names another")
+    lines.append(f"target remote {target}")
+    if not gdb_has_python(gdb):
+        print(f"[{dev.name}] {gdb} has no Python: no symbols of apps, and "
+              "nothing said at a crash")
+    else:
+        script, apps = gdb_kit(elf, origin, args.apps) if elf else (None, None)
+        if script:
+            print(f"[{dev.name}] apps' symbols, as they start: from {apps}")
+        about = {"fapscript": str(script or ""), "apps": str(apps or "")}
+        lines += [f"python FLIPPEREMU_GDB = {about!r}",
+                  f"source {ROOT / 'scripts' / 'fe_gdb.py'}"]
+    dev.gdb_init.write_text("\n".join(lines) + "\n")
+    cmd = [gdb, "-q", "-x", str(dev.gdb_init), *args.gdb_args]
+    if args.serve:
+        print(f"[{dev.name}] its gdb stub is on localhost:{args.serve}, for an IDE "
+              f"(`target remote localhost:{args.serve}`), or with all of the "
+              "above:\n    " + shlex.join(cmd))
+        return 0
+    # Ctrl-C in gdb's terminal reaches us too, and is gdb's to take
+    ours = signal.signal(signal.SIGINT, lambda *_: None)
+    sys.stdout.flush()
+    try:
+        code = subprocess.call(cmd)
+    finally:
+        signal.signal(signal.SIGINT, ours)
+    if dev.running():
+        # a gdb that leaves lets go, and the firmware runs on; one that died
+        # does not
+        m = open_monitor(dev)
+        try:
+            if "paused" in m.cmd("info status"):
+                m.cmd("cont")
+                print(f"[{dev.name}] gdb left it stopped: it runs again")
+        finally:
+            m.close()
+    return code if code >= 0 else 128 - code    # ended by a signal: as a shell has it
 
 
 def usb_serial(dev):
@@ -1117,10 +1312,9 @@ def find_tool(name):
             sys.exit("flipperemu: no `ufbt` on the PATH: `pipx install ufbt` "
                      "(or pip, in a virtual environment) gets it")
         return [tool], None
-    here = pathlib.Path.cwd()
-    for folder in (here, *here.parents):
-        if (folder / "fbt").is_file() and (folder / "SConstruct").is_file():
-            return [str(folder / "fbt")], folder
+    tree = source_tree()
+    if tree:
+        return [str(tree / "fbt")], tree
     sys.exit("flipperemu: no `fbt` in this folder or above it: it is run in "
              "a firmware's source tree")
 
@@ -1147,8 +1341,7 @@ def cmd_tool(args):
     if stack:
         pkg = "PACKAGE"
         if name == "ufbt":
-            home = pathlib.Path(os.environ.get("UFBT_HOME") or "~/.ufbt")
-            found = sorted(home.expanduser().glob("current/f7-update-*"))
+            found = sorted(sdk_home().glob("current/f7-update-*"))
             pkg = str(found[-1]) if found else "its SDK's f7-update-… folder"
         sys.exit(f"flipperemu: `{name} {stack[0]}` sends an update package with a "
                  "radio stack in it, which this Flipper's second core cannot "
@@ -2317,8 +2510,25 @@ def main():
     p.add_argument("action", nargs="*", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_enclave)
 
-    p = sub.add_parser("gdb", help="attach gdb to a running --gdb device")
-    p.add_argument("--gdb-port", type=int, default=1234)
+    p = sub.add_parser("gdb", help="gdb on a running device, with the firmware's "
+                       "and its apps' symbols",
+                       usage="flipperemu gdb [--elf FILE] [--apps DIR] [--with GDB] "
+                             "[--serve PORT] [-- GDB'S ARGUMENTS]")
+    p.add_argument("--elf", metavar="FILE",
+                   help="the firmware's ELF (default: the one whose contents are "
+                        "in the device's flash, of what was flashed, a build in "
+                        "this source tree, and ufbt's SDK)")
+    p.add_argument("--apps", metavar="DIR",
+                   help="where the apps' debug ELFs are (default: the build's "
+                        ".extapps; ufbt's build folder)")
+    p.add_argument("--with", dest="program", metavar="GDB",
+                   help="the gdb to run (default: the firmware toolchain's "
+                        "arm-none-eabi-gdb-py3, then what the PATH has)")
+    p.add_argument("--serve", type=int, metavar="PORT",
+                   help="open the stub on a TCP port of this computer and leave: "
+                        "for an IDE, or a gdb of your own")
+    p.add_argument("--gdb-port", type=int, help=argparse.SUPPRESS)  # found by itself now
+    p.add_argument("gdb_args", nargs="*", help="after --: passed on to gdb")
     p.set_defaults(func=cmd_gdb)
 
     p = sub.add_parser("shot", help="save the LCD of a running device as PNG")

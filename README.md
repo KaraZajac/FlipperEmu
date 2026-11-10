@@ -33,7 +33,9 @@ Classic 1K) and emulate, USB/IP export, warm reboot, no crash): **official 1.5.1
 `scripts/gui_check.py` (clicked buttons, the firmware log and its level, a file copied
 to the card, an app dropped on it, the bench, switching off and on, the Left + Back
 reboot, installing firmware) on the same three, off-screen. `scripts/ufbt_check.py`
-(ufbt 0.2.6 building `examples/hello` and launching it there) passes on the official one.
+(ufbt 0.2.6 building `examples/hello` and launching it there) and
+`scripts/gdb_check.py` (gdb with the firmware's and that app's symbols) pass on the
+official one.
 
 | | |
 |:-:|:-:|
@@ -144,7 +146,8 @@ reboot, installing firmware) on the same three, off-screen. `scripts/ufbt_check.
   `./flipperemu enclave` shows them and computes what the firmware encrypts.
 - CPU2 modelled as ST's FUS with no wireless stack. That's a real device state, and it
   keeps the BT paths healthy.
-- GDB stub with the release `.elf` symbols.
+- gdb on a device that runs, with the firmware's symbols and those of the apps it
+  loads: a breakpoint in an app's code, and a stop at a crash.
 
 **Not yet** (see [PLAN.md](PLAN.md))
 - qFlipper's firmware *update* includes a radio-stack stage that the emulated CPU2
@@ -330,7 +333,8 @@ switches it off and on, and reboots it.
 | `sd [--resources X] [--size 512M]` | rebuild the microSD from a resources tgz, update package or folder |
 | `press ok down down ok …` | press buttons on a running device |
 | `shot out.png` | save the LCD of a running device |
-| `gdb` | attach gdb (with symbols when the device was flashed from an `.elf`) |
+| `gdb [--elf FILE] [--apps DIR] [--with GDB] [-- GDB'S ARGUMENTS]` | gdb on a running device, with the firmware's symbols and its apps' |
+| `gdb --serve PORT` | its gdb stub on a TCP port of this computer, for an IDE |
 | `info` | which firmware is on the device |
 
 `--serial` (the USART1 log) takes `stdio` (default), `file:PATH`, `pty`, `tcp:PORT`
@@ -1129,11 +1133,39 @@ key would on hardware.
 ### Debugging firmware
 
 ```sh
-./flipperemu run --wait-gdb -f build/f7-firmware-D/firmware.elf     # halts at reset
-./flipperemu gdb                                                     # second terminal
+./flipperemu gdb                       # on a device that runs
 (gdb) break furi_hal_subghz_init
+(gdb) break my_app_entry               # an app's code: before the app is started, too
 (gdb) continue
 ```
+
+`./flipperemu gdb` asks the emulator for its gdb stub, on a socket in the device's
+folder, and starts gdb on it with what it finds:
+
+- the firmware toolchain's gdb (the one ufbt and fbt download), then the PATH's;
+- the firmware's symbols, from an ELF whose contents are what the device's flash holds:
+  the `.elf` it was flashed from, a build in the source tree you are in, or ufbt's
+  SDK, which has the ELF of its release;
+- the symbols of each app the firmware loads, read by the firmware's own gdb script
+  when the app starts. A breakpoint set in an app's code beforehand is hit when the
+  app is launched;
+- a stop where a crash begins, with the firmware's message, before it restarts.
+
+The Flipper stands still while gdb has it stopped, and runs on when gdb leaves.
+
+```sh
+./flipperemu run --wait-gdb -f build/f7-firmware-D/firmware.elf     # waits at reset
+./flipperemu gdb                                                     # second terminal
+
+./flipperemu gdb --serve 3333          # the stub on localhost:3333, for an IDE
+./flipperemu gdb -- -batch -ex bt      # after --: gdb's own arguments
+```
+
+[docs/DEVELOPING.md](docs/DEVELOPING.md#gdb-with-the-firmwares-symbols-and-your-apps)
+has a session with an app, and what `--elf`, `--apps` and `--with` are for.
+`scripts/gdb_check.py FIRMWARE` checks it (19 checks on the official firmware, with
+ufbt's SDK and toolchain). `run --gdb` still opens the stub at the start, on
+localhost:1234 (`--gdb-port`).
 
 QEMU's own `-d` tracing works too. `scripts/fe_monitor.py` drives the HMP monitor
 (`devices/NAME/monitor.sock`) for screenshots, key presses and `info registers`. What the
@@ -1164,7 +1196,7 @@ docs/ARCHITECTURE.md   how the machine is modelled, device by device
 docs/BRINGUP_LOG.md    every bug found on the way (incl. 3 QEMU fixes and the USB races)
 docs/RADIO_LINK.md     the protocol between an emulated radio and a real one
 docs/PANEL_LINK.md     the protocol between the emulator and the window
-docs/DEVELOPING.md     writing an app or a firmware with it: ufbt, fbt, the loop
+docs/DEVELOPING.md     writing an app or a firmware with it: ufbt, fbt, gdb, the loop
 examples/hello/        an app to try that with
 flipperemu             launcher / device manager
 qemu/hw/arm/flipper/   the QEMU machine + STM32WB55 SoC + board devices (C)
@@ -1174,7 +1206,8 @@ scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_moni
                        (apps and the loader), fe_ir.py,
                        fe_subghz.py, fe_sdr.py (real radios),
                        fe_nfc_link.py (cards from programs), fe_pm3.py (Proxmark3),
-                       fe_enclave.py (the enclave's keys and ciphers), fe_usbip.py,
+                       fe_enclave.py (the enclave's keys and ciphers), fe_gdb.py
+                       (gdb's side of `flipperemu gdb`), fe_usbip.py,
                        usbip_attach.py, fe_gui.py (the window: fe_gui_view.py,
                        fe_gui_link.py, fe_gui_widgets.py), smoke_test.py, *_check.py
 devices/ firmware/ build/ third_party/    generated, git-ignored

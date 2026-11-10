@@ -24,7 +24,16 @@ class Monitor:
     def __init__(self, path, timeout=5.0):
         self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.s.settimeout(timeout)
-        self.s.connect(path)
+        end = time.time() + timeout
+        while True:
+            try:
+                self.s.connect(path)
+                break
+            except BlockingIOError:     # others wait for it already
+                if time.time() > end:
+                    self.s.close()
+                    raise
+                time.sleep(0.05)
         if "(qemu)" not in self._read():
             self.s.close()
             raise ConnectionError(f"{path}: the monitor did not answer; is another "

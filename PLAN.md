@@ -200,10 +200,15 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         `launch APPSRC=`; ufbt with Momentum's and Unleashed's SDK
   - ☐ An update package sent to a running device by the launcher itself (`push` and
         `update install`, without the radio stage), for `ufbt flash_usb`
-  - ☐ Debugging an app: gdb with the firmware's and the app's symbols (the SDK's
-        `flipperapps.py`), a breakpoint in the app before it starts
+  - ☑ Debugging an app: `./flipperemu gdb` on a device that runs. The stub on
+        demand, on a socket in the device's folder; the toolchain's gdb; the firmware's
+        ELF, found by what the flash holds; the apps' symbols through the SDK's
+        `flipperapps.py`, with the firmware's probe flag kept off and breakpoints of
+        gdb's where an app starts and where a crash begins; `--serve PORT` for an
+        IDE; `scripts/gdb_check.py` (BRINGUP_LOG 79)
+  - ☐ gdb with a firmware tree's ELF and its `.extapps`; from an IDE (VS Code)
 - ☐ A recording of the screen (GIF) from the launcher and the window
-- ☐ gdb on demand for a device that runs already; pause and continue
+- ☐ Pause and continue, from the launcher and the window
 
 ## M6: research tooling ☐
 - ☐ Snapshot workflow (`savevm` on qcow2 images; boot once, jump straight to an app)

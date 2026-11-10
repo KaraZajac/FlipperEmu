@@ -1017,3 +1017,4 @@ the emulated field.
 | `held.json` | (while it runs) the names of what the launcher held to it, for `status` and the window |
 | `uart.log`, `uart.log.1` | what a serial adapter on pins 13 and 14 would have recorded: the firmware's log of this run, and of the one before |
 | `firmware.elf` | symbols for gdb (copied when flashing an ELF) |
+| `gdb.sock`, `gdb.init` | (once `./flipperemu gdb` was run) QEMU's gdb stub, and what gdb was told: the ELF, the stub, `scripts/fe_gdb.py` |
