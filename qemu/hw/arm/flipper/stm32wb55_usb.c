@@ -44,6 +44,7 @@
 #include "qemu/timer.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
+#include "hw/core/cpu.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-properties-system.h"
@@ -188,6 +189,7 @@ static void usb_update_irq(WB55UsbState *s)
 }
 
 static void host_wake(WB55UsbState *s, int64_t when);
+static void host_kick(WB55UsbState *s);
 
 /*
  * Bus time.  A full-speed bulk transaction (token, data with its PID and
@@ -206,11 +208,29 @@ static void host_wake(WB55UsbState *s, int64_t when);
  * between those and the next pass leaves one more event queued, and nine
  * end in furi_check() in USB_LP.  On a real STM32 the pass takes a few
  * microseconds against the 51 us packet; an emulated CPU can be a hundred
- * times slower than that, and slower still on a busy host.  So the host
- * also leaves the firmware twice its own recent turnaround (a packet's
- * completion to the CPU re-arming that endpoint) after each re-arm.
+ * times slower than that, and slower still on a busy host.
+ *
+ * So a bulk endpoint gets its next transaction when the firmware has caught
+ * up with the last one: the USB interrupt is not pending and the CPU
+ * sleeps in WFI, which the idle thread does when every other thread waits
+ * (that service's with its queue empty).  Nothing tells the host when that
+ * comes about, and every look costs the emulated CPU time when it is still
+ * at work (the main loop takes the lock that its register accesses need).
+ * So the host looks as long after the re-arm as that took lately (ep_idle:
+ * a look that found the CPU at work lengthens it, one that found it idle
+ * shortens it as much, so that it comes to the middle of them), and again
+ * a little later.  At the latest the transaction comes when the firmware
+ * has had twice its own recent turnaround (a packet's completion to the CPU
+ * re-arming that endpoint) since the re-arm, and BUSY_MIN_NS at least: that
+ * is what firmware that does not sleep gets (a thread that polls, a busy
+ * loop).
  */
 #define TURN_MAX_NS     (2 * MS)        /* a turnaround sample's ceiling */
+#define BUSY_MIN_NS     (1 * MS)        /* the least a CPU at work is given */
+#define IDLE_FIRST_NS   (200 * 1000)    /* re-arm to idle: the first guess */
+#define IDLE_MIN_NS     (20 * 1000)
+#define LOOK_AGAIN_NS   (50 * 1000)     /* the least between two looks */
+#define LOOK_SLACK_NS   (150 * 1000)    /* a look later than this says nothing */
 
 static int64_t usb_wire_ns(int len)
 {
@@ -222,25 +242,69 @@ static bool usb_is_bulk(WB55UsbState *s, int n)
     return (s->epr[n] & EP_TYPE) == EPT_BULK;
 }
 
+/* The firmware has dealt with all that this bus gave it */
+static bool usb_caught_up(WB55UsbState *s)
+{
+    return !(usb_istr(s) & s->cntr & CNTR_MASKS) &&
+           qatomic_read(&first_cpu->halted);
+}
+
+/* when EPn gets its transaction, whatever the CPU does */
+static int64_t usb_due(WB55UsbState *s, int n)
+{
+    return s->ep_armed[n] + MAX(2 * s->turn_ns, BUSY_MIN_NS);
+}
+
 /* true (and the host woken when it may proceed) while the bus is busy */
 static bool usb_paced(WB55UsbState *s, int n, int len)
 {
-    int64_t wire = usb_wire_ns(len);
-    int64_t due = MAX(s->ep_armed[n] + MAX(wire, 2 * s->turn_ns),
-                      s->bus_last + wire);
+    int64_t now, bus, due, look;
+    bool idle;
 
-    if (!usb_is_bulk(s, n) || now_ns() >= due) {
+    if (!usb_is_bulk(s, n)) {
         return false;
     }
-    host_wake(s, due);
+    now = now_ns();
+    bus = MAX(s->ep_armed[n], s->bus_last) + usb_wire_ns(len);
+    due = MAX(bus, usb_due(s, n));
+    look = MIN(MAX(bus, s->ep_look[n]), due);
+    if (now < look) {
+        host_wake(s, look);
+        return true;
+    }
+    idle = usb_caught_up(s);
+    /* a look that came when it was planned says how good the plan was */
+    if (s->ep_timed[n] && now - look < LOOK_SLACK_NS) {
+        int64_t step = s->ep_idle[n] / 8;
+
+        s->ep_idle[n] = idle ? MAX(s->ep_idle[n] - step, IDLE_MIN_NS)
+                             : MIN(s->ep_idle[n] + step, TURN_MAX_NS);
+    }
+    s->ep_timed[n] = false;
+    if (idle || now >= due) {
+        return false;
+    }
+    s->ep_look[n] = now + MAX(s->ep_idle[n] / 4, LOOK_AGAIN_NS);
+    host_wake(s, MIN(s->ep_look[n], due));
     return true;
+}
+
+/* EPn may get a transaction from now on: when to look for an idle CPU */
+static void usb_plan(WB55UsbState *s, int n, int64_t now)
+{
+    s->ep_armed[n] = now;
+    s->ep_look[n] = now + s->ep_idle[n];
+    s->ep_timed[n] = true;
 }
 
 /* a transaction on EPn completed */
 static void usb_moved(WB55UsbState *s, int n)
 {
     if (usb_is_bulk(s, n)) {
-        s->ep_armed[n] = s->bus_last = s->ep_done[n] = now_ns();
+        int64_t now = now_ns();
+
+        s->bus_last = s->ep_done[n] = now;
+        usb_plan(s, n, now);
     }
 }
 
@@ -255,7 +319,27 @@ static void usb_armed(WB55UsbState *s, int n)
         s->turn_ns = s->turn_ns ? (3 * s->turn_ns + t) / 4 : t;
         s->ep_done[n] = 0;
     }
-    s->ep_armed[n] = now;
+    usb_plan(s, n, now);
+}
+
+/*
+ * The CPU wrote a bulk endpoint's register while the host runs the device.
+ * The host has nothing to do about most of these (a CTR bit cleared, a
+ * buffer not yet given back); when the endpoint can take a transaction
+ * after it, the host comes for it when the pacing first lets it.
+ */
+static void usb_bulk_written(WB55UsbState *s, int n)
+{
+    uint16_t r = s->epr[n];
+    bool rx = STAT_RX(r) == STAT_VALID &&
+              (!IS_DBLBULK(r) || !(r & EP_DTOG_RX) != !(r & EP_SWBUF_RX));
+
+    if (STAT_RX(r) == STAT_STALL || STAT_TX(r) == STAT_STALL) {
+        host_kick(s);
+    } else if (!(r & EP_CTR) && (rx || STAT_TX(r) == STAT_VALID)) {
+        host_wake(s, MAX(MIN(s->ep_look[n], usb_due(s, n)),
+                         now_ns() + KICK_NS));
+    }
 }
 
 /* A double-buffered IN endpoint reads NAK while software owns the buffer
@@ -308,7 +392,6 @@ static uint16_t usb_bcdr(WB55UsbState *s)
 }
 
 static void host_pullup(WB55UsbState *s, bool on);
-static void host_kick(WB55UsbState *s);
 
 static uint64_t usb_read(void *opaque, hwaddr addr, unsigned size)
 {
@@ -358,7 +441,14 @@ static void usb_write(void *opaque, hwaddr addr, uint64_t val64,
         return;
     }
     if (addr < 0x20) {
-        usb_epr_write(s, addr >> 2, val);
+        int n = addr >> 2;
+
+        usb_epr_write(s, n, val);
+        if (s->hstate == H_RUNNING && usb_is_bulk(s, n)) {
+            usb_update_irq(s);
+            usb_bulk_written(s, n);
+            return;
+        }
     } else {
         switch (addr) {
         case R_CNTR:
@@ -1975,6 +2065,11 @@ static void usb_reset_hold(Object *obj, ResetType type)
     memset(s->epr_seen, 0, sizeof(s->epr_seen));
     memset(s->ep_armed, 0, sizeof(s->ep_armed));
     memset(s->ep_done, 0, sizeof(s->ep_done));
+    memset(s->ep_look, 0, sizeof(s->ep_look));
+    memset(s->ep_timed, 0, sizeof(s->ep_timed));
+    for (int n = 0; n < 8; n++) {
+        s->ep_idle[n] = IDLE_FIRST_NS;
+    }
     s->bus_last = s->turn_ns = 0;
     s->cntr = CNTR_FRES | CNTR_PDWN;
     s->istr = s->istr_seen = 0;

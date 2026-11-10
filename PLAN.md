@@ -34,7 +34,9 @@ qFlipper / lab.flipper.net / `ufbt launch` only run over USB CDC.
       kernel-role client; real-kernel/qFlipper run pending
 - ☑ Bus time (2026-11-08): bulk transactions take full-speed bus time and wait for the
       firmware's measured turnaround, so a slow emulated CPU can't overflow the CLI's
-      CDC event queue (`furi_check` in USB_LP; BRINGUP_LOG 36)
+      CDC event queue (`furi_check` in USB_LP; BRINGUP_LOG 36). Since 2026-11-10 the
+      host waits for the firmware to go idle rather than for the clock: file
+      transfers over the CLI are up to twice as fast (BRINGUP_LOG 74)
 - ☐ A minimal BLE stack on CPU2, so qFlipper's updates (radio stage) and the BT service work
 - ☐ Stretch: second CDC port of the dual-CDC mode; mass storage
 

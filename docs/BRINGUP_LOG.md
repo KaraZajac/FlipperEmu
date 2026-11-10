@@ -752,6 +752,34 @@ All three are small, self-contained, and suitable for sending upstream.
     front, and only on the one in front closes it; the log behind keeps its lines
     and shows them when it comes to the front.
 
+74. **Waiting for the firmware, not for the clock.** Entry 36's rule gave every bulk
+    packet twice the firmware's measured turnaround after the re-arm, and file copies
+    over the CLI (`storage write_chunk`, `storage read_chunks`) ran at 16 to 35 KiB/s.
+    Much of that wait passed with the firmware done and asleep. What the rule protects
+    is the CDC service's 8-entry event queue, and there is an exact sign of that queue
+    being empty: the CPU halted in WFI with the USB interrupt not pending. The idle
+    thread runs only when no other thread is ready, so the service's thread waits with
+    nothing queued. A packet delivered then raises the interrupt, so each look at an
+    idle CPU hands the firmware one packet.
+    - The first try was no faster. Its estimate of when the CPU goes idle moved in
+      unequal steps and ran to its ceiling, and the hook on the endpoint register's
+      write woke the host only at the clock rule's time: the old rule with more code.
+    - Equal steps of an eighth, up for a look that found the CPU at work and down for
+      one that found it idle, bring the estimate to the median of what the firmware
+      takes. A look that came later than planned (the main loop was busy) says nothing
+      about the plan and changes nothing.
+    - A look is not free: the main loop takes the lock that the emulated CPU's register
+      accesses need. So the host looks again no sooner than 50 µs later.
+    - Firmware that never sleeps keeps a clock rule: twice its turnaround since the
+      re-arm, 1 ms at least. That is no shorter than what entry 36 gave it.
+    - Measured back to back on the loaded host (official 1.5.1, a 200 KiB file, chunks
+      of 1024, 4096 and 8192 bytes): writes went from 16, 35 and 26 KiB/s to 22, 44 and
+      48, reads from 28, 24 and 25 to 50, 49 and 55. The host's own load moves these
+      numbers a lot: the same build an hour earlier wrote at 57, 74 and 83 KiB/s and
+      read at 85, 94 and 94.
+    - The smoke test passed on the three firmwares, Unleashed's key cache upload
+      (entry 36) among its checks, and `gui_check.py` on official and Unleashed.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

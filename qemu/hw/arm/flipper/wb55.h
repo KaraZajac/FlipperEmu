@@ -537,6 +537,9 @@ struct WB55UsbState {
     int64_t frame_base_ns;
     int64_t ep_armed[8];         /* the CPU last (re)armed EPn, or it last moved data */
     int64_t ep_done[8];          /* EPn's last transaction, until the CPU re-arms it */
+    int64_t ep_look[8];          /* when the host next looks for an idle CPU */
+    int64_t ep_idle[8];          /* a re-arm to the CPU's idling, lately */
+    bool ep_timed[8];            /* that look is the planned one */
     int64_t bus_last;            /* the last bulk/interrupt transaction */
     int64_t turn_ns;             /* the firmware's turnaround, averaged */
 

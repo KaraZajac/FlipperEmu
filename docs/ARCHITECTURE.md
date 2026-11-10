@@ -329,11 +329,25 @@ takes one event per pass, but it also re-arms the endpoints from two other callb
 such a re-arm and the next pass leaves one more event queued, and the ninth fails a
 `furi_check()` in the interrupt. A real STM32 finishes the pass in a few microseconds,
 while the next packet takes 51 µs. An emulated CPU can be a hundred times slower, and
-slower still on a busy host. So the host measures the firmware's turnaround: from a bulk
-packet's completion to the CPU re-arming that endpoint, averaged, each sample capped at
-2 ms. After each re-arm it waits twice that. Interrupt endpoints get no such wait: the
-host polls them every bInterval, as a PC does, because Bad USB drops a report that the
-host has not taken within two intervals.
+slower still on a busy host.
+
+So a bulk endpoint gets its next transaction when the firmware has caught up with the
+last one: the USB interrupt is not pending and the CPU sleeps in WFI. The idle thread
+does that only when every other thread waits, so the CDC service waits too, with its
+queue empty. A packet that is delivered raises the interrupt, so one look at an idle CPU
+gives the firmware one packet. Nothing tells the host when the CPU goes idle, and a look
+while it is still at work costs it time (the main loop takes the lock that the CPU's
+register accesses need). So the host looks as long after the re-arm as that took lately.
+That is an estimate per endpoint: a look that found the CPU at work lengthens it by an
+eighth and one that found it idle shortens it by as much, so it settles at the median.
+The next look comes a quarter of it later, and 50 µs at least.
+
+Firmware that never sleeps (a thread that polls, a busy loop) gets the clock instead.
+The host measures the firmware's turnaround: from a bulk packet's completion to the CPU
+re-arming that endpoint, averaged, each sample capped at 2 ms. The transaction comes when
+twice that has passed since the re-arm, and 1 ms at least. Interrupt endpoints get no
+such wait: the host polls them every bInterval, as a PC does, because Bad USB drops a
+report that the host has not taken within two intervals.
 
 **USB/IP export** (`usbip` chardev, a TCP server, default port 3240). The device can be
 handed to the PC's kernel instead of the built-in class drivers:
