@@ -552,6 +552,27 @@ All three are small, self-contained, and suitable for sending upstream.
     `apdu` gets SELECT, GET CHALLENGE and GET DATA answers through the firmware's own
     ISO-DEP stack.
 
+55. **A Proxmark3 with no Proxmark3.** None was plugged in, so the relay was written
+    from the Iceman/RRG source and checked against a simulation of it. The source
+    held three surprises:
+    - `CMD_HF_ISO14443A_READER` changed shape on 2026-08-29, from MIX arguments to
+      an NG payload, and old frames are now refused. Releases up to v4.21611 want
+      MIX, and v4.23346 wants NG. A too-short NG payload tells them apart: the new
+      reader answers with an error, the old one hears nothing it understands.
+    - The client's `hf 14a raw` has no parity option, but the firmware has
+      `ISO14A_NO_PARITY`. Given no parity array, the coder sends the bits as they
+      are, so a frame can go out as air bits with whatever parity the emulated
+      reader computed. That is what MIFARE Classic after authentication needs.
+    - Received without parity handling, the bits come back eight to a byte and the
+      count is dropped. Every Type A answer is 4 bits or 9k bits, so ⌊8n/9⌋ bytes, or
+      one byte as a 4-bit ACK/NAK, recovers it exactly.
+
+    The emulated Flipper's `scanner` and `apdu` then reach a Python card behind the
+    simulated Proxmark3, with both generations. Only Type A frames go out: each
+    poll now says what the chip's MODE register polls for (`mode=a`, `b`, `f`, `v`),
+    and the firmware's B, FeliCa and ISO15693 probes get silence without a round
+    trip.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

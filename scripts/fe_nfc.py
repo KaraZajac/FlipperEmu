@@ -13,9 +13,15 @@ holds in its field (see qemu/hw/arm/flipper/nfc_card.c):
 
     fe_nfc.py --mfc1k 11223344              -> a factory MIFARE Classic 1K
 
+    fe_nfc.py hf-mf-11223344-dump.json      -> a Proxmark3 dump's description
+    fe_nfc.py --nfc-file hf-mfu-dump.json   -> the dump as a Flipper .nfc file
+
 Supported: MIFARE Ultralight / Ultralight EV1 / NTAG21x (Type 2), MIFARE
-Classic Mini / 1K / 4K (unread blocks: zeros; unread keys: FF..FF).
+Classic Mini / 1K / 4K (unread blocks: zeros; unread keys: FF..FF).  A
+Proxmark3 dump is its client's JSON: `hf mf autopwn`, `hf mf dump`
+(FileType "mfcard", "mfc v2", "mfc v3") or `hf mfu dump` ("mfu").
 """
+import json
 import pathlib
 import sys
 
@@ -177,12 +183,66 @@ def blank_mfc(kind, uid):
     return "\n".join(out) + "\n"
 
 
+# ------------------------------------------------------------ Proxmark3 dumps
+
+def describe_pm3(path):
+    """The card description for a Proxmark3 client's JSON dump."""
+    d = json.loads(pathlib.Path(path).read_text())
+    kind = d.get("FileType", "")
+    card = d.get("Card", {})
+    blocks = d.get("blocks", {})
+    hexb = lambda v: bytes.fromhex(str(v).replace(" ", ""))
+    mem = [hexb(blocks[k]) for k in sorted(blocks, key=int)]
+    if not mem:
+        raise ValueError(f"{path}: no blocks in the dump")
+    uid = hexb(card.get("UID", ""))
+    if kind in ("mfcard", "mfc v2", "mfc v3"):
+        size = {20: "MINI", 64: "1K", 256: "4K"}.get(len(mem))
+        if not size:
+            raise ValueError(f"{path}: {len(mem)} blocks: not a MIFARE Classic "
+                             "Mini, 1K or 4K")
+        atqa = hexb(card.get("ATQA", "0400" if size != "4K" else "0200"))
+        sak = card.get("SAK", {"MINI": "09", "1K": "08", "4K": "18"}[size])
+        out = [f"# MIFARE Classic {size} (Proxmark3 dump)", "type mfc",
+               f"uid {uid.hex(' ')}", f"atqa {atqa.hex(' ')}", f"sak {sak.lower()}"]
+        out += [f"mem {b.hex(' ')}" for b in mem]
+        return "\n".join(out) + "\n"
+    if kind == "mfu":
+        version = hexb(card.get("Version", "00" * 8))
+        name = {0x0F: "NTAG213", 0x11: "NTAG215", 0x13: "NTAG216"}.get(
+            version[6] if len(version) == 8 and version[2] == 0x04 else None,
+            "Mifare Ultralight")
+        out = [f"# {name} (Proxmark3 dump)", "type t2", f"uid {uid.hex(' ')}",
+               "atqa 44 00", "sak 00"]
+        if any(version):
+            out.append(f"version {version.hex(' ')}")
+        if card.get("Signature"):
+            out.append(f"signature {hexb(card['Signature']).hex(' ')}")
+        for i in range(3):
+            if card.get(f"Counter{i}"):
+                out.append(f"counter{i} {int.from_bytes(hexb(card[f'Counter{i}']), 'little')}")
+            if card.get(f"Tearing{i}"):
+                out.append(f"tearing{i} {card[f'Tearing{i}'].lower()}")
+        out += [f"mem {b.hex(' ')}" for b in mem]
+        return "\n".join(out) + "\n"
+    raise ValueError(f"{path}: Proxmark3 FileType {kind!r} is not supported "
+                     "(mfcard, mfc v2, mfc v3, mfu are)")
+
+
+def describe_any(path):
+    """A Flipper .nfc file's or a Proxmark3 JSON dump's description."""
+    if str(path).lower().endswith(".json"):
+        return describe_pm3(path)
+    return describe(parse_nfc(path))
+
+
 T2_NAMES = {45: "NTAG213", 135: "NTAG215", 231: "NTAG216"}
 
 
 def nfc_file(desc):
-    """A Flipper .nfc file (format 4) for a Type 2 card description: what
-    the firmware loads to emulate it (NFC -> Saved, or `emulate -f`)."""
+    """A Flipper .nfc file (format 4) for a Type 2 or MIFARE Classic card
+    description: what the firmware loads to emulate it (NFC -> Saved, or
+    `emulate -f`)."""
     kv, mem = {}, bytearray()
     for line in desc.splitlines():
         key, _, val = line.partition(" ")
@@ -190,11 +250,20 @@ def nfc_file(desc):
             mem += hexbytes(val)
         elif key and not key.startswith("#"):
             kv[key] = val
-    if kv.get("type") != "t2":
-        raise ValueError("only Type 2 cards can be written as .nfc here")
-    pages = len(mem) // 4
     atqa = hexbytes(kv["atqa"])
     up = lambda b: b.hex(" ").upper()
+    if kv.get("type") == "mfc":
+        blocks = len(mem) // 16
+        size = {20: "MINI", 64: "1K", 256: "4K"}[blocks]
+        out = ["Filetype: Flipper NFC device", "Version: 4", "Device type: Mifare Classic",
+               f"UID: {up(hexbytes(kv['uid']))}", f"ATQA: {up(atqa[::-1])}",
+               f"SAK: {kv.get('sak', '08').upper()}", f"Mifare Classic type: {size}",
+               "Data format version: 2"]
+        out += [f"Block {i}: {up(mem[i * 16:i * 16 + 16])}" for i in range(blocks)]
+        return "\n".join(out) + "\n"
+    if kv.get("type") != "t2":
+        raise ValueError("only Type 2 and MIFARE Classic cards can be written as .nfc")
+    pages = len(mem) // 4
     out = ["Filetype: Flipper NFC device", "Version: 4",
            "Device type: NTAG/Ultralight", f"UID: {up(hexbytes(kv['uid']))}",
            f"ATQA: {up(atqa[::-1])}", f"SAK: {kv.get('sak', '00').upper()}",
@@ -215,14 +284,17 @@ def main():
     as_file = "--nfc-file" in args
     args = [a for a in args if a != "--nfc-file"]
     if as_file:
+        if len(args) == 1 and args[0].lower().endswith(".json"):
+            print(nfc_file(describe_pm3(args[0])), end="")
+            return 0
         if len(args) in (2, 3) and args[0].lstrip("-") in BLANK:
             print(nfc_file(blank(args[0].lstrip("-"), bytes.fromhex(args[1]),
                                  args[2] if len(args) == 3 else None)), end="")
             return 0
         print(__doc__)
         return 2
-    if len(args) == 1 and args[0].endswith(".nfc"):
-        print(describe(parse_nfc(args[0])), end="")
+    if len(args) == 1 and args[0].endswith((".nfc", ".json")):
+        print(describe_any(args[0]), end="")
     elif len(args) == 2 and args[0].lstrip("-").lower() in ("mfcmini", "mfc1k", "mfc4k"):
         print(blank_mfc(args[0].lstrip("-")[3:], bytes.fromhex(args[1])), end="")
     elif len(args) in (2, 3) and args[0].lstrip("-") in BLANK:

@@ -685,6 +685,36 @@ I-blocks with chaining, R- and S-blocks, APDUs to a method). Its `iso-dep` card 
 by the NFC app as an ISO14443-4A card, and the shell's `apdu` reaches it through the
 firmware's ISO-DEP stack.
 
+### Real cards: a Proxmark3 on the link (`scripts/fe_pm3.py`)
+
+The `pm3` link card relays every Type A frame to a Proxmark3 (Iceman/RRG firmware) over
+its own USB protocol. Frames are `PM3a` commands and `PM3b` replies: a preamble, the
+data and a postamble. With the postamble's magic in place of a CRC, which USB allows,
+no client or library is needed.
+- **Two firmware generations.** On 2026-08-29 `CMD_HF_ISO14443A_READER` moved from MIX
+  arguments (flags; length and bit count; timeout) to an NG payload, `iso14a_raw_cmd_t`,
+  and gained `ISO14A_NO_PARITY`. The relay asks with a too-short NG payload. New
+  firmware answers it with an error; old firmware reads its absent MIX arguments as
+  zero and stays silent.
+- **New firmware: exact.** The frame goes out as its air bits, data and parity
+  interleaved LSB first, which `CodeIso14443aBitsAsReaderPar` sends as they are when
+  no parity array is given. The answer comes back raw, every bit packed eight to a
+  byte. The count is lost, but a k-byte answer is 9k bits, so ⌊8n/9⌋ of n raw bytes
+  recovers it, and one raw byte can only be a 4-bit ACK/NAK. MIFARE Classic's encrypted
+  parity therefore survives both ways.
+- **Old firmware: bytes.** The Proxmark3 adds odd parity, and an answer's parity is
+  recomputed.
+
+The field follows the firmware's (`ISO14A_CONNECT | ISO14A_NO_SELECT |
+ISO14A_NO_DISCONNECT` on, `CMD_HF_DROPFIELD` off). The `mode` on each poll keeps the
+firmware's ISO14443B, FeliCa and ISO15693 probes off the 14A reader. `fe_pm3.py sim` is
+a Proxmark3 on a pty, for both generations, with an fe_nfc_link card in its field; the
+relay's checks run against it.
+
+`fe_nfc.py` also reads the client's JSON dumps (`mfcard`, `mfc v2`, `mfc v3`, `mfu`) into
+card descriptions, or Flipper `.nfc` files, so a card the Proxmark3 dumped can sit in
+the emulated field.
+
 ## Persistence per device (`devices/NAME/`)
 
 | file | real-world equivalent |

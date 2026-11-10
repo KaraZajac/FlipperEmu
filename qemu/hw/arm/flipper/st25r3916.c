@@ -393,11 +393,17 @@ static void st25_link_poll(St25r3916State *s)
     int nbits = nfc_air_split(s->tx, s->ntx, data, par);
     g_autoptr(GString) line = g_string_new(NULL);
 
+    /* MODE.om: what the firmware polls for, so a relay can skip the rest */
+    static const char *const om[16] = {
+        [1] = "a", [2] = "b", [3] = "f", [4] = "t1", [14] = "v", [15] = "bpsk",
+    };
+    const char *mode = om[(s->rega[REG_MODE] >> 3) & 15];
+
     g_string_printf(line, "poll %d ", nbits);
     hex_put(line, data, (nbits + 7) / 8);
     g_string_append_c(line, ' ');
     hex_put(line, par, (nbits / 8 + 7) / 8);
-    g_string_append_c(line, '\n');
+    g_string_append_printf(line, " mode=%s\n", mode ? mode : "other");
     flipper_link_send(&s->lk, "%s", line->str);
     s->stage = STAGE_LINK;
     timer_mod(s->link_timeout,

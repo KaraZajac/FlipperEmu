@@ -754,6 +754,10 @@ def cmd_nfc(args):
             fields = fe_nfc.parse_nfc(card[0])
             desc = fe_nfc.describe(fields)
             label = f"{desc.splitlines()[0][2:]} {fields['UID']} ({pathlib.Path(card[0]).name})"
+        elif len(card) == 1 and card[0].lower().endswith(".json"):     # a Proxmark3 dump
+            desc = fe_nfc.describe_pm3(card[0])
+            uid = next(l[4:] for l in desc.splitlines() if l.startswith("uid "))
+            label = f"{desc.splitlines()[0][2:]} {uid.upper()} ({pathlib.Path(card[0]).name})"
         elif len(card) == 2 and card[0].lower() in ("mfcmini", "mfc1k", "mfc4k"):
             uid = bytes.fromhex(card[1].replace(":", "").replace(" ", ""))
             desc = fe_nfc.blank_mfc(card[0][3:], uid)
@@ -765,8 +769,8 @@ def cmd_nfc(args):
             label = (f"an {card[0].upper()} {uid.hex(' ').upper()}" +
                      (f" with {url}" if url else ", blank"))
         else:
-            sys.exit("usage: nfc FILE.nfc | nfc ntag215 UID [URL] | nfc mfc1k UID | "
-                     "nfc none")
+            sys.exit("usage: nfc FILE.nfc | nfc DUMP.json (Proxmark3) | nfc ntag215 UID "
+                     "[URL] | nfc mfc1k UID | nfc none")
     except (ValueError, KeyError, OSError) as e:
         sys.exit(f"nfc: {e}")
     m = Monitor(str(dev.monitor))
@@ -1016,7 +1020,8 @@ def main():
     p = sub.add_parser("nfc", help="hold an NFC card to a running device")
     p.add_argument("card", nargs="*",
                    help="FILE.nfc (NTAG21x, Ultralight, Ultralight EV1, MIFARE "
-                        "Classic), ntag213|ntag215|ntag216 UID [URL] (a new tag, "
+                        "Classic), DUMP.json (a Proxmark3 dump: hf mf / hf mfu), "
+                        "ntag213|ntag215|ntag216 UID [URL] (a new tag, "
                         "its NDEF a URL), mfcmini|mfc1k|mfc4k UID (a factory "
                         "MIFARE Classic), or none; nothing: show the card")
     p.add_argument("--reader", choices=("scan", "ntag"),
@@ -1027,8 +1032,9 @@ def main():
                         "(what NFC field detection sees)")
     p.add_argument("--link", metavar="CARD",
                    help="instead: be the card in the Flipper's field from here, "
-                        "until ^C. CARD: iso-dep (an ISO14443-4A card), log (print "
-                        "the reader's frames), script:FILE.py (your own)")
+                        "until ^C. CARD: iso-dep (an ISO14443-4A card), pm3[:PORT] "
+                        "(real cards through a Proxmark3), log (print the reader's "
+                        "frames), script:FILE.py (your own)")
     import fe_nfc_link
     fe_nfc_link.add_options(p)
     p.set_defaults(func=cmd_nfc)

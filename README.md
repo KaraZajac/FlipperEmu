@@ -100,6 +100,9 @@ USB/IP export, warm reboot, no crash): **official 1.5.1**, **Momentum mntm-012**
 - NFC link: `./flipperemu nfc --link iso-dep` puts a card played by a program in the
   field (an ISO14443-4A card here; any card type you write). The machine stops while it
   answers, so it can take its time, or relay to real hardware.
+- Proxmark3: `./flipperemu nfc --link pm3` lets the emulated Flipper read real cards
+  through a Proxmark3, frame by frame, MIFARE Classic included with current firmware.
+  `./flipperemu nfc dump.json` puts a card the Proxmark3 dumped in the field.
 - Speaker: TIM16's PWM tone plays through QEMU audio (desktop sound or a WAV recording).
   The duty cycle sets the volume, as on the real piezo.
 - Power: STOP2 deep sleep (1–2 % of a host core when idle), fuel gauge and charger you can
@@ -179,6 +182,7 @@ are erased). Without `-f` it boots whatever is already flashed.
 | `nfc FILE.nfc` \| `nfc ntag215 UID [URL]` \| `nfc mfc1k UID` \| `nfc none` | hold an NFC card to the device |
 | `nfc --reader ntag` \| `nfc --reader scan` | hold an NFC reader to an emulating device and print what it reads |
 | `nfc --link iso-dep` \| `--link script:FILE.py` \| `--link log` | a card played by a program, in the field until ^C |
+| `nfc --link pm3[:PORT]` \| `nfc DUMP.json` | real cards through a Proxmark3; a Proxmark3 dump as the card |
 | `flash FW [--erase-all]` | program `.elf` / `.dfu` / `.bin` / update `.tgz` into `flash.img` |
 | `sd [--resources X] [--size 512M]` | rebuild the microSD from a resources tgz, update package or folder |
 | `press ok down down ok …` | press buttons on a running device |
@@ -214,7 +218,8 @@ It then tests each radio through the firmware's own CLI:
 - iButton: a DS1990A is read over 1-Wire, a virtual reader reads an emulated DS1990A,
   and an emulated Metakom key is captured, decoded and read back;
 - NFC: an NTAG215 is read with `mfu info`, a MIFARE Classic 1K is dumped, the virtual
-  reader reads an emulated NTAG215, and an ISO-DEP card on the NFC link answers an APDU.
+  reader reads an emulated NTAG215, and an ISO-DEP card on the NFC link answers an APDU,
+  directly and through a simulated Proxmark3.
 
 Finally, a USB/IP client enumerates the device, the LCD comes back after `power reboot`,
 and the log must have no `[CRASH]`. Exit code 0 means pass, so it slots into a
@@ -627,8 +632,37 @@ def card(args):
 
 The protocol is in [docs/RADIO_LINK.md](docs/RADIO_LINK.md). For now the link is the card
 and the firmware the reader. The other way round still uses the built-in virtual reader
-(`--reader`). Next are relays to real cards through a PN532/PN533 (ACR122U) or a
-Proxmark3.
+(`--reader`).
+
+#### Real cards, through a Proxmark3
+
+```sh
+./flipperemu nfc --link pm3                   # the first Proxmark3 found; pm3:/dev/ttyACM1
+./flipperemu nfc hf-mf-A1B2C3D4-dump.json     # a card the Proxmark3 dumped, in the field
+scripts/fe_nfc.py --nfc-file hf-mfu-dump.json > card.nfc     # and for a real Flipper
+```
+
+With `pm3`, every frame the emulated Flipper's reader sends goes out of a real
+Proxmark3's antenna, and the real card's answer comes back. That includes anticollision
+and select, so what the firmware sees is the card itself. It talks the Proxmark3's own
+USB protocol, so no client is needed, against Iceman/RRG firmware:
+- From v4.23346 (September 2026) the relay is exact. Each frame goes out as air bits with
+  its own parity, and the answer comes back with the card's (`ISO14A_NO_PARITY`), so
+  MIFARE Classic's encrypted exchanges get through: the firmware's dictionary attack
+  and `dump` run against the real card.
+- Older firmware takes the frame's bytes and adds the parity itself, so everything
+  relays except Classic after authentication.
+
+Only ISO14443A goes out. The firmware's ISO14443B, FeliCa and ISO15693 polls get
+silence. The emulated machine stops while each frame makes the round trip.
+
+A dump is the client's JSON: `hf mf autopwn` or `hf mf dump` for MIFARE Classic Mini, 1K
+and 4K (FileType `mfcard`, `mfc v2`, `mfc v3`), and `hf mfu dump` for Ultralight and NTAG
+(`mfu`, with version, signature and counters). `scripts/nfc_link_check.py DEVICE` checks
+all of it with no Proxmark3. It converts dumps, then relays through a simulated Proxmark3
+(`scripts/fe_pm3.py sim`), for both firmware generations. The relay is written from the
+Proxmark3 firmware's source and checked against that simulation. It has not met a real
+Proxmark3 yet.
 
 ### Sound
 
@@ -697,8 +731,8 @@ qemu/hw/arm/flipper/   the QEMU machine + STM32WB55 SoC + board devices (C)
 qemu/patches/          fixes to upstream QEMU (SysTick, ssi-sd, SD SPI state)
 scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_monitor.py,
                        fe_cli.py, fe_ir.py, fe_subghz.py, fe_sdr.py (real radios),
-                       fe_nfc_link.py (cards from programs), fe_usbip.py,
-                       usbip_attach.py, smoke_test.py, *_check.py
+                       fe_nfc_link.py (cards from programs), fe_pm3.py (Proxmark3),
+                       fe_usbip.py, usbip_attach.py, smoke_test.py, *_check.py
 devices/ firmware/ build/ third_party/    generated, git-ignored
 ```
 

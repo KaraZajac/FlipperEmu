@@ -124,10 +124,14 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       frame (data bits and parity) and takes the card's answer, the machine stopped
       meanwhile; `scripts/fe_nfc_link.py` (`./flipperemu nfc --link`): ISO14443-3A,
       ISO-DEP, an `iso-dep` card, `script:FILE.py` (BRINGUP_LOG 54)
-- ☐ NFC: relays to real cards through real hardware on that link: a PN532/PN533
-      (ACR122U over PC/SC; raw frames with parity, so MIFARE Classic too) or a
-      Proxmark3. And the other way round, listen mode: an external reader (or a real
-      one through a PN532 in target mode) in front of an emulating Flipper
+- ☑ NFC: real cards through a Proxmark3 (2026-11-09): `nfc --link pm3` relays every
+      Type A frame over the Proxmark3's own USB protocol, exactly (NO_PARITY: MIFARE
+      Classic too) with firmware from v4.23346, with odd parity before; Proxmark3 JSON
+      dumps as cards and .nfc files. Checked against `fe_pm3.py sim`
+      (`nfc_link_check.py`; BRINGUP_LOG 55); not yet against a real Proxmark3
+- ☐ NFC: a PN532/PN533 (ACR122U over PC/SC) relay; and the other way round, listen
+      mode: an external reader (or a real one: a Proxmark3 or PN532 as the card) in
+      front of an emulating Flipper
 - ☐ 125 kHz RFID and IR through real front ends (a Proxmark3's LF, an IR transceiver),
       and iButton through a USB 1-Wire master (DS9490R)
 

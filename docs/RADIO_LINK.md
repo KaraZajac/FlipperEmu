@@ -116,7 +116,7 @@ set on the device (`./flipperemu nfc none`). A built-in card answers instead of 
 changes. A card loses its state when the field goes.
 
 ```
-poll 72 93708804A1B29FAE4B 6501
+poll 72 93708804A1B29FAE4B 6501 mode=a
 ```
 
 This is a frame the firmware sent as the reader, while its field is on:
@@ -127,7 +127,10 @@ This is a frame the firmware sent as the reader, while its field is on:
   are odd parity, except in MIFARE Classic's encrypted frames.
 
 The example is a SELECT at cascade level 1, `93 70 88 04 A1 B2 9F AE 4B`: nine bytes,
-so nine parity bits in two bytes.
+so nine parity bits in two bytes. `mode` is what the reader polls for, from the chip's
+MODE register: `a` (ISO14443A), `b` (ISO14443B), `f` (FeliCa), `v` (ISO15693, as a
+subcarrier stream), `t1` (Topaz), `bpsk` or `other`. A relay that only speaks Type A
+(`pm3`) answers the rest with silence at once.
 
 ### To the emulator
 
@@ -151,5 +154,5 @@ waiting time. After a second with no answer, it gets silence and a warning, once
 socat - UNIX-CONNECT:devices/NAME/nfc.sock       # and answer them yourself
 ```
 
-Start `scanner` in the `nfc` shell. The first poll is a WUPA, `poll 7 52`; answer
-`answer 16 4400` within a second, and the next poll is the anticollision, `poll 16 9320 01`.
+Start `scanner` in the `nfc` shell. The first poll is a WUPA, `poll 7 52 mode=a`; answer
+`answer 16 4400` within a second, and the next poll is the anticollision, `poll 16 9320 01 mode=a`.

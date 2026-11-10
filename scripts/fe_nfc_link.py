@@ -12,6 +12,7 @@ CARD:
                      SELECT (any AID), GET CHALLENGE and GET DATA; anything
                      else 6D00.  --uid, --sak, --ats
     log              no card: print every frame the Flipper's reader sends
+    pm3[:PORT]       real cards, through a Proxmark3 (scripts/fe_pm3.py)
     script FILE.py   a card of your own: FILE defines `card(args)` returning a
                      Card (below) whose frame() decides every answer
 
@@ -63,7 +64,8 @@ def crc_ok(frame):
 
 class Card:
     """What sits in the field.  frame() gets every frame the Flipper sends
-    (nbits, data bytes, the parity bits of the full bytes packed LSB first)
+    (nbits, data bytes, the parity bits of the full bytes packed LSB first,
+    and what the reader polls for: "a" for ISO14443A, else "b", "f", "v")
     and returns its answer: None for silence, bytes (whole bytes, odd
     parity added), or (nbits, data[, parity]) for anything else."""
     name = "a card"
@@ -71,7 +73,7 @@ class Card:
     def field(self, on):
         pass
 
-    def frame(self, nbits, data, parity):
+    def frame(self, nbits, data, parity, mode="a"):
         return None
 
 
@@ -103,7 +105,9 @@ class Iso14443A(Card):
     def reset(self):
         """Back to unselected (the field went off, or HLTA)."""
 
-    def frame(self, nbits, data, parity):
+    def frame(self, nbits, data, parity, mode="a"):
+        if mode != "a":
+            return None                         # a Type A card
         if nbits == 7:                          # REQA, WUPA
             if data[0] == 0x26 and self.state in (self.IDLE, self.READY) or \
                data[0] == 0x52 and self.state in (self.IDLE, self.HALT, self.READY):
@@ -214,8 +218,9 @@ class Log(Card):
     def field(self, on):
         print(f"[fe_nfc_link] field {'on' if on else 'off'}", flush=True)
 
-    def frame(self, nbits, data, parity):
-        print(f"[fe_nfc_link] reader: {nbits:4} bits  {data.hex(' ').upper()}", flush=True)
+    def frame(self, nbits, data, parity, mode="a"):
+        print(f"[fe_nfc_link] reader ({mode}): {nbits:4} bits  {data.hex(' ').upper()}",
+              flush=True)
         return None
 
 
@@ -240,10 +245,12 @@ def run(path, card, verbose=False):
                 if words[0] == "field" and len(words) > 1:
                     card.field(words[1] == "on")
                 elif words[0] == "poll" and len(words) >= 3:
-                    nbits = int(words[1])
-                    frame = bytes.fromhex(words[2])
-                    par = bytes.fromhex(words[3]) if len(words) > 3 else b""
-                    ans = card.frame(nbits, frame, par)
+                    pos = [w for w in words[1:] if "=" not in w]
+                    kv = dict(w.split("=", 1) for w in words[1:] if "=" in w)
+                    nbits = int(pos[0])
+                    frame = bytes.fromhex(pos[1])
+                    par = bytes.fromhex(pos[2]) if len(pos) > 2 else b""
+                    ans = card.frame(nbits, frame, par, kv.get("mode", "a"))
                     if verbose:
                         print(f"  > {frame.hex(' ').upper():40}  < "
                               f"{answer_text(ans)}", flush=True)
@@ -281,6 +288,9 @@ def make_card(spec, args):
                           bytes.fromhex("0578807000"))
     if spec == "log":
         return Log()
+    if spec == "pm3" or spec.startswith("pm3:"):
+        import fe_pm3
+        return fe_pm3.Pm3Relay(spec[4:] or None)
     if spec.startswith("script"):
         path = spec.split(":", 1)[1] if ":" in spec else args.script
         if not path:
@@ -290,7 +300,7 @@ def make_card(spec, args):
         mod = importlib.util.module_from_spec(mod_spec)
         mod_spec.loader.exec_module(mod)
         return mod.card(args)
-    raise ValueError(f"unknown card {spec!r}: iso-dep, log, script:FILE.py")
+    raise ValueError(f"unknown card {spec!r}: iso-dep, log, pm3[:PORT], script:FILE.py")
 
 
 def add_options(p):
@@ -308,7 +318,7 @@ def main():
                                 epilog=__doc__.split("\n\n", 1)[1])
     p.add_argument("link", help="the device's NFC link socket (devices/NAME/nfc.sock), "
                    "or its directory")
-    p.add_argument("card", help="iso-dep, log, or script:FILE.py")
+    p.add_argument("card", help="iso-dep, log, pm3[:PORT], or script:FILE.py")
     add_options(p)
     args = p.parse_args()
     link = pathlib.Path(args.link)
