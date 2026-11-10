@@ -50,6 +50,8 @@ off-screen.
   and Left + Back reboots it.
 - microSD over SPI2 + DMA: card detect, mount, read, write. Settings land in
   `/ext/.int`, dolphin animations load from the card, and `.fap` apps launch.
+- Files to and from the card with `./flipperemu ls`, `push`, `pull`, `rm` and `mkdir`:
+  through the firmware when the device runs, in the card's image when it does not.
 - Persistent devices: the internal flash (`flash.img`) and the battery-backed state (fuel
   gauge data memory and RTC backup domain, `nvram.bin`) survive restarts.
 - The firmware's log (USART1: `[I][Flipper] Startup complete`, …) on stdio, a pty or
@@ -276,6 +278,9 @@ level, switches it off and on, and reboots it.
 | `reset` | reboot it, as holding Left + Back does |
 | `run --usbip [PORT]` | export the USB device over USB/IP (then `sudo scripts/usbip_attach.py`) |
 | `cli ["CMD" …]` | the device's CLI over USB: interactive, or run commands and print their output |
+| `ls [-R] [PATH]` | what is on the SD card (`/ext` when no path is given); `-R`: and in every folder under it |
+| `push [-f] LOCAL… [REMOTE]` \| `pull [-f] REMOTE… [LOCAL]` | copy files and folders to the card, and from it |
+| `rm [-r] [-f] PATH…` \| `mkdir PATH…` | remove files and folders on the card; make folders |
 | `log [-f] [-n N] [-l LEVEL] [-g REGEX] [--previous]` | what the firmware logged (its UART), in its colours: follow it, the last N lines, this level and worse, the lines that match |
 | `log --set-level LEVEL` | how much the firmware logs, from its next start: none, error, warn, info, debug, trace or default |
 | `ir PROTO ADDR CMD` \| `ir raw …` \| `ir FILE.ir [NAME]` | send an infrared signal to the device's receiver |
@@ -351,6 +356,56 @@ it was.
 
 <p align="center"><img src="docs/img/30-window-fwlog.png" width="75%"
 alt="The firmware log in the window, with the firmware's level at debug"></p>
+
+### Files on the SD card
+
+```sh
+./flipperemu ls /ext/apps/Games                   # sizes and names, folders first
+./flipperemu ls -R /ext/subghz                    # ... and what is in the folders under it
+./flipperemu push my_app.fap /ext/apps/Tools      # a file into a folder (made if it is not there)
+./flipperemu push gate.sub tv.ir                  # no folder named: each to where its kind lives
+./flipperemu push assets /ext/apps_data/my_app    # a folder and all in it: .../my_app/assets
+./flipperemu pull /ext/nfc backup                 # a folder from the card: backup/nfc
+./flipperemu pull /ext/subghz/gate.sub .          # one file
+./flipperemu rm -r /ext/apps_data/my_app
+./flipperemu mkdir /ext/apps/Mine/New             # with the folders above it
+```
+
+A device that runs is reached through its firmware: the `storage` commands of its CLI
+on the USB serial port, as `fbt`'s scripts do it on a real Flipper. The firmware sees
+each file as it arrives, and nothing has to be restarted. That moves some tens of
+kilobytes a second. For a stopped device the same commands read and write the card's
+image (`devices/NAME/sd.img`) with mtools, which takes megabytes in a moment: to copy a
+lot, stop the device first. The last line of a copy says which way it went:
+
+```
+$ ./flipperemu push assets /ext/apps_data/my_app
+assets/icon.png -> /ext/apps_data/my_app/assets/icon.png (412 bytes)
+assets/levels.bin = /ext/apps_data/my_app/assets/levels.bin (unchanged)
+[default] 1 copied, 1 unchanged (through the firmware)
+```
+
+A file that is there already with the same bytes is left alone (`-f` copies it all the
+same), and what was written is read back as an MD5 and compared. With no folder named,
+`push` puts `.sub` in `/ext/subghz`, `.ir` in `/ext/infrared`, `.nfc` in `/ext/nfc`,
+`.rfid` in `/ext/lfrfid`, `.ibtn` in `/ext/ibutton`, `.js` in `/ext/apps/Scripts` and
+`.fmf` in `/ext/music_player`; a `.fap` goes over the app of that name under
+`/ext/apps`.
+
+Paths are the firmware's: `/ext` is the card and `/int` its own small storage, which
+current firmware keeps on the card as `/ext/.int` (that is where a stopped device has
+it). Names are what FAT and the firmware's shell both take: ASCII, and none of
+`\ / : * ? " < > |`.
+
+The USB serial port carries one conversation at a time. The launcher's commands take
+turns: one that finds the port taken waits ten seconds, then says who has it. A program
+that opened the pty by itself (`screen`, a script) is not seen, so close it first. With
+the cable out, or while an app on the Flipper has turned the port into a keyboard, the
+commands say that there is no CLI and why.
+
+`scripts/files_check.py FIRMWARE` checks all of this on a throwaway device: a folder
+copied there and back through the firmware and through the image, each reading what the
+other wrote.
 
 ### Smoke-testing a build
 
@@ -981,7 +1036,8 @@ flipperemu             launcher / device manager
 qemu/hw/arm/flipper/   the QEMU machine + STM32WB55 SoC + board devices (C)
 qemu/patches/          fixes to upstream QEMU (SysTick, ssi-sd, SD SPI state)
 scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_monitor.py,
-                       fe_cli.py, fe_ir.py, fe_subghz.py, fe_sdr.py (real radios),
+                       fe_cli.py, fe_files.py (files on the card), fe_ir.py,
+                       fe_subghz.py, fe_sdr.py (real radios),
                        fe_nfc_link.py (cards from programs), fe_pm3.py (Proxmark3),
                        fe_enclave.py (the enclave's keys and ciphers), fe_usbip.py,
                        usbip_attach.py, fe_gui.py (the window: fe_gui_view.py,

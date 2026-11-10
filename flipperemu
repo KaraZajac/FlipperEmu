@@ -25,6 +25,9 @@ you flash stays flashed, settings and files persist across runs.
   ./flipperemu sd --resources update.tgz     (re)build the SD card
   ./flipperemu cli                           USB CLI of a running device
   ./flipperemu cli "storage list /ext"       run CLI commands, print output
+  ./flipperemu ls /ext/apps                  what is on its SD card
+  ./flipperemu push app.fap /ext/apps/Tools  copy files and folders to the card
+  ./flipperemu pull /ext/nfc backup          ... and from it (rm, mkdir: as named)
   ./flipperemu log -f                        what the firmware logs, as it logs it
   ./flipperemu ir NEC 0x04 0x08              point a virtual IR remote at it
   ./flipperemu subghz capture.sub            put a Sub-GHz signal on the air
@@ -1000,25 +1003,181 @@ def cmd_gdb(args):
     os.execvp(cmd[0], cmd)
 
 
-def cmd_cli(args):
+def open_cli(dev, prompt=True, timeout=15.0):
+    """The CLI on a running device's USB serial port (an fe_cli.FlipperCli, at
+    its prompt), or an exit that says why there is none.  The port is one line:
+    our commands take turns at it (usb.lock)."""
     from fe_cli import FlipperCli, usb_endpoint
-    dev = Device(args.device)
-    if not dev.monitor.exists():
-        sys.exit(f"[{dev.name}] not running (no {dev.monitor})")
-    ep = usb_endpoint(dev.monitor)
+    m = open_monitor(dev)
+    try:
+        ep = usb_endpoint(m)
+        usb = read_usb(m)
+        end = time.monotonic() + 10         # just started: the PC finds it soon
+        while (ep and usb["cable"] == "computer" and time.monotonic() < end
+               and usb["device"] in ("none", "enumerating")):
+            time.sleep(0.2)
+            usb = read_usb(m)
+    finally:
+        m.close()
+    seen = usb["device"] or ""
+    why = None
     if not ep:
-        sys.exit(f"[{dev.name}] was started with --usb none")
-    cli = FlipperCli(ep)
+        why = "it was started with --usb none"
+    elif usb["cable"] != "computer":
+        why = (f"its USB port is {usb_text(usb)}; `./flipperemu -d {dev.name} "
+               "usb plug` plugs it into the computer")
+    elif seen == "usbip":
+        why = ("a PC has its USB port over USB/IP (run --usbip), and its "
+               "serial port with it")
+    elif "CDC ACM" not in seen:
+        why = f"it is {usb_text(usb)}, and that is no serial port"
+        if seen not in ("none", "enumerating", "failed"):
+            why += " (an app on the Flipper has USB: leaving it gives the port back)"
+    if why:
+        sys.exit(f"[{dev.name}] no CLI: {why}")
+    cli = FlipperCli(ep, lock=dev.dir / "usb.lock")
+    if prompt:
+        try:
+            cli.read_until_prompt(timeout)
+        except TimeoutError as e:
+            cli.close()
+            sys.exit(f"[{dev.name}] {e}")
+    return cli
+
+
+def cmd_cli(args):
+    dev = Device(args.device)
+    cli = open_cli(dev, prompt=bool(args.commands), timeout=args.timeout)
     try:
         if not args.commands:
-            print(f"[{dev.name}] USB CLI on {ep[1]}; Ctrl-] quits")
+            print(f"[{dev.name}] USB CLI; Ctrl-] quits")
             cli.interactive()
             return 0
-        cli.read_until_prompt(args.timeout)
         for command in args.commands:
             print(cli.run(command, timeout=args.timeout, color=sys.stdout.isatty()))
     finally:
         cli.close()
+    return 0
+
+
+# ---- files on the SD card
+
+def open_card(dev):
+    """(files, close): a device's SD card, through the firmware when it runs
+    and in the card's image when it does not (scripts/fe_files.py)"""
+    import fe_files
+    if dev.running():
+        cli = open_cli(dev)
+        return fe_files.CliFiles(cli), cli.close
+    if not dev.sd.exists():
+        sys.exit(f"[{dev.name}] has no SD card: `./flipperemu -d {dev.name} sd` "
+                 "makes one")
+    return fe_files.ImageFiles(dev.sd), lambda: None
+
+
+CARD_PATH = re.compile(r"/(ext|int|any)(/|$)")
+
+
+def transfer_progress():
+    """Shows how far a big file is: on a terminal only"""
+    if not sys.stderr.isatty():
+        return None
+
+    def show(name, done, total):
+        if total >= 32768:
+            sys.stderr.write(f"\r  {name[-48:]}: {done * 100 // total} %"
+                             if done < total else "\r\x1b[K")
+            sys.stderr.flush()
+    return show
+
+
+def copied_text(dev, files, copied, same):
+    text = f"[{dev.name}] {copied} copied"
+    if same:
+        text += f", {same} unchanged"
+    return f"{text} ({files.where})"
+
+
+def cmd_ls(args):
+    import fe_files
+    dev = Device(args.device)
+    files, close = open_card(dev)
+    try:
+        path = fe_files.clean(args.path)
+        st = files.stat(path)
+        if not st:
+            raise fe_files.StorageError("file/dir not exist", path)
+        if not st.is_dir:
+            entries = [st]
+        elif args.recursive:
+            entries = sorted(files.tree(path),
+                             key=lambda e: [p.lower() for p in e.name.split("/")])
+        else:
+            entries = fe_files.by_name(files.ls(path))
+    finally:
+        close()
+    for e in entries:
+        print(f"{'' if e.is_dir else e.size:>10}  {e.name}{'/' if e.is_dir else ''}")
+    return 0
+
+
+def cmd_push(args):
+    import fe_files
+    dev = Device(args.device)
+    sources = list(args.paths)
+    remote = sources.pop() if CARD_PATH.match(sources[-1]) else None
+    if not sources:
+        sys.exit(f"push: what is to go to {remote}? (push LOCAL... [REMOTE])")
+    files, close = open_card(dev)
+    try:
+        copied, same = fe_files.push(files, sources, remote, force=args.force,
+                                     progress=transfer_progress())
+    finally:
+        close()
+    print(copied_text(dev, files, copied, same))
+    return 0
+
+
+def cmd_pull(args):
+    import fe_files
+    dev = Device(args.device)
+    sources = list(args.paths)
+    local = sources.pop() if len(sources) > 1 and not CARD_PATH.match(sources[-1]) \
+        else "."
+    files, close = open_card(dev)
+    try:
+        copied, same = fe_files.pull(files, sources, local, force=args.force,
+                                     progress=transfer_progress())
+    finally:
+        close()
+    print(copied_text(dev, files, copied, same))
+    return 0
+
+
+def cmd_rm(args):
+    import fe_files
+    dev = Device(args.device)
+    files, close = open_card(dev)
+    try:
+        for path in args.paths:
+            if fe_files.remove(files, path, args.recursive, args.force):
+                print(f"removed {fe_files.clean(path)}")
+    finally:
+        close()
+    return 0
+
+
+def cmd_mkdir(args):
+    import fe_files
+    dev = Device(args.device)
+    files, close = open_card(dev)
+    try:
+        for path in args.paths:
+            path = fe_files.clean(path)
+            if path not in fe_files.ROOTS:
+                files.makedirs(path)
+    finally:
+        close()
     return 0
 
 
@@ -1590,6 +1749,60 @@ def main():
     p.add_argument("--timeout", type=float, default=30)
     p.set_defaults(func=cmd_cli)
 
+    card = ("  A running device is reached through its firmware (the "
+            "`storage` commands of its CLI); a stopped one's card image is "
+            "written directly, which is quicker for a lot of files.")
+    p = sub.add_parser("ls", help="what is on the device's SD card",
+                       description="List a folder of the SD card." + card)
+    p.add_argument("path", nargs="?", default="/ext",
+                   help="a folder (or a file) on the Flipper, default: /ext")
+    p.add_argument("-R", "--recursive", action="store_true",
+                   help="and all that is in its folders")
+    p.set_defaults(func=cmd_ls)
+
+    p = sub.add_parser(
+        "push", help="copy files and folders to the SD card",
+        usage="flipperemu push [-f] LOCAL... [REMOTE]",
+        description="Copy files and folders to the SD card.  REMOTE (/ext/...) "
+        "is the folder to put them in, made if it is not there; for one file "
+        "it can also be the file's new name.  Without REMOTE a file goes "
+        "where its kind lives: .sub to /ext/subghz, .ir to /ext/infrared, "
+        ".nfc to /ext/nfc, .rfid to /ext/lfrfid, .ibtn to /ext/ibutton, .js "
+        "to /ext/apps/Scripts, .fmf to /ext/music_player, and a .fap over the "
+        "one of its name under /ext/apps (else into /ext/apps).  A file that "
+        "is there already with the same bytes is left alone." + card)
+    p.add_argument("paths", nargs="+", metavar="LOCAL... [REMOTE]")
+    p.add_argument("-f", "--force", action="store_true",
+                   help="copy what is there unchanged too")
+    p.set_defaults(func=cmd_push)
+
+    p = sub.add_parser(
+        "pull", help="copy files and folders from the SD card",
+        usage="flipperemu pull [-f] REMOTE... [LOCAL]",
+        description="Copy files and folders from the SD card.  LOCAL is the "
+        "folder to put them in (default: here), made if it is not there; for "
+        "one file it can also be the file's new name." + card)
+    p.add_argument("paths", nargs="+", metavar="REMOTE... [LOCAL]")
+    p.add_argument("-f", "--force", action="store_true",
+                   help="copy what is here unchanged too")
+    p.set_defaults(func=cmd_pull)
+
+    p = sub.add_parser("rm", help="delete files and folders on the SD card",
+                       description="Delete files and folders on the SD card."
+                       + card)
+    p.add_argument("paths", nargs="+", metavar="PATH")
+    p.add_argument("-r", "--recursive", action="store_true",
+                   help="a folder with all that is in it")
+    p.add_argument("-f", "--force", action="store_true",
+                   help="say nothing about what is not there")
+    p.set_defaults(func=cmd_rm)
+
+    p = sub.add_parser("mkdir", help="make folders on the SD card",
+                       description="Make folders on the SD card, with the "
+                       "folders above them." + card)
+    p.add_argument("paths", nargs="+", metavar="PATH")
+    p.set_defaults(func=cmd_mkdir)
+
     p = sub.add_parser("log", help="what the firmware logs (to its UART: pins "
                        "13 and 14 of a real Flipper), of this run or the last")
     p.add_argument("-f", "--follow", action="store_true",
@@ -1721,10 +1934,13 @@ def main():
     p = sub.add_parser("info", help="show what is on the device")
     p.set_defaults(func=cmd_info)
 
+    import fe_files
     args = ap.parse_args()
     try:
         return args.func(args) or 0
-    except ConnectionError as e:            # e.g. the monitor is busy
+    except (ConnectionError, TimeoutError) as e:    # e.g. the monitor is busy
+        sys.exit(f"flipperemu: {e}")
+    except fe_files.FilesError as e:
         sys.exit(f"flipperemu: {e}")
 
 

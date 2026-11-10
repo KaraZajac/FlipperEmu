@@ -174,8 +174,13 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       firmware's own log level as the machine property `log-level` (`run --log-level`,
       `log --set-level`); in the window a tab beside the console, with the firmware's
       colours, filters, the level, and a notice when the firmware crashes
-- ☐ Files and apps: copy files to and from the card of a running device, install a
+- ◐ Files and apps: copy files to and from the card of a running device, install a
       `.fap` and start it, from the launcher and by dropping it on the window
+  - ☑ `ls`, `push`, `pull`, `rm`, `mkdir` in the launcher (2026-11-10): through the
+        firmware's `storage` CLI when the device runs, in the card's image (mtools)
+        when it is stopped; `scripts/files_check.py` (BRINGUP_LOG 75)
+  - ☐ `app`: install a `.fap`, start it, close it, say what the firmware logged
+  - ☐ The window: a dropped `.fap` is installed and started; files to the card
 - ☐ The firmware's own tools against an emulated Flipper (`fbt`/`ufbt` launch and
       debug over the USB serial port), and a page on the developer's loop
 - ☐ A recording of the screen (GIF) from the launcher and the window

@@ -780,6 +780,32 @@ All three are small, self-contained, and suitable for sending upstream.
     - The smoke test passed on the three firmwares, Unleashed's key cache upload
       (entry 36) among its checks, and `gui_check.py` on official and Unleashed.
 
+75. **Two ways to one card.** `push` and `pull` could write the card's image with
+    mtools, as `make_sdcard.py` does, and be done in a moment. But a running firmware
+    has the FAT mounted, and keeps what it read of it: a file put into the image behind
+    its back is not there for it, and the next thing it writes may go over it. So a
+    device that runs gets its files through the firmware's `storage` commands, and only
+    a stopped one through mtools. What each of the two would not take as given:
+    - The firmware's `mkdir` makes one folder, and `remove` takes one file or one empty
+      folder ("access denied" is its word for a folder with files in it), so the
+      launcher walks the tree itself, deepest first.
+    - Its shell drops every byte that is not ASCII, so `café.txt` would arrive under
+      another name with nothing said. Such names are refused before anything is sent.
+    - `write_chunk` appends. A file is removed before it is written again, and a file
+      of no bytes is one chunk of none.
+    - mtools reads `[` and `]` in a name as a pattern, so `brack[1].sub` matched nothing
+      until they were escaped. Not in the last name of something to be made, though:
+      there the backslash would become part of the name.
+    - mtools shows a short name in the case FAT stores, without the long one when there
+      is none: the listing is put together from both columns.
+    - The check's second boot waited for a second "Startup complete" in a log that
+      `run` had started afresh: each run's log is looked at on its own now.
+    `scripts/files_check.py` copies a folder (an empty one in it, a name with a space,
+    one with brackets, a file that ends like the CLI's prompt, one of exactly one read
+    chunk, one of no bytes) there and back both ways and has each way read what the
+    other wrote: 41 checks on official 1.5.1, Momentum mntm-012 and Unleashed
+    unlshd-094.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

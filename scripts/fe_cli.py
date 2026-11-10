@@ -7,11 +7,13 @@ The emulator bridges the firmware's USB serial port (the one qFlipper and
 `screen /dev/ttyACM0` use on a real Flipper) to a QEMU chardev with the id
 "usb". This finds that chardev through the monitor and connects to it; that
 raises DTR, the firmware starts a CLI session, and closing the connection
-ends it.
+ends it. The port is one line for one client at a time: a lock file (lock=)
+makes this project's own commands take turns.
 
     fe_cli.py MONITOR_SOCK                         interactive, Ctrl-] quits
     fe_cli.py MONITOR_SOCK "info device" "storage list /ext"
 """
+import fcntl
 import os
 import re
 import select
@@ -54,10 +56,19 @@ def usb_endpoint(monitor, label="usb"):
     return None
 
 
+class PortBusy(ConnectionError):
+    """Another command of ours has the USB serial port"""
+
+
 class FlipperCli:
-    def __init__(self, endpoint, timeout=10.0):
+    def __init__(self, endpoint, timeout=10.0, lock=None, wait=10.0):
+        """lock: a file that whoever talks on this port holds locked; it is
+        waited for for `wait` seconds (a command of a few lines is over
+        sooner), then it is PortBusy"""
         kind, where = endpoint
-        self.sock = None
+        self.sock = self.lock = None
+        if lock:
+            self.take(lock, wait)
         if kind == "pty":
             import tty
             self.fd = os.open(where, os.O_RDWR | os.O_NOCTTY)
@@ -72,11 +83,39 @@ class FlipperCli:
             raise ValueError(f"cannot connect to a '{kind}' chardev")
         self.buf = b""
 
+    def take(self, lock, wait):
+        f = open(lock, "a+")
+        end = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() > end:
+                    f.seek(0)
+                    who = f.read().strip()
+                    f.close()
+                    raise PortBusy("its USB serial port is in use"
+                                   + (f" by {who}" if who else "")
+                                   + ": one at a time") from None
+                time.sleep(0.1)
+        f.seek(0)
+        f.truncate()
+        f.write(f"`{' '.join([os.path.basename(sys.argv[0]), *sys.argv[1:]])}` "
+                f"(pid {os.getpid()})\n")
+        f.flush()
+        self.lock = f
+
     def close(self):
         if self.sock:
             self.sock.close()
         else:
             os.close(self.fd)
+        if self.lock:
+            self.lock.seek(0)
+            self.lock.truncate()
+            self.lock.close()               # (which lets it go)
+            self.lock = None
 
     def _fill(self, timeout):
         r, _, _ = select.select([self.fd], [], [], timeout)
@@ -99,11 +138,34 @@ class FlipperCli:
         out, self.buf = self.buf, b""
         return out
 
+    def read_exactly(self, n, timeout):
+        """The next n bytes, whatever they are"""
+        end = time.time() + timeout
+        while len(self.buf) < n:
+            if time.time() > end:
+                raise TimeoutError(f"the Flipper sent {len(self.buf)} of "
+                                   f"{n} bytes, and no more")
+            self._fill(min(0.2, max(0.0, end - time.time())))
+        out, self.buf = self.buf[:n], self.buf[n:]
+        return out
+
+    def read_line(self, timeout):
+        """The next line, without its end"""
+        end = time.time() + timeout
+        while b"\r\n" not in self.buf:
+            if time.time() > end:
+                raise TimeoutError("the Flipper's CLI does not answer")
+            self._fill(min(0.2, max(0.0, end - time.time())))
+        line, _, self.buf = self.buf.partition(b"\r\n")
+        return ANSI.sub(b"", line).decode(errors="replace")
+
     def write(self, data: bytes):
         if self.sock:
             self.sock.sendall(data)
-        else:
-            os.write(self.fd, data)
+            return
+        view = memoryview(data)
+        while view:                         # a pty takes what it has room for
+            view = view[os.write(self.fd, view):]
 
     def run(self, command, timeout=30.0, color=False):
         """Run one CLI command, return its output (without echo and prompt)."""

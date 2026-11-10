@@ -718,6 +718,23 @@ builds FAT32 images from official resources (`.tgz`), update packages (heatshrin
 `resources.ths` or `.tar.gz`) or a directory, using mtools, so no root is needed. Current
 firmware keeps `/int` on the card as `/ext/.int`.
 
+The launcher's `ls`, `push`, `pull`, `rm` and `mkdir` (`scripts/fe_files.py`) have two
+ways to that card, and take the one that cannot disagree with the firmware. While the
+device runs, the firmware has the filesystem mounted and its FAT in memory, so the
+image must not be written from outside: the commands go through the firmware's own
+`storage` CLI on the USB serial port (`list`, `tree`, `stat`, `md5`, `mkdir`, `remove`,
+and `write_chunk` / `read_chunks` for the bytes). When it is stopped, nothing has the
+image open, and mtools reads and writes it directly. Both are the same six operations
+behind one interface, and `scripts/files_check.py` holds them to the same results.
+
+A file goes to the firmware in pieces of 1024 bytes, each announced by its own
+`storage write_chunk PATH N` and sent when the firmware answers `Ready`. The firmware
+reads a piece whole before it writes it, so when a write fails (a full card, an error
+from the card) no bytes of the file are left on the line for its shell to read as
+commands. It comes back in pieces of 8192 (`read_chunks`), each asked for with a `y`.
+The port is one line with one reader: a command holds `devices/NAME/usb.lock` (an
+flock with its holder's name in it) for as long as it has the CLI.
+
 ## Board
 
 - **ST7567**: 132×65 RAM, page/column addressing, SEG/COM direction, start line, inverse,
