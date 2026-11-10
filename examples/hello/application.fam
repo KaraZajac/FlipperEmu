@@ -1,0 +1,11 @@
+# An app to try the emulator with: see docs/DEVELOPING.md
+App(
+    appid="fe_hello",
+    name="Hello FlipperEmu",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="fe_hello_app",
+    stack_size=2 * 1024,
+    fap_category="Examples",
+    fap_version="1.0",
+    fap_description="Counts the buttons pressed, and says so in the log",
+)

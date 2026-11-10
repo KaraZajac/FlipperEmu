@@ -29,6 +29,8 @@ you flash stays flashed, settings and files persist across runs.
   ./flipperemu push app.fap /ext/apps/Tools  copy files and folders to the card
   ./flipperemu pull /ext/nfc backup          ... and from it (rm, mkdir: as named)
   ./flipperemu app dist/my_app.fap           put an app on its card and start it
+  ./flipperemu ufbt launch                   build the app in this folder (ufbt), and
+                                             start it there; fbt: in a firmware tree
   ./flipperemu log -f                        what the firmware logs, as it logs it
   ./flipperemu ir NEC 0x04 0x08              point a virtual IR remote at it
   ./flipperemu subghz capture.sub            put a Sub-GHz signal on the air
@@ -1004,11 +1006,10 @@ def cmd_gdb(args):
     os.execvp(cmd[0], cmd)
 
 
-def open_cli(dev, prompt=True, timeout=15.0):
-    """The CLI on a running device's USB serial port (an fe_cli.FlipperCli, at
-    its prompt), or an exit that says why there is none.  The port is one line:
-    our commands take turns at it (usb.lock)."""
-    from fe_cli import FlipperCli, usb_endpoint
+def usb_serial(dev):
+    """A running device's USB serial port: (the chardev it is bridged to, why
+    no CLI can be had on it: None when one can)"""
+    from fe_cli import usb_endpoint
     m = open_monitor(dev)
     try:
         ep = usb_endpoint(m)
@@ -1034,6 +1035,15 @@ def open_cli(dev, prompt=True, timeout=15.0):
         why = f"it is {usb_text(usb)}, and that is no serial port"
         if seen not in ("none", "enumerating", "failed"):
             why += " (an app on the Flipper has USB: leaving it gives the port back)"
+    return ep, why
+
+
+def open_cli(dev, prompt=True, timeout=15.0):
+    """The CLI on a running device's USB serial port (an fe_cli.FlipperCli, at
+    its prompt), or an exit that says why there is none.  The port is one line:
+    our commands take turns at it (usb.lock)."""
+    from fe_cli import FlipperCli
+    ep, why = usb_serial(dev)
     if why:
         sys.exit(f"[{dev.name}] no CLI: {why}")
     cli = FlipperCli(ep, lock=dev.dir / "usb.lock")
@@ -1062,6 +1072,117 @@ def cmd_cli(args):
     finally:
         cli.close()
     return 0
+
+
+# ---- the firmware's own build tools: ufbt, and a firmware tree's fbt
+
+# their targets that go through a debug probe, which is to a real Flipper
+TOOL_PROBE = {"flash", "firmware_flash", "jflash", "firmware_jflash", "debug",
+              "debug_other", "debug_other_blackmagic", "blackmagic",
+              "flash_blackmagic", "updater_debug", "updater_blackmagic",
+              "gdb_trace_all", "openocd", "get_blackmagic", "get_stlink",
+              "devboard_flash"}
+# ... those that talk to a Flipper on its USB serial port
+TOOL_PORT = {"launch", "launch_app", "cli", "cli_perf", "flash_usb",
+             "flash_usb_full", "dolphin_ext", "fap_deploy"}
+# ... and what ufbt does itself, before there is a build to give a port to
+UFBT_OWN = {"update", "clean", "status"}
+# an update package with a radio stack in it: fbt's flash_usb sends the one
+# without, ufbt's sends the SDK's, which has one
+TOOL_STACK = {"fbt": {"flash_usb_full"}, "ufbt": {"flash_usb", "flash_usb_full"}}
+
+
+def split_tool(argv):
+    """`ufbt` and `fbt` are followed by that tool's arguments, which are not
+    ours to read: (our arguments, the tool's or None)"""
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-d", "--device"):
+            i += 2
+        elif a.startswith("--device=") or (a.startswith("-d") and len(a) > 2):
+            i += 1
+        elif a in ("ufbt", "fbt"):
+            return argv[:i + 1], argv[i + 1:]
+        else:
+            break
+    return argv, None
+
+
+def find_tool(name):
+    """(the command, the folder it is run in: None = this one)"""
+    if name == "ufbt":
+        tool = shutil.which("ufbt")
+        if not tool:
+            sys.exit("flipperemu: no `ufbt` on the PATH: `pipx install ufbt` "
+                     "(or pip, in a virtual environment) gets it")
+        return [tool], None
+    here = pathlib.Path.cwd()
+    for folder in (here, *here.parents):
+        if (folder / "fbt").is_file() and (folder / "SConstruct").is_file():
+            return [str(folder / "fbt")], folder
+    sys.exit("flipperemu: no `fbt` in this folder or above it: it is run in "
+             "a firmware's source tree")
+
+
+def cmd_tool(args):
+    """Run ufbt or fbt as it was called, with this device's USB serial port
+    named as the Flipper to talk to.  Left to themselves they take a real
+    Flipper that is plugged into this computer, before they look at
+    FLIPPER_PATH."""
+    from fe_cli import leave_port, take_port
+    dev = Device(args.device)
+    name, rest = args.cmd, list(args.tool_args or [])
+    cmd, cwd = find_tool(name)
+    if name == "ufbt" and UFBT_OWN.intersection(rest):
+        return subprocess.call([*cmd, *rest], cwd=cwd)
+    targets = {a for a in rest if not a.startswith("-") and "=" not in a}
+    probe = sorted(targets & TOOL_PROBE)
+    if probe:
+        sys.exit(f"flipperemu: `{name} {probe[0]}` goes through a debug probe, "
+                 "to a real Flipper, and not to this one.  "
+                 f"`./flipperemu -d {dev.name} flash FILE` programs it, "
+                 f"`./flipperemu -d {dev.name} gdb` debugs it")
+    stack = sorted(targets & TOOL_STACK[name])
+    if stack:
+        pkg = "PACKAGE"
+        if name == "ufbt":
+            home = pathlib.Path(os.environ.get("UFBT_HOME") or "~/.ufbt")
+            found = sorted(home.expanduser().glob("current/f7-update-*"))
+            pkg = str(found[-1]) if found else "its SDK's f7-update-… folder"
+        sys.exit(f"flipperemu: `{name} {stack[0]}` sends an update package with a "
+                 "radio stack in it, which this Flipper's second core cannot "
+                 "install: its updater would stop at \"CRC mismatch #[3-99]\" "
+                 "(a held Back leaves it).\n"
+                 + ("`fbt flash_usb` sends the package without one, and works.  "
+                    if name == "fbt" else "")
+                 + f"`./flipperemu -d {dev.name} run --update {pkg}`, with "
+                 "the device stopped, installs it without that stage")
+    lock = None
+    if not any(a.startswith("FLIP_PORT=") for a in rest):
+        port = sorted(targets & TOOL_PORT)
+        if port:
+            what = f"`{name} {port[0]}`"
+            if not dev.running():
+                sys.exit(f"[{dev.name}] is not running, and {what} talks to "
+                         "it on its USB serial port "
+                         f"(`./flipperemu -d {dev.name} run`)")
+            ep, why = usb_serial(dev)
+            if not why and ep[0] != "pty":
+                why = (f"it is a {ep[0]} socket (run --usb), and the "
+                       "firmware's tools open a serial port: the default, "
+                       "--usb pty, is one")
+            if why:
+                sys.exit(f"[{dev.name}] no USB serial port for {what}: {why}")
+            lock = take_port(dev.dir / "usb.lock")
+        # (a stopped device has no usb.tty: then a target that is not in the
+        # list above fails on that name, and does not find a real Flipper)
+        rest.append(f"FLIP_PORT={dev.usb_tty}")
+    try:
+        return subprocess.call([*cmd, *rest], cwd=cwd)
+    finally:
+        if lock:
+            leave_port(lock)
 
 
 # ---- files on the SD card
@@ -1991,6 +2112,14 @@ def main():
     card = ("  A running device is reached through its firmware (the "
             "`storage` commands of its CLI); a stopped one's card image is "
             "written directly, which is quicker for a lot of files.")
+    for tool, what in (
+            ("ufbt", "run ufbt with this device as its Flipper: `ufbt launch` "
+                     "builds the app in this folder and starts it there"),
+            ("fbt", "the same for the ./fbt of the firmware tree this is "
+                    "called in (launch, cli, flash_usb)")):
+        p = sub.add_parser(tool, help=what, add_help=False)
+        p.set_defaults(func=cmd_tool)
+
     p = sub.add_parser("ls", help="what is on the device's SD card",
                        description="List a folder of the SD card." + card)
     p.add_argument("path", nargs="?", default="/ext",
@@ -2206,7 +2335,9 @@ def main():
     p.set_defaults(func=cmd_info)
 
     import fe_files
-    args = ap.parse_args()
+    argv, tool_args = split_tool(sys.argv[1:])
+    args = ap.parse_args(argv)
+    args.tool_args = tool_args
     try:
         return args.func(args) or 0
     except (ConnectionError, TimeoutError) as e:    # e.g. the monitor is busy

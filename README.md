@@ -32,7 +32,8 @@ Classic 1K) and emulate, USB/IP export, warm reboot, no crash): **official 1.5.1
 **Momentum mntm-012**, **Unleashed unlshd-094**. The window passes
 `scripts/gui_check.py` (clicked buttons, the firmware log and its level, a file copied
 to the card, an app dropped on it, the bench, switching off and on, the Left + Back
-reboot, installing firmware) on the same three, off-screen.
+reboot, installing firmware) on the same three, off-screen. `scripts/ufbt_check.py`
+(ufbt 0.2.6 building `examples/hello` and launching it there) passes on the official one.
 
 | | |
 |:-:|:-:|
@@ -55,6 +56,11 @@ reboot, installing firmware) on the same three, off-screen.
 - An app from your build directory onto the Flipper and started in one command,
   `./flipperemu app my_app.fap`: what it was built for, the app that runs closed
   first, and what the firmware logged about the start.
+- The firmware's own build tools with the emulated Flipper as their Flipper:
+  `./flipperemu ufbt launch` in an app's folder builds it, puts it there and starts
+  it, as on a real one. A real Flipper that is plugged in is left alone.
+  [docs/DEVELOPING.md](docs/DEVELOPING.md) is the page for whoever writes an app or a
+  firmware.
 - Persistent devices: the internal flash (`flash.img`) and the battery-backed state (fuel
   gauge data memory and RTC backup domain, `nvram.bin`) survive restarts.
 - The firmware's log (USART1: `[I][Flipper] Startup complete`, …) on stdio, a pty or
@@ -142,7 +148,8 @@ reboot, installing firmware) on the same three, off-screen.
 
 **Not yet** (see [PLAN.md](PLAN.md))
 - qFlipper's firmware *update* includes a radio-stack stage that the emulated CPU2
-  cannot install; use `./flipperemu run --update` for updates.
+  cannot install (the updater stops there with "CRC mismatch #[3-99]"); use
+  `./flipperemu run --update` for updates.
 - Bluetooth (needs a radio stack).
 - NFC: Ultralight C, ISO14443-4 (DESFire, bank cards), ISO14443B, ISO15693 and FeliCa
   cards. When the Flipper emulates a MIFARE Classic, the virtual reader gets as far as
@@ -196,6 +203,9 @@ is OK and **Backspace/Esc** is Back. The firmware log streams to the terminal, a
 Each `-d NAME` is an independent virtual Flipper in `devices/NAME/`, with its own flash, SD
 card and NVRAM. Re-running with `-f` reflashes it the way DFU does (only the touched pages
 are erased). Without `-f` it boots whatever is already flashed.
+
+Writing an app or a firmware? [docs/DEVELOPING.md](docs/DEVELOPING.md) has the loop:
+`ufbt launch` and `fbt` against the emulated Flipper, its log, a crash.
 
 ## The window
 
@@ -299,6 +309,7 @@ switches it off and on, and reboots it.
 | `rm [-r] [-f] PATH…` \| `mkdir PATH…` | remove files and folders on the card; make folders |
 | `app FILE.fap [ARGS]` \| `app NAME [ARGS]` \| `app /ext/….fap [ARGS]` | put an app on the card and start it; start one of the firmware's own, or one on the card |
 | `app` \| `app --close` \| `app --list` | which app runs; close it; the apps the firmware has and the ones on the card |
+| `ufbt [ARGS]` \| `fbt [ARGS]` | your `ufbt`, or the `fbt` of the firmware tree you are in, with this device as its Flipper: `ufbt launch`, `fbt cli`, … |
 | `log [-f] [-n N] [-l LEVEL] [-g REGEX] [--previous]` | what the firmware logged (its UART), in its colours: follow it, the last N lines, this level and worse, the lines that match |
 | `log --set-level LEVEL` | how much the firmware logs, from its next start: none, error, warn, info, debug, trace or default |
 | `ir PROTO ADDR CMD` \| `ir raw …` \| `ir FILE.ir [NAME]` | send an infrared signal to the device's receiver |
@@ -501,6 +512,31 @@ behind F5, with its lines in the console.
 
 `scripts/app_check.py FIRMWARE` checks this on a throwaway device with an app the
 firmware brought along: 23 checks on each of the three firmwares.
+
+### ufbt and fbt
+
+```sh
+cd examples/hello                      # an app's folder (this one comes along, to try it)
+../../flipperemu ufbt launch           # build it, put it on the Flipper, start it
+../../flipperemu log -f -g FeHello     # what it logs
+```
+
+`./flipperemu ufbt …` is your own [ufbt](https://github.com/flipperdevices/flipperzero-ufbt)
+with one thing added: the emulated Flipper's USB serial port as the port to use
+(`FLIP_PORT=devices/NAME/usb.tty`). That argument matters. Left to themselves the
+firmware's tools look for a real Flipper first, and one that is plugged in gets the
+app. `./flipperemu fbt …` does the same for the `fbt` of the firmware tree you are in.
+
+Targets that talk to the Flipper over USB work as on a real one: `launch`, `cli`,
+and `fbt flash_usb`. Targets that go through a debug probe (`flash`, `debug`,
+`blackmagic`, …) are refused, with the launcher's command for it, and so is an update
+package that brings a radio stack (`ufbt flash_usb`, `fbt flash_usb_full`).
+Everything else (a plain build, `ufbt create`, `ufbt update`) is passed on as it is.
+
+[docs/DEVELOPING.md](docs/DEVELOPING.md) goes through it: the loop for an app, the SDK
+that has to match the firmware, a firmware tree, and what the usual failures mean.
+`scripts/ufbt_check.py FIRMWARE` checks it with the `ufbt` on the PATH (17 checks on
+the official firmware; `fbt` in a firmware tree has not been tried yet).
 
 ### Smoke-testing a build
 
@@ -1127,6 +1163,8 @@ docs/ARCHITECTURE.md   how the machine is modelled, device by device
 docs/BRINGUP_LOG.md    every bug found on the way (incl. 3 QEMU fixes and the USB races)
 docs/RADIO_LINK.md     the protocol between an emulated radio and a real one
 docs/PANEL_LINK.md     the protocol between the emulator and the window
+docs/DEVELOPING.md     writing an app or a firmware with it: ufbt, fbt, the loop
+examples/hello/        an app to try that with
 flipperemu             launcher / device manager
 qemu/hw/arm/flipper/   the QEMU machine + STM32WB55 SoC + board devices (C)
 qemu/patches/          fixes to upstream QEMU (SysTick, ssi-sd, SD SPI state)

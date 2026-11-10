@@ -60,11 +60,43 @@ class PortBusy(ConnectionError):
     """Another command of ours has the USB serial port"""
 
 
+def take_port(lock, wait=10.0):
+    """Lock the file that whoever talks on a device's USB serial port holds
+    locked.  It is waited for for `wait` seconds (a command of a few lines is
+    over sooner), then it is PortBusy.  -> the open file, for leave_port()"""
+    f = open(lock, "a+")
+    end = time.monotonic() + wait
+    while True:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if time.monotonic() > end:
+                f.seek(0)
+                who = f.read().strip()
+                f.close()
+                raise PortBusy("its USB serial port is in use"
+                               + (f" by {who}" if who else "")
+                               + ": one at a time") from None
+            time.sleep(0.1)
+    f.seek(0)
+    f.truncate()
+    f.write(f"`{' '.join([os.path.basename(sys.argv[0]), *sys.argv[1:]])}` "
+            f"(pid {os.getpid()})\n")
+    f.flush()
+    return f
+
+
+def leave_port(f):
+    f.seek(0)
+    f.truncate()
+    f.close()                               # (which lets it go)
+
+
 class FlipperCli:
     def __init__(self, endpoint, timeout=10.0, lock=None, wait=10.0):
-        """lock: a file that whoever talks on this port holds locked; it is
-        waited for for `wait` seconds (a command of a few lines is over
-        sooner), then it is PortBusy"""
+        """lock: a file that whoever talks on this port holds locked
+        (take_port)"""
         kind, where = endpoint
         self.sock = self.lock = None
         if lock:
@@ -84,27 +116,7 @@ class FlipperCli:
         self.buf = b""
 
     def take(self, lock, wait):
-        f = open(lock, "a+")
-        end = time.monotonic() + wait
-        while True:
-            try:
-                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except OSError:
-                if time.monotonic() > end:
-                    f.seek(0)
-                    who = f.read().strip()
-                    f.close()
-                    raise PortBusy("its USB serial port is in use"
-                                   + (f" by {who}" if who else "")
-                                   + ": one at a time") from None
-                time.sleep(0.1)
-        f.seek(0)
-        f.truncate()
-        f.write(f"`{' '.join([os.path.basename(sys.argv[0]), *sys.argv[1:]])}` "
-                f"(pid {os.getpid()})\n")
-        f.flush()
-        self.lock = f
+        self.lock = take_port(lock, wait)
 
     def close(self):
         if self.sock:
@@ -112,9 +124,7 @@ class FlipperCli:
         else:
             os.close(self.fd)
         if self.lock:
-            self.lock.seek(0)
-            self.lock.truncate()
-            self.lock.close()               # (which lets it go)
+            leave_port(self.lock)
             self.lock = None
 
     def _fill(self, timeout):

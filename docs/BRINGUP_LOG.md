@@ -862,6 +862,41 @@ All three are small, self-contained, and suitable for sending upstream.
     do not bring Snake Game along under that name); the question on the screen on
     Momentum and Unleashed only (the official one does not ask).
 
+78. **The tools find the real Flipper first.** `ufbt launch` against the emulated port
+    needed no change to the model at all: built, installed, started, the app's log
+    lines in the log, its crash and the restart as on hardware. What it needed was
+    care about which Flipper. The tools' port search takes the first serial port named
+    `flip_…` before it looks at `FLIPPER_PATH`, and a real Flipper was plugged into
+    the machine this was written on: an `ufbt launch` without a port would have
+    installed the test app on it. So nothing here runs a tool without `FLIP_PORT=`,
+    and `./flipperemu ufbt` and `fbt` exist to add it. Three more things on the way:
+    - `ufbt flash_usb` uploaded the SDK's update package, the Flipper restarted into
+      its updater, and that stopped: "Update Failed! CRC mismatch #[3-99]". The files
+      on the card were the SDK's, byte for byte, and the radio image's CRC is the
+      manifest's. Stage 3 is the radio image's check, and it has no failure of its
+      own for what comes right after the CRC: the address check before the stack is
+      written. The option bytes say that the secure area begins at 0x080D7000 (the
+      manifest's "OB reference", which the updater also compares), the stack is to go
+      there, and an address that is not below the secure area is refused. On a real
+      Flipper the stage is skipped when the stack that is installed is the package's,
+      and before another one is written the FUS removes the old one, which moves the
+      secure area up. Here the option bytes are those of a Flipper with its stack and
+      the CPU2 is a FUS without one, which is the known limit. A held Back leaves the
+      updater, and nothing was written. The same package without its radio stage (what `fbt flash_usb` sends,
+      and what `run --update` makes of any package), sent with the official
+      `selfupdate.py`, installed and came back. The launcher refuses the two targets
+      that send a stack, with the command that works.
+    - The example app could not be launched twice: `loader close` answered "has to be
+      closed manually" (entry 77's Snake Game again, in an app of our own), and
+      `runfap.py` ends there with "Unexpected response". An app with a message queue
+      of its own has to take the request itself: `furi_thread_set_signal_callback`,
+      and `FuriSignalExit` queued like a key. `examples/hello` does that now, and
+      the page says what the message means.
+    - ufbt's scripts print carriage-return progress bars: a log of them read with
+      `tail` is one line of 40 kB.
+    `scripts/ufbt_check.py`: 17 checks on the official 1.5.1 with ufbt 0.2.6. `fbt` in
+    a firmware's tree is not tried yet.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

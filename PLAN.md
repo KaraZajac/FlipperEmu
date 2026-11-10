@@ -188,8 +188,19 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         it again after a build, an Apps menu; files and folders to the card from the
         microSD menu and by dropping them, also while it is off; the launcher's
         lines come into the console as they are printed
-- ☐ The firmware's own tools against an emulated Flipper (`fbt`/`ufbt` launch and
-      debug over the USB serial port), and a page on the developer's loop
+- ◐ The firmware's own tools against an emulated Flipper, and a page on the
+      developer's loop
+  - ☑ `./flipperemu ufbt …` and `fbt …` (2026-11-10): the tool as it is, with the
+        emulated port named (`FLIP_PORT=`), so that a real Flipper that is plugged in
+        is not the one it finds; the port held meanwhile; probe targets and packages
+        with a radio stack refused with what does it here; `examples/hello`;
+        `docs/DEVELOPING.md`; `scripts/ufbt_check.py` (BRINGUP_LOG 78)
+  - ☐ `fbt` in a firmware's tree, tried: build, `run -f` the `.elf`, `flash_usb`,
+        `launch APPSRC=`; ufbt with Momentum's and Unleashed's SDK
+  - ☐ An update package sent to a running device by the launcher itself (`push` and
+        `update install`, without the radio stage), for `ufbt flash_usb`
+  - ☐ Debugging an app: gdb with the firmware's and the app's symbols (the SDK's
+        `flipperapps.py`), a breakpoint in the app before it starts
 - ☐ A recording of the screen (GIF) from the launcher and the window
 - ☐ gdb on demand for a device that runs already; pause and continue
 

@@ -792,6 +792,17 @@ as `fbt launch` uses it on a real Flipper: `loader close`, `loader open PATH [AR
   the launcher marks the end of `devices/NAME/uart.log` before `loader open` and reads
   what the firmware logged from there on: warnings, errors, and a crash.
 
+**The firmware's own tools** (the launcher's `ufbt` and `fbt`). They need nothing from
+the model: the USB serial port is a pty, and `runfap.py`, `storage.py`, `selfupdate.py`
+and miniterm open it like a `/dev/ttyACM`. What they need is its name. Their port
+search (`scripts/flipper/utils/cdc.py`) takes a port that is named, else the first
+serial port whose name holds `flip_`, which is a real Flipper, and only when there is
+none the environment's `FLIPPER_PATH`. So the launcher names it, as scons takes it:
+`FLIP_PORT=devices/NAME/usb.tty` after the tool's arguments. Around that it holds the
+port's lock (`devices/NAME/usb.lock`, which its own commands take turns on), and it
+reads the targets to refuse two kinds: the ones for a debug probe, and an update
+package with a radio stack in it, which stops in the updater (BRINGUP_LOG 78).
+
 ## Board
 
 - **ST7567**: 132×65 RAM, page/column addressing, SEG/COM direction, start line, inverse,

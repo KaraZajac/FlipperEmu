@@ -10,3 +10,7 @@ __pycache__/
 
 # local copies of third-party docs consulted for RESEARCH.md (not ours to publish)
 research/prior-art/
+
+# what ufbt leaves in an app folder
+examples/*/dist/
+examples/*/.vscode/
