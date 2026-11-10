@@ -13,8 +13,10 @@ runs; an app that takes no request to close is left with its Back button.
 Then what must not work: the same app with another API version in its
 manifest (which the loader refuses, or asks about on the screen: then the
 question is cancelled once, and answered once), a file that is no app, a name
-the firmware does not know; and what a stopped device takes.  Exit status
-0 = pass.
+the firmware does not know.  Last, an app that does not live through being
+asked to close (the firmware's NFC app in the middle of a read: a check of
+its own fails, and the firmware starts again): the launcher says what
+happened.  And what a stopped device takes.  Exit status 0 = pass.
 """
 import argparse
 import pathlib
@@ -180,6 +182,38 @@ def app_checks(b, work):
     return local
 
 
+def crash_checks(b):
+    """The loader's request ends an app's event loop where it is.  The NFC app
+    of the official firmware frees its scanner then, which is still at work
+    while it reads: a furi_check fails, and the firmware starts again."""
+    code, text = b.fe("app", "NFC")
+    if code:
+        print("  SKIP  no NFC app in this firmware to close in the middle of "
+              "a read", flush=True)
+        return
+    time.sleep(2)
+    b.fe("press", "ok")                     # its first item: Read
+    time.sleep(3)
+    code, text = b.fe("app", "--close")
+    if code == 0:
+        print("  SKIP  this firmware's NFC app closes in the middle of a read",
+              flush=True)
+        return
+    check("an app that crashes when it is asked to close (NFC, while it "
+          "reads): the firmware's crash is reported, with what its log says",
+          code == 1 and re.search(r"the firmware crashed \(.*furi_check "
+                                  r"failed\)", text)
+          and "has started again" in text and "Traceback" not in text, text)
+    end = time.monotonic() + 40
+    while True:
+        code, text = b.fe("app")
+        if (code == 0 and "no app runs" in text) or time.monotonic() > end:
+            break
+        time.sleep(1)
+    check("after it the firmware is up again: no app runs",
+          code == 0 and "no app runs" in text, text)
+
+
 def stopped_checks(b, local):
     code, text = b.fe("app", local)
     check("a stopped device: it says that it is its firmware that starts apps",
@@ -212,6 +246,7 @@ def main():
             crash = CRASH.search(log)
             check("no crash in the firmware's log", not crash,
                   crash and log[max(0, crash.start() - 300):crash.end() + 300])
+            crash_checks(b)
             b.stop()
             if local:
                 stopped_checks(b, local)

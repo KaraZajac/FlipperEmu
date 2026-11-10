@@ -361,6 +361,14 @@ Then `./flipperemu log -f` for what the firmware says, at the level you set
   with a loop of its own has to ask for it (`furi_thread_set_signal_callback`, as
   `examples/hello` does; a view dispatcher or an event loop does it for you).
   `./flipperemu app --close` closes it with its Back button, and then `launch` again.
+- **"the firmware crashed (…) when the app was asked to close, and has started
+  again".** The other side of the same request. It ends the app's event loop where it
+  is, the app goes on to free what it has, and something of that was still at work: a
+  worker thread, a timer, a scan. The firmware's own NFC app does this when it is asked
+  in the middle of a read (`nfc_scanner_free` checks that the scanner is idle). `fbt
+  launch` and `ufbt launch` ask in the same way, so an app that crashes here crashes
+  on a `launch` over itself on a real Flipper too. Stop what is at work after the loop
+  returns, then free it; `./flipperemu gdb` has the place (the backtrace of the crash).
 - **"its USB serial port is in use by …".** Another command talks to the Flipper: a
   `ufbt cli` left open, a long `push`. One at a time.
 - **"no USB serial port for `ufbt launch`".** The cable is out (`./flipperemu usb
@@ -419,6 +427,10 @@ ending where it stays), and starts NFC > Read for the blink: flashes of one colo
 with dark between, `status` saying that it blinks and in which colour, and an end to
 it with Back. `scripts/smoke_test.py` reads engine 1 after the fade: on hold, at the
 brightness the backlight has.
+
+An app that does not live through the request to close is the NFC app in the middle
+of a read: `scripts/app_check.py` asks it, and wants the crash named and the firmware
+back with no app running.
 
 By hand: the official self-update script sending a package without a radio stack
 (what `fbt flash_usb` sends) to a running device, which installed it and came back.

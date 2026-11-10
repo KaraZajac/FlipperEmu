@@ -123,9 +123,27 @@ def firmware_api(cli):
         return None
 
 
+class Restarted(AppError):
+    """The firmware started again under a command: it crashed, or was reset"""
+
+
+# what a new CLI session begins with, on every firmware
+GREETING = re.compile(r"Firmware version: .+ built on ")
+
+
+def ask_loader(cli, command):
+    """What the loader answers.  Restarted: a firmware that has just started
+    answers, and not the one that was asked (what it says about apps is true
+    of it, and no answer to the question)."""
+    out = cli.run(command, timeout=15)
+    if GREETING.search(out):
+        raise Restarted("the firmware started again meanwhile")
+    return out
+
+
 def running(cli):
     """The name of the app that runs, or None"""
-    out = cli.run("loader info", timeout=15)
+    out = ask_loader(cli, "loader info")
     m = re.search(r'Application "(.*)" is running', out)
     if m:
         return m.group(1)
@@ -144,10 +162,12 @@ def close(cli, wait=8.0, back=None):
     The loader asks an app to close, and an app with a loop of its own (many
     small ones) does not hear that.  back: a function that presses the
     Flipper's Back button (long=False): what a person would do then.
-    AppError: an app that is still there after all of it."""
+    AppError: an app that is still there after all of it.  Restarted: the
+    firmware did not live through it (the request ends an app's event loop
+    where it is, and what the app then frees may still be at work)."""
     closed = []
     while True:
-        out = cli.run("loader close", timeout=15)
+        out = ask_loader(cli, "loader close")
         m = re.search(r'Application "(.*)" (was closed|has to be closed '
                       r'manually)', out)
         if "No application is running" in out:

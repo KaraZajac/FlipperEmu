@@ -517,6 +517,13 @@ dist/my_app.fap -> /ext/apps/Tools/my_app.fap (26916 bytes)
   loop of its own (many small ones) does not hear that, and then its Back button is
   pressed, as a person would: a few short presses, then a long one. If it is still
   there, the command says so and starts nothing.
+- **When the firmware does not live through that.** The loader's request ends an app's
+  event loop where it is, and an app that frees something which is still at work
+  crashes the firmware. The firmware's own NFC app does, asked to close in the middle
+  of a read. `app` and `app --close` then say `the firmware crashed ([NFC] furi_check
+  failed) when the app was asked to close, and has started again`, with exit status 1.
+  If it is your app: when its event loop returns, stop what is still at work (a
+  worker, a timer, a scan) before you free it.
 - **After the start** it says whether the app runs. If the firmware logged warnings or
   errors since, they are shown; if the firmware crashed, its crash message is, and the
   exit status is 1. `./flipperemu log -f` in another terminal shows all of it.
@@ -537,7 +544,8 @@ In [the window](#the-window) the same command is behind a `.fap` dropped on it a
 behind F5, with its lines in the console.
 
 `scripts/app_check.py FIRMWARE` checks this on a throwaway device with an app the
-firmware brought along: 23 checks on each of the three firmwares.
+firmware brought along, and with the firmware's NFC app closed in the middle of a
+read, for the crash: 25 checks on each of the three firmwares.
 
 ### ufbt and fbt
 

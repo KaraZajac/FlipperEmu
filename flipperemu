@@ -1668,10 +1668,26 @@ def app_close(dev, cli):
     """Close the app that runs, with its Back button if it has to be.
     What to say about it: a list, empty when none ran."""
     import fe_apps
+    try:
+        mark = dev.uart.stat().st_size
+    except OSError:
+        mark = None
+    try:
+        closed = fe_apps.close(
+            cli, back=lambda long=False: press_back(dev, long))
+    except fe_apps.Restarted:
+        crash = log_trouble(dev.uart, mark)[1] if mark is not None else None
+        raise fe_apps.AppError(
+            "the firmware " + (f"crashed ({crash})" if crash else "stopped")
+            + " when the app was asked to close, and has started again.  "
+            "The loader's request ends an app where it is, and not every "
+            "app is ready for that in the middle of its work (reading, "
+            "sending): leave that with its Back button first.  "
+            f"`./flipperemu -d {dev.name} log` has the firmware's report"
+        ) from None
     return [f'"{name}" closed' + (" (with its Back button: it takes no "
                                   "request to close)" if pressed else "")
-            for name, pressed in fe_apps.close(
-                cli, back=lambda long=False: press_back(dev, long))]
+            for name, pressed in closed]
 
 
 def cmd_app(args):

@@ -1034,6 +1034,36 @@ All three are small, self-contained, and suitable for sending upstream.
       (ten or so on the way to 255) and the flashes of NFC > Read; the smoke test
       reads engine 1's end (`hold@0=255`).
 
+83. **An app asked to close in the middle of its work.** The first version of that
+    check closed NFC while it read, with the launcher's `app --close` (the loader's
+    `loader close`, as `fbt launch` does it). A few checks later a Back held for 5.6 s
+    did not bring the power-off dialog, and it looked like the firmware's clock
+    running slow.
+    - It was not. `input dump` on the CLI showed press and release 5.6 s apart, and
+      the firmware's `uptime` kept pace with the host's clock, plugged in and on
+      battery. The log's time stamps gave it away: 12 s where it should have been
+      minutes. The firmware had started again, and Back was held on a desktop that
+      was not there yet.
+    - `[CRASH][NFC] furi_check failed`. The loader's request ends the app's event
+      loop where it is, the app frees its scanner, and `nfc_scanner_free()` checks
+      that it is idle. In the middle of a read it is not. This is the firmware's
+      own, in its source; the emulator only went along.
+    - The launcher made nothing of it. A firmware that starts again greets the CLI
+      with its banner, and the banner was taken for the loader's answer ("the
+      firmware's loader said:" and a dolphin), or, when the new firmware's `No
+      application is running` came in the same read, for success: `"NFC" closed`.
+      Now a greeting in an answer is a restart (`fe_apps.Restarted`), and `app
+      --close` says so with the crash from the firmware's log: `the firmware
+      crashed ([NFC] furi_check failed) when the app was asked to close, and has
+      started again`. Exit status 1.
+    - For a developer this is a result and not an accident: an app of their own
+      that does not clean up when its loop ends shows the same, and `fbt launch`
+      closes the app that runs in just this way.
+    - The window check leaves the read with Back first, as a person does.
+      `app_check.py` closes NFC in the middle of a read on purpose, after its
+      "no crash" check, and wants the report: 25 checks now, on each of the three
+      firmwares. Momentum's and Unleashed's NFC app crash in the same way.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
