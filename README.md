@@ -37,7 +37,7 @@ copied to the card, an app dropped on it, the LED blinking while NFC reads, the 
 switching off and on, the Left + Back reboot, installing firmware) on the same three,
 off-screen. `scripts/update_check.py` (an update package sent to a running device
 through its CLI and installed there, and the updater's error screen) passes on the
-official firmware and Unleashed, and from the one to the other.
+same three, and from the official firmware to Unleashed.
 `scripts/ufbt_check.py` (ufbt 0.2.6 building `examples/hello`, launching it there, and
 `ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's and that app's
 symbols) pass on the official one.
@@ -673,7 +673,7 @@ $ ./flipperemu -d mine update firmware/official-1.5.1/flipper-z-f7-update-1.5.1.
 ```
 
 The CLI takes some 20 KB/s, as a real Flipper's does: two minutes for the official
-package, nine or so for Momentum's 12 MB. A file that is on the card already with the
+package, thirteen for Momentum's 12 MB. A file that is on the card already with the
 same bytes is not sent again. The package is a `.tgz`, the folder that was in one
 (`dist/f7-D/f7-update-local` of a firmware tree, ufbt's `current/f7-update-*`), or
 its `update.fuf`. `./flipperemu ufbt flash_usb` is this command with the SDK's package.
@@ -682,14 +682,15 @@ in, for a look at what the updater does with it: it stops, the launcher says so 
 seconds, and a held Back (`press --hold 1500 back`) starts the firmware that is there.
 
 An updater decides on the firmware's log level when it is done, on a real Flipper too:
-the official one sets the default, Unleashed's sets none, and its log is silent from
-then on. `update` says when the level is another than before, with the command that
-sets it again (`log --set-level`). If the level hides the updater's steps when you
-start, it gets `info` for as long as it works, so that an error on its screen is seen.
+the official one sets the default, Momentum's and Unleashed's set none, and the log is
+silent from then on. `update` says when the level is another than before, with the
+command that sets it again (`log --set-level`). If the level hides the updater's steps
+when you start, it gets `info` for as long as it works, so that an error on its screen
+is seen.
 
 `scripts/update_check.py FIRMWARE [--package PKG]` checks all of that on a throwaway
-device (25 checks: the official firmware and Unleashed with their own packages,
-and the official one updated to Unleashed).
+device (25 checks: the official firmware, Momentum and Unleashed with their own
+packages, and the official one updated to Unleashed).
 
 | | |
 |:-:|:-:|

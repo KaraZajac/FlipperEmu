@@ -421,8 +421,8 @@ register (the machine's `log-level` property reads and writes it), and the firmw
 takes it when it starts. If it is none, error or warn, the launcher writes `info`
 there before `update install`, for the starts of the update, and the old level again
 if the update did not end well. An updater that ends well writes a level itself (the
-official one the default, Unleashed's none), and that one stays: the launcher only
-says that it is another than before.
+official one the default, Momentum's and Unleashed's none), and that one stays: the
+launcher only says that it is another than before.
 
 ## Timers (`stm32wb55_tim.c`) and the IR receiver
 

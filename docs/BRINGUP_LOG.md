@@ -1071,8 +1071,8 @@ All three are small, self-contained, and suitable for sending upstream.
     PKG` sends the package as the firmware's own tools send it, file by file through
     the CLI, and then `update install`.
     - The CLI takes 22 KB/s (`storage write_chunk`, 1024 bytes a time, as `push`
-      does it): 111 s for the official package's 2.5 MB, nine minutes or so for
-      Momentum's 12. A real Flipper is no faster. A file that is on the card with
+      does it): 111 s for the official package's 2.5 MB, 13 minutes for Momentum's
+      12 (16 KB/s there). A real Flipper is no faster. A file that is on the card with
       the same size and md5 is not sent again, so a second time costs seconds.
     - `update install` gives no prompt back. "Verifying update package", then
       `Error: …. Stopping update.`, or `OK.` and "Restarting to apply update. BRB",
@@ -1095,8 +1095,10 @@ All three are small, self-contained, and suitable for sending upstream.
       Unleashed's updater ends its flash stage with
       `furi_hal_rtc_set_log_level(FuriLogLevelNone)` where the official one has
       `FuriLogLevelDefault` (production builds; `update_task_worker_flasher.c`). So
-      a real Flipper is as silent after it. The launcher says so when the level is
-      another than before the update, with `log --set-level` to set it again.
+      a real Flipper is as silent after it. Momentum's updater left the level at
+      none as well (seen in the check; its source was not read for it). The
+      launcher says so when the level is another than before the update, with
+      `log --set-level` to set it again.
     - That made the next update blind: no stage lines, and a wait of 15 minutes in
       front of an error screen. The level is in the RTC register, and the updater
       is the firmware's next start: when the level hides `info`, the launcher
@@ -1120,6 +1122,8 @@ All three are small, self-contained, and suitable for sending upstream.
     - `scripts/update_check.py`: 25 checks. Official 1.5.1 with its own
       package: 218 s, 100 of them the updater. Unleashed with its own (5.3 MB):
       368 s, 127 the updater. Official to Unleashed: 354 s, 138 the updater.
+      Momentum with its own (12 MB, 11 of them `resources.tar.gz`): 1016 s, 255
+      the updater.
       `ufbt_check.py` runs the real `ufbt flash_usb` now: 29 checks.
 
 ## Things that were right the first time (and why)
@@ -1155,7 +1159,8 @@ All three are small, self-contained, and suitable for sending upstream.
 - `update` on a device that runs, official 1.5.1's package (2.5 MB without the radio
   stack): 218 s, of which 111 s through the CLI at 22 KB/s and 100 s in the updater,
   where the firmware starts four times. The updater's error with the radio stage
-  kept: reported 4 s after `update install`.
+  kept: reported 4 s after `update install`. Momentum's package (12 MB): 1016 s,
+  of which 13 minutes through the CLI at 16 KB/s and 255 s in the updater.
 - The enclave check through the firmware (`enclave_check.py -f`): four boots and 22
   checks in 40 to 48 s, on each of the three firmwares.
 - USB: 33 ms from D+ pull-up to enumerated: 25 ms of attach debounce, suspend and

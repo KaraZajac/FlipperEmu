@@ -374,8 +374,8 @@ Then `./flipperemu log -f` for what the firmware says, at the level you set
   with the same package sends only what changed. `run --update` writes the package
   into the card's image instead, in a second, and needs the device stopped for it.
 - **No log after an update.** The updater sets the firmware's log level when it is
-  done: the official one to the default, Unleashed's to none. That is the firmware's
-  doing, and a real Flipper has it too. `update` says so when the level is another
+  done: the official one to the default, Momentum's and Unleashed's to none. That is
+  the firmware's doing, and a real Flipper has it too. `update` says so when the level is another
   than before; `./flipperemu log --set-level info` and `./flipperemu reset` bring the
   log back, and `status` shows the level.
 - **`ufbt launch` ends with "Unexpected response: Application … has to be closed
@@ -465,9 +465,9 @@ reported with the way out of it, and a held Back brings the firmware back. That 
 runs with the firmware's log level at none: the launcher has to lend the updater a
 level to see its error, and to give none back. And the refusals: a folder and a file
 that are no package, a pulled USB cable, a device that does not run. 25 checks; it
-passes on the official 1.5.1 and on Unleashed with their own packages, and from the
-official firmware to Unleashed with `--package`. `ufbt_check.py` has the real `ufbt
-flash_usb` go through the wrapper (29 checks now).
+passes on the official 1.5.1, Momentum and Unleashed with their own packages (4, 17
+and 6 minutes), and from the official firmware to Unleashed with `--package`.
+`ufbt_check.py` has the real `ufbt flash_usb` go through the wrapper (29 checks now).
 
 By hand: the official self-update script sending a package without a radio stack
 (what `fbt flash_usb` sends) to a running device, which installed it and came back.

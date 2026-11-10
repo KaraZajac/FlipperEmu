@@ -209,7 +209,7 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         with the SDK's package;
         `scripts/update_check.py` (BRINGUP_LOG 84)
   - ☐ A quicker way for a big package onto the card of a running device than the CLI's
-        20 KB/s (Momentum's 12 MB take nine minutes)
+        20 KB/s (Momentum's 12 MB take thirteen minutes)
   - ☑ Debugging an app: `./flipperemu gdb` on a device that runs. The stub on
         demand, on a socket in the device's folder; the toolchain's gdb; the firmware's
         ELF, found by what the flash holds; the apps' symbols through the SDK's
