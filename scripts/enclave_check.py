@@ -1271,7 +1271,7 @@ def f_tool(emu):
 
 
 def firmware_part(results, firmware, keep, timeout):
-    emu = Emu(f"enclave-{int(time.time())}", firmware, timeout)
+    emu = Emu(f"enclave-{int(time.time())}-{os.getpid()}", firmware, timeout)
     emu.first = emu.stored = None
 
     def check(label, fn, *args):

@@ -1,32 +1,35 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026, Kara Zajac
 # SPDX-License-Identifier: BSD-3-Clause
-"""Check the launcher's `update` command: an update package sent to a Flipper
-that runs, and installed by its firmware.
+"""Check the launcher's `update` command: an update package for a Flipper
+that runs, installed by its firmware.
 
     scripts/update_check.py firmware/official-1.5.1/flipper-z-f7-update-1.5.1.tgz
     scripts/update_check.py OLD.tgz --package NEW.tgz
 
-Boots a throwaway device with the firmware, and sends it an update package
-(the same one, unless another is named) the way a real Flipper gets one:
-file by file through the firmware's CLI, then `update install`.  What is
-looked at: the launcher waits until the Flipper is back and says what runs
-on it; a file that was on the card is still there; the manifest on the card
+Boots a throwaway device with the firmware, and gives it an update package
+(the same one, unless another is named): written to the card's image with
+the card out of its slot for that moment, then `update install` at the
+firmware's CLI.  What is looked at: the card is in again and the firmware
+has it; the launcher waits until the Flipper is back and says what runs on
+it; a file that was on the card is still there; the manifest on the card
 has no radio stage; nothing crashed.  Then with the radio stage left in,
-which the emulated second core cannot install: the files that are on the
-card are not sent again, the updater's error is seen and said with the way
+which the emulated second core cannot install, and through the firmware's
+CLI as a real Flipper gets a package (`--cli`): the files that are on the
+card are not sent again (what the launcher wrote to the image is what the
+firmware reads there), the updater's error is seen and said with the way
 out of it, and that way works.  That is done with the firmware's log level
 at none, where the updater would say nothing: the launcher lends it another
 level, and gives the old one back.  And what is refused: a folder and a file
-that are no package, a Flipper with its cable pulled, one that does not run.
-Exit status 0 = pass.
+that are no package, a Flipper with its cable pulled or its card out, one
+that does not run.  Exit status 0 = pass.
 
-The transfer is as slow as a Flipper's CLI (some 20 KB/s) and the updater
-takes its time: five minutes or so with the official firmware, more with a
-bigger package.
+The updater takes its time: three minutes or so with the official firmware,
+more with a bigger package.
 """
 import argparse
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -65,6 +68,27 @@ def log_level(b):
         return json.loads(text)["log"]["level"] if code == 0 else None
     except (ValueError, KeyError):
         return None
+
+
+def card(b):
+    """(the card is in its slot, the firmware has it): the second by asking
+    the firmware for a folder on it"""
+    code, text = b.fe("status", "--json")
+    try:
+        slot = bool(json.loads(text)["sd"]["inserted"]) if code == 0 else None
+    except (ValueError, KeyError):
+        slot = None
+    code, text = b.fe("cli", "storage info /ext")
+    return slot, code == 0 and "Type:" in text
+
+
+def card_within(b, seconds):
+    end = time.time() + seconds
+    while True:
+        state = card(b)
+        if state == (True, True) or time.time() > end:
+            return state
+        time.sleep(1)
 
 
 def answers_within(b, seconds):
@@ -109,6 +133,15 @@ def refusals(b, pkg, work):
           text)
     ok, text = answers_within(b, 30)
     check("plugged in again: its CLI answers", ok, text)
+    b.fe("sd", "eject")
+    time.sleep(2)
+    code, text = b.fe("update", pkg)
+    check("with its card out of the slot: said so, and how to put it in",
+          code == 1 and "not in the slot" in text and "sd insert" in text, text)
+    b.fe("sd", "insert")
+    state = card_within(b, 20)
+    check("the card in again: the firmware has it", state == (True, True),
+          state)
 
 
 def update_checks(b, pkg, work, other):
@@ -125,11 +158,19 @@ def update_checks(b, pkg, work, other):
     code, text = b.fe("update", pkg, timeout=3600)
     took = time.time() - start
     m = re.search(r"updated in (\d+) s: it runs (\S+)", text)
-    check("the package sent through the CLI and installed: waited for, and "
-          f"said what runs ({took:.0f} s in all"
+    check("the package written to the card, out of its slot for that, and "
+          "installed: waited for, and said what runs "
+          f"({took:.0f} s in all"
           + (f", {m.group(1)} s of them the updater)" if m else ")"),
           code == 0 and m and f"-> /ext/update/{name}/update.fuf" in text
+          and "out of the slot for a moment" in text
+          and "the card is in again" in text
           and "Traceback" not in text, text[-2500:])
+    check("... in seconds, where the CLI takes minutes",
+          m and took - int(m.group(1)) < 45, f"{took:.0f} s")
+    state = card(b)
+    check("the card is in its slot, and the firmware has it",
+          state == (True, True), state)
     left = log_level(b)
     said = re.search(r"left the firmware's log level at (\w+)", text)
     check(f"the firmware's log level after it: {left}, "
@@ -181,12 +222,14 @@ def update_checks(b, pkg, work, other):
     check("the firmware's log level set to none", code == 0
           and log_level(b) == "none", text)
     start = time.time()
-    code, text = b.fe("update", "--keep-radio", pkg, timeout=1800)
+    code, text = b.fe("update", "--keep-radio", "--cli", pkg, timeout=1800)
     took = time.time() - start
     sent = re.findall(r"^  \S+ -> /ext/update/\S+/(\S+) \(", text, re.M)
-    check("with the radio stage kept: the files that are on the card are not "
-          f"sent again (sent: {', '.join(sent)})",
-          "(unchanged)" in text and "radio.bin" in sent
+    check("with the radio stage kept, and through the CLI: the files that "
+          "were written to the card's image are the same to the firmware, and "
+          f"not sent again (sent: {', '.join(sent)})",
+          "through the Flipper's CLI" in text and "out of the slot" not in text
+          and "(unchanged)" in text and "radio.bin" in sent
           and "firmware.dfu" not in sent, text)
     check("... and the updater's error is seen, with a log level lent to it, "
           f"and said with the way out ({took:.0f} s)",
@@ -224,7 +267,7 @@ def main():
     args = ap.parse_args()
     pkg = pathlib.Path(args.package or args.firmware).resolve()
 
-    b = Bench(f"updcheck-{int(time.time())}", args.firmware, args.timeout)
+    b = Bench(f"updcheck-{int(time.time())}-{os.getpid()}", args.firmware, args.timeout)
     work = pathlib.Path(tempfile.mkdtemp(prefix="fe-upd-"))
     try:
         code, text = b.fe("update", pkg)

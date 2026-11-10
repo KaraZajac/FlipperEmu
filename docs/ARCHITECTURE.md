@@ -403,9 +403,19 @@ line, because the firmware reads the manifest's optional keys in order and stops
 first missing one.
 
 `./flipperemu update PKG` is for a device that runs, whose card image is the firmware's
-to write and not the launcher's. The same package, without the same stage, goes to
-`/ext/update/` through the CLI's `storage write_chunk` (`fe_files.push`: 1024 bytes a
-time, md5 compared at the end, files that are there with the same bytes skipped), and
+to write and not the launcher's. So the launcher takes the card out first: the
+machine's `sd-card` property off, which is `sd eject`, and a wait at the CLI until
+`storage info /ext` fails, which is the firmware letting go of the card (a second and
+a half). From then on the image is the launcher's, as with a stopped device, and the
+same package, without the same stage, is written to `/ext/update/` with mtools. QEMU
+has the image open all the while. It is a raw file that both reach through the host's
+page cache, and the emulated card keeps nothing of it: `sd-card` on resets the card,
+and the firmware mounts it anew. The launcher waits for that at the CLI as well. With
+`--cli` the card stays in and the package goes through the CLI's `storage write_chunk`
+(`fe_files.push`: 1024 bytes a time, md5 compared at the end, files that are there
+with the same bytes skipped), which is the way of the firmware's own tools, at
+20 KB/s.
+
 `update install` follows. That command gives no prompt back: "Restarting to apply
 update. BRB", and the firmware resets 100 ms later. The updater has no USB, because
 the firmware does not start the CLI's serial port in a special boot mode. So the

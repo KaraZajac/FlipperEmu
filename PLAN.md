@@ -208,8 +208,11 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         updater leaves changed is said); `ufbt flash_usb` through the wrapper is this
         with the SDK's package;
         `scripts/update_check.py` (BRINGUP_LOG 84)
-  - ☐ A quicker way for a big package onto the card of a running device than the CLI's
-        20 KB/s (Momentum's 12 MB take thirteen minutes)
+  - ☑ A quicker way for a big package onto the card of a running device than the CLI's
+        20 KB/s (2026-11-10): `update` takes the card out of its slot, writes the
+        package to the card's image and puts the card in again, with the firmware
+        waited for both times (Momentum's 12 MB: 4 s, where the CLI took thirteen
+        minutes); `update --cli` is the way through the CLI (BRINGUP_LOG 85)
   - ☑ Debugging an app: `./flipperemu gdb` on a device that runs. The stub on
         demand, on a socket in the device's folder; the toolchain's gdb; the firmware's
         ELF, found by what the flash holds; the apps' symbols through the SDK's

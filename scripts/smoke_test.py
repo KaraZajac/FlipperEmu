@@ -856,7 +856,7 @@ def main() -> int:
     ap.add_argument("qemu_args", nargs="*", help="extra QEMU arguments after --")
     args = ap.parse_args()
 
-    name = f"smoke-{int(time.time())}"
+    name = f"smoke-{int(time.time())}-{os.getpid()}"
     devdir = ROOT / "devices" / name
     out = pathlib.Path(args.out) if args.out else pathlib.Path(tempfile.mkdtemp(prefix="fe-smoke-"))
     out.mkdir(parents=True, exist_ok=True)

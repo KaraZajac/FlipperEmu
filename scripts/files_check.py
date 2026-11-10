@@ -292,7 +292,7 @@ def main():
     ap.add_argument("--keep", action="store_true", help="keep the device directory")
     args = ap.parse_args()
 
-    b = Bench(f"filescheck-{int(time.time())}", args.firmware, args.timeout)
+    b = Bench(f"filescheck-{int(time.time())}-{os.getpid()}", args.firmware, args.timeout)
     work = pathlib.Path(tempfile.mkdtemp(prefix="fe-files-"))
     src, out = work / "src", work / "out"
     src.mkdir()

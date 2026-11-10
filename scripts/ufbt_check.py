@@ -292,7 +292,7 @@ def main():
         print("skipped: no `ufbt` on the PATH (`pipx install ufbt` gets it)")
         return SKIPPED
 
-    b = Bench(f"ufbtcheck-{int(time.time())}", args.firmware, args.timeout)
+    b = Bench(f"ufbtcheck-{int(time.time())}-{os.getpid()}", args.firmware, args.timeout)
     work = pathlib.Path(tempfile.mkdtemp(prefix="fe-ufbt-"))
     folder = work / "fe_hello"
     folder.mkdir()

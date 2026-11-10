@@ -1126,6 +1126,37 @@ All three are small, self-contained, and suitable for sending upstream.
       the updater.
       `ufbt_check.py` runs the real `ufbt flash_usb` now: 29 checks.
 
+85. **The card on the desk.** Thirteen minutes for Momentum's package through the CLI
+    (84). Somebody with a real Flipper and a big package takes the card out, puts it
+    into the computer's reader and copies 12 MB in seconds. The device has that move
+    (`sd eject`, `sd insert`), and since 76 its slot is a real one. `update` makes
+    the move itself now, around the write, and 75's two ways to one card are both
+    open to a device that runs.
+    - The firmware notices a pulled card after 1.4 s (`storage info /ext`: "Storage
+      error: filesystem not ready") and has one that is pushed in mounted after 1.1
+      to 1.5 s (`[I][StorageExt] card mounted`). The launcher asks at the CLI both
+      times and counts no seconds (74).
+    - With the card out, the image is the launcher's, though QEMU has the file open:
+      a raw image, which QEMU and mtools both reach through the host's page cache,
+      and the emulated card is reset when it goes in. 3 MB written in 0.01 s, and
+      the firmware's `storage md5` of it was the file's.
+    - Official to Momentum, 12.2 MB: 228 s, 223 of them the updater and 4 s the
+      package. Through the CLI it was 1016 s.
+    - A card that is out already stays out: `update` says so, with `sd insert`. The
+      launcher does not push in a card that somebody else pulled.
+    - `update --cli` is the old way, and it stays for what it is: the path that the
+      firmware's tools take with a real Flipper. The check uses it for its second
+      run, with the radio stage kept. The files that mtools wrote are "unchanged"
+      to the firmware's md5 there, and only `radio.bin` and the manifest are sent:
+      the two ways, compared by the firmware.
+    - Two checks that were started in the same second shared one device. A
+      throwaway device was named after its check and the time in seconds. All
+      eight checks have their process ID in that name now.
+    - `scripts/update_check.py`: 29 checks. Official 1.5.1 with its own package:
+      84 s, 80 of them the updater. Unleashed with its own: 127 s, 122 the updater.
+      Official to Unleashed: 118 s, 114 the updater. Momentum with its own: 222 s,
+      218 the updater. `ufbt flash_usb` through the wrapper: 83 s.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
@@ -1157,10 +1188,11 @@ All three are small, self-contained, and suitable for sending upstream.
   flash and unpacking 1074 resource files to the SD. Momentum's 11 MB resource
   bundle takes longer.
 - `update` on a device that runs, official 1.5.1's package (2.5 MB without the radio
-  stack): 218 s, of which 111 s through the CLI at 22 KB/s and 100 s in the updater,
-  where the firmware starts four times. The updater's error with the radio stage
-  kept: reported 4 s after `update install`. Momentum's package (12 MB): 1016 s,
-  of which 13 minutes through the CLI at 16 KB/s and 255 s in the updater.
+  stack): 84 s, 80 of them in the updater, where the firmware starts four times. The
+  card is out of its slot, written and in again within 4 s. Momentum's package
+  (12 MB): 222 s, 218 of them in the updater. Through the CLI (`update --cli`,
+  22 KB/s, 16 on Momentum): 218 s and 1016 s. The updater's error with the radio
+  stage kept: reported 4 s after `update install`.
 - The enclave check through the firmware (`enclave_check.py -f`): four boots and 22
   checks in 40 to 48 s, on each of the three firmwares.
 - USB: 33 ms from D+ pull-up to enumerated: 25 ms of attach debounce, suspend and

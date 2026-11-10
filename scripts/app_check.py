@@ -19,6 +19,7 @@ its own fails, and the firmware starts again): the launcher says what
 happened.  And what a stopped device takes.  Exit status 0 = pass.
 """
 import argparse
+import os
 import pathlib
 import re
 import shutil
@@ -235,7 +236,7 @@ def main():
                     help="keep the throwaway device")
     args = ap.parse_args()
 
-    b = Bench(f"appcheck-{int(time.time())}", args.firmware, args.timeout)
+    b = Bench(f"appcheck-{int(time.time())}-{os.getpid()}", args.firmware, args.timeout)
     work = pathlib.Path(tempfile.mkdtemp(prefix="fe-app-"))
     try:
         if check("boot: 'Startup complete'", b.start(first=True),

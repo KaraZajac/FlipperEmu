@@ -1649,6 +1649,71 @@ def firmware_log_level(dev, level=None):
         m.close()
 
 
+class card_out:
+    """The microSD card of a running device out of its slot for a moment, as
+    one that is taken to a computer's reader: in the block the launcher has
+    the card's image (an fe_files.ImageFiles) and writes megabytes in no
+    time, where the firmware's CLI takes 20 KB/s.  The firmware is waited for
+    both times, at its CLI: until it has let go of the card, and until it has
+    it again.  What it had open on the card it loses, as on a real Flipper."""
+
+    def __init__(self, dev, cli, how):
+        self.dev, self.cli, self.how = dev, cli, how    # how: the other way
+
+    def slot(self, card_in=None):
+        """Is the card in its slot?  With an argument: put there, or taken
+        out, first"""
+        m = open_monitor(self.dev)
+        try:
+            if card_in is not None:
+                err = m.cmd("qom-set /machine sd-card "
+                            + ("on" if card_in else "off"))
+                if err:
+                    sys.exit(f"[{self.dev.name}] "
+                             f"{err.removeprefix('Error: ')}")
+            return qom_get(m, "/machine", "sd-card")
+        finally:
+            m.close()
+
+    def mounted(self):
+        return "Storage error" not in self.cli.run("storage info /ext")
+
+    def wait(self, mounted, seconds):
+        end = time.monotonic() + seconds
+        while self.mounted() != mounted:
+            if time.monotonic() > end:
+                return False
+            time.sleep(0.2)
+        return True
+
+    def __enter__(self):
+        import fe_files
+        name = self.dev.name
+        if not self.slot():
+            sys.exit(f"[{name}] its microSD card is not in the slot: "
+                     f"`./flipperemu -d {name} sd insert` puts it there")
+        if not self.mounted():
+            sys.exit(f"[{name}] its firmware has no card that it can use "
+                     f"(`./flipperemu -d {name} cli \"storage info /ext\"`)")
+        image = fe_files.ImageFiles(self.dev.sd)
+        self.slot(False)
+        if not self.wait(False, 10.0):
+            self.slot(True)
+            sys.exit(f"[{name}] the firmware did not let go of its card when "
+                     "it was pulled out, so nothing was written to it.  "
+                     + self.how)
+        return image
+
+    def __exit__(self, kind, *_):
+        self.slot(True)
+        if kind is None and not self.wait(True, 30.0):
+            sys.exit(f"[{self.dev.name}] the card is in its slot again, but "
+                     "the firmware does not take it: `./flipperemu -d "
+                     f"{self.dev.name} reset` starts the firmware anew.  "
+                     + self.how)
+        return False
+
+
 def await_update(dev, log, timeout):
     """Wait for the firmware's updater: what became of it ("back": the
     Flipper runs again, with its USB serial port; "error": the updater stopped
@@ -1704,9 +1769,13 @@ def await_update(dev, log, timeout):
         time.sleep(0.25)
 
 
-def send_update(dev, pkg, keep_radio=False, wait=True, timeout=900.0):
-    """Send an update package to a running device's SD card through the
-    firmware's CLI, have the firmware install it, and wait until it has."""
+def send_update(dev, pkg, keep_radio=False, wait=True, timeout=900.0,
+                through_cli=False):
+    """Put an update package on a running device's SD card, have the
+    firmware install it, and wait until it has.  The package is written to
+    the card's image, with the card out of its slot for that moment; or sent
+    through the firmware's CLI, as its own tools send one to a real Flipper,
+    which is 20 KB/s."""
     import fe_files
     import fe_log
     import tempfile
@@ -1726,17 +1795,35 @@ def send_update(dev, pkg, keep_radio=False, wait=True, timeout=900.0):
         size = sum(f.stat().st_size for f in pdir.rglob("*") if f.is_file())
         manifest = f"/ext/update/{pdir.name}/update.fuf"
         files, close = open_card(dev)
+        what = (f"{label} ({size / 1e6:.1f} MB"
+                + ("" if keep_radio else ", without its radio stage") + ")")
+
+        def say(line):
+            print("  " + line.replace(f"{tmp}/", ""), flush=True)
+
         try:
-            print(f"[{dev.name}] sending {label} ({size / 1e6:.1f} MB"
-                  + ("" if keep_radio else ", without its radio stage")
-                  + f") to /ext/update/{pdir.name} through the Flipper's "
-                  "CLI, which takes some 20 KB/s; what is there already is "
-                  "not sent again", flush=True)
             with held_interrupt("stopping after this piece") as stop:
-                copied, same = fe_files.push(
-                    files, [pdir], "/ext/update/", progress=transfer_progress(),
-                    stop=stop, say=lambda line: print(
-                        "  " + line.replace(f"{tmp}/", ""), flush=True))
+                print(f"[{dev.name}] {what} goes to /ext/update/{pdir.name}",
+                      flush=True)
+                if through_cli:
+                    print(f"[{dev.name}] through the Flipper's CLI, which takes "
+                          "some 20 KB/s; what is there already is not sent "
+                          "again", flush=True)
+                    fe_files.push(files, [pdir], "/ext/update/",
+                                  progress=transfer_progress(), stop=stop,
+                                  say=say)
+                else:
+                    print(f"[{dev.name}] its card is out of the slot for a "
+                          "moment: the package is written to its image",
+                          flush=True)
+                    with card_out(dev, files.cli,
+                                  "`update --cli` sends the package through "
+                                  "the Flipper's CLI, with the card where it "
+                                  "is") as image:
+                        fe_files.push(image, [pdir], "/ext/update/",
+                                      stop=stop, say=say)
+                    print(f"[{dev.name}] the card is in again, and the "
+                          "firmware has it", flush=True)
             log = fe_log.Log(dev.uart, tail=4096)
             log.poll()                  # from here on: what the updater logs
             was = firmware_log_level(dev)
@@ -1825,7 +1912,7 @@ def send_update(dev, pkg, keep_radio=False, wait=True, timeout=900.0):
 def cmd_update(args):
     return send_update(Device(args.device), pathlib.Path(args.package),
                        keep_radio=args.keep_radio, wait=not args.no_wait,
-                       timeout=args.timeout)
+                       timeout=args.timeout, through_cli=args.cli)
 
 
 def cmd_pull(args):
@@ -2749,21 +2836,29 @@ def main():
     p.set_defaults(func=cmd_push)
 
     p = sub.add_parser(
-        "update", help="send an update package to a running device, and "
-                       "have its firmware install it",
-        description="Send an update package to the SD card of a running "
-        "device through its firmware's CLI, and have the firmware install it "
-        "with its own updater, as qFlipper and `fbt flash_usb` do with a "
-        "real Flipper: settings and files stay.  A file that is on the card "
-        "already with the same bytes is not sent again.  The Flipper starts "
-        "a few times, without USB, while its updater works; this waits "
-        "until its USB serial port is back.  For a device that does not "
-        "run: `run --update PKG`.")
+        "update", help="put an update package on a running device's card, "
+                       "and have its firmware install it",
+        description="Put an update package on the SD card of a running "
+        "device, and have the firmware install it with its own updater, as "
+        "qFlipper and `fbt flash_usb` do with a real Flipper: settings and "
+        "files stay.  The package is written to the card's image, with the "
+        "card out of its slot for that moment (as one that is taken to a "
+        "computer's reader: seconds for any package; what the firmware had "
+        "open on the card it loses).  A file that is on the card already "
+        "with the same bytes is not written again.  The Flipper starts a few "
+        "times, without USB, while its updater works; this waits until its "
+        "USB serial port is back.  For a device that does not run: `run "
+        "--update PKG`.")
     p.add_argument("package", metavar="PKG",
                    help="a .tgz, its unpacked folder, or the update.fuf in it")
     p.add_argument("--keep-radio", action="store_true",
                    help="keep the radio stack stage (the emulated CPU2 cannot "
                         "install it, so the updater will fail)")
+    p.add_argument("--cli", action="store_true",
+                   help="send the package through the firmware's CLI, as the "
+                        "firmware's own tools send one to a real Flipper: the "
+                        "card stays in its slot, and it takes minutes (some "
+                        "20 KB/s)")
     p.add_argument("--no-wait", action="store_true",
                    help="leave when the updater has started")
     p.add_argument("--timeout", type=float, default=900.0, metavar="S",

@@ -195,8 +195,8 @@ than `default`. It also
   `jflash`, …). They would reach the real Flipper on your desk, or nothing.
   `./flipperemu flash` and `./flipperemu gdb` are what does that here;
 - does `ufbt flash_usb` itself: the SDK's update package has a radio stack in it, which
-  the emulated Flipper cannot install, so the launcher sends that package without the
-  stage (`./flipperemu update`). See [below](#when-it-goes-wrong).
+  the emulated Flipper cannot install, so the launcher installs that package without
+  the stage (`./flipperemu update`). See [below](#when-it-goes-wrong).
 
 Without the wrapper it is one argument, and it has to be there every time:
 
@@ -229,8 +229,8 @@ Momentum and Unleashed publish theirs. Their documentation has the URL.
 
 It works the other way round too: `./flipperemu ufbt flash_usb` puts the firmware of
 the SDK that ufbt has on the running Flipper, through the firmware's own updater, as
-`ufbt flash_usb` does with a real one. Files and settings stay, and it takes three or
-four minutes.
+`ufbt flash_usb` does with a real one. Files and settings stay, and it takes a minute
+and a half.
 
 ## gdb, with the firmware's symbols and your app's
 
@@ -339,8 +339,8 @@ flipperemu -d mine run --update dist/f7-D/f7-update-local
                                        # through the firmware's own updater, as
                                        # qFlipper does: settings and files stay
 flipperemu -d mine update dist/f7-D/f7-update-local
-                                       # the same with the device running: sent
-                                       # through its CLI, installed, waited for
+                                       # the same with the device running: written
+                                       # to its card, installed, waited for
 
 flipperemu -d mine fbt flash_usb       # with the device running: fbt builds the
                                        # package and sends it over USB
@@ -353,7 +353,7 @@ folder on your PATH.)
 as for ufbt, and the same targets refused. `fbt launch APPSRC=my_app`, `fbt cli` and
 `fbt flash_usb` talk to the emulated Flipper. `fbt flash_usb_full` is refused: its
 package has a radio stack in it. `./fbt updater_package` builds that package, and
-`flipperemu update` sends it without the stage.
+`flipperemu update` installs it without the stage.
 
 Then `./flipperemu log -f` for what the firmware says, at the level you set
 (`log --set-level debug`), and
@@ -368,16 +368,20 @@ Then `./flipperemu log -f` for what the firmware says, at the level you set
   name; nothing was written. Hold Back, and the Flipper starts as it was. `./flipperemu
   update PACKAGE` installs the same package without that stage on a device that runs,
   `./flipperemu run --update PACKAGE` on one that does not.
-- **`./flipperemu update` takes minutes.** Most of it is the transfer: the firmware's
-  CLI takes some 20 KB/s, on a real Flipper too, and a release's package is 2.5 to
-  12 MB. Then the updater works for a minute or two with no USB. A second `update`
-  with the same package sends only what changed. `run --update` writes the package
-  into the card's image instead, in a second, and needs the device stopped for it.
+- **`./flipperemu update` takes a minute or more.** That is the firmware's updater,
+  which works with no USB and starts the Flipper a few times: a minute and a half for
+  the official firmware, two minutes for Unleashed, four for Momentum. The package
+  itself is on the card within seconds, with the card out of its slot for that
+  moment.
+- **`update --cli` and `fbt flash_usb` take minutes more.** They send the package
+  through the firmware's CLI, which takes some 20 KB/s, on a real Flipper too, and a
+  release's package is 2.5 to 12 MB. A second `update --cli` with the same package
+  sends only what changed.
 - **No log after an update.** The updater sets the firmware's log level when it is
   done: the official one to the default, Momentum's and Unleashed's to none. That is
-  the firmware's doing, and a real Flipper has it too. `update` says so when the level is another
-  than before; `./flipperemu log --set-level info` and `./flipperemu reset` bring the
-  log back, and `status` shows the level.
+  the firmware's doing, and a real Flipper has it too. `update` says so when the level
+  is another than before; `./flipperemu log --set-level info` and `./flipperemu reset`
+  bring the log back, and `status` shows the level.
 - **`ufbt launch` ends with "Unexpected response: Application … has to be closed
   manually".** The app that runs does not take the loader's request to close: an app
   with a loop of its own has to ask for it (`furi_thread_set_signal_callback`, as
@@ -455,18 +459,21 @@ An app that does not live through the request to close is the NFC app in the mid
 of a read: `scripts/app_check.py` asks it, and wants the crash named and the firmware
 back with no app running.
 
-`scripts/update_check.py FIRMWARE` sends a running device its own update package with
-`update` (`--package PKG`: another firmware's). It wants the launcher to wait until
-the Flipper is back and to say what runs on it, a file that was on the card still
-there, a manifest on the card without the radio stage, the updater's stages in the
-log, no crash, and the log level as before or else named. Then the same with the
-radio stage kept: only the two changed files are sent, the updater's error is
-reported with the way out of it, and a held Back brings the firmware back. That part
-runs with the firmware's log level at none: the launcher has to lend the updater a
-level to see its error, and to give none back. And the refusals: a folder and a file
-that are no package, a pulled USB cable, a device that does not run. 25 checks; it
-passes on the official 1.5.1, Momentum and Unleashed with their own packages (4, 17
-and 6 minutes), and from the official firmware to Unleashed with `--package`.
+`scripts/update_check.py FIRMWARE` gives a running device its own update package with
+`update` (`--package PKG`: another firmware's). It wants the package on the card
+within seconds, the card in its slot again and the firmware using it, the launcher
+waiting until the Flipper is back and saying what runs on it, a file that was on the
+card still there, a manifest on the card without the radio stage, the updater's
+stages in the log, no crash, and the log level as before or else named. Then the same
+with the radio stage kept and through the CLI (`--cli`): what was written to the
+card's image is the same to the firmware, so only the two changed files are sent, the
+updater's error is reported with the way out of it, and a held Back brings the
+firmware back. That part runs with the firmware's log level at none: the launcher has
+to lend the updater a level to see its error, and to give none back. And the
+refusals: a folder and a file that are no package, a pulled USB cable, a card that is
+out of its slot, a device that does not run. 29 checks; it passes on the official
+1.5.1, Momentum and Unleashed with their own packages (3, 6 and 4 minutes), and from
+the official firmware to Unleashed with `--package`.
 `ufbt_check.py` has the real `ufbt flash_usb` go through the wrapper (29 checks now).
 
 By hand: the official self-update script sending a package without a radio stack

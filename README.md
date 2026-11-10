@@ -35,8 +35,8 @@ unlshd-094**. The window passes `scripts/gui_check.py` (clicked buttons, a recor
 of the screen, Pause, the firmware log and its level, the backlight fading in, a file
 copied to the card, an app dropped on it, the LED blinking while NFC reads, the bench,
 switching off and on, the Left + Back reboot, installing firmware) on the same three,
-off-screen. `scripts/update_check.py` (an update package sent to a running device
-through its CLI and installed there, and the updater's error screen) passes on the
+off-screen. `scripts/update_check.py` (an update package written to the card of a
+running device and installed there, and the updater's error screen) passes on the
 same three, and from the official firmware to Unleashed.
 `scripts/ufbt_check.py` (ufbt 0.2.6 building `examples/hello`, launching it there, and
 `ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's and that app's
@@ -81,8 +81,9 @@ symbols) pass on the official one.
   Flipper (`0483:5740`, `/dev/ttyACM*`), for qFlipper, lab.flipper.net and other tools.
 - Over-the-air updates through the firmware's own updater (`run --update`): /int backup,
   updater in RAM, flash write and verify, resources and splash, then a normal boot.
-  `update` does it on a device that runs: the package goes to its card through the
-  firmware's CLI, as `ufbt flash_usb` and `fbt flash_usb` send one.
+  `update` does it on a device that runs: the card is out of its slot for the moment
+  in which the package is written to it. `update --cli` sends the package through the
+  firmware's CLI instead, as `ufbt flash_usb` and `fbt flash_usb` send one.
 - Infrared receive: `./flipperemu ir NEC 0x04 0x08` points a virtual remote at the
   Flipper (14 protocols, raw timings, or signals from `.ir` files). The Infrared app's
   Learn screen and the `ir rx` CLI command decode it.
@@ -322,7 +323,7 @@ while NFC reads, switches it off and on, and reboots it.
 |---|---|
 | `run [-f FW] [--headless] [--gdb\|--wait-gdb] [--serial S] [--usb U] [--no-sd] [--log-level L]` | (flash and) boot |
 | `run --update PKG` | install an update package through the firmware's own updater (keeps settings and files) |
-| `update PKG [--keep-radio] [--no-wait] [--timeout S]` | the same on a device that runs: the package goes to its card through the firmware's CLI, and the launcher waits until the Flipper is back |
+| `update PKG [--cli] [--keep-radio] [--no-wait] [--timeout S]` | the same on a device that runs: the package is written to its card, which is out of its slot for that moment (`--cli`: sent through the firmware's CLI), and the launcher waits until the Flipper is back |
 | `run --unplugged` \| `run --battery PERCENT` \| `run --gtk` | start on battery (USB cable out); with this charge; in QEMU's own window (the bare LCD) |
 | `stop` | shut a running device down cleanly (saves its NVRAM) |
 | `gui [--scale N]` | the window that looks like a Flipper, for a device that runs already |
@@ -570,7 +571,7 @@ app. `./flipperemu fbt …` does the same for the `fbt` of the firmware tree you
 
 Targets that talk to the Flipper over USB work as on a real one: `launch`, `cli`,
 and `fbt flash_usb`. `ufbt flash_usb` sends the SDK's update package, which has a radio
-stack in it that the emulated second core cannot install: the launcher sends that
+stack in it that the emulated second core cannot install: the launcher installs that
 package itself, without the stage (`./flipperemu update`,
 [below](#updating-like-qflipper-does)).
 Targets that go through a debug probe (`flash`, `debug`, `blackmagic`, …) are refused,
@@ -658,28 +659,41 @@ card. Your settings and files stay:
 ./flipperemu -d mine run --update firmware/momentum-mntm-012/flipper-z-f7-update-mntm-012.tgz
 ```
 
-`update` does the same for a device that runs already, over its USB cable: the files
-go to the card one by one through the firmware's CLI, then `update install`. The
-Flipper starts a few times, without USB, while its updater works. The launcher waits
-for it and says what runs at the end:
+`update` does the same for a device that runs already. Its card comes out of the slot
+for a moment, as one that is taken to a computer's reader: the package is written to
+the card's image, the card goes in again, and `update install` follows at the
+firmware's CLI. The Flipper starts a few times, without USB, while its updater works.
+The launcher waits for it and says what runs at the end:
 
 ```console
 $ ./flipperemu -d mine update firmware/official-1.5.1/flipper-z-f7-update-1.5.1.tgz
-[mine] sending 1.5.1 (2.5 MB, without its radio stage) to /ext/update/f7-update-1.5.1 …
+[mine] 1.5.1 (2.5 MB, without its radio stage) goes to /ext/update/f7-update-1.5.1
+[mine] its card is out of the slot for a moment: the package is written to its image
   f7-update-1.5.1/firmware.dfu -> /ext/update/f7-update-1.5.1/firmware.dfu (771593 bytes)
   …
+[mine] the card is in again, and the firmware has it
 [mine] updater started: the Flipper starts a few times, without USB, until it is done
-[mine] updated in 96 s: it runs 1.5.1 (commit 9e810dc3, built 15-10-2026)
+[mine] updated in 80 s: it runs 1.5.1 (commit 9e810dc3, built 15-10-2026)
 ```
 
-The CLI takes some 20 KB/s, as a real Flipper's does: two minutes for the official
-package, thirteen for Momentum's 12 MB. A file that is on the card already with the
-same bytes is not sent again. The package is a `.tgz`, the folder that was in one
-(`dist/f7-D/f7-update-local` of a firmware tree, ufbt's `current/f7-update-*`), or
-its `update.fuf`. `./flipperemu ufbt flash_usb` is this command with the SDK's package.
-`--no-wait` leaves when the updater has started. `--keep-radio` leaves the radio stage
-in, for a look at what the updater does with it: it stops, the launcher says so within
-seconds, and a held Back (`press --hold 1500 back`) starts the firmware that is there.
+The package is on the card within seconds, whatever its size. The rest is the
+firmware's updater: a minute and a half for the official firmware, two minutes for
+Unleashed, four for Momentum. What the firmware has open on the card at that moment
+it loses, as with a real card that is pulled, and it starts anew for the update
+anyway.
+
+`update --cli` leaves the card where it is and sends the files one by one through the
+firmware's CLI, as the firmware's own tools send them to a real Flipper. The CLI takes
+some 20 KB/s, as a real Flipper's does: two minutes more for the official package,
+thirteen for Momentum's 12 MB. A file that is on the card already with the same bytes
+is not sent again.
+
+The package is a `.tgz`, the folder that was in one (`dist/f7-D/f7-update-local` of a
+firmware tree, ufbt's `current/f7-update-*`), or its `update.fuf`.
+`./flipperemu ufbt flash_usb` is this command with the SDK's package. `--no-wait`
+leaves when the updater has started. `--keep-radio` leaves the radio stage in, for a
+look at what the updater does with it: it stops, the launcher says so within seconds,
+and a held Back (`press --hold 1500 back`) starts the firmware that is there.
 
 An updater decides on the firmware's log level when it is done, on a real Flipper too:
 the official one sets the default, Momentum's and Unleashed's set none, and the log is
@@ -689,7 +703,7 @@ when you start, it gets `info` for as long as it works, so that an error on its 
 is seen.
 
 `scripts/update_check.py FIRMWARE [--package PKG]` checks all of that on a throwaway
-device (25 checks: the official firmware, Momentum and Unleashed with their own
+device (29 checks: the official firmware, Momentum and Unleashed with their own
 packages, and the official one updated to Unleashed).
 
 | | |

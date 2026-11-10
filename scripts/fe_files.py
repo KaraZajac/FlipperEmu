@@ -307,7 +307,8 @@ class CliFiles:
 # -------------------------------------------- a stopped device: its card image
 
 class ImageFiles:
-    """The card's image, with mtools.  Only while no emulator has it."""
+    """The card's image, with mtools.  Only while no firmware has the card:
+    its device does not run, or the card is out of its slot."""
     where = "in the card's image"
     LINE = re.compile(r"^(.{8}) (.{3}) +(<DIR>|\d+) +\d{4}-\d\d-\d\d +"
                       r"\d{1,2}:\d\d ?(?: (.*))?$")

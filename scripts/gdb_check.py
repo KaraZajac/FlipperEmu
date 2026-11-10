@@ -252,7 +252,7 @@ def main():
         print("skipped: no `ufbt` on the PATH (`pipx install ufbt` gets it)")
         return SKIPPED
 
-    b = Bench(f"gdbcheck-{int(time.time())}", args.firmware, args.timeout)
+    b = Bench(f"gdbcheck-{int(time.time())}-{os.getpid()}", args.firmware, args.timeout)
     work = pathlib.Path(tempfile.mkdtemp(prefix="fe-gdb-")).resolve()
     folder = work / "fe_hello"
     folder.mkdir()

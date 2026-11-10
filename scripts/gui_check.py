@@ -492,7 +492,7 @@ def main():
     ap.add_argument("--keep", action="store_true", help="keep the device directory")
     args = ap.parse_args()
 
-    name = f"guicheck-{int(time.time())}"
+    name = f"guicheck-{int(time.time())}-{os.getpid()}"
     devdir = ROOT / "devices" / name
     out = pathlib.Path(args.out) if args.out else pathlib.Path(
         tempfile.mkdtemp(prefix="fe-gui-"))
