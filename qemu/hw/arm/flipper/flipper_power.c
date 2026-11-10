@@ -25,6 +25,13 @@
 #define SEC_UNSEALED 2
 #define SEC_FULL     1
 
+/* BatteryStatus SYSDWN, "the system should shut down": the gauge raises it
+ * under one voltage and drops it over another.  Both are in its data
+ * memory, where the firmware leaves them as they came; here they are these.
+ * Off USB, the firmware then counts down and switches the Flipper off. */
+#define SYSDWN_SET_MV    3150
+#define SYSDWN_CLEAR_MV  3400
+
 static uint16_t bq_opstatus(Bq27220State *s)
 {
     return (s->sec << 1) | (s->initcomp ? 1u << 5 : 0) |
@@ -144,13 +151,19 @@ static void bq_snapshot(Bq27220State *s)
     bool charging = s->current_ma > 0;
     uint32_t rem = s->capacity_mah * MIN(s->soc, 100u) / 100;
 
+    if (s->voltage_mv <= SYSDWN_SET_MV) {
+        s->sysdwn = true;
+    } else if (s->voltage_mv >= SYSDWN_CLEAR_MV) {
+        s->sysdwn = false;
+    }
     memset(r, 0, sizeof(s->snap));
     bq_put16(r + 0x00, 0x0000);                     /* ControlStatus */
     bq_put16(r + 0x04, 0xFFFF);
     bq_put16(r + 0x06, s->temperature_dk);
     bq_put16(r + 0x08, s->voltage_mv);
-    bq_put16(r + 0x0A, (charging ? 0 : 1) | (1u << 3) |
-                       (s->soc >= 100 ? 1u << 9 : 0));  /* DSG, BATTPRES, FC */
+    bq_put16(r + 0x0A, (charging ? 0 : 1) | (s->sysdwn ? 1u << 1 : 0) |
+                       (1u << 3) | (s->soc >= 100 ? 1u << 9 : 0));
+                                        /* DSG, SYSDWN, BATTPRES, FC */
     bq_put16(r + 0x0C, (uint16_t)(int16_t)s->current_ma);
     bq_put16(r + 0x10, rem);
     bq_put16(r + 0x12, s->capacity_mah);
@@ -324,6 +337,19 @@ static int bq25896_event(I2CSlave *i2c, enum i2c_event ev)
     return 0;
 }
 
+/*
+ * REG09 BATFET_DIS turns the battery's switch off, at once with BATFET_DLY
+ * clear (as the firmware leaves it).  That is how the Flipper switches
+ * itself off: with nothing on VBUS either, the system rail is gone.  While
+ * USB power is there it keeps running, and goes off when the cable does.
+ */
+static void bq25896_batfet(Bq25896State *s)
+{
+    if ((s->regs[0x09] & 0x20) && !s->vbus && s->power_off) {
+        s->power_off(s->opaque);
+    }
+}
+
 static int bq25896_send(I2CSlave *i2c, uint8_t data)
 {
     Bq25896State *s = BQ25896(i2c);
@@ -338,6 +364,9 @@ static int bq25896_send(I2CSlave *i2c, uint8_t data)
             memcpy(s->regs, bq25896_defaults, sizeof(s->regs));
         } else if (s->ptr < 0x0B || s->ptr == 0x0D) {
             s->regs[s->ptr] = data;                 /* status regs are RO */
+            if (s->ptr == 0x09) {
+                bq25896_batfet(s);
+            }
         }
     }
     s->ptr++;
@@ -375,6 +404,7 @@ static void bq25896_set_usb(Object *obj, bool value, Error **errp)
         s->gauge->current_ma = value ? 480 : -42;
     }
     bq25896_adc(s);
+    bq25896_batfet(s);
 }
 
 /* qom-set /machine/charger usb true  - plug a USB charger in */

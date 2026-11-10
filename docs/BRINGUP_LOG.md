@@ -664,6 +664,55 @@ All three are small, self-contained, and suitable for sending upstream.
     its logs. It stays unexplained. A busy host during that one run is the likeliest
     cause, and a guess.
 
+## The window (M8)
+
+64. **Switching off.** The firmware switches a Flipper off by setting BATFET_DIS in the
+    BQ25896, which opens the battery's switch. With nothing on VBUS the system rail is
+    gone; with USB plugged in it stays, and the firmware shows "It's now safe to unplug
+    the USB cable" until the cable is pulled. The charger model now does both. An
+    emulator that is off has nothing to run, so the board exits through a guest
+    shutdown, and first says `power 0` on the front-panel link: the window that
+    started it stays, and starts it again when Back is held. A flat battery takes the
+    same way. The BQ27220 raises SYSDWN ("the system should shut down") under 3.15 V
+    and drops it over 3.40 V, and the firmware, off USB, says "Battery low!", counts
+    down from 86 s, and switches the Flipper off.
+
+65. **Five seconds of Back.** `press back --hold 1500` on the desktop did nothing. The
+    power-off dialog takes Back held for 5 s, so the window lets a button be held as
+    long as a finger holds it: the panel link has a press and a release of its own.
+    The other way round, a press and a release that come together (a touchpad tap, a
+    test's click) can fall between the firmware's debounced looks at the pins, so a
+    press now lasts at least 40 ms of emulated time, and a release that comes sooner
+    waits for it.
+
+66. **A socket name that was not a path.** The window's first run never connected,
+    though the emulator listened. Qt's QLocalSocket takes a name that is not an
+    absolute path as one in the temporary directory, so `devices/NAME/panel.sock`
+    became `/tmp/devices/NAME/panel.sock`. The window makes the path absolute.
+
+67. **Readers that held the monitor.** `nfc --reader` waited up to 15 s for the virtual
+    reader, and `ibutton --reader` up to 120 s, with the emulator's monitor open the
+    whole time. The monitor takes one client, and the window runs every command
+    through it one after another, so a reader held everything else up. With
+    `--no-wait` they put the reader there and return; the window watches the reader's
+    `reader` and `tx` properties over the panel link and says what it read, or that it
+    read nothing.
+
+68. **One emulator at a time.** `gui_check.py` failed its reboot check once, and left
+    an emulator running after it exited. When an emulator exits, the window waits
+    300 ms before it decides what happened, so that the link's last lines (`power 0`)
+    come first. The check switched the Flipper off the hard way and plugged USB in
+    within those 300 ms, which started a new emulator; the old decision then took the
+    new one for gone, showed the Flipper off while it ran, and the next Back held
+    started a second emulator on the same device files. Now the decision is about the
+    process that exited, and the window never starts one while another still runs.
+
+69. **A serial that looked like a ROM.** A new DS1990 with the serial `01 02 03 04 05
+    06` was refused: "a 1-Wire ROM is 7 bytes". Six bytes are taken as a serial, and
+    get the family code in front, unless they start with the family code, as these do
+    (01 is a DS1990's), when they were taken for a ROM without its CRC, one byte
+    short. Six bytes are always a serial now.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

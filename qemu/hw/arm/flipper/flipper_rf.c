@@ -730,6 +730,17 @@ static char *cc1101_get_rssi(Object *obj, Error **errp)
     return g_strdup_printf("%.1f", cc1101_rssi_dbm(CC1101(obj)));
 }
 
+/* what the radio is doing, as the link's cc1101 message has it */
+static char *cc1101_get_radio(Object *obj, Error **errp)
+{
+    Cc1101State *s = CC1101(obj);
+
+    if (!s->link_cfg) {
+        cc1101_link_check(s);
+    }
+    return g_strdup(s->link_cfg);
+}
+
 static void cc1101_init(Object *obj)
 {
     object_property_add_str(obj, "tx", cc1101_get_tx, NULL);
@@ -738,6 +749,10 @@ static void cc1101_init(Object *obj)
     object_property_add_str(obj, "rssi", cc1101_get_rssi, NULL);
     object_property_set_description(obj, "rssi",
         "The RSSI (dBm) the firmware reads now, at the chip's frequency and bandwidth");
+    object_property_add_str(obj, "radio", cc1101_get_radio, NULL);
+    object_property_set_description(obj, "radio",
+        "What the chip is set to: state=sleep|idle|rx|fstxon|tx freq=Hz "
+        "mod=... bw=Hz rate=baud dev=Hz boundary=dB");
     object_property_add_str(obj, "rx", cc1101_get_rx, cc1101_set_rx);
     object_property_set_description(obj, "rx",
         "Put a signal on the air: [@freq_hz,]+high,-low,... in µs, or file:PATH");

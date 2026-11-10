@@ -6,6 +6,12 @@ new `flipper-zero` board (STM32WB55RG SoC with the Flipper's display, SD card, p
 and radios), and it runs the **unmodified firmware binary**: the same `.elf`, `.dfu` or
 update `.tgz` you would flash.
 
+![The window: a Flipper drawn around the emulated LCD, with a bench of virtual devices under it](docs/img/26-window-nfc-read.png)
+
+*The window. The NFC app has just read the NTAG215 that the bench holds to the emulated
+Flipper. Click its buttons, plug its USB cable in and out, pull its microSD card, hold
+cards, tags and keys to it, and switch it off and on: [The window](#the-window).*
+
 | | |
 |:-:|:-:|
 | ![desktop](docs/img/03-desktop-sd-animation.png) | ![menu](docs/img/04-main-menu.png) |
@@ -23,7 +29,9 @@ Verified on 2026-11-10 with `scripts/smoke_test.py` (boot, SD mount, LCD, input,
 USB, the secure enclave, IR receive and transmit, Sub-GHz receive and transmit, 125 kHz
 RFID read, emulate and T5577 write, iButton read and emulate, NFC read (NTAG215, MIFARE
 Classic 1K) and emulate, USB/IP export, warm reboot, no crash): **official 1.5.1**,
-**Momentum mntm-012**, **Unleashed unlshd-094**.
+**Momentum mntm-012**, **Unleashed unlshd-094**. The window passes
+`scripts/gui_check.py` (clicked buttons, the bench, switching off and on, the Left + Back
+reboot, installing firmware) on the same three, off-screen.
 
 | | |
 |:-:|:-:|
@@ -32,9 +40,13 @@ Classic 1K) and emulate, USB/IP export, warm reboot, no crash): **official 1.5.1
 
 **Works**
 - Boots to the desktop: every `furi_hal` init, all services, the dolphin and the menus.
-- 128×64 ST7567 LCD with backlight, plus RGB LED, vibro and speaker indicators in the
-  window.
-- Buttons from the keyboard, the QEMU monitor, or `./flipperemu press`.
+- A window that looks like a Flipper: the 128×64 ST7567 LCD and its backlight, the RGB
+  LED, the vibration motor and the speaker, in a body whose buttons you click. Its USB
+  plug and microSD card come out and go back in, and a bench under it holds cards, tags
+  and keys to it, points remotes at it and puts signals on the air.
+- Buttons from the window (mouse or keyboard), the QEMU monitor, or `./flipperemu
+  press`, held as long as you like: Back held for 5 s offers to switch the Flipper off,
+  and Left + Back reboots it.
 - microSD over SPI2 + DMA: card detect, mount, read, write. Settings land in
   `/ext/.int`, dolphin animations load from the card, and `.fap` apps launch.
 - Persistent devices: the internal flash (`flash.img`) and the battery-backed state (fuel
@@ -106,8 +118,10 @@ Classic 1K) and emulate, USB/IP export, warm reboot, no crash): **official 1.5.1
   `./flipperemu nfc dump.json` puts a card the Proxmark3 dumped in the field.
 - Speaker: TIM16's PWM tone plays through QEMU audio (desktop sound or a WAV recording).
   The duty cycle sets the volume, as on the real piezo.
-- Power: STOP2 deep sleep (1–2 % of a host core when idle), fuel gauge and charger you can
-  set from the monitor, and a USB cable that carries VBUS.
+- Power: STOP2 deep sleep (1–2 % of a host core when idle), a fuel gauge and charger you
+  can set (`./flipperemu battery`, `usb`), and a USB cable that carries VBUS. The
+  firmware switches the Flipper off as on hardware (the power-off dialog, `power off`,
+  a flat battery off USB), and the window switches it on again when Back is held.
 - Secure enclave: the key store of ST's FUS on CPU2 and the AES peripheral it loads keys
   into, with factory keys of FlipperEmu's own. The firmware's check of its ten keys
   passes, so there is no "Secure Enclave is damaged" at start. `furi_hal_crypto` and the
@@ -129,8 +143,10 @@ Classic 1K) and emulate, USB/IP export, warm reboot, no crash): **official 1.5.1
 - LP5562 engine programs are approximated (steady-state brightness only).
 - Not yet exercised: XIP app loaders that run code from internal flash, and the
   radio-stack stage of updates (the emulated CPU2 can't install a stack).
-- The GTK window is QEMU's standard display. It hasn't been tested on a desktop session
-  here; all testing so far was headless, with screenshots taken through the monitor.
+- The window has been checked off-screen (Qt's offscreen platform, `scripts/gui_check.py`),
+  not yet by hand on a desktop session.
+- DFU mode (Left held through a reboot) shows the firmware's DFU splash, but there is
+  no USB DFU device behind it: reboot again to leave it.
 
 The enclave's factory keys are FlipperEmu's, not Flipper Devices': those never leave a
 real Flipper, and they are not in this project. So the files a real Flipper's keys
@@ -145,6 +161,9 @@ encrypted stay closed to an emulated one, the stock Sub-GHz keystore among them;
 #    PipeWire or PulseAudio headers, e.g. pipewire-devel / libpipewire-0.3-dev)
 scripts/setup_qemu.sh
 
+#    the window that looks like a Flipper needs PySide6 (without it: the bare LCD)
+pip install PySide6                           # or: dnf/apt install python3-pyside6
+
 # 2. fetch an official release (SHA-256 verified)
 scripts/fetch_firmware.py                     # -> firmware/official-<ver>/
 
@@ -152,8 +171,8 @@ scripts/fetch_firmware.py                     # -> firmware/official-<ver>/
 ./flipperemu run -f firmware/official-1.5.1/flipper-z-f7-update-1.5.1.tgz
 ```
 
-The window shows the LCD. Use the **arrows**; **Enter/Space** is OK and
-**Backspace/Esc** is Back. The firmware log streams to the terminal.
+A Flipper opens in a window. Click its buttons, or use the **arrows**; **Enter/Space**
+is OK and **Backspace/Esc** is Back. The firmware log streams to the terminal.
 
 ### Your own builds and other firmwares
 
@@ -169,13 +188,81 @@ Each `-d NAME` is an independent virtual Flipper in `devices/NAME/`, with its ow
 card and NVRAM. Re-running with `-f` reflashes it the way DFU does (only the touched pages
 are erased). Without `-f` it boots whatever is already flashed.
 
+## The window
+
+`./flipperemu run` opens a window with a Flipper in it: a body of FlipperEmu's own
+drawing around the emulated LCD, with its lights, its buttons and its ports. It needs
+PySide6. `--gtk` gives QEMU's own window with the bare LCD instead, and `--headless` no
+window at all.
+
+- **The buttons**: click them, or use the keyboard (arrows, Enter/Space = OK,
+  Backspace/Esc = Back), and hold them as long as you would a real one. Back held for
+  5 s on the desktop opens the firmware's power-off dialog. Left + Back held for 3 s
+  reboots the Flipper; keep Left held after letting go of Back and it starts in DFU mode.
+- **Off and on**: when the firmware switches the Flipper off (that dialog, Settings >
+  Power, a flat battery off USB), the window stays and shows it off. Hold Back to switch
+  it on, or plug its USB cable in. It starts with its battery as it was, and with the
+  cards, tags and keys that were held to it.
+- **The USB plug** on the right: click it to unplug the cable, again to plug it back in.
+  The USB menu also has a charger (power without data). Unplugged, the Flipper runs on
+  its battery and sleeps deeply when idle.
+- **The microSD card** at the bottom: click it to pull it out (as rudely as a finger
+  would) and push it back in.
+- **The lights and sounds** show on the body: the LED glows, the body shakes when the
+  motor runs, a speaker sign shows a tone (it plays through `--audio`), and the IR window
+  on the left end flashes when the Flipper transmits.
+- **The bench** under it has a tile for each of USB, the microSD card, the battery, NFC,
+  RFID, iButton, infrared and Sub-GHz. A tile says what is plugged in or held to the
+  Flipper and what its radio is doing, with a button for what you do most and a menu
+  for the rest. The menu bar has the same menus, and so does a right click on the
+  Flipper.
+- **What can be held to it**: NFC cards (Flipper `.nfc` files, Proxmark3 `.json`
+  dumps, new NTAG21x and MIFARE Classic tags), 125 kHz tags (`.rfid` files, new tags of
+  24 protocols, a blank T5577) and iButton keys (`.ibtn` files, new Dallas, Cyfral and
+  Metakom keys, blanks it can write). A reader's field around it, and virtual readers
+  held to an emulating Flipper, whose reads land in the log. An `.ir` file opens as a
+  remote of buttons; `.sub` captures and Princeton keys go on the air. A real radio (an
+  RTL-SDR through `rtl_tcp`, a HackRF, an IQ recording), a Proxmark3 or a script can be
+  its antenna. Files dropped on the window go where they belong.
+- **The log** (View > The log, Ctrl+L) says what you did and what the Flipper did (its
+  transmissions, what a reader read), and has a line for the Flipper's CLI.
+- **View**: zoom from 2× to 6×, a white, black or Catppuccin Mocha body, the LCD's pixel
+  grid. Device > Save the screen saves the LCD as a PNG; Install firmware flashes another
+  one and starts it.
+
+Closing the window stops the emulator, as `./flipperemu stop` does. `./flipperemu gui`
+opens the window for a device that runs already (started with `--headless`); closing
+that one leaves the emulator running. The window remembers
+its zoom, colours and recent files in `~/.config/FlipperEmu/gui.ini`.
+
+| | |
+|:-:|:-:|
+| ![off](docs/img/27-window-off.png) | ![log](docs/img/29-window-log.png) |
+| Off: hold Back to switch it on, or plug it in | The log, with a line for the CLI |
+
+<p align="center"><img src="docs/img/28-window-colours.png" width="50%"
+alt="The three colours: white, black and Catppuccin Mocha"></p>
+
+The window and the emulator talk over the [front-panel link](docs/PANEL_LINK.md): the
+LCD, the lights and the buttons, and the QOM properties the bench shows. Any other
+program can use it too. `scripts/gui_check.py FIRMWARE` checks the window off-screen: it
+boots a throwaway device, clicks its buttons, switches it off and on, and reboots it.
+
 ## The `flipperemu` tool
 
 | command | what it does |
 |---|---|
 | `run [-f FW] [--headless] [--gdb\|--wait-gdb] [--serial S] [--usb U] [--no-sd]` | (flash and) boot |
 | `run --update PKG` | install an update package through the firmware's own updater (keeps settings and files) |
+| `run --unplugged` \| `run --battery PERCENT` \| `run --gtk` | start on battery (USB cable out); with this charge; in QEMU's own window (the bare LCD) |
 | `stop` | shut a running device down cleanly (saves its NVRAM) |
+| `gui [--scale N]` | the window that looks like a Flipper, for a device that runs already |
+| `status [--json]` | what is plugged into a running device and held to it |
+| `usb plug` \| `usb unplug` \| `usb charger` | its USB cable: into a computer, out, into a charger (no argument: show it) |
+| `battery [PERCENT] [--voltage MV] [--temperature C] [--current MA]` | its battery (no argument: show it) |
+| `sd eject` \| `sd insert` | pull its microSD card out, push it back in |
+| `sound off` \| `sound on` | mute its speaker, and back |
+| `reset` | reboot it, as holding Left + Back does |
 | `run --usbip [PORT]` | export the USB device over USB/IP (then `sudo scripts/usbip_attach.py`) |
 | `cli ["CMD" …]` | the device's CLI over USB: interactive, or run commands and print their output |
 | `ir PROTO ADDR CMD` \| `ir raw …` \| `ir FILE.ir [NAME]` | send an infrared signal to the device's receiver |
@@ -188,7 +275,7 @@ are erased). Without `-f` it boots whatever is already flashed.
 | `ibutton rw1990` \| `ibutton tm2004` \| … | touch a blank the device can write; `ibutton` shows its ROM |
 | `ibutton --reader` | read the Dallas key the device emulates, ROM and memory (to `devices/NAME/ibutton-tx/`) |
 | `nfc FILE.nfc` \| `nfc ntag215 UID [URL]` \| `nfc mfc1k UID` \| `nfc none` | hold an NFC card to the device |
-| `nfc --reader ntag` \| `nfc --reader scan` | hold an NFC reader to an emulating device and print what it reads |
+| `nfc --reader ntag` \| `nfc --reader scan` | hold an NFC reader to an emulating device and print what it reads (`--no-wait`: leave it there) |
 | `nfc --link iso-dep` \| `--link script:FILE.py` \| `--link log` | a card played by a program, in the field until ^C |
 | `nfc --link pm3[:PORT]` \| `nfc DUMP.json` | real cards through a Proxmark3; a Proxmark3 dump as the card |
 | `enclave` \| `enclave encrypt SLOT IV TEXT` \| `enclave wrap KEY` \| `enclave reset` | the keys in the device's secure enclave, and what the firmware computes with them |
@@ -235,7 +322,8 @@ It then tests each radio through the firmware's own CLI:
 Finally, a USB/IP client enumerates the device, the LCD comes back after `power reboot`,
 and the log must have no `[CRASH]`. Exit code 0 means pass, so it slots into a
 pre-flash habit or CI. `--keep` keeps the device directory (`uart.log`, `qemu.log`, the
-captures) to look at afterwards.
+captures) to look at afterwards. `scripts/gui_check.py FIRMWARE` does the same for the
+window, off-screen.
 
 Each area has a closer check of its own in `scripts/*_check.py`. For the enclave:
 
@@ -690,19 +778,33 @@ driver if your QEMU build has one (PipeWire, PulseAudio, ALSA or SDL; silent whe
 
 ```sh
 ./flipperemu run --audio wav:flipper.wav     # e.g. then: ./flipperemu cli "buzzer note C5 1s"
+./flipperemu sound off                       # mute it (the firmware notices nothing); sound on
 ```
+
+The window's Device > Mute (Ctrl+M) does the same, and shows a tone that plays.
 
 ### Battery and USB power
 
-The fuel gauge and charger are live QOM objects. From the monitor
-(`scripts/fe_monitor.py devices/NAME/monitor.sock hmp "…"`):
+```sh
+./flipperemu battery 15                 # 15 %, with a voltage to match
+./flipperemu battery 0                  # flat: off USB the firmware warns, counts down
+                                        # and switches the Flipper off
+./flipperemu battery --temperature 60   # °C (also --voltage MV, --current MA)
+./flipperemu usb unplug                 # pull the USB cable (data and VBUS)
+./flipperemu usb charger                # a charger: power without data
+./flipperemu usb plug                   # into a computer again
+./flipperemu status                     # all of it, and what is held to it
+./flipperemu run --unplugged --battery 40   # start that way
+```
 
-```
-qom-set /machine/gauge soc 5           # 5 % battery: low-battery warnings
-qom-set /machine/gauge temperature-dk 3330   # 60 °C
-qom-set /machine/charger usb true      # plug in a charger (charging icon)
-qom-set /machine/soc/usb attached false   # pull the USB cable (data and VBUS)
-```
+The fuel gauge and charger are QOM objects (`/machine/gauge`: `soc`, `voltage-mv`,
+`temperature-dk`, `current-ma`, `capacity-mah`; `/machine/charger`: `usb`;
+`/machine/soc/usb`: `attached`), which the commands set through the monitor.
+
+When the firmware switches the Flipper off, the emulator exits: an emulator that is off
+has nothing to run. The window stays and switches it on again when Back is held. With the
+cable plugged in, `power off` leaves the Flipper on its "It's now safe to unplug the USB
+cable" screen until the cable is pulled.
 
 With `--usb` (the default) the virtual cable is plugged in, so the Flipper shows
 charging. As on hardware, a Flipper on USB never enters deep sleep: expect about 20 % of
@@ -814,6 +916,7 @@ PLAN.md                roadmap
 docs/ARCHITECTURE.md   how the machine is modelled, device by device
 docs/BRINGUP_LOG.md    every bug found on the way (incl. 3 QEMU fixes and the USB races)
 docs/RADIO_LINK.md     the protocol between an emulated radio and a real one
+docs/PANEL_LINK.md     the protocol between the emulator and the window
 flipperemu             launcher / device manager
 qemu/hw/arm/flipper/   the QEMU machine + STM32WB55 SoC + board devices (C)
 qemu/patches/          fixes to upstream QEMU (SysTick, ssi-sd, SD SPI state)
@@ -821,7 +924,8 @@ scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_moni
                        fe_cli.py, fe_ir.py, fe_subghz.py, fe_sdr.py (real radios),
                        fe_nfc_link.py (cards from programs), fe_pm3.py (Proxmark3),
                        fe_enclave.py (the enclave's keys and ciphers), fe_usbip.py,
-                       usbip_attach.py, smoke_test.py, *_check.py
+                       usbip_attach.py, fe_gui.py (the window: fe_gui_view.py,
+                       fe_gui_link.py, fe_gui_widgets.py), smoke_test.py, *_check.py
 devices/ firmware/ build/ third_party/    generated, git-ignored
 ```
 

@@ -243,7 +243,7 @@ def describe_new(kind, data):
         return wave("Metakom", metakom_wave(data))
     families = {name.lower(): code for code, (name, _, _) in FAMILIES.items()}
     if kind in families:
-        if len(data) in (6, 7) and data[0] != families[kind]:
+        if len(data) == 6 or (len(data) == 7 and data[0] != families[kind]):
             data = bytes([families[kind]]) + bytes(data)[:6]   # serial only
         rom = rom_of(data)
         if rom[0] != families[kind]:

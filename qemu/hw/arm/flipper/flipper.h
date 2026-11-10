@@ -74,6 +74,7 @@ struct Bq27220State {
     /* battery */
     uint32_t soc, voltage_mv, temperature_dk, capacity_mah;
     int32_t current_ma;
+    bool sysdwn;                 /* the battery is too low to go on */
 };
 
 /* ---------------------------------------------------- BQ25896 charger */
@@ -86,6 +87,9 @@ struct Bq25896State {
     bool first;
     bool vbus;                   /* USB cable "plugged" */
     Bq27220State *gauge;
+    /* the battery was cut off with nothing on VBUS: the Flipper is off */
+    void (*power_off)(void *opaque);
+    void *opaque;
 };
 
 /* ------------------------------------------------- LP5562 LED driver */
@@ -219,6 +223,7 @@ struct FlipperSpeakerState {
     struct AudioBackend *audio_be;
     struct SWVoiceOut *voice;
     bool on;
+    bool mute;                   /* property: no sound from it */
     uint32_t freq_mhz;           /* tone, milli-Hz */
     uint32_t duty_ppm;           /* PWM duty: how the firmware sets volume */
     uint32_t phase, phase_inc, threshold;
@@ -395,6 +400,44 @@ void flipper_ibutton_reset(FlipperIbuttonState *s);
 void flipper_rfid_set_drive(FlipperRfidState *s, uint32_t drive_hz);
 /* emulating: the load on the antenna (TIM2 CH3 on RFID_PULL) changed */
 void flipper_rfid_load(FlipperRfidState *s, bool on, int64_t when);
+
+/* ------------------------------------- front panel (flipper_panel.c) */
+/* the buttons, in the order of the panel link's names for them */
+enum { BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_OK, BTN_BACK, BTN_NUM };
+
+/*
+ * The Flipper's face on a link (docs/PANEL_LINK.md): the picture on the
+ * LCD, the backlight, the LED, the vibration motor and the speaker go out;
+ * button presses come in.  A window drawn around the emulator is its other
+ * end.  It also reports QOM properties the window asks to watch.
+ */
+#define TYPE_FLIPPER_PANEL "flipper-panel"
+OBJECT_DECLARE_SIMPLE_TYPE(FlipperPanelState, FLIPPER_PANEL)
+struct FlipperPanelState {
+    DeviceState parent_obj;
+    CharFrontend link;
+    FlipperLink lk;
+    St7567State *lcd;            /* the picture; it has the lights' state too */
+    FlipperSpeakerState *speaker;
+    void (*key)(void *opaque, int button, bool down);
+    void *key_opaque;
+    QEMUTimer *tick;             /* host time, while a window is connected */
+    QEMUTimer *release;          /* emulated time: a press's minimum length */
+    uint8_t frame[1024];         /* as last sent */
+    bool frame_sent;
+    uint64_t lcd_bytes;          /* the LCD's data counter at the last tick */
+    int settling;                /* ticks spent waiting for a frame's end */
+    int64_t props_at;
+    uint32_t backlight, led, freq, duty;
+    bool vibro;
+    uint32_t held, releasing;    /* bit per button */
+    int64_t pressed_at[BTN_NUM];
+    GPtrArray *watches;
+};
+/* the speaker or the motor changed: tell the window now, not at its tick */
+void flipper_panel_sync(FlipperPanelState *s);
+/* the firmware turned the Flipper off; the emulator is about to exit */
+void flipper_panel_power_off(FlipperPanelState *s);
 
 /* ------------------------------------ secure enclave (flipper_enclave.c) */
 /* what the factory stores in the SoC's FUS; call before realizing the SoC */

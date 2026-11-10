@@ -1128,6 +1128,22 @@ static void st25_realize(SSIPeripheral *d, Error **errp)
                       st25_link_opened, s);
 }
 
+/* what the chip is doing: reading with its own field on, or listening for
+ * a reader's as a card (the firmware emulating one) */
+static char *st25_get_radio(Object *obj, Error **errp)
+{
+    St25r3916State *s = ST25R3916(obj);
+
+    if (s->field_on) {
+        return g_strdup("field");
+    }
+    if ((s->rega[REG_MODE] & MODE_TARG) &&
+        (s->rega[REG_OP_CONTROL] & OP_EN)) {
+        return g_strdup("listen");
+    }
+    return g_strdup("idle");
+}
+
 static void st25_init(Object *obj)
 {
     object_property_add_str(obj, "card", st25_get_card, st25_set_card);
@@ -1140,6 +1156,10 @@ static void st25_init(Object *obj)
     object_property_set_description(obj, "field",
         "A reader's field around the Flipper with no reader talking (what "
         "field detection sees; \"reader\" brings its own)");
+    object_property_add_str(obj, "radio", st25_get_radio, NULL);
+    object_property_set_description(obj, "radio",
+        "What the chip is doing: field (its own 13.56 MHz field is on: it "
+        "is reading), listen (it waits for a reader, as a card) or idle");
     object_property_add_str(obj, "tx", st25_get_tx, NULL);
     object_property_set_description(obj, "tx",
         "What the virtual reader last read, as a .nfc file");

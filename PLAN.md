@@ -60,8 +60,8 @@ NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
 - ☑ Speaker: TIM16 CH1 PWM → QEMU audio (desktop driver or `--audio wav:FILE`); tones
       verified by FFT (440 Hz, 1 kHz, notes)
 - ☐ LP5562 engine interpreter (blinks, ramps)
-- ◐ Battery/USB power: monitor control done (`qom-set /machine/gauge soc 5`,
-      `/machine/charger usb true`); the controls in a window are M8's
+- ☑ Battery/USB power (2026-11-10): `./flipperemu battery`, `usb plug|unplug|charger`
+      and the window; SYSDWN under 3.15 V, so a flat battery switches the Flipper off
 - ☑ STOP2 deep sleep (CPU2 performs the SHCI clock switch); now the default, 1–2 % host CPU idle
 - ☑ IR: receive (TIM2 input capture + virtual receiver; 14 protocols, raw, .ir files;
       decoded by the Infrared app and `ir rx`) and transmit capture (TIM1 with its
@@ -149,9 +149,21 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
 - ☐ U2F from a host: the app starts, takes the USB port as a HID token and shows
       "Connected!"; a registration and a login from a browser or libfido2 over USB/IP
       have not been tried
-- ☐ The window: the LCD inside a Flipper's body with buttons to click, the LED and the
-      vibration motor; menus that put cards, tags, keys and signals in front of it;
-      the USB cable to plug and unplug; battery and charger
+- ☑ The window (2026-11-10): `scripts/fe_gui.py` (PySide6), the default of `run`. The
+      LCD in a Flipper-shaped body of its own drawing, with buttons to click or hold, the
+      LED, the vibration motor, the speaker's tone and the IR window; a USB plug and a
+      microSD card to pull and push back; a bench and menus that hold cards, tags and
+      keys to it, point remotes at it, put signals on the air, hold virtual readers to
+      it and make real radios its antenna; a log with a line for the CLI. Over a
+      front-panel link (`flipper_panel.c`, docs/PANEL_LINK.md): frames, lights, held
+      buttons and watched QOM properties. Power as on hardware: the firmware's power-off
+      (dialog, `power off` on USB, a flat battery) ends the emulator, and the window
+      switches it on again on Back held or USB plugged in, with the battery and what was
+      held to it. New commands for it and for scripts: `gui`, `status`, `usb`, `battery`,
+      `sound`, `sd eject|insert`, `reset`, `run --unplugged|--battery|--gtk`. Checked
+      off-screen by `gui_check.py` on official, Momentum and Unleashed (BRINGUP_LOG 64-69)
+- ☐ The window by hand on a desktop session (it has only run on Qt's offscreen
+      platform here); a USB DFU device behind the firmware's DFU mode
 
 ## M6: research tooling ☐
 - ☐ Snapshot workflow (`savevm` on qcow2 images; boot once, jump straight to an app)

@@ -7,6 +7,9 @@
  * the duty cycle as it does on the real piezo.  -M flipper-zero,audiodev=ID
  * selects the backend; without one the speaker stays silent.
  *
+ * QOM, on /machine/speaker:
+ *   mute  (bool, RW)  keep it quiet; the firmware notices nothing
+ *
  * Copyright (c) 2026, Kara Zajac
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -44,7 +47,7 @@ static void speaker_callback(void *opaque, int free)
             break;
         }
         for (int i = 0; i < n; i++) {
-            if (s->on) {
+            if (s->on && !s->mute) {
                 buf[i] = s->phase < s->threshold ? s->hi : s->lo;
                 s->phase += s->phase_inc;
             } else {
@@ -72,8 +75,30 @@ void flipper_speaker_set(FlipperSpeakerState *s, bool on, uint32_t freq_mhz,
     s->duty_ppm = duty_ppm;
     speaker_update_wave(s);
     if (s->voice) {
-        audio_be_set_active_out(s->audio_be, s->voice, on);
+        audio_be_set_active_out(s->audio_be, s->voice, on && !s->mute);
     }
+}
+
+static bool speaker_get_mute(Object *obj, Error **errp)
+{
+    return FLIPPER_SPEAKER(obj)->mute;
+}
+
+static void speaker_set_mute(Object *obj, bool v, Error **errp)
+{
+    FlipperSpeakerState *s = FLIPPER_SPEAKER(obj);
+
+    s->mute = v;
+    if (s->voice) {
+        audio_be_set_active_out(s->audio_be, s->voice, s->on && !v);
+    }
+}
+
+static void speaker_init(Object *obj)
+{
+    object_property_add_bool(obj, "mute", speaker_get_mute, speaker_set_mute);
+    object_property_set_description(obj, "mute",
+        "Keep the speaker quiet (the firmware notices nothing)");
 }
 
 /* QEMU never finalizes machine devices, so close the voice ourselves: that
@@ -125,6 +150,7 @@ static const TypeInfo speaker_types[] = {
         .name = TYPE_FLIPPER_SPEAKER,
         .parent = TYPE_DEVICE,
         .instance_size = sizeof(FlipperSpeakerState),
+        .instance_init = speaker_init,
         .class_init = speaker_class_init,
     },
 };

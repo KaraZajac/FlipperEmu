@@ -713,9 +713,15 @@ firmware keeps `/int` on the card as `/ext/.int`.
 - **BQ27220**: standard commands, MAC subcommands, unseal/full-access keys, CFG_UPDATE,
   and a data memory written with the firmware's own checksum protocol. A fresh gauge is
   provisioned by the firmware once (~2 s), then persisted in `nvram.bin`. QOM properties
-  `soc`, `voltage-mv`, `current-ma` and `temperature-dk` set the battery.
+  `soc`, `voltage-mv`, `current-ma`, `temperature-dk` and `capacity-mah` set the battery
+  (and `-global bq27220.soc=…` the one a run starts with; they survive a reset). SYSDWN
+  rises under 3.15 V and falls over 3.40 V: off USB, the firmware then counts down and
+  switches the Flipper off.
 - **BQ25896**: register file with ADC readings derived from the gauge; property `usb`
-  plugs in a charger.
+  plugs in a charger. BATFET_DIS in REG09 is how the firmware switches the Flipper off:
+  with nothing on VBUS the board powers off (it says `power 0` on the panel link and
+  QEMU exits); while USB power is there it keeps running, and goes off when the cable
+  does.
 - **LP5562**: register file. W PWM is the backlight and R/G/B the status LED, both drawn
   next to the LCD.
 - **CC1101**: status byte, header/burst/strobe framing, config and status registers,
@@ -740,6 +746,45 @@ firmware keeps `/int` on the card as `/ext/.int`.
 - **Pins held by the board** (re-applied after every reset, because a GPIO port reset
   releases external drivers): SD card detect, idle-low MISO lines (the CC1101 driver waits
   for CHIP_RDYn on MISO), and released buttons.
+- **The microSD slot**: the machine property `sd-card` pulls the card out and pushes it
+  back, at run time: card detect says so, and the firmware leaves a card that is not
+  there alone (pushed back, it is the same image); `usb-cable=off`
+  starts a run with the USB cable unplugged. The speaker's `mute` silences it without
+  the firmware knowing.
+
+## The front panel (`flipper_panel.c`, `scripts/fe_gui*.py`)
+
+The window that looks like a Flipper is a program of its own, `scripts/fe_gui.py`
+(PySide6), on a link of the same kind as the radios': a line protocol on a chardev,
+`devices/NAME/panel.sock` (docs/PANEL_LINK.md). The `flipper-panel` device sends it the
+LCD as 1024 bytes of pixels, the backlight, the LED, the vibration motor and the
+speaker's tone, each when it changes, and the QOM properties it asks to watch; it takes
+button presses and releases. Nothing of it runs while no program is connected.
+
+- **Frames**: a 16 ms tick on the realtime clock reads the ST7567's pixels and sends
+  them when they changed. While the firmware is writing the display RAM (its byte count
+  moved since the last tick) the tick looks again 3 ms later, up to five times, so a
+  frame goes out whole. While more than 64 KB wait to be sent, no frames go: a slow
+  window gets the latest one.
+- **Buttons**: the panel's presses go to the same pins as the keyboard of QEMU's window
+  and the monitor's `sendkey`, and the last of them decides. A press lasts at least
+  40 ms of virtual time, because the firmware's input service debounces; a release that
+  comes sooner is deferred on a virtual-clock timer. When the window goes, the buttons
+  it held are released.
+- **Properties**: watched paths are read every 100 ms with `object_property_get_qobject`
+  and sent as JSON when it changed. The window changes nothing through the link: it
+  runs the launcher's commands, which go through the monitor, and sees the result come
+  back.
+- **Power**: when the board powers off (above) the panel says `power 0` before the
+  guest shutdown. The launcher's `Session` started that QEMU; the window keeps the
+  battery's last values and what the launcher held to the Flipper, and starts a new
+  QEMU with them (`-global bq27220.*`, `usb-cable=off`) when Back is held or USB is
+  plugged in.
+
+The window itself (`fe_gui_view.py`) draws a body of FlipperEmu's own in QPainter, in
+units of one LCD pixel, so it scales without blurring; the LCD's colours follow the
+backlight. `fe_gui_link.py` is its end of the link, `fe_gui_widgets.py` the bench, the
+dialogs and the log, and `fe_gui.py` the menus and what ties them together.
 
 ## Real radios: the CC1101's link (`flipper_rf.c`, `scripts/fe_sdr.py`)
 
@@ -854,4 +899,5 @@ the emulated field.
 | `sd.img` | the microSD card |
 | `nvram.bin` | coin-cell / gauge state: BQ27220 data memory, RTC calendar offset, BKP0R–BKP19R |
 | `enclave.keys` | the FUS's key store on CPU2: the secure enclave's keys (text, one key per line) |
+| `held.json` | (while it runs) the names of what the launcher held to it, for `status` and the window |
 | `firmware.elf` | symbols for gdb (copied when flashing an ELF) |

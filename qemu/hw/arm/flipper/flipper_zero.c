@@ -17,6 +17,10 @@
  *   -drive if=pflash,format=raw,file=flash.img  persistent 1 MiB flash
  *   -M flipper-zero,nvram=FILE                  battery-backed state
  *   -M flipper-zero,enclave=FILE                the secure enclave's keys
+ *   -M flipper-zero,usb-cable=off               start with USB unplugged
+ *   -M flipper-zero,sd-card=off                 ... and the microSD pulled out
+ *   -global flipper-panel.link=CHARDEV          the front panel, for a window
+ *                                               around it (docs/PANEL_LINK.md)
  *
  * Keys: arrows = D-pad, Enter/Space = OK, Backspace/Escape = Back.
  *
@@ -39,6 +43,7 @@
 #include "system/blockdev.h"
 #include "ui/input.h"
 #include "system/reset.h"
+#include "system/runstate.h"
 #include "system/system.h"
 #include "target/arm/cpu-qom.h"
 #include "wb55.h"
@@ -53,6 +58,7 @@ struct FlipperZeroState {
     St7567State *lcd;
     Lp5562State *led;
     FlipperSpeakerState *speaker;
+    FlipperPanelState *panel;
     FlipperIrState *ir;
     FlipperRfidState *rfid;
     FlipperIbuttonState *ibutton;
@@ -66,9 +72,11 @@ struct FlipperZeroState {
     uint32_t scale;
     uint32_t region;
     bool legacy_sleep;
+    bool usb_cable;              /* plugged in from the start */
     QemuInputHandlerState *input;
     uint32_t keys_down;          /* bit per button */
-    bool sd_present;
+    bool sd_drive;               /* there is a card: -drive if=sd */
+    bool sd_in;                  /* ... and it is in the slot */
     char *nvram;                 /* battery-backed state file */
     char *enclave;               /* the FUS's key store (flipper_enclave.c) */
     Notifier exit_notifier;
@@ -88,7 +96,6 @@ typedef struct FlipperNvram {
     WB55RtcBackup rtc;
 } FlipperNvram;
 
-enum { BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_OK, BTN_BACK, BTN_NUM };
 static const struct {
     char port;
     int pin;
@@ -173,6 +180,12 @@ static void flipper_button(FlipperZeroState *s, int b, bool down)
     qemu_set_irq(soc_in(s, buttons[b].port, buttons[b].pin), level);
 }
 
+/* a button on the front panel's link */
+static void flipper_panel_key(void *opaque, int b, bool down)
+{
+    flipper_button(opaque, b, down);
+}
+
 static void flipper_input_event(DeviceState *dev, QemuConsole *src,
                                 QemuInputEvent *evt)
 {
@@ -208,6 +221,7 @@ static void flipper_vibro(void *opaque, int n, int level)
     FlipperZeroState *s = opaque;
     s->lcd->vibro = level;
     s->lcd->status_dirty = true;
+    flipper_panel_sync(s->panel);
 }
 
 /*
@@ -240,6 +254,7 @@ static void flipper_tim16_changed(void *opaque)
         s->lcd->speaker = on && duty;
         s->lcd->status_dirty = true;
     }
+    flipper_panel_sync(s->panel);
 }
 
 /*
@@ -388,20 +403,27 @@ static void flipper_nvram_save(Notifier *n, void *data)
     }
 }
 
+/* The slot's switch: low with a card in it.  The firmware looks at it all
+ * the time, and mounts or unmounts the card when it changes. */
+static void flipper_sd_detect(FlipperZeroState *s)
+{
+    qemu_set_irq(soc_in(s, 'C', 10), s->sd_drive && s->sd_in ? 0 : 1);
+}
+
 /* External levels the board holds on MCU pins. A GPIO port reset releases
  * external drivers, so these are re-applied after every system reset. */
 static void flipper_drive_pins(FlipperZeroState *s)
 {
-    qemu_set_irq(soc_in(s, 'C', 10), s->sd_present ? 0 : 1); /* SD card detect */
+    flipper_sd_detect(s);
     qemu_set_irq(soc_in(s, 'C', 2), 0);     /* SPI2 MISO idle low */
     qemu_set_irq(soc_in(s, 'B', 4), 0);     /* SPI1 MISO: CC1101 CHIP_RDYn */
     flipper_ir_idle(s->ir);                 /* IR receiver output idles high */
     flipper_ibutton_reset(s->ibutton);      /* iButton line pulled up */
-    for (int b = 0; b < BTN_NUM; b++) {     /* buttons released */
-        if (!(s->keys_down & (1u << b))) {
-            qemu_set_irq(soc_in(s, buttons[b].port, buttons[b].pin),
-                         buttons[b].active_high ? 0 : 1);
-        }
+    for (int b = 0; b < BTN_NUM; b++) {     /* buttons: as they are held */
+        bool down = s->keys_down & (1u << b);
+
+        qemu_set_irq(soc_in(s, buttons[b].port, buttons[b].pin),
+                     buttons[b].active_high ? down : !down);
     }
 }
 
@@ -505,6 +527,21 @@ static void flipper_usb_vbus(void *opaque, bool on)
     object_property_set_bool(OBJECT(s->charger), "usb", on, &error_abort);
 }
 
+/*
+ * The charger cut the battery off with nothing on VBUS: the Flipper is off
+ * (Settings > Power > Power OFF, or a flat battery).  A real one stays off
+ * until Back is held; an emulator that is off has nothing to run, so it
+ * exits, and what started it starts it again to switch it on.
+ */
+static void flipper_power_off(void *opaque)
+{
+    FlipperZeroState *s = opaque;
+
+    info_report("flipper-zero: powered off");
+    flipper_panel_power_off(s->panel);
+    qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
+}
+
 /* --------------------------------------------------------------- machine */
 
 static void flipper_zero_init(MachineState *machine)
@@ -533,8 +570,8 @@ static void flipper_zero_init(MachineState *machine)
             exit(1);
         }
         qdev_prop_set_chr(DEVICE(&s->soc.usb), "chardev", chr);
-        object_property_set_bool(OBJECT(&s->soc.usb), "attached", true,
-                                 &error_fatal);
+        object_property_set_bool(OBJECT(&s->soc.usb), "attached",
+                                 s->usb_cable, &error_fatal);
     }
     if (s->usbip) {
         Chardev *chr = qemu_chr_find(s->usbip);
@@ -544,8 +581,8 @@ static void flipper_zero_init(MachineState *machine)
             exit(1);
         }
         qdev_prop_set_chr(DEVICE(&s->soc.usb), "usbip", chr);
-        object_property_set_bool(OBJECT(&s->soc.usb), "attached", true,
-                                 &error_fatal);
+        object_property_set_bool(OBJECT(&s->soc.usb), "attached",
+                                 s->usb_cable, &error_fatal);
     }
     flipper_enclave_setup(&s->soc.ipcc);
     if (s->enclave) {
@@ -574,7 +611,7 @@ static void flipper_zero_init(MachineState *machine)
                             &error_fatal);
     qdev_realize_and_unref(card, qdev_get_child_bus(dev, "sd-bus"),
                            &error_fatal);
-    s->sd_present = dinfo != NULL;
+    s->sd_drive = dinfo != NULL;
 
     /* ---- SPI1: CC1101 + ST25R3916 */
     SSIBus *spi1 = s->soc.spi[0].bus;
@@ -596,6 +633,8 @@ static void flipper_zero_init(MachineState *machine)
     s->charger = BQ25896(flipper_i2c_dev(machine, i2c1, TYPE_BQ25896, 0x6B,
                                          "charger"));
     s->charger->gauge = s->gauge;
+    s->charger->power_off = flipper_power_off;
+    s->charger->opaque = s;
     s->led = LP5562(flipper_i2c_dev(machine, i2c1, TYPE_LP5562, 0x30, "led"));
     s->soc.usb.vbus_changed = flipper_usb_vbus;
     s->soc.usb.vbus_opaque = s;
@@ -624,6 +663,16 @@ static void flipper_zero_init(MachineState *machine)
     s->speaker = FLIPPER_SPEAKER(dev);
     s->soc.tim16->changed = flipper_tim16_changed;
     s->soc.tim16->changed_opaque = s;
+
+    /* ---- the front panel on a link: a window's view of all of the above */
+    dev = qdev_new(TYPE_FLIPPER_PANEL);
+    s->panel = FLIPPER_PANEL(dev);
+    s->panel->lcd = s->lcd;
+    s->panel->speaker = s->speaker;
+    s->panel->key = flipper_panel_key;
+    s->panel->key_opaque = s;
+    object_property_add_child(OBJECT(machine), "panel", OBJECT(dev));
+    qdev_realize_and_unref(dev, NULL, &error_fatal);
 
     /* ---- infrared receiver: PA0 and TIM2 TI1 */
     dev = qdev_new(TYPE_FLIPPER_IR);
@@ -753,6 +802,40 @@ static void flipper_set_legacy(Object *obj, bool v, Error **errp)
     FLIPPER_ZERO(obj)->legacy_sleep = v;
 }
 
+static bool flipper_get_usb_cable(Object *obj, Error **errp)
+{
+    return FLIPPER_ZERO(obj)->usb_cable;
+}
+
+static void flipper_set_usb_cable(Object *obj, bool v, Error **errp)
+{
+    FLIPPER_ZERO(obj)->usb_cable = v;
+}
+
+static bool flipper_get_sd_card(Object *obj, Error **errp)
+{
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+
+    return s->sd_in && (s->sd_drive ||
+                        !phase_check(PHASE_MACHINE_INITIALIZED));
+}
+
+/* Pulled out and pushed back in, it is the same card: the image of -drive.
+ * While it is out the firmware leaves it alone. */
+static void flipper_set_sd_card(Object *obj, bool v, Error **errp)
+{
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+
+    if (!phase_check(PHASE_MACHINE_INITIALIZED)) {
+        s->sd_in = v;
+    } else if (v && !s->sd_drive) {
+        error_setg(errp, "no microSD card: started without -drive if=sd");
+    } else {
+        s->sd_in = v;
+        flipper_sd_detect(s);
+    }
+}
+
 static void flipper_zero_instance_init(Object *obj)
 {
     FlipperZeroState *s = FLIPPER_ZERO(obj);
@@ -761,12 +844,24 @@ static void flipper_zero_instance_init(Object *obj)
     s->scale = 4;
     s->region = 2;                      /* US/CA/AU */
     s->legacy_sleep = false;            /* the firmware's default: STOP2 */
+    s->usb_cable = true;
+    s->sd_in = true;
     object_property_add_uint32_ptr(obj, "lcd-scale", &s->scale,
                                    OBJ_PROP_FLAG_READWRITE);
     object_property_add_uint32_ptr(obj, "region", &s->region,
                                    OBJ_PROP_FLAG_READWRITE);
     object_property_add_bool(obj, "legacy-sleep", flipper_get_legacy,
                              flipper_set_legacy);
+    object_property_add_bool(obj, "usb-cable", flipper_get_usb_cable,
+                             flipper_set_usb_cable);
+    object_property_set_description(obj, "usb-cable",
+        "The USB cable is plugged in from the start (default on); off: plug "
+        "it later with /machine/soc/usb attached");
+    object_property_add_bool(obj, "sd-card", flipper_get_sd_card,
+                             flipper_set_sd_card);
+    object_property_set_description(obj, "sd-card",
+        "The microSD card is in its slot (default on, with -drive if=sd); "
+        "it can be pulled out and pushed in while running");
 }
 
 static void flipper_zero_class_init(ObjectClass *oc, const void *data)

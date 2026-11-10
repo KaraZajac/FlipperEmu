@@ -1942,6 +1942,29 @@ static void usb_set_attached(Object *obj, bool value, Error **errp)
     }
 }
 
+/* what the host at the other end of the cable makes of the Flipper */
+static char *usb_get_device(Object *obj, Error **errp)
+{
+    WB55UsbState *s = WB55_USB(obj);
+
+    if (s->usbip_imported) {
+        return g_strdup("usbip");           /* a PC has it: ask that */
+    }
+    switch (s->hstate) {
+    case H_DETACHED:
+        return g_strdup("none");
+    case H_RUNNING:
+        return g_strdup_printf("%04x:%04x %s: %s",
+                               lduw_le_p(&s->dev_desc[8]),
+                               lduw_le_p(&s->dev_desc[10]), s->strings[1],
+                               s->functions[0] ? s->functions : "?");
+    case H_FAILED:
+        return g_strdup("failed");
+    default:
+        return g_strdup("enumerating");
+    }
+}
+
 /* ---- device boilerplate */
 
 static void usb_reset_hold(Object *obj, ResetType type)
@@ -1987,6 +2010,10 @@ static void usb_init(Object *obj)
                              usb_set_attached);
     object_property_set_description(obj, "attached",
         "Virtual USB cable to the built-in host (VBUS, enumeration, CDC)");
+    object_property_add_str(obj, "device", usb_get_device, NULL);
+    object_property_set_description(obj, "device",
+        "What the host sees on the bus: none, enumerating, failed, usbip "
+        "(a PC attached it over USB/IP) or \"vid:pid product: functions\"");
 }
 
 static void usb_realize(DeviceState *dev, Error **errp)

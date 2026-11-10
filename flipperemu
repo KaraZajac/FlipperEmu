@@ -7,12 +7,20 @@ Each virtual device lives in devices/<name>/ with a persistent 1 MiB internal
 flash (flash.img) and a microSD card (sd.img), exactly like a real one: what
 you flash stays flashed, settings and files persist across runs.
 
-  ./flipperemu run  -f firmware.elf          flash + boot (GTK window)
+  ./flipperemu run  -f firmware.elf          flash + boot, in a window that looks
+                                             like a Flipper (--gtk: the bare LCD)
   ./flipperemu run                           boot whatever is flashed
   ./flipperemu run -f update.tgz --headless  update package, no window
   ./flipperemu run --update update.tgz       install it through the firmware's own
                                              updater (OTA, keeps settings and files)
   ./flipperemu stop                          shut a running device down cleanly
+  ./flipperemu gui                           the window, for a device that runs already
+  ./flipperemu status                        what is plugged in and held to it
+  ./flipperemu usb unplug | plug | charger   its USB cable
+  ./flipperemu battery 15                    its battery (percent; --voltage, ...)
+  ./flipperemu sd eject | insert             pull its microSD card out, push it back
+  ./flipperemu sound off | on                its speaker
+  ./flipperemu reset                         reboot it, as Left + Back do on a real one
   ./flipperemu flash fw.dfu                  just program the flash
   ./flipperemu sd --resources update.tgz     (re)build the SD card
   ./flipperemu cli                           USB CLI of a running device
@@ -28,7 +36,8 @@ you flash stays flashed, settings and files persist across runs.
 
 Firmware formats: .elf (from fbt: build/f7-firmware-*/firmware.elf),
 .dfu / .bin (release or fbt dist/), and update packages (.tgz, official,
-Momentum, Unleashed, ...). Keys: arrows, Enter/Space = OK, Backspace/Esc = Back.
+Momentum, Unleashed, ...). Keys: arrows, Enter/Space = OK, Backspace/Esc = Back,
+or click the buttons of the Flipper in the window.
 
 USB: the firmware's USB serial port (CLI and protobuf RPC) is bridged to a
 pty by default (--usb), linked as devices/<name>/usb.tty while running.
@@ -139,6 +148,8 @@ class Device:
         self.usb_tty = self.dir / "usb.tty"     # --usb pty: symlink to the pty
         self.subghz_sock = self.dir / "subghz.sock"     # a radio bridge (fe_sdr.py)
         self.nfc_sock = self.dir / "nfc.sock"           # a card on the link (fe_nfc_link.py)
+        self.panel_sock = self.dir / "panel.sock"       # its face: the window (fe_gui.py)
+        self.held_file = self.dir / "held.json"         # names of what is held to it
 
     def running(self):
         """Is a QEMU serving this device's monitor socket?"""
@@ -153,6 +164,25 @@ class Device:
             return False
         finally:
             s.close()
+
+    def held(self):
+        """What the commands last held to it: {'nfc': label, 'rfid': ..}"""
+        try:
+            return json.loads(self.held_file.read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def set_held(self, what, label):
+        """The emulator has the card's bytes, not what it was called: `status`
+        and the window read that here.  label None: taken away."""
+        held = self.held()
+        if label:
+            held[what] = label
+        else:
+            held.pop(what, None)
+        tmp = self.held_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(held, indent=2) + "\n")
+        os.replace(tmp, self.held_file)
 
     def refuse_if_running(self):
         # two emulators (or mtools) on one flash/SD image corrupt it
@@ -268,6 +298,18 @@ def cmd_flash(args):
 
 def cmd_sd(args):
     dev = Device(args.device)
+    if args.action:                     # the card of a running device
+        m = open_monitor(dev)
+        try:
+            err = m.cmd("qom-set /machine sd-card "
+                        + ("on" if args.action == "insert" else "off"))
+        finally:
+            m.close()
+        if err:
+            sys.exit(f"sd: {err.removeprefix('Error: ')}")
+        print(f"[{dev.name}] microSD card: "
+              + ("pushed in" if args.action == "insert" else "pulled out"))
+        return 0
     dev.refuse_if_running()
     dev.dir.mkdir(parents=True, exist_ok=True)
     dev.make_sd(args.resources, args.size, force=True)
@@ -304,11 +346,52 @@ def audio_args(args):
     return ["-audiodev", f"{choice},id=snd0"]
 
 
-def qemu_cmd(dev: Device, args):
-    machine = (f"flipper-zero,name={args.name or dev.name[:8]},lcd-scale={args.scale}"
+def pick_window(args):
+    """What a run shows: 'qt', the window that looks like a Flipper
+    (scripts/fe_gui.py), 'gtk', QEMU's own window with the bare LCD, or 'none'"""
+    if args.headless:
+        return "none"
+    if args.gtk:
+        return "gtk"
+    import importlib.util
+    if importlib.util.find_spec("PySide6"):
+        return "qt"
+    if not args.print_cmd:
+        print("(PySide6 is not installed: this is QEMU's own window, the bare LCD. "
+              "With `pip install PySide6`, or your distribution's python3-pyside6, "
+              "there is a Flipper around it)")
+    return "gtk"
+
+
+def need_display():
+    if not any(os.environ.get(v) for v in ("WAYLAND_DISPLAY", "DISPLAY",
+                                           "QT_QPA_PLATFORM")):
+        sys.exit("no display to open a window on: `run --headless` runs without one")
+
+
+# A plausible cell voltage for a charge level.  An empty battery's is under
+# what the emulated gauge takes for "shut down now" (3150 mV), and the firmware
+# then does, off USB: as a real Flipper with a flat battery.
+BATTERY_CURVE = ((0, 3100), (1, 3400), (5, 3480), (10, 3600), (20, 3700),
+                 (50, 3820), (80, 4020), (87, 4061), (100, 4180))
+
+
+def battery_voltage(percent):
+    for (p0, v0), (p1, v1) in zip(BATTERY_CURVE, BATTERY_CURVE[1:]):
+        if percent <= p1:
+            return round(v0 + (v1 - v0) * (percent - p0) / (p1 - p0))
+    return BATTERY_CURVE[-1][1]
+
+
+def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
+    """gauge: {property: value} of /machine/gauge to start with"""
+    machine = (f"flipper-zero,name={args.name or dev.name[:8]}"
+               f",lcd-scale={args.scale or 4}"
                f",nvram={dev.nvram},enclave={dev.enclave}")
     if args.legacy_sleep:
         machine += ",legacy-sleep=on"
+    if args.unplugged:
+        machine += ",usb-cable=off"
     usb = []
     if args.usb == "pty":
         usb = ["-chardev", "pty,id=usb"]
@@ -341,6 +424,10 @@ def qemu_cmd(dev: Device, args):
            # and a card on the NFC link (a program, or a real reader's antenna)
            "-chardev", f"socket,id=nfc-link,path={dev.nfc_sock},server=on,wait=off",
            "-global", "st25r3916.link=nfc-link",
+           # the front panel: the LCD, the lights and the buttons, for the
+           # window drawn around them (docs/PANEL_LINK.md)
+           "-chardev", f"socket,id=panel,path={dev.panel_sock},server=on,wait=off",
+           "-global", "flipper-panel.link=panel",
            "-global", f"flipper-ir.tx-dir={dev.dir / 'ir-tx'}",
            "-global", f"flipper-rfid.tx-dir={dev.dir / 'rfid-tx'}",
            "-global", f"flipper-ibutton.tx-dir={dev.dir / 'ibutton-tx'}",
@@ -349,15 +436,15 @@ def qemu_cmd(dev: Device, args):
            "-rtc", "base=localtime",
            "-monitor", f"unix:{dev.monitor},server=on,wait=off",
            "-name", f"Flipper Zero ({dev.name})"]
+    for prop, value in (gauge or {}).items():
+        cmd += ["-global", f"bq27220.{prop}={value}"]
     if not args.no_sd and dev.sd.exists():
         cmd += ["-drive", f"if=sd,format=raw,file={dev.sd}"]
-    if args.headless:
-        cmd += ["-display", "none"]
-    else:
+    if window == "gtk":
         cmd += ["-display", "gtk,show-menubar=off,zoom-to-fit=off"]
-    if args.serial == "stdio" and not args.headless:
-        cmd += ["-serial", "stdio"]
-    elif args.serial == "stdio":
+    else:                               # none, or the window is ours
+        cmd += ["-display", "none"]
+    if args.serial == "stdio":
         cmd += ["-serial", "stdio"]
     elif args.serial.startswith("tcp:"):
         cmd += ["-serial", f"tcp::{args.serial[4:]},server=on,wait=off"]
@@ -376,8 +463,17 @@ def cmd_run(args):
     dev = Device(args.device)
     if not args.print_cmd:
         dev.refuse_if_running()
-    if args.update and args.usb == "none":
-        sys.exit("--update starts the install over the USB CLI; drop --usb none")
+    if args.update and (args.usb == "none" or args.unplugged):
+        sys.exit("--update starts the install over the USB CLI; drop --usb none "
+                 "and --unplugged")
+    gauge = None
+    if args.battery is not None:
+        if not 0 <= args.battery <= 100:
+            sys.exit("--battery: 0 to 100 percent")
+        gauge = {"soc": args.battery, "voltage-mv": battery_voltage(args.battery)}
+    window = pick_window(args)
+    if window == "qt" and not args.print_cmd:
+        need_display()
     if args.firmware:
         fw = pathlib.Path(args.firmware)
         label, resources = dev.program(fw, args.erase_all)
@@ -386,13 +482,11 @@ def cmd_run(args):
             dev.make_sd(resources or find_resources_for(fw))
     if not dev.flash.exists():
         sys.exit(f"[{dev.name}] nothing flashed yet: ./flipperemu run -f <firmware>")
-    cmd = qemu_cmd(dev, args)
     if args.print_cmd:
-        print(" ".join(cmd))
+        print(" ".join(qemu_cmd(dev, args, window, gauge)))
         return 0
     if not dev.sd.exists() and not args.no_sd:
         dev.make_sd(dev.info().get("resources"))
-        cmd = qemu_cmd(dev, args)
     manifest = label = None
     if args.update:
         if args.no_sd:
@@ -405,28 +499,86 @@ def cmd_run(args):
     print(f"[{dev.name}] {info.get('firmware', '?')}  "
           f"(monitor: {dev.monitor}"
           + (f", gdb: :{args.gdb_port}" if args.gdb or args.wait_gdb else "") + ")")
-    for stale in (dev.monitor, dev.usb_tty):
-        try:
-            stale.unlink()
-        except FileNotFoundError:
-            pass
-    proc = subprocess.Popen(cmd)
+    session = Session(dev, args, window, gauge, manifest, label)
+    session.start()
     # killing the launcher stops the emulator too (Ctrl-C already reaches both)
     for sig in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, lambda signum, frame: proc.send_signal(signum))
+        signal.signal(sig, lambda signum, frame: session.signal(signum))
     if args.usbip:
         print(f"[{dev.name}] USB/IP on {args.usbip_host}:{args.usbip}: attach with "
               f"`sudo {ROOT / 'scripts' / 'usbip_attach.py'} --port {args.usbip}`",
               flush=True)
-    if args.usb == "pty" or manifest:
-        threading.Thread(target=usb_helpers,
-                         args=(dev, proc, args.usb, manifest, label),
-                         daemon=True).start()
+    if window == "qt":
+        import fe_gui
+        return fe_gui.run(dev.name, dev.dir, ROOT / "flipperemu", session=session,
+                          scale=args.scale)
     try:
-        return proc.wait()
+        return session.proc.wait()
     except KeyboardInterrupt:
-        proc.terminate()
-        return proc.wait()
+        return session.stop()
+    finally:
+        session.tidy()
+
+
+class Session:
+    """A device's QEMU.  It exits when the Flipper switches itself off;
+    start() again is switching it back on (the window does that)."""
+
+    def __init__(self, dev, args, window, gauge=None, manifest=None, label=None):
+        self.dev, self.args, self.window = dev, args, window
+        self.gauge = dict(gauge or {})
+        self.update = (manifest, label)
+        self.proc = None
+
+    def start(self, unplugged=None, gauge=None):
+        """unplugged, gauge: as it was left when it went off (default: as
+        the run was asked for)"""
+        dev, args = self.dev, self.args
+        if unplugged is not None:
+            args.unplugged = unplugged
+        if gauge is not None:
+            self.gauge = dict(gauge)
+        for stale in (dev.monitor, dev.usb_tty, dev.panel_sock, dev.held_file):
+            try:
+                stale.unlink()
+            except FileNotFoundError:
+                pass
+        self.proc = subprocess.Popen(qemu_cmd(dev, args, self.window, self.gauge))
+        manifest, label = self.update
+        self.update = (None, None)          # an update is started once
+        if args.usb == "pty" or manifest:
+            threading.Thread(target=usb_helpers,
+                             args=(dev, self.proc, args.usb, manifest, label),
+                             daemon=True).start()
+        return self.proc
+
+    def poll(self):
+        """QEMU's exit code once it is gone, None while it runs"""
+        return self.proc.poll() if self.proc else 0
+
+    def tidy(self):
+        """Behind a QEMU that is gone: what only meant something while it ran"""
+        for stale in (self.dev.usb_tty, self.dev.held_file):
+            try:
+                stale.unlink()
+            except FileNotFoundError:
+                pass
+
+    def signal(self, signum):
+        if self.proc and self.proc.poll() is None:
+            self.proc.send_signal(signum)
+
+    def stop(self, timeout=10):
+        """As `flipperemu stop`: QEMU saves the NVRAM on its way out."""
+        if not self.proc:
+            return 0
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+        return self.proc.wait()
 
 
 def usb_helpers(dev: Device, proc, usb_mode, manifest, label=None):
@@ -493,6 +645,252 @@ def cmd_stop(args):
             break
         time.sleep(0.1)
     print(f"[{dev.name}] stopped")
+    return 0
+
+
+def open_monitor(dev):
+    from fe_monitor import Monitor
+    if not dev.running():
+        sys.exit(f"[{dev.name}] not running")
+    return Monitor(str(dev.monitor))
+
+
+def qom_get(m, path, prop):
+    """A QOM property through the monitor (which prints JSON); None: none"""
+    try:
+        return json.loads(m.cmd(f"qom-get {path} {prop}"))
+    except ValueError:
+        return None
+
+
+def cmd_gui(args):
+    dev = Device(args.device)
+    if not dev.running():
+        sys.exit(f"[{dev.name}] not running: `./flipperemu -d {dev.name} run` "
+                 "starts it, with its window")
+    try:
+        import fe_gui
+    except ImportError as e:
+        sys.exit(f"the window needs PySide6 ({e}): `pip install PySide6`, or your "
+                 "distribution's python3-pyside6")
+    need_display()
+    return fe_gui.run(dev.name, dev.dir, ROOT / "flipperemu", scale=args.scale)
+
+
+def newest(directory):
+    """The newest file in a directory of transmissions, or None"""
+    try:
+        files = [p for p in directory.iterdir() if p.is_file()]
+    except OSError:
+        return None
+    return str(max(files, key=lambda p: p.stat().st_mtime)) if files else None
+
+
+def read_battery(m):
+    g = lambda prop: qom_get(m, "/machine/gauge", prop)
+    current = g("current-ma")
+    return {"percent": g("soc"), "voltage_mv": g("voltage-mv"),
+            "temperature_c": round(g("temperature-dk") / 10 - 273.15, 1),
+            "current_ma": current, "capacity_mah": g("capacity-mah"),
+            "charging": current > 0}
+
+
+def battery_text(b):
+    return (f"{b['percent']} %, {b['voltage_mv'] / 1000:.3f} V, "
+            f"{b['temperature_c']:.1f} °C, "
+            + (f"charging at {b['current_ma']} mA" if b["charging"]
+               else f"drawing {-b['current_ma']} mA"))
+
+
+def read_usb(m):
+    cable = qom_get(m, "/machine/soc/usb", "attached")
+    power = qom_get(m, "/machine/charger", "usb")
+    return {"cable": "computer" if cable else "charger" if power else "unplugged",
+            "device": qom_get(m, "/machine/soc/usb", "device") if cable else None}
+
+
+def usb_text(u):
+    if u["cable"] == "computer":
+        return {"none": "plugged into a computer, which does not see it (yet)",
+                "enumerating": "plugged into a computer, which is finding out what it is",
+                "failed": "plugged into a computer, which could not make sense of it",
+                "usbip": "plugged in: a PC has it over USB/IP",
+                }.get(u["device"], f"plugged into a computer, which sees {u['device']}")
+    return "on a charger (power, no data)" if u["cable"] == "charger" else "unplugged"
+
+
+def device_status(dev):
+    """What `status` prints, as a dict (--json: as it is)"""
+    st = {"device": dev.name, "running": dev.running(),
+          "firmware": dev.info().get("firmware")}
+    if not st["running"]:
+        return st
+    from fe_monitor import Monitor
+    held = dev.held()
+    m = Monitor(str(dev.monitor))
+    try:
+        g = lambda path, prop: qom_get(m, path, prop)
+        st["usb"] = read_usb(m)
+        st["battery"] = read_battery(m)
+        st["sd"] = {"card": dev.sd.exists(), "inserted": g("/machine", "sd-card")}
+        card = g("/machine/nfc", "card")
+        st["nfc"] = {"card": (held.get("nfc") or card) if card else None,
+                     "reader_field": g("/machine/nfc", "field"),
+                     "radio": g("/machine/nfc", "radio"),
+                     "last_read": g("/machine/nfc", "tx") or None}
+        t5577 = g("/machine/rfid", "t5577")
+        tag = g("/machine/rfid", "tag")
+        st["rfid"] = {"tag": (held.get("rfid") or tag or "a T5577")
+                      if tag or t5577 else None,
+                      "t5577": t5577 or None,
+                      "reader_field": g("/machine/rfid", "reader"),
+                      "noise": g("/machine/rfid", "noise"),
+                      "field": g("/machine/rfid", "field"),
+                      "last_emulation": g("/machine/rfid", "tx") or None}
+        key = g("/machine/ibutton", "key")
+        st["ibutton"] = {"key": (held.get("ibutton") or key) if key else None,
+                         "rom": g("/machine/ibutton", "rom") or None,
+                         "last_read": g("/machine/ibutton", "tx") or None}
+        st["infrared"] = {"last_transmission": g("/machine/ir", "tx") or None}
+        st["subghz"] = {"radio": g("/machine/subghz", "radio"),
+                        "last_transmission": newest(dev.dir / "subghz-tx")}
+        st["sound"] = {"muted": g("/machine/speaker", "mute")}
+    finally:
+        m.close()
+    return st
+
+
+def cmd_status(args):
+    dev = Device(args.device)
+    st = device_status(dev)
+    if args.json:
+        print(json.dumps(st, indent=2))
+        return 0 if st["running"] else 1
+    if not st["running"]:
+        print(f"[{dev.name}] not running"
+              + (f" ({st['firmware']})" if st["firmware"] else ""))
+        return 1
+    onoff = lambda v: "on" if v else "off"
+    last = lambda v: v or "nothing yet"
+    nfc, rfid, ibtn, sd = st["nfc"], st["rfid"], st["ibutton"], st["sd"]
+    radio = dict(f.split("=", 1) for f in (st["subghz"]["radio"] or "").split()
+                 if "=" in f)
+    nfc_radio = {"field": "its field is on (reading)", "idle": "off",
+                 "listen": "waits for a reader (as a card)"}
+    rows = [
+        ("usb", usb_text(st["usb"])),
+        ("battery", battery_text(st["battery"])),
+        ("sd card", "none" if not sd["card"] or sd["inserted"] is None
+         else "in the slot" if sd["inserted"] else "pulled out"),
+        ("nfc", f"{nfc['card'] or 'no card'} held to it; its radio: "
+                f"{nfc_radio.get(nfc['radio'], nfc['radio'])}; a reader's field "
+                f"around it: {onoff(nfc['reader_field'])}"),
+        ("", f"a virtual reader last read: {last(nfc['last_read'])}"),
+        ("rfid", f"{rfid['tag'] or 'no tag'} held to it; its own field: "
+                 f"{rfid['field']}; a reader's field around it: "
+                 f"{onoff(rfid['reader_field'])}; noise: {onoff(rfid['noise'])}"),
+        *([("", f"T5577 blocks: {rfid['t5577']}")] if rfid["t5577"] else []),
+        ("", f"last emulation: {last(rfid['last_emulation'])}"),
+        ("ibutton", f"{ibtn['key'] or 'no key'} on its contact"
+                    + (f", ROM now {ibtn['rom']}" if ibtn["rom"] else "")),
+        ("", f"last emulation: {last(ibtn['last_read'])}"),
+        ("infrared", f"last sent: {last(st['infrared']['last_transmission'])}"),
+        ("sub-ghz", f"the radio: {radio.get('state', '?')}"
+                    + (f" at {int(radio['freq']) / 1e6:.2f} MHz"
+                       if radio.get("state") in ("rx", "tx", "fstxon")
+                       and radio.get("freq", "").isdigit() else "")
+                    + f"; last sent: {last(st['subghz']['last_transmission'])}"),
+        ("sound", "muted" if st["sound"]["muted"] else "on"),
+    ]
+    print(f"[{dev.name}] running: {st['firmware'] or '?'}")
+    for name, text in rows:
+        print(f"{name:9}{':' if name else ' '} {text}")
+    return 0
+
+
+def cmd_usb(args):
+    dev = Device(args.device)
+    m = open_monitor(dev)
+    try:
+        if args.action:
+            out = m.cmd("qom-set /machine/soc/usb attached "
+                        + ("on" if args.action == "plug" else "off"))
+            if "powered off" in out:
+                # it had switched itself off, and ran on the cable alone
+                print(f"[{dev.name}] USB unplugged: it is off")
+                return 0
+            if out:
+                sys.exit(f"usb: {out}")
+            if args.action != "plug":       # the charger feeds VBUS on its own
+                out = m.cmd("qom-set /machine/charger usb "
+                            + ("on" if args.action == "charger" else "off"))
+                if "powered off" in out:
+                    print(f"[{dev.name}] USB unplugged: it is off")
+                    return 0
+                if out:
+                    sys.exit(f"usb: {out}")
+        print(f"[{dev.name}] USB: {usb_text(read_usb(m))}")
+    finally:
+        m.close()
+    return 0
+
+
+def cmd_battery(args):
+    dev = Device(args.device)
+    sets = {}
+    if args.percent is not None:
+        if not 0 <= args.percent <= 100:
+            sys.exit("battery: 0 to 100 percent")
+        sets["soc"] = args.percent
+        sets["voltage-mv"] = battery_voltage(args.percent)
+    if args.voltage is not None:
+        if not 2000 <= args.voltage <= 5000:
+            sys.exit("battery: --voltage in mV, 2000 to 5000")
+        sets["voltage-mv"] = args.voltage
+    if args.temperature is not None:
+        if not -50 <= args.temperature <= 150:
+            sys.exit("battery: --temperature in °C, -50 to 150")
+        sets["temperature-dk"] = round((args.temperature + 273.15) * 10)
+    if args.current is not None:
+        sets["current-ma"] = args.current
+    m = open_monitor(dev)
+    try:
+        for prop, value in sets.items():
+            err = m.cmd(f"qom-set /machine/gauge {prop} {value}")
+            if err:
+                sys.exit(f"battery: {err}")
+        print(f"[{dev.name}] battery: {battery_text(read_battery(m))}")
+    finally:
+        m.close()
+    return 0
+
+
+def cmd_sound(args):
+    dev = Device(args.device)
+    m = open_monitor(dev)
+    try:
+        if args.action:
+            err = m.cmd("qom-set /machine/speaker mute "
+                        + ("off" if args.action == "on" else "on"))
+            if err:
+                sys.exit(f"sound: {err}")
+        muted = qom_get(m, "/machine/speaker", "mute")
+    finally:
+        m.close()
+    print(f"[{dev.name}] sound: {'muted' if muted else 'on'}")
+    return 0
+
+
+def cmd_reset(args):
+    dev = Device(args.device)
+    m = open_monitor(dev)
+    try:
+        err = m.cmd("system_reset")
+    finally:
+        m.close()
+    if err:
+        sys.exit(f"reset: {err}")
+    print(f"[{dev.name}] reset")
     return 0
 
 
@@ -661,6 +1059,7 @@ def cmd_rfid(args):
             err = m.cmd(f"qom-set /machine/rfid t5577 {t5577}")
             if err:
                 sys.exit(f"rfid: {err}")
+            dev.set_held("rfid", label)
             print(f"[{dev.name}] 125 kHz field: {label}")
         elif value is not None:
             if value != "none":
@@ -670,6 +1069,7 @@ def cmd_rfid(args):
             err = m.cmd(f"qom-set /machine/rfid tag {value}")
             if err:
                 sys.exit(f"rfid: {err}")
+            dev.set_held("rfid", None if value == "none" else label)
             print(f"[{dev.name}] 125 kHz field: {label}")
         else:
             get = lambda prop: m.cmd(f"qom-get /machine/rfid {prop}").strip().strip('"')
@@ -732,6 +1132,10 @@ def cmd_nfc(args):
             err = m.cmd(f"qom-set /machine/nfc reader {args.reader}")
             if err:
                 sys.exit(f"nfc: {err}")
+            if args.no_wait:
+                print(f"[{dev.name}] a virtual NFC reader ({args.reader}) in front of "
+                      "the Flipper")
+                return 0
             print(f"[{dev.name}] a virtual NFC reader ({args.reader}) in front of the "
                   "Flipper; waiting for it to finish...", flush=True)
             for _ in range(150):
@@ -791,6 +1195,7 @@ def cmd_nfc(args):
         err = m.cmd(f"qom-set /machine/nfc card {value}")
         if err:
             sys.exit(f"nfc: {err}")
+        dev.set_held("nfc", None if desc is None else label)
         print(f"[{dev.name}] NFC field: {label}")
     finally:
         m.close()
@@ -812,6 +1217,9 @@ def cmd_ibutton(args):
             err = m.cmd("qom-set /machine/ibutton reader read")
             if err:
                 sys.exit(f"ibutton: {err}")
+            if args.no_wait:
+                print(f"[{dev.name}] a virtual iButton reader on the Flipper's contact")
+                return 0
             print(f"[{dev.name}] a virtual iButton reader on the Flipper's contact; "
                   "reading...", flush=True)
             for _ in range(1200):           # a DS1996's 8 KB: ~5 s, more if it resumes
@@ -882,6 +1290,7 @@ def cmd_ibutton(args):
         err = m.cmd(f"qom-set /machine/ibutton key {value}")
         if err:
             sys.exit(f"ibutton: {err}")
+        dev.set_held("ibutton", None if desc is None else label)
         print(f"[{dev.name}] iButton contact: {label}")
     finally:
         m.close()
@@ -979,6 +1388,14 @@ def main():
                         "cannot install it, so the updater will fail)")
     p.add_argument("--erase-all", action="store_true", help="wipe flash before programming")
     p.add_argument("--headless", action="store_true", help="no window")
+    p.add_argument("--gtk", action="store_true",
+                   help="QEMU's own window, the bare LCD, instead of the one that "
+                        "looks like a Flipper (which needs PySide6)")
+    p.add_argument("--unplugged", action="store_true",
+                   help="start with the USB cable unplugged, on battery (`usb plug`, "
+                        "or the window, plugs it in)")
+    p.add_argument("--battery", type=int, metavar="PERCENT",
+                   help="start with the battery at this charge (default 87)")
     p.add_argument("--no-sd", action="store_true", help="boot without a microSD card")
     p.add_argument("--usb", default="pty",
                    help="USB serial port (CLI/RPC): pty (default), unix "
@@ -998,7 +1415,9 @@ def main():
     p.add_argument("--gdb", action="store_true", help="enable the gdb stub")
     p.add_argument("--wait-gdb", action="store_true", help="gdb stub, halt at reset")
     p.add_argument("--gdb-port", type=int, default=1234)
-    p.add_argument("--scale", type=int, default=4, help="LCD pixel size (default 4)")
+    p.add_argument("--scale", type=int,
+                   help="size of an LCD pixel in the window (default: 3 for the "
+                        "Flipper, or as you left it; 4 with --gtk) and in `shot`")
     p.add_argument("--name", help="device name in OTP (max 8 chars)")
     p.add_argument("--legacy-sleep", action="store_true",
                    help="new device starts with Sleep Method = Legacy (light sleep "
@@ -1012,13 +1431,55 @@ def main():
     p.add_argument("--erase-all", action="store_true")
     p.set_defaults(func=cmd_flash)
 
-    p = sub.add_parser("sd", help="(re)create the microSD image")
+    p = sub.add_parser("sd", help="(re)create the microSD image; or pull the card "
+                       "of a running device out and push it back in")
+    p.add_argument("action", nargs="?", choices=("eject", "insert"),
+                   help="of a running device: pull the card out (as rudely as a "
+                        "finger would: the firmware is not asked), push it back in")
     p.add_argument("--resources", help="resources .tgz, update package or directory")
     p.add_argument("--size", default="512M")
     p.set_defaults(func=cmd_sd)
 
     p = sub.add_parser("stop", help="shut a running device down (saves its NVRAM)")
     p.set_defaults(func=cmd_stop)
+
+    p = sub.add_parser("gui", help="the window that looks like a Flipper, for a "
+                       "device that runs already (run --headless); closing it leaves "
+                       "the device running")
+    p.add_argument("--scale", type=int, help="size of an LCD pixel")
+    p.set_defaults(func=cmd_gui)
+
+    p = sub.add_parser("status", help="what is plugged into a running device and "
+                       "held to it; exit status 1 when it is not running")
+    p.add_argument("--json", action="store_true", help="for a program")
+    p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("usb", help="the USB cable of a running device")
+    p.add_argument("action", nargs="?", choices=("plug", "unplug", "charger"),
+                   help="plug: into a computer (the default of a run); charger: "
+                        "power without data; nothing: show it")
+    p.set_defaults(func=cmd_usb)
+
+    p = sub.add_parser("battery", help="the battery of a running device")
+    p.add_argument("percent", nargs="?", type=int,
+                   help="its charge, with a voltage to match; 0 is flat: off USB "
+                        "the firmware warns, counts down and switches off. "
+                        "Nothing: show it")
+    p.add_argument("--voltage", type=int, metavar="MV", help="millivolts")
+    p.add_argument("--temperature", type=float, metavar="C", help="degrees Celsius")
+    p.add_argument("--current", type=int, metavar="MA",
+                   help="milliamps, positive when charging (plugging USB in and "
+                        "out sets it too)")
+    p.set_defaults(func=cmd_battery)
+
+    p = sub.add_parser("sound", help="the speaker of a running device")
+    p.add_argument("action", nargs="?", choices=("on", "off"),
+                   help="off: mute it (the firmware notices nothing); nothing: show it")
+    p.set_defaults(func=cmd_sound)
+
+    p = sub.add_parser("reset", help="reboot a running device, as holding Left + "
+                       "Back does on a real one")
+    p.set_defaults(func=cmd_reset)
 
     p = sub.add_parser("cli", help="the USB CLI of a running device")
     p.add_argument("commands", nargs="*",
@@ -1078,6 +1539,9 @@ def main():
     p.add_argument("--reader", choices=("scan", "ntag"),
                    help="instead: hold a virtual reader to an emulating Flipper and "
                         "print what it reads (scan: UID/ATQA/SAK; ntag: a Type 2 tag)")
+    p.add_argument("--no-wait", action="store_true",
+                   help="with --reader: leave it there and return; what it reads "
+                        "is in `status`, and saved to devices/NAME/nfc-tx/")
     p.add_argument("--field", choices=("on", "off"),
                    help="a reader's field around the Flipper with no reader talking "
                         "(what NFC field detection sees)")
@@ -1100,6 +1564,9 @@ def main():
     p.add_argument("--reader", action="store_true",
                    help="instead: read the Dallas key the Flipper emulates and print "
                         "it (a virtual 1-Wire master; saved to devices/NAME/ibutton-tx/)")
+    p.add_argument("--no-wait", action="store_true",
+                   help="with --reader: start reading and return; what it reads is "
+                        "in `status`")
     p.set_defaults(func=cmd_ibutton)
 
     p = sub.add_parser("enclave", help="the keys in the device's secure enclave",
