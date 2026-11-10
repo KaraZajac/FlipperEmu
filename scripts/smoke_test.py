@@ -18,8 +18,9 @@ virtual T5577 (`rfid write`), reads a DS1990A iButton (`ikey read`), has a
 virtual 1-Wire reader read an emulated DS1990A, captures an emulated Metakom
 key and reads it back, reads an NTAG215 (`mfu info`) and dumps a MIFARE
 Classic 1K over NFC, has a virtual reader read an NTAG215 the firmware
-emulates, enumerates over USB/IP, then reboots through the CLI and checks the
-LCD comes back after the warm reset.
+emulates, sends an APDU to an ISO-DEP card a program plays on the NFC link
+(scripts/fe_nfc_link.py), enumerates over USB/IP, then reboots through the
+CLI and checks the LCD comes back after the warm reset.
 Exit status 0 = pass. Screenshots are kept in the --out directory.
 """
 import argparse
@@ -464,6 +465,42 @@ def nfc_check(mon: Monitor, devdir: pathlib.Path):
     return ok
 
 
+def nfc_link_check(mon: Monitor, devdir: pathlib.Path):
+    """An ISO14443-4A card played by a program on the NFC link
+    (fe_nfc_link.py iso-dep): `apdu` in the NFC shell must get its answer
+    through the firmware's ISO-DEP stack.  None (skip) without the shell."""
+    import subprocess
+    card = subprocess.Popen([sys.executable, str(ROOT / "scripts" / "fe_nfc_link.py"),
+                             str(devdir / "nfc.sock"), "iso-dep"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    try:
+        time.sleep(1.0)
+        cli = FlipperCli(usb_endpoint(mon))
+        try:
+            cli.read_until_prompt(15)
+            found, _ = cli.watch("nfc", r"\[nfc\]>: ", timeout=8, stop=False)
+            if not found:
+                cli.write(b"\x03")
+                return None
+            _, out = cli.watch("apdu -p 4a -d 00CA000000", r"Rx:[^\n]*\n|\[nfc\]>: ",
+                               timeout=20, stop=False)
+            cli.run("exit", timeout=5)
+        finally:
+            cli.close()
+    except (OSError, TimeoutError, ConnectionError, TypeError) as e:
+        print(f"  nfc link: {e}")
+        return False
+    finally:
+        card.terminate()
+        card.wait(5)
+    if "Rx:" not in out and ("not found" in out or "nknown" in out):
+        return None                     # this firmware's shell has no `apdu`
+    ok = "Rx: 04 A1 B2 C3 D4 E5 F6 90 00" in out
+    if not ok:
+        print(f"  nfc link: {out.strip()[-300:]!r}")
+    return ok
+
+
 def mfc_check(mon: Monitor, devdir: pathlib.Path):
     """A MIFARE Classic 1K in the field and its keys in the NFC app's key
     cache: `dump` must authenticate every sector (Crypto1) and save all 64
@@ -702,6 +739,8 @@ def main() -> int:
                                 mfc_check(mon, devdir)))
                 results.append(("nfc: emulated NTAG215 read by a virtual reader",
                                 nfc_emulate_check(mon)))
+                results.append(("nfc: an ISO-DEP card on the link answers an APDU",
+                                nfc_link_check(mon, devdir)))
                 results.append(("usbip: enumerated by a USB/IP client, CLI over URBs",
                                 usbip_check(usbip_port)))
                 results.append(("reboot: LCD redrawn after a warm reset",

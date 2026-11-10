@@ -13,6 +13,23 @@
 #include "qemu/notify.h"
 #include "chardev/char-fe.h"
 
+/* ------------------------------------------- radio links (flipper_link.c) */
+/* a line protocol on a chardev: a real radio, or a program, as an antenna */
+typedef struct FlipperLink {
+    CharFrontend *chr;
+    const char *name;            /* for the log: "Sub-GHz", "NFC" */
+    GString *in, *out;           /* a partial line in; bytes not yet sent */
+    guint watch;
+    bool open;                   /* a program is connected */
+    void (*on_line)(void *opaque, char *line);
+    void (*on_open)(void *opaque, bool open);
+    void *opaque;
+} FlipperLink;
+void flipper_link_init(FlipperLink *l, CharFrontend *chr, const char *name,
+                       void (*on_line)(void *opaque, char *line),
+                       void (*on_open)(void *opaque, bool open), void *opaque);
+void flipper_link_send(FlipperLink *l, const char *fmt, ...) G_GNUC_PRINTF(2, 3);
+
 /* ---------------------------------------------------------- ST7567 LCD */
 #define TYPE_ST7567 "st7567"
 OBJECT_DECLARE_SIMPLE_TYPE(St7567State, ST7567)
@@ -115,9 +132,7 @@ struct Cc1101State {
     char *tx_last;               /* "@freq,+d,-d,..." of the last one */
     /* a radio bridge on the "link" chardev (scripts/fe_sdr.py: an SDR) */
     CharFrontend link;
-    GString *link_in, *link_out; /* a partial line in; bytes not yet sent */
-    guint link_watch;
-    bool link_open;
+    FlipperLink lk;
     uint32_t link_epoch;         /* bumped whenever the receive set-up changes */
     char *link_cfg;              /* that set-up, as last announced */
     QEMUTimer *link_timer;       /* announces it once the writes settle */
@@ -177,6 +192,13 @@ struct St25r3916State {
     int rd_pages, rd_pages_read;
     char *tx_dir;                /* the reader's results go here as .nfc */
     char *tx_last;
+    /* a card on the "link" chardev: a program, or real hardware's antenna */
+    CharFrontend link;
+    FlipperLink lk;
+    QEMUTimer *link_timeout;     /* host time: no answer by then is silence */
+    QEMUBH *link_stop;           /* stops the machine, outside the timers */
+    bool link_paused;            /* the machine stopped while it answers */
+    bool link_late;              /* warned about a slow answer */
 };
 /* ISO14443A helpers (st25r3916.c): CRC_A, bytes <-> air bits with parity */
 uint16_t nfc_crc_a(const uint8_t *d, int n);

@@ -219,8 +219,6 @@ static void cc1101_set_rx(Object *obj, const char *value, Error **errp)
 
 #define LIVE_MAX       (1 << 16)            /* durations queued */
 #define LIVE_DELAY_NS  (60 * SCALE_MS)      /* jitter buffer before playing */
-#define LINK_LINE_MAX  (1 << 20)
-#define LINK_OUT_MAX   (1 << 20)
 #define SPEC_MAX       8192
 #define SPEC_FRESH_NS  (1500 * SCALE_MS)
 
@@ -260,55 +258,6 @@ static uint32_t cc1101_dev_hz(Cc1101State *s)
     return ((uint64_t)(8 + (d & 7)) << ((d >> 4) & 7)) * 26000000u >> 17;
 }
 
-static void cc1101_link_flush(Cc1101State *s);
-
-static gboolean cc1101_link_writable(void *do_not_use, GIOCondition cond,
-                                     void *opaque)
-{
-    Cc1101State *s = opaque;
-
-    s->link_watch = 0;
-    cc1101_link_flush(s);
-    return G_SOURCE_REMOVE;
-}
-
-static void cc1101_link_flush(Cc1101State *s)
-{
-    while (s->link_out->len) {
-        int w = qemu_chr_fe_write(&s->link, (const uint8_t *)s->link_out->str,
-                                  s->link_out->len);
-
-        if (w <= 0) {
-            if (!qemu_chr_fe_backend_connected(&s->link) || !s->link_open) {
-                g_string_truncate(s->link_out, 0);
-            } else if (!s->link_watch) {
-                s->link_watch = qemu_chr_fe_add_watch(&s->link,
-                                                      G_IO_OUT | G_IO_HUP,
-                                                      cc1101_link_writable, s);
-            }
-            return;
-        }
-        g_string_erase(s->link_out, 0, w);
-    }
-}
-
-static void G_GNUC_PRINTF(2, 3) cc1101_link_send(Cc1101State *s,
-                                                 const char *fmt, ...)
-{
-    va_list ap;
-
-    if (!s->link_open) {
-        return;
-    }
-    if (s->link_out->len > LINK_OUT_MAX) {
-        return;                         /* the bridge stopped reading */
-    }
-    va_start(ap, fmt);
-    g_string_append_vprintf(s->link_out, fmt, ap);
-    va_end(ap);
-    cc1101_link_flush(s);
-}
-
 /* the bridge's air stops: nothing queued, the line low */
 static void cc1101_live_stop(Cc1101State *s)
 {
@@ -331,7 +280,7 @@ static void cc1101_link_announce(void *opaque)
     if (!s->link_cfg) {
         cc1101_link_check(s);
     }
-    cc1101_link_send(s, "cc1101 epoch=%u %s\n", s->link_epoch, s->link_cfg);
+    flipper_link_send(&s->lk, "cc1101 epoch=%u %s\n", s->link_epoch, s->link_cfg);
 }
 
 /* after a register write or a state change: has the receive set-up changed? */
@@ -356,7 +305,7 @@ static void cc1101_link_check(Cc1101State *s)
     s->link_cfg = g_steal_pointer(&cfg);
     s->link_epoch++;
     cc1101_live_stop(s);
-    if (s->link_open) {                 /* a preset is many writes: settle */
+    if (s->lk.open) {                 /* a preset is many writes: settle */
         timer_mod(s->link_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
                                  SCALE_MS);
     }
@@ -464,58 +413,27 @@ static void cc1101_link_spectrum(Cc1101State *s, const char *p)
     s->spec_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 }
 
-static void cc1101_link_line(Cc1101State *s, char *line)
+static void cc1101_link_line(void *opaque, char *line)
 {
+    Cc1101State *s = opaque;
+
     if (g_str_has_prefix(line, "rx ")) {
         cc1101_link_rx(s, line + 3);
     } else if (g_str_has_prefix(line, "spectrum ")) {
         cc1101_link_spectrum(s, line + 9);
-    } else if (g_str_has_prefix(line, "hello ")) {
-        info_report("flipper-zero: Sub-GHz link: %s", g_strstrip(line + 6));
     }
 }
 
-static int cc1101_link_can_read(void *opaque)
-{
-    return 65536;
-}
-
-static void cc1101_link_read(void *opaque, const uint8_t *buf, int size)
-{
-    Cc1101State *s = opaque;
-    char *nl;
-
-    g_string_append_len(s->link_in, (const char *)buf, size);
-    while ((nl = memchr(s->link_in->str, '\n', s->link_in->len))) {
-        *nl = 0;
-        cc1101_link_line(s, s->link_in->str);
-        g_string_erase(s->link_in, 0, nl + 1 - s->link_in->str);
-    }
-    if (s->link_in->len > LINK_LINE_MAX) {
-        g_string_truncate(s->link_in, 0);   /* no line ends: not a bridge */
-    }
-}
-
-static void cc1101_link_event(void *opaque, QEMUChrEvent event)
+static void cc1101_link_opened(void *opaque, bool open)
 {
     Cc1101State *s = opaque;
 
-    switch (event) {
-    case CHR_EVENT_OPENED:
-        s->link_open = true;
-        g_string_truncate(s->link_in, 0);
-        g_string_truncate(s->link_out, 0);
-        cc1101_link_send(s, "hello flipperemu subghz 1\n");
+    if (open) {
+        flipper_link_send(&s->lk, "hello flipperemu subghz 1\n");
         cc1101_link_announce(s);
-        break;
-    case CHR_EVENT_CLOSED:
-        s->link_open = false;
-        g_string_truncate(s->link_out, 0);
+    } else {
         cc1101_live_stop(s);
         s->spec_n = 0;
-        break;
-    default:
-        break;
     }
 }
 
@@ -637,7 +555,7 @@ static void cc1101_tx_end(Cc1101State *s)
         g_string_append_c(sub, '\n');
         g_free(s->tx_last);
         s->tx_last = g_strdup(last->str);
-        cc1101_link_send(s, "tx freq=%u mod=%s rate=%u dev=%u raw=%s\n", freq,
+        flipper_link_send(&s->lk, "tx freq=%u mod=%s rate=%u dev=%u raw=%s\n", freq,
                          cc1101_mod_name(s), cc1101_rate_baud(s),
                          cc1101_dev_hz(s), strchr(last->str, ',') + 1);
         if (s->tx_dir) {
@@ -798,13 +716,8 @@ static void cc1101_realize(SSIPeripheral *d, Error **errp)
     s->live_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, cc1101_live_edge, s);
     s->link_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, cc1101_link_announce, s);
     s->live = g_new0(int32_t, LIVE_MAX);
-    s->link_in = g_string_new(NULL);
-    s->link_out = g_string_new(NULL);
-    if (qemu_chr_fe_backend_connected(&s->link)) {
-        qemu_chr_fe_set_handlers(&s->link, cc1101_link_can_read,
-                                 cc1101_link_read, cc1101_link_event, NULL, s,
-                                 NULL, true);
-    }
+    flipper_link_init(&s->lk, &s->link, "Sub-GHz", cc1101_link_line,
+                      cc1101_link_opened, s);
 }
 
 static char *cc1101_get_tx(Object *obj, Error **errp)

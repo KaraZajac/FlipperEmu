@@ -97,6 +97,9 @@ USB/IP export, warm reboot, no crash): **official 1.5.1**, **Momentum mntm-012**
 - NFC emulate: `./flipperemu nfc --reader ntag` holds a virtual reader to a Flipper
   that is emulating a card, reads it like a phone reads an NTAG, and saves what it read
   to `devices/NAME/nfc-tx/` as a `.nfc` file.
+- NFC link: `./flipperemu nfc --link iso-dep` puts a card played by a program in the
+  field (an ISO14443-4A card here; any card type you write). The machine stops while it
+  answers, so it can take its time, or relay to real hardware.
 - Speaker: TIM16's PWM tone plays through QEMU audio (desktop sound or a WAV recording).
   The duty cycle sets the volume, as on the real piezo.
 - Power: STOP2 deep sleep (1–2 % of a host core when idle), fuel gauge and charger you can
@@ -175,6 +178,7 @@ are erased). Without `-f` it boots whatever is already flashed.
 | `ibutton --reader` | read the Dallas key the device emulates, ROM and memory (to `devices/NAME/ibutton-tx/`) |
 | `nfc FILE.nfc` \| `nfc ntag215 UID [URL]` \| `nfc mfc1k UID` \| `nfc none` | hold an NFC card to the device |
 | `nfc --reader ntag` \| `nfc --reader scan` | hold an NFC reader to an emulating device and print what it reads |
+| `nfc --link iso-dep` \| `--link script:FILE.py` \| `--link log` | a card played by a program, in the field until ^C |
 | `flash FW [--erase-all]` | program `.elf` / `.dfu` / `.bin` / update `.tgz` into `flash.img` |
 | `sd [--resources X] [--size 512M]` | rebuild the microSD from a resources tgz, update package or folder |
 | `press ok down down ok …` | press buttons on a running device |
@@ -209,8 +213,8 @@ It then tests each radio through the firmware's own CLI:
   is written to a virtual T5577;
 - iButton: a DS1990A is read over 1-Wire, a virtual reader reads an emulated DS1990A,
   and an emulated Metakom key is captured, decoded and read back;
-- NFC: an NTAG215 is read with `mfu info`, a MIFARE Classic 1K is dumped, and the virtual
-  reader reads an emulated NTAG215.
+- NFC: an NTAG215 is read with `mfu info`, a MIFARE Classic 1K is dumped, the virtual
+  reader reads an emulated NTAG215, and an ISO-DEP card on the NFC link answers an APDU.
 
 Finally, a USB/IP client enumerates the device, the LCD comes back after `power reboot`,
 and the log must have no `[CRASH]`. Exit code 0 means pass, so it slots into a
@@ -575,6 +579,57 @@ scripts/fe_nfc.py --nfc-file --ntag215 04A1B2C3D4E5F6 https://flipperzero.one > 
 
 Or read a virtual card with NFC → Read and save it on the Flipper.
 
+#### A card from a program (the NFC link)
+
+With no card in the field, the Flipper's reader talks to whatever is on the device's
+NFC link, `devices/NAME/nfc.sock`. That can be a card written in Python, or a relay to
+real hardware:
+
+```sh
+./flipperemu nfc none                               # no built-in card in the field
+./flipperemu nfc --link iso-dep --verbose           # an ISO14443-4A card, until ^C
+./flipperemu nfc --link script:mycard.py            # a card of your own
+./flipperemu nfc --link log                         # no card: print the reader's frames
+```
+
+Each frame the firmware sends goes out on the link as data bits (CRC included) and the
+parity of each byte, so MIFARE Classic's encrypted parity survives. The answer comes
+back as the card's. While the program works it out, QEMU stops the machine and the
+virtual clock with it. However long the answer takes (a Python card, or USB to a real
+reader), the firmware still sees it within its frame waiting time.
+
+`scripts/fe_nfc_link.py` has the layers a card needs:
+- `Iso14443A`: REQA/WUPA, anticollision and select over 4, 7 or 10-byte UIDs, HLTA;
+- `IsoDep`: RATS/ATS, I-blocks with chaining, R- and S-blocks, and the APDUs handed to
+  `apdu()`.
+
+The `iso-dep` card answers SELECT, GET CHALLENGE and GET DATA. The NFC app reads it as an
+ISO14443-4A card, and `apdu -p 4a -d 00A4040007A000000003101000` in the `nfc` shell gets
+its answers through the firmware's own ISO-DEP stack. A card type the emulator doesn't
+model is a subclass and a method away, and so is an answer no real card would give, for
+seeing what the firmware's parsers make of it:
+
+```python
+import fe_nfc_link as nl
+
+class Mine(nl.IsoDep):
+    def apdu(self, cmd):
+        return bytes.fromhex("9000")
+
+def card(args):
+    return Mine(uid=bytes.fromhex("04112233445566"))
+```
+
+| | |
+|:-:|:-:|
+| ![nfc link](docs/img/23-nfc-link-iso-dep.png) | |
+| NFC → Read: the `iso-dep` card, played by `fe_nfc_link.py` over the link | |
+
+The protocol is in [docs/RADIO_LINK.md](docs/RADIO_LINK.md). For now the link is the card
+and the firmware the reader. The other way round still uses the built-in virtual reader
+(`--reader`). Next are relays to real cards through a PN532/PN533 (ACR122U) or a
+Proxmark3.
+
 ### Sound
 
 The speaker plays through QEMU's audio. `--audio` picks the output: by default a desktop
@@ -642,7 +697,8 @@ qemu/hw/arm/flipper/   the QEMU machine + STM32WB55 SoC + board devices (C)
 qemu/patches/          fixes to upstream QEMU (SysTick, ssi-sd, SD SPI state)
 scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_monitor.py,
                        fe_cli.py, fe_ir.py, fe_subghz.py, fe_sdr.py (real radios),
-                       fe_usbip.py, usbip_attach.py, smoke_test.py, *_check.py
+                       fe_nfc_link.py (cards from programs), fe_usbip.py,
+                       usbip_attach.py, smoke_test.py, *_check.py
 devices/ firmware/ build/ third_party/    generated, git-ignored
 ```
 

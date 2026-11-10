@@ -659,6 +659,32 @@ libhackrf (ctypes), or from a recording or stdin.
   still buffered from before are skipped. Hopping and the analyzer move faster than any
   SDR retunes, so they just read the band the SDR is on.
 
+## A card from a program: the ST25R3916's link (`st25r3916.c`, `scripts/fe_nfc_link.py`)
+
+The ST25R3916 has a link too (`devices/NAME/nfc.sock`, the same line protocol). While no
+card is set on the device and a program is connected, each frame the firmware sends as a
+reader goes out on it (`poll`). That happens where the built-in card would be asked: at
+the end of the transmission. The frame is decoded from its air bits into data bits and
+the parity bit after each byte, so MIFARE Classic's encrypted parity goes through as
+sent. The answer comes back the same way and joins the normal receive path: RX start,
+then the FIFO as the chip is set up, raw or decoded, CRC checked. `silence` lets the
+firmware's no-response timer run out.
+
+The answer can't be timed against the firmware. The firmware's frame waiting time is
+from 0.1 ms to tens of milliseconds, and a Python card, let alone a USB reader, misses it.
+So each poll stops the machine, and the virtual clock with it, until the answer comes
+(`vm_stop`, then `vm_start`), or a second has passed in host time. The firmware sees
+every answer at its usual 40 µs. The stop has to come from a bottom half. The poll is
+made inside a virtual-clock timer, and `vm_stop` there deadlocks: `pause_all_vcpus`
+waits for that clock's running timers to finish, the caller among them, while the vCPU
+waits for the BQL.
+
+`fe_nfc_link.py` has the card's layers: ISO14443-3A activation over 4, 7 or 10-byte UIDs
+(REQA/WUPA, anticollision and select per cascade level, HLTA), and ISO-DEP (RATS/ATS,
+I-blocks with chaining, R- and S-blocks, APDUs to a method). Its `iso-dep` card is read
+by the NFC app as an ISO14443-4A card, and the shell's `apdu` reaches it through the
+firmware's ISO-DEP stack.
+
 ## Persistence per device (`devices/NAME/`)
 
 | file | real-world equivalent |

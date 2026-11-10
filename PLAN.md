@@ -120,11 +120,14 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       firmware (`sdr_check.py`; BRINGUP_LOG 50-53; docs/RADIO_LINK.md)
 - ☐ Sub-GHz transmit through a TX-capable SDR (HackRF): the link already carries each
       transmission; modulate it (OOK/2-FSK) at the tuned frequency. Opt-in only
-- ☐ NFC: a frame link on the ST25R3916 (reader frames out, card answers in, and the
-      reverse in listen mode), so an external card, reader or real hardware can sit in
-      the field. Real hardware: PC/SC readers (ACR122U/PN533: Ultralight/NTAG and
-      ISO-DEP relayed after its own anticollision), a PN532 or a Proxmark3 (raw frames,
-      MIFARE Classic)
+- ☑ NFC: a card from a program (2026-11-09): the ST25R3916's link sends each reader
+      frame (data bits and parity) and takes the card's answer, the machine stopped
+      meanwhile; `scripts/fe_nfc_link.py` (`./flipperemu nfc --link`): ISO14443-3A,
+      ISO-DEP, an `iso-dep` card, `script:FILE.py` (BRINGUP_LOG 54)
+- ☐ NFC: relays to real cards through real hardware on that link: a PN532/PN533
+      (ACR122U over PC/SC; raw frames with parity, so MIFARE Classic too) or a
+      Proxmark3. And the other way round, listen mode: an external reader (or a real
+      one through a PN532 in target mode) in front of an emulating Flipper
 - ☐ 125 kHz RFID and IR through real front ends (a Proxmark3's LF, an IR transceiver),
       and iButton through a USB 1-Wire master (DS9490R)
 

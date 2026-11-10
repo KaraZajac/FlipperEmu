@@ -37,15 +37,26 @@
  * (Custom-parity answers, MIFARE Classic's, go out by transparent mode on
  * a bit-banged pin, which this does not decode.)
  *
+ * A card can also be on the "link" chardev (docs/RADIO_LINK.md): a program
+ * (scripts/fe_nfc_link.py), or real hardware's antenna.  With no card set
+ * here, each frame the firmware sends goes out on it ("poll", data bits
+ * and the parity of each byte), and its answer ("answer", or "silence")
+ * comes back as the card's.  The machine is stopped meanwhile, the virtual
+ * clock with it, so however long the answer takes over a socket or USB,
+ * the firmware sees it within its frame waiting time.
+ *
  * Copyright (c) 2026, Kara Zajac
  * SPDX-License-Identifier: BSD-3-Clause
  */
 #include "qemu/osdep.h"
 #include "qemu/timer.h"
+#include "qemu/main-loop.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
+#include "system/runstate.h"
 #include "flipper.h"
 
 #define REG_IO_CONF1      0x00
@@ -91,7 +102,8 @@
 #define BIT_NS 9439                     /* 128 / 13.56 MHz */
 #define FDT_NS (40 * SCALE_US)          /* end of TX to start of the answer */
 
-enum { STAGE_IDLE, STAGE_TX, STAGE_RXS, STAGE_RXE, STAGE_NRT };
+enum { STAGE_IDLE, STAGE_TX, STAGE_RXS, STAGE_RXE, STAGE_NRT, STAGE_LINK };
+#define LINK_ANSWER_MS 1000             /* host time for a card on the link */
 
 static void st25_update_irq(St25r3916State *s)
 {
@@ -186,6 +198,48 @@ int nfc_air_decode(const uint8_t *air, int nbits, uint8_t *data, bool *parity_ok
     return bytes * 8 + MIN(rest, 8);
 }
 
+/* air bits -> data bits (returned) and the parity bit of each full byte */
+static int nfc_air_split(const uint8_t *air, int nbits, uint8_t *data,
+                         uint8_t *par)
+{
+    int bytes = nbits / 9, rest = nbits % 9;
+
+    memset(data, 0, (nbits + 7) / 8 + 1);
+    memset(par, 0, bytes / 8 + 1);
+    for (int i = 0; i < bytes; i++) {
+        for (int b = 0; b < 8; b++) {
+            data[i] |= bit_get(air, i * 9 + b) << b;
+        }
+        bit_put(par, i, bit_get(air, i * 9 + 8));
+    }
+    for (int b = 0; b < rest && b < 8; b++) {
+        data[bytes] |= bit_get(air, bytes * 9 + b) << b;
+    }
+    return bytes * 8 + MIN(rest, 8);
+}
+
+/* data bits and their parity (NULL: odd, as a card computes it) -> air */
+static int nfc_air_join(const uint8_t *data, int nbits, const uint8_t *par,
+                        uint8_t *air)
+{
+    int n = 0, full = nbits / 8;
+
+    if (!par) {
+        return nfc_air_encode(data, nbits, air);
+    }
+    memset(air, 0, NFC_AIR_MAX);
+    for (int i = 0; i < full && n + 9 <= NFC_AIR_MAX * 8; i++) {
+        for (int b = 0; b < 8; b++) {
+            bit_put(air, n++, (data[i] >> b) & 1);
+        }
+        bit_put(air, n++, bit_get(par, i));
+    }
+    for (int b = 0; b < nbits % 8; b++) {
+        bit_put(air, n++, (data[full] >> b) & 1);
+    }
+    return n;
+}
+
 /* ------------------------------------------------------------ the field */
 
 static bool st25_field(St25r3916State *s)
@@ -202,6 +256,7 @@ static void st25_field_changed(St25r3916State *s)
         if (s->card) {
             nfc_card_field(s->card, on);
         }
+        flipper_link_send(&s->lk, "field %s\n", on ? "on" : "off");
     }
 }
 
@@ -243,6 +298,9 @@ static void st25_rx_end(St25r3916State *s)
     st25_raise(s, I_RXE);
 }
 
+static void st25_link_poll(St25r3916State *s);
+static void st25_silence(St25r3916State *s, int64_t now);
+
 /* the transmission is over: hand it to the card, schedule its answer */
 static void st25_tx_end(St25r3916State *s, int64_t now)
 {
@@ -254,14 +312,24 @@ static void st25_tx_end(St25r3916State *s, int64_t now)
     }
     if (s->card && s->field_on && (s->rega[REG_OP_CONTROL] & OP_RX_EN)) {
         s->nrx = nfc_card_rx(s->card, s->tx, s->ntx, s->rx);
+    } else if (!s->card && s->lk.open && s->field_on &&
+               (s->rega[REG_OP_CONTROL] & OP_RX_EN)) {
+        st25_link_poll(s);              /* the card on the link answers */
+        return;
     }
     if (s->nrx > 0) {
         s->stage = STAGE_RXS;
         timer_mod(s->timer, now + FDT_NS);
         return;
     }
-    /* silence: the no-response timer runs out, if it was set */
+    st25_silence(s, now);
+}
+
+/* no answer: the no-response timer runs out, if it was set */
+static void st25_silence(St25r3916State *s, int64_t now)
+{
     uint32_t nrt = s->rega[REG_NRT1] << 8 | s->rega[REG_NRT2];
+
     if (nrt) {
         int64_t step = (s->rega[REG_TIMER_EMV] & 1) ? 4096 : 64;
 
@@ -295,6 +363,143 @@ static void st25_timer(void *opaque)
         s->stage = STAGE_IDLE;
         st25_raise(s, I_NRE);
         break;
+    }
+}
+
+/* ---------------------------------------------------- a card on the link */
+
+static void hex_put(GString *out, const uint8_t *b, int n)
+{
+    for (int i = 0; i < n; i++) {
+        g_string_append_printf(out, "%02X", b[i]);
+    }
+}
+
+static int hex_get(const char *p, uint8_t *b, int max)
+{
+    int n = 0;
+
+    while (n < max && g_ascii_isxdigit(p[0]) && g_ascii_isxdigit(p[1])) {
+        b[n++] = g_ascii_xdigit_value(p[0]) << 4 | g_ascii_xdigit_value(p[1]);
+        p += 2;
+    }
+    return n;
+}
+
+/* the frame just sent goes out on the link; the machine waits for the card */
+static void st25_link_poll(St25r3916State *s)
+{
+    uint8_t data[NFC_AIR_MAX + 1], par[NFC_AIR_MAX / 8 + 2];
+    int nbits = nfc_air_split(s->tx, s->ntx, data, par);
+    g_autoptr(GString) line = g_string_new(NULL);
+
+    g_string_printf(line, "poll %d ", nbits);
+    hex_put(line, data, (nbits + 7) / 8);
+    g_string_append_c(line, ' ');
+    hex_put(line, par, (nbits / 8 + 7) / 8);
+    g_string_append_c(line, '\n');
+    flipper_link_send(&s->lk, "%s", line->str);
+    s->stage = STAGE_LINK;
+    timer_mod(s->link_timeout,
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + LINK_ANSWER_MS);
+    /* not from here: this runs in a virtual-clock timer, and stopping the
+     * machine waits for that clock's timers to finish, this one included */
+    qemu_bh_schedule(s->link_stop);
+}
+
+/* time stands still till the card answers (if it has not already) */
+static void st25_link_stop(void *opaque)
+{
+    St25r3916State *s = opaque;
+
+    if (s->stage == STAGE_LINK && !s->link_paused && runstate_is_running()) {
+        vm_stop(RUN_STATE_PAUSED);
+        s->link_paused = true;
+    }
+}
+
+static void st25_link_resume(St25r3916State *s)
+{
+    timer_del(s->link_timeout);
+    if (s->link_paused) {
+        s->link_paused = false;
+        vm_start();
+    }
+}
+
+/* "answer NBITS DATA [PARITY]" or "silence": the card's turn is over */
+static void st25_link_line(void *opaque, char *line)
+{
+    St25r3916State *s = opaque;
+    uint8_t data[NFC_AIR_MAX], par[NFC_AIR_MAX / 8 + 1];
+    int64_t now;
+    char *p, *end;
+    long nbits;
+    bool own_par;
+
+    if (s->stage != STAGE_LINK) {
+        return;                         /* nothing asked */
+    }
+    if (g_str_has_prefix(line, "silence")) {
+        st25_link_resume(s);
+        st25_silence(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+        return;
+    }
+    if (!g_str_has_prefix(line, "answer ")) {
+        return;
+    }
+    nbits = strtol(line + 7, &end, 10);
+    if (end == line + 7 || nbits <= 0 || nbits > (NFC_AIR_MAX - 2) * 8 * 8 / 9) {
+        return;
+    }
+    p = end;
+    while (*p == ' ') {
+        p++;
+    }
+    memset(data, 0, sizeof(data));
+    if (hex_get(p, data, sizeof(data)) < (nbits + 7) / 8) {
+        return;
+    }
+    p += (nbits + 7) / 8 * 2;
+    while (*p == ' ') {
+        p++;
+    }
+    memset(par, 0, sizeof(par));
+    own_par = hex_get(p, par, sizeof(par)) > 0;  /* encrypted parity, say */
+    st25_link_resume(s);
+    now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    s->nrx = nfc_air_join(data, nbits, own_par ? par : NULL, s->rx);
+    s->stage = STAGE_RXS;
+    timer_mod(s->timer, now + FDT_NS);
+}
+
+static void st25_link_timeout(void *opaque)
+{
+    St25r3916State *s = opaque;
+
+    if (s->stage != STAGE_LINK) {
+        return;
+    }
+    if (!s->link_late) {
+        s->link_late = true;
+        warn_report("flipper-zero: NFC link: no answer in %d ms, taken as "
+                    "silence", LINK_ANSWER_MS);
+    }
+    st25_link_resume(s);
+    st25_silence(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+}
+
+static void st25_link_opened(void *opaque, bool open)
+{
+    St25r3916State *s = opaque;
+
+    if (open) {
+        s->link_late = false;
+        flipper_link_send(&s->lk, "hello flipperemu nfc 1\nfield %s\n",
+                          s->field_on ? "on" : "off");
+    } else if (s->stage == STAGE_LINK) {
+        st25_link_resume(s);            /* gone mid-frame: silence */
+        st25_silence(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     }
 }
 
@@ -911,6 +1116,10 @@ static void st25_realize(SSIPeripheral *d, Error **errp)
     qdev_init_gpio_out_named(DEVICE(d), &s->irq, "irq", 1);
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, st25_timer, s);
     s->rd_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, st25_rd_timer, s);
+    s->link_timeout = timer_new_ms(QEMU_CLOCK_REALTIME, st25_link_timeout, s);
+    s->link_stop = qemu_bh_new(st25_link_stop, s);
+    flipper_link_init(&s->lk, &s->link, "NFC", st25_link_line,
+                      st25_link_opened, s);
 }
 
 static void st25_init(Object *obj)
@@ -932,6 +1141,7 @@ static void st25_init(Object *obj)
 
 static const Property st25_props[] = {
     DEFINE_PROP_STRING("tx-dir", St25r3916State, tx_dir),
+    DEFINE_PROP_CHR("link", St25r3916State, link),  /* a card elsewhere */
 };
 
 static void st25_reset_hold(Object *obj, ResetType type)

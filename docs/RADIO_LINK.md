@@ -1,22 +1,26 @@
-# The radio link
+# The radio links
 
-An emulated radio can have a real one, or any program, as its antenna. The CC1101
-(Sub-GHz) has such a link today. `scripts/fe_sdr.py` drives it from an SDR, and anything
-else that speaks this protocol can too: another SDR stack, a GNU Radio flowgraph, a
-simulator, a test.
+An emulated radio can have a real one, or any program, as its antenna. Two radios have
+such a link: the CC1101 (Sub-GHz) and the ST25R3916 (NFC).
+- `scripts/fe_sdr.py` drives the CC1101's from an SDR. So can anything else that speaks
+  the protocol: another SDR stack, a GNU Radio flowgraph, a simulator, a test.
+- `scripts/fe_nfc_link.py` is the card on the ST25R3916's, written in Python or relayed.
 
 ## Where
 
-Each device has a Unix socket, `devices/NAME/subghz.sock`. QEMU listens on it (the
-launcher passes `-chardev socket,id=subghz-link,path=…,server=on,wait=off -global
-cc1101.link=subghz-link`) and takes one client at a time. Running QEMU by hand, give the
-`cc1101` device any chardev as `link`.
+Each device has two Unix sockets, `devices/NAME/subghz.sock` and `devices/NAME/nfc.sock`.
+QEMU listens on each and takes one client at a time. The launcher passes `-chardev
+socket,id=subghz-link,path=…,server=on,wait=off -global cc1101.link=subghz-link`, and the
+same for `st25r3916`. Running QEMU by hand, give the device any chardev as `link`.
 
 ## Lines
 
-The protocol is ASCII text, one message per line, ended by `\n`. Fields are separated by
-spaces, and `key=value` pairs can come in any order. Unknown messages and keys are
-ignored, so either side can add to them.
+Both links speak the same way. A message is one line of ASCII text, ended by `\n`.
+Fields are separated by spaces, and `key=value` pairs can come in any order. Unknown
+messages and keys are ignored, so either side can add to them. A `hello <text>` line from
+the program describes it, and QEMU logs it.
+
+# Sub-GHz (`subghz.sock`)
 
 ### From the emulator
 
@@ -54,8 +58,6 @@ same data the model saves as a `.sub` file in `devices/NAME/subghz-tx/`.
 
 ### To the emulator
 
-`hello <text>` describes the bridge. QEMU logs it.
-
 ```
 rx 7 +390 -1170 +1170 -390 -11700 ...
 ```
@@ -90,7 +92,7 @@ so: the Frequency Analyzer sweeps 2 ms per frequency and needs an answer at once
 A bridge with no spectrum gets −60 dBm while its timeline is high, and −100 dBm
 otherwise.
 
-## Trying it by hand
+### Trying it by hand
 
 ```sh
 socat - UNIX-CONNECT:devices/NAME/subghz.sock
@@ -100,3 +102,54 @@ This shows the set-up lines as the firmware tunes; Sub-GHz → Read hops through
 frequencies. Typing `rx EPOCH +390 -1170 +390 -1170 …` with the current epoch puts a
 signal on GDO0, and `qom-get /machine/subghz rssi` on the monitor shows what the
 firmware reads as RSSI.
+
+# NFC (`nfc.sock`)
+
+The program is the card in the field, and the firmware is the reader, while no card is
+set on the device (`./flipperemu nfc none`). A built-in card answers instead of the link.
+
+### From the emulator
+
+`hello flipperemu nfc 1` comes first, on connecting.
+
+`field on` and `field off` report the reader's field, sent on connecting and whenever it
+changes. A card loses its state when the field goes.
+
+```
+poll 72 93708804A1B29FAE4B 6501
+```
+
+This is a frame the firmware sent as the reader, while its field is on:
+- the number of data bits: 7 for REQA/WUPA, 8 per byte otherwise;
+- the data, hex, CRC_A included where the frame has one. An incomplete last byte's bits
+  are its low bits;
+- the parity bit sent after each full byte, packed LSB first (byte 0's in bit 0). These
+  are odd parity, except in MIFARE Classic's encrypted frames.
+
+The example is a SELECT at cascade level 1, `93 70 88 04 A1 B2 9F AE 4B`: nine bytes,
+so nine parity bits in two bytes.
+
+### To the emulator
+
+`answer <bits> <hex> [<parity hex>]` is the card's answer, in the same form. Without
+parity, odd parity is sent, as a card computes it. Give it for MIFARE Classic's
+encrypted answers. `answer 16 4400` is an ATQA; `answer 24 04da17` a SAK with its CRC.
+
+`silence` means no answer: the firmware's no-response timer runs out.
+
+### Time
+
+Each poll stops the machine, and with it the virtual clock, until the answer or silence
+comes: `vm_stop` from a bottom half, then `vm_start`. However long the program takes,
+over a socket or USB to a real reader, the firmware sees the answer within its frame
+waiting time. After a second with no answer, it gets silence and a warning, once.
+
+### Trying it by hand
+
+```sh
+./flipperemu nfc --link log                      # print the reader's frames
+socat - UNIX-CONNECT:devices/NAME/nfc.sock       # and answer them yourself
+```
+
+Start `scanner` in the `nfc` shell. The first poll is a WUPA, `poll 7 52`; answer
+`answer 16 4400` within a second, and the next poll is the anticollision, `poll 16 9320 01`.

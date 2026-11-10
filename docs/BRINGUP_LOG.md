@@ -536,6 +536,22 @@ All three are small, self-contained, and suitable for sending upstream.
     the trailing 14–39 µs glitches went with it. Timings are now within 2–12 µs at all
     three of the Flipper's deviations (47.6, 12.7 and 2.38 kHz), down to 12–15 dB SNR.
 
+54. **A card from a program: time has to stand still.** The firmware's NFC poller
+    waits forever for an event, but its timeout is an MCU timer on the virtual clock:
+    the frame waiting time, 0.1 ms to tens of ms. A card on the other end of a socket
+    can't answer that fast, and real hardware over USB even less. So each poll on the
+    NFC link stops the machine (and the virtual clock) until the answer comes. The first
+    try hung QEMU outright after one exchange (WUPA, then ATQA). The backtrace showed
+    the main loop in `vm_stop` → `pause_all_vcpus` → `qemu_clock_enable(VIRTUAL,
+    false)`, which waits for the clock's running timers to finish. The caller was one
+    of them (the end of transmission is a virtual-clock timer), and the vCPU was stuck
+    on the BQL in an MMIO write. Stopping from a bottom half fixed it: it runs moments
+    later, outside the timers, and does nothing if the answer is already in. A Python
+    ISO-DEP card then went through anticollision over two cascade levels, RATS/ATS and
+    I-blocks. The firmware's `scanner` names it ISO14443-4A, the NFC app reads it, and
+    `apdu` gets SELECT, GET CHALLENGE and GET DATA answers through the firmware's own
+    ISO-DEP stack.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

@@ -136,6 +136,7 @@ class Device:
         self.usb_sock = self.dir / "usb.sock"   # --usb unix
         self.usb_tty = self.dir / "usb.tty"     # --usb pty: symlink to the pty
         self.subghz_sock = self.dir / "subghz.sock"     # a radio bridge (fe_sdr.py)
+        self.nfc_sock = self.dir / "nfc.sock"           # a card on the link (fe_nfc_link.py)
 
     def running(self):
         """Is a QEMU serving this device's monitor socket?"""
@@ -335,6 +336,9 @@ def qemu_cmd(dev: Device, args):
            # CC1101's antenna: `./flipperemu subghz --sdr ...`
            "-chardev", f"socket,id=subghz-link,path={dev.subghz_sock},server=on,wait=off",
            "-global", "cc1101.link=subghz-link",
+           # and a card on the NFC link (a program, or a real reader's antenna)
+           "-chardev", f"socket,id=nfc-link,path={dev.nfc_sock},server=on,wait=off",
+           "-global", "st25r3916.link=nfc-link",
            "-global", f"flipper-ir.tx-dir={dev.dir / 'ir-tx'}",
            "-global", f"flipper-rfid.tx-dir={dev.dir / 'rfid-tx'}",
            "-global", f"flipper-ibutton.tx-dir={dev.dir / 'ibutton-tx'}",
@@ -688,6 +692,25 @@ def cmd_nfc(args):
     dev = Device(args.device)
     if not dev.running():
         sys.exit(f"[{dev.name}] not running")
+    if args.link:                               # a program as the card
+        import fe_nfc_link
+        held = ""
+        try:                                    # (the monitor may be busy)
+            m = Monitor(str(dev.monitor))
+            try:
+                held = m.cmd("qom-get /machine/nfc card").strip().strip('"')
+            finally:
+                m.close()
+        except ConnectionError:
+            pass
+        if held:
+            print(f"[{dev.name}] note: a card is in the field already ({held}); the "
+                  "link's card answers once it is gone (`./flipperemu nfc none`)")
+        try:
+            return fe_nfc_link.run(dev.nfc_sock, fe_nfc_link.make_card(args.link, args),
+                                   args.verbose)
+        except (OSError, ValueError) as e:
+            sys.exit(f"nfc --link: {e}")
     card = args.card
     if args.field:
         m = Monitor(str(dev.monitor))
@@ -1002,6 +1025,12 @@ def main():
     p.add_argument("--field", choices=("on", "off"),
                    help="a reader's field around the Flipper with no reader talking "
                         "(what NFC field detection sees)")
+    p.add_argument("--link", metavar="CARD",
+                   help="instead: be the card in the Flipper's field from here, "
+                        "until ^C. CARD: iso-dep (an ISO14443-4A card), log (print "
+                        "the reader's frames), script:FILE.py (your own)")
+    import fe_nfc_link
+    fe_nfc_link.add_options(p)
     p.set_defaults(func=cmd_nfc)
 
     p = sub.add_parser("ibutton", help="touch an iButton key to a running device")
