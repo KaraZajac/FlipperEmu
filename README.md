@@ -26,12 +26,13 @@ QEMU, so none has QEMU's speed, built-in GDB stub, snapshots or tracing plugins.
 ## Status
 
 Verified on 2026-11-10 with `scripts/smoke_test.py` (boot, SD mount, LCD, input, a
-recording of the screen, CLI over USB, the secure enclave, IR receive and transmit,
+recording of the screen, pause and continue, CLI over USB, the secure enclave, IR
+receive and transmit,
 Sub-GHz receive and transmit, 125 kHz RFID read, emulate and T5577 write, iButton read
 and emulate, NFC read (NTAG215, MIFARE Classic 1K) and emulate, USB/IP export, warm
 reboot, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed
 unlshd-094**. The window passes `scripts/gui_check.py` (clicked buttons, a recording
-of the screen, the firmware log and its level, a file copied to the card, an app
+of the screen, Pause, the firmware log and its level, a file copied to the card, an app
 dropped on it, the bench, switching off and on, the Left + Back reboot, installing
 firmware) on the same three, off-screen. `scripts/ufbt_check.py` (ufbt 0.2.6 building
 `examples/hello` and launching it there) and `scripts/gdb_check.py` (gdb with the
@@ -275,6 +276,12 @@ instead, and `--headless` no window at all.
   on, with a red "● REC" and the time in the status bar. Choose it again to end it: the
   window asks where to save the animated GIF. `./flipperemu record` does the same for
   a device that runs without a window.
+- **Device > Pause** (Ctrl+P) makes time stand still on it: the screen, the firmware's
+  timers, a transmission half sent. "PAUSED" stands on the glass above the screen and
+  in the title. Choose it again and it goes on from there. A button you click meanwhile
+  is felt when it goes on. `./flipperemu pause` and `continue` do the same from a
+  terminal, and the window shows it, as it shows a debugger that has the firmware
+  stopped at a breakpoint.
 
 Closing the window stops the emulator, as `./flipperemu stop` does. `./flipperemu gui`
 opens the window for a device that runs already (started with `--headless`); closing
@@ -289,12 +296,15 @@ its zoom, colours and recent files in `~/.config/FlipperEmu/gui.ini`.
 <p align="center"><img src="docs/img/28-window-colours.png" width="50%"
 alt="The three colours: white, black and Catppuccin Mocha"></p>
 
+<p align="center"><img src="docs/img/32-window-paused.png" width="60%"
+alt="Paused in the middle of the main menu: PAUSED above the screen, and in the status bar"></p>
+
 The window and the emulator talk over the [front-panel link](docs/PANEL_LINK.md): the
 LCD, the lights and the buttons, and the QOM properties the bench shows. Any other
 program can use it too. `scripts/gui_check.py FIRMWARE` checks the window off-screen: it
-boots a throwaway device, clicks its buttons, reads the firmware's log and sets its
-level, copies a file to its card, drops an app on it and starts it again with F5,
-switches it off and on, and reboots it.
+boots a throwaway device, clicks its buttons, records its screen, pauses it, reads the
+firmware's log and sets its level, copies a file to its card, drops an app on it and
+starts it again with F5, switches it off and on, and reboots it.
 
 ## The `flipperemu` tool
 
@@ -311,6 +321,7 @@ switches it off and on, and reboots it.
 | `sd eject` \| `sd insert` | pull its microSD card out, push it back in |
 | `sound off` \| `sound on` | mute its speaker, and back |
 | `reset` | reboot it, as holding Left + Back does |
+| `pause` \| `continue` | time stands still on it (screen, timers, radios), and goes on from there |
 | `run --usbip [PORT]` | export the USB device over USB/IP (then `sudo scripts/usbip_attach.py`) |
 | `cli ["CMD" …]` | the device's CLI over USB: interactive, or run commands and print their output |
 | `ls [-R] [PATH]` | what is on the SD card (`/ext` when no path is given); `-R`: and in every folder under it |
@@ -559,6 +570,9 @@ scripts/smoke_test.py path/to/firmware.elf|.dfu|update.tgz [--no-sd] [--keep] [-
 Boots a throwaway device headless and checks that:
 - the firmware reports "Startup complete" and "card mounted";
 - the LCD draws, and OK changes the screen;
+- `flipperemu record` writes the screen as a GIF while keys are pressed;
+- `flipperemu pause` makes time stand still (the firmware's uptime misses those
+  seconds, and `press` and `ls` say why they cannot) until `continue`;
 - `info device` answers on the USB CLI;
 - the secure enclave holds its ten factory keys, and `crypto encrypt` gives what the host
   computes from the key file.
@@ -1170,7 +1184,7 @@ The Flipper stands still while gdb has it stopped, and runs on when gdb leaves.
 
 [docs/DEVELOPING.md](docs/DEVELOPING.md#gdb-with-the-firmwares-symbols-and-your-apps)
 has a session with an app, and what `--elf`, `--apps` and `--with` are for.
-`scripts/gdb_check.py FIRMWARE` checks it (19 checks on the official firmware, with
+`scripts/gdb_check.py FIRMWARE` checks it (20 checks on the official firmware, with
 ufbt's SDK and toolchain). `run --gdb` still opens the stub at the start, on
 localhost:1234 (`--gdb-port`).
 

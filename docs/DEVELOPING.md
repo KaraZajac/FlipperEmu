@@ -5,6 +5,7 @@ would be: the build tools you already use, pointed at it.
 
 - [An app, from its source to the screen](#an-app-from-its-source-to-the-screen)
 - [A GIF of your app](#a-gif-of-your-app)
+- [Pause it](#pause-it)
 - [Why `./flipperemu ufbt`, and not `ufbt` alone](#why-flipperemu-ufbt-and-not-ufbt-alone)
 - [The SDK has to be the firmware's](#the-sdk-has-to-be-the-firmwares)
 - [gdb, with the firmware's symbols and your app's](#gdb-with-the-firmwares-symbols-and-your-apps)
@@ -118,8 +119,35 @@ so with the window open the recording is the window's to make, and
 
 The file is small because a picture after the first holds only the part of the screen
 that changed: in the one above the whole screen is 2.9 kB, and each step of the
-counter under one. The time is the time you watched it for. An emulated Flipper that runs slower or faster than a real one (under
-gdb, or with a host that is busy) is recorded as it was seen.
+counter under one. The time is the time you watched it for. An emulated Flipper that
+runs slower or faster than a real one (under gdb, or with a host that is busy) is
+recorded as it was seen.
+
+## Pause it
+
+```sh
+../../flipperemu pause                 # time stands still on it
+../../flipperemu shot frame.png        # ... for a look at a screen that is gone in a moment
+../../flipperemu continue              # and it goes on from there
+```
+
+A paused Flipper is in the middle of whatever it was doing: an animation between two
+pictures, a timer that has not run out, a tone that plays. Nothing is lost, and
+`continue` goes on from that instant. In the window it is Device > Pause (Ctrl+P),
+with "PAUSED" on the glass above the screen.
+
+What needs the firmware's answer says so at once on a paused device, and does not
+wait: `ls`, `push`, `app`, `cli`, the `ufbt` and `fbt` targets ("no CLI: it is
+paused"), and `press` ("feels no button"). What does not need it works: `shot`,
+`status` (which has a line for it, and `"stopped": "paused"` with `--json`), `usb
+unplug`, a tag held to it. They take effect when it goes on. `reset` on a paused
+device is a reset that starts when it goes on. A button clicked in the window
+meanwhile is felt then too.
+
+With a gdb on it the stop is gdb's: `status` says "a debugger has it stopped", the
+window says "STOPPED BY A DEBUGGER", and `./flipperemu continue` leaves it to gdb's
+`continue`, because a firmware that runs under a gdb that takes it to be stopped is no
+help to anyone. `./flipperemu pause` with a gdb attached is gdb's Ctrl-C.
 
 ## Why `./flipperemu ufbt`, and not `ufbt` alone
 
@@ -338,15 +366,23 @@ mode: a backtrace of the firmware with functions and lines, the breakpoint in th
 app's entry that `ufbt launch` runs into, a breakpoint on a line of the app that runs
 and a variable printed there, the crash with its message and the app's line in the
 backtrace, the firmware running on after each, the debug flag off throughout, the
-stub on a TCP port with a gdb of its own on it, a second gdb turned away, a gdb that
-dies with the firmware stopped. It passes on the official 1.5.1 with the SDK's
-toolchain (gdb 13.2) and ELF (19 checks), and is skipped (77) without them.
+stub on a TCP port with a gdb of its own on it, a second gdb turned away, what
+`status` and `continue` say of a firmware a gdb has stopped, a gdb that dies with the
+firmware stopped. It passes on the official 1.5.1 with the SDK's
+toolchain (gdb 13.2) and ELF (20 checks), and is skipped (77) without them.
 
 A recording is checked where the screen is: `scripts/smoke_test.py` runs
 `./flipperemu record` for four seconds with two key presses and has Pillow read the
 file (its size, its two colours, more than one picture, the four seconds, the loop),
 and `scripts/gui_check.py` records through the window's menu action and has Qt's
 reader do the same.
+
+A pause is checked by the firmware's own clock: `scripts/smoke_test.py` asks for its
+`uptime`, pauses it for some seconds (`status`, `press` and `ls` meanwhile), lets it go
+on and asks again; the seconds have to be gone from the uptime. `scripts/gui_check.py`
+pauses through the window's menu action, clicks OK while it stands still (no picture
+comes, and the click is felt when it goes on), and has the window follow a `pause` and
+a `continue` given in a terminal.
 
 By hand: the official self-update script sending a package without a radio stack
 (what `fbt flash_usb` sends) to a running device, which installed it and came back.

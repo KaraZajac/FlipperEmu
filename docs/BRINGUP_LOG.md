@@ -950,6 +950,43 @@ All three are small, self-contained, and suitable for sending upstream.
       first picture, under 1 kB a step); five seconds through the main menu with
       its animated icons, 35 kB. A full-screen picture of noise takes 14 ms to
       compress, so the window writes the file in a thread of its own.
+81. **Two kinds of stop.** `./flipperemu pause` and `continue`, and the window's
+    Device > Pause. QEMU has a stop and a start, and they were in use already: the
+    NFC link holds time still for each of the reader's frames until the card on the
+    other end has answered (up to a second of the host's time), and starts it again.
+    - A pause given as the monitor's `stop` during such a hold did nothing (QEMU's
+      `vm_stop()` on a machine that stands still is no event), and the link's start
+      ended it. So the panel keeps the two apart: a pause somebody asked for is a
+      property (`/machine/panel paused`), a link's hold is a count
+      (`flipper_vm_hold()`, `flipper_vm_release()`), and the machine starts when
+      neither is left. Whatever else starts it (the monitor's `cont`, a debugger)
+      ends the pause, which a handler of the run state sees.
+    - To everybody else the machine runs through a link's hold: `stopped` is empty,
+      and the window is not told. Otherwise an NFC read would flicker "PAUSED".
+    - Why it stands still is QEMU's run state by its name (`paused`, `debug`),
+      with two corrections. A machine reset while it stood still is `prelaunch` to
+      QEMU, and paused to anybody who looks at it. And QEMU has `debug` at a
+      breakpoint only: a gdb that has just got on, or pressed Ctrl-C, is `paused`
+      to it. The panel calls it the debugger's whenever a gdb is on the stub and
+      nobody asked for a pause, so the window does not say "PAUSED" over a stop
+      that its Pause cannot end.
+    - The window does not pause by itself. It runs the launcher's command, and is
+      told over the link (`running 0 paused`), as it is when a terminal pauses, or
+      a gdb stops at a breakpoint. The panel looks on the host's clock, so it can
+      say so while the machine stands still.
+    - Keys: the monitor's `sendkey` is dropped by QEMU on a stopped machine (and
+      its release comes later, with no press before it), so `press` refuses with
+      the reason. The panel's own press is kept, with its release on the machine's
+      clock: a button clicked in the paused window is one press of 40 ms when it
+      goes on.
+    - With a gdb attached `continue` is refused: QEMU would run, and the gdb would
+      still take the firmware to be stopped. A pause there is given to gdb as an
+      interrupt, which is what it is.
+    - Not seen: a monitor's own `stop`, or a gdb's Ctrl-C, that falls into a link's
+      hold. QEMU tells nobody, and the card's answer ends it.
+    - The check is the firmware's uptime: the seconds it stood still are gone from it
+      (`smoke_test.py`); in the window, a click on OK that changes nothing until
+      it goes on (`gui_check.py`).
 
 ## Things that were right the first time (and why)
 

@@ -56,7 +56,6 @@
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-properties-system.h"
-#include "system/runstate.h"
 #include "flipper.h"
 
 #define REG_IO_CONF1      0x00
@@ -418,9 +417,8 @@ static void st25_link_stop(void *opaque)
 {
     St25r3916State *s = opaque;
 
-    if (s->stage == STAGE_LINK && !s->link_paused && runstate_is_running()) {
-        vm_stop(RUN_STATE_PAUSED);
-        s->link_paused = true;
+    if (s->stage == STAGE_LINK && !s->link_paused) {
+        s->link_paused = flipper_vm_hold();
     }
 }
 
@@ -429,7 +427,7 @@ static void st25_link_resume(St25r3916State *s)
     timer_del(s->link_timeout);
     if (s->link_paused) {
         s->link_paused = false;
-        vm_start();
+        flipper_vm_release();       /* (a pause that came meanwhile stays) */
     }
 }
 

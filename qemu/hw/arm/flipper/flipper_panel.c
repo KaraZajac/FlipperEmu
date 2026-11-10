@@ -7,7 +7,8 @@
  * of their own, so a button can be held for as long as a finger holds it.
  * It can also name QOM properties to be told about when they change (the
  * USB cable, the battery, the card in the field ...), so it needs no
- * monitor of its own.
+ * monitor of its own.  And it is told when the machine stands still: paused
+ * by someone, or stopped by a debugger.
  *
  * The link is a line protocol on a chardev, like the radios'.  Nothing here
  * runs while no program is connected.
@@ -17,6 +18,9 @@
  */
 #include "qemu/osdep.h"
 #include "qemu/timer.h"
+#include "qapi/error.h"
+#include "system/runstate.h"
+#include "chardev/char.h"
 #include "qobject/qobject.h"
 #include "qobject/qjson.h"
 #include "qom/qom-qobject.h"
@@ -42,6 +46,106 @@ static const char *const panel_keys[BTN_NUM] = {
     [BTN_UP] = "up", [BTN_DOWN] = "down", [BTN_LEFT] = "left",
     [BTN_RIGHT] = "right", [BTN_OK] = "ok", [BTN_BACK] = "back",
 };
+
+/* ---- the machine, stopped and going
+ *
+ * It stands still for two kinds of reason.  Somebody asked for it: a pause
+ * (the launcher's, the window's), which lasts until somebody ends it; or a
+ * debugger has it.  Or a link holds time still while the other side answers
+ * (the NFC link, for the card on it): that is over in milliseconds, it is
+ * the link's own business, and to everyone else the machine runs through
+ * it.  A pause that comes during such a stop outlasts it.
+ */
+static bool vm_paused;          /* somebody asked for it */
+static int vm_holds;            /* stops of a link's own */
+
+bool flipper_vm_hold(void)
+{
+    if (!runstate_is_running()) {
+        return false;
+    }
+    vm_holds++;
+    vm_stop(RUN_STATE_PAUSED);
+    return true;
+}
+
+void flipper_vm_release(void)
+{
+    assert(vm_holds > 0);
+    if (!--vm_holds && !vm_paused) {
+        vm_start();
+    }
+}
+
+/* a gdb is on QEMU's stub */
+static bool panel_gdb(void)
+{
+    Chardev *chr = qemu_chr_find("gdb");
+
+    return chr && object_property_get_bool(OBJECT(chr), "connected", NULL);
+}
+
+/* QEMU's run state if the machine stands still, or -1 */
+static int panel_stopped(void)
+{
+    RunState state = runstate_get();
+
+    if (runstate_is_running() || (vm_holds && !vm_paused)) {
+        return -1;
+    }
+    /* (one that was reset while it stood still is "prelaunch" to QEMU) */
+    if (vm_paused || state == RUN_STATE_PRELAUNCH) {
+        return RUN_STATE_PAUSED;
+    }
+    /*
+     * QEMU has "debug" at a breakpoint only: a gdb that has just got on, or
+     * interrupted, is "paused" to it, and is the debugger's stop all the same
+     */
+    return state == RUN_STATE_PAUSED && panel_gdb() ? RUN_STATE_DEBUG : state;
+}
+
+static void panel_vm_change(void *opaque, bool running, RunState state)
+{
+    if (running) {
+        vm_paused = false;      /* whoever said go: the monitor, a debugger */
+    }
+}
+
+static bool panel_get_paused(Object *obj, Error **errp)
+{
+    return vm_paused;
+}
+
+static void panel_set_paused(Object *obj, bool value, Error **errp)
+{
+    vm_paused = value;
+    if (value) {
+        vm_stop(RUN_STATE_PAUSED);      /* (nothing, if it stands still) */
+    } else if (!vm_holds) {
+        vm_start();
+    }
+}
+
+static char *panel_get_stopped(Object *obj, Error **errp)
+{
+    int state = panel_stopped();
+
+    return g_strdup(state < 0 ? "" : RunState_str(state));
+}
+
+static void panel_running(FlipperPanelState *s, bool all)
+{
+    int state = panel_stopped();
+
+    if (all || state != s->stopped) {
+        s->stopped = state;
+        if (state < 0) {
+            flipper_link_send(&s->lk, "running 1\n");
+        } else {
+            flipper_link_send(&s->lk, "running 0 %s\n", RunState_str(state));
+        }
+    }
+}
 
 /* ---- out: the picture and the lights */
 
@@ -187,6 +291,7 @@ static void panel_watch(FlipperPanelState *s, const char *path,
 
 static void panel_everything(FlipperPanelState *s)
 {
+    panel_running(s, true);
     panel_lights(s, true);
     panel_lcd(s, true);
     panel_props(s, true);
@@ -203,6 +308,7 @@ static void panel_tick(void *opaque)
     if (!s->lk.open) {
         return;
     }
+    panel_running(s, false);
     panel_lights(s, false);
     if (s->lcd->bytes != s->lcd_bytes && s->settling < SETTLE_MAX) {
         /* the firmware is sending a frame: wait for all of it, briefly */
@@ -324,6 +430,7 @@ static void panel_realize(DeviceState *dev, Error **errp)
     s->tick = timer_new_ms(QEMU_CLOCK_REALTIME, panel_tick, s);
     s->release = timer_new_ns(QEMU_CLOCK_VIRTUAL, panel_release, s);
     s->watches = g_ptr_array_new_with_free_func(panel_watch_free);
+    qemu_add_vm_change_state_handler(panel_vm_change, s);
     flipper_link_init(&s->lk, &s->link, "panel", panel_line, panel_opened, s);
 }
 
@@ -338,6 +445,15 @@ static void panel_class_init(ObjectClass *klass, const void *data)
     dc->realize = panel_realize;
     dc->user_creatable = false;
     device_class_set_props(dc, panel_props_list);
+    object_class_property_add_bool(klass, "paused", panel_get_paused,
+                                   panel_set_paused);
+    object_class_property_set_description(klass, "paused",
+        "The machine stands still because somebody asked for it; set it to "
+        "pause and to go on");
+    object_class_property_add_str(klass, "stopped", panel_get_stopped, NULL);
+    object_class_property_set_description(klass, "stopped",
+        "Why the machine stands still (QEMU's run state: paused, debug ...), "
+        "or empty: it runs");
 }
 
 static const TypeInfo panel_types[] = {

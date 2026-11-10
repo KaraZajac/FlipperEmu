@@ -179,6 +179,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.gauge = {}                 # the battery as it was last reported
         self.muted = False
         self.tone = (0, 0)
+        self.stopped = ""               # time stands still on it: why
         self.recording = None           # a fe_record.Recording, while one runs
         self.recording_since = 0.0
         self.sd_none = (session is not None and session.args.no_sd) or \
@@ -306,6 +307,10 @@ class MainWindow(QtWidgets.QMainWindow):
                       tip="As holding Back does: start the emulator again")
         self.a_reboot = A(m, "Reboot", self.reboot, "Ctrl+R", live=True,
                           tip="As holding Left + Back does")
+        self.a_pause = A(m, "Pause", self.set_paused, "Ctrl+P", checkable=True,
+                         live=True,
+                         tip="Time stands still on it: its screen, its timers, "
+                             "its radios.  Once more, and it goes on")
         self.a_off = A(m, "Switch off now" if owner else "Stop the emulator",
                        self.hard_off, live=True,
                        tip="Pull its battery, as it were: the firmware is not "
@@ -595,6 +600,7 @@ class MainWindow(QtWidgets.QMainWindow):
         L.speaker.connect(self.on_speaker)
         L.prop.connect(self.on_prop)
         L.power_off.connect(self.on_power_off)
+        L.stopped.connect(self.on_stopped)
         V.key.connect(self.on_key)
         V.usb_clicked.connect(self.toggle_usb)
         V.sd_clicked.connect(self.on_sd_click)
@@ -637,15 +643,37 @@ class MainWindow(QtWidgets.QMainWindow):
             self.view.set_blank(False)
             self.resetting = False
             self.on_speaker(0, 0)
+            self.on_stopped("")
+        self.show_state()
+        self.update_actions()
+        self.refresh_tiles()
+
+    def show_state(self):
         words = {"on": "running", "starting": "starting", "connecting":
                  "connecting", "busy": "running (in another window)",
                  "off": "off", "lost": "not running", "installing":
-                 "installing firmware"}
-        self.state_label.setText(words.get(state, state))
+                 "installing firmware"}.get(self.state, self.state)
+        if self.state == "on" and self.stopped:
+            words = {"paused": "paused", "debug": "stopped by a debugger"}.get(
+                self.stopped, f"stopped ({self.stopped})")
+        self.state_label.setText(words)
         self.setWindowTitle(f"FlipperEmu: {self.name}"
-                            + ("" if state == "on" else f" ({words.get(state)})"))
-        self.update_actions()
-        self.refresh_tiles()
+                            + ("" if words == "running" else f" ({words})"))
+
+    def on_stopped(self, why):
+        """Time stands still on it (why: "paused", or "debug": a debugger has
+        it), or goes on (""): whoever did it, the emulator says so"""
+        if why == self.stopped:
+            return
+        self.stopped = why
+        self.view.set_paused(why)
+        self.a_pause.setChecked(bool(why))
+        self.show_state()
+
+    def set_paused(self, on):
+        # (the mark stays as it is until the emulator says it has changed)
+        self.a_pause.setChecked(bool(self.stopped))
+        self.command("pause" if on else "continue", quiet=True)
 
     def is_live(self):
         """an emulator runs (and its monitor takes commands)"""
@@ -802,6 +830,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     QtCore.QTimer.singleShot(150, self.reboot)
             return
         if self.state == "on":
+            if down and self.stopped:
+                self.statusBar().showMessage(
+                    "It is paused, and feels this when it goes on (Ctrl+P)"
+                    if self.stopped == "paused" else
+                    "It stands still, and feels this when it goes on", 5000)
             (self.link.press if down else self.link.release)(key)
             both = self.view.pressed("left") and self.view.pressed("back")
             if both and not self.combo.isActive():

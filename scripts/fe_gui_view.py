@@ -301,6 +301,7 @@ class FlipperView(QtWidgets.QWidget):
         self.power = "wait"             # on | anything else: the LCD is dark
         self.hint = ()                  # ... and says this, in lines
         self.blank = False              # held in reset: dark, nothing said
+        self.paused = ""                # time stands still on it: why
         self.ir_until = 0               # the IR window glows until then (ms)
         self.down = {}                  # key -> who holds it (mouse, keys)
         self.mouse_key = None
@@ -377,6 +378,10 @@ class FlipperView(QtWidgets.QWidget):
 
     def set_blank(self, on):
         self._set(blank=bool(on))
+
+    def set_paused(self, why):
+        """Time stands still on it ("paused", "debug" ...), or goes on ("")"""
+        self._set(paused=why or "")
 
     def flash_ir(self, ms=450):
         self.ir_until = self.clock.elapsed() + ms
@@ -721,6 +726,29 @@ class FlipperView(QtWidgets.QWidget):
                 p.drawLine(QPointF(LCD.x(), LCD.y() + i),
                            QPointF(LCD.right(), LCD.y() + i))
             p.setRenderHint(QPainter.Antialiasing, True)
+        if self.paused:
+            self.draw_paused(p, fg)
+
+    def draw_paused(self, p, colour):
+        """Time stands still: said on the glass above the pixels, which are
+        the firmware's, and stay as it left them"""
+        text = {"paused": "PAUSED",
+                "debug": "STOPPED BY A DEBUGGER"}.get(self.paused, "STOPPED")
+        font = QtGui.QFont(self.font())
+        font.setPixelSize(6)
+        font.setBold(True)
+        font.setLetterSpacing(QtGui.QFont.AbsoluteSpacing, 0.6)
+        p.setFont(font)
+        width = QtGui.QFontMetricsF(font).horizontalAdvance(text)
+        x = LCD.center().x() - (width + 7) / 2
+        y = (GLASS.top() + LCD.top()) / 2
+        p.setPen(Qt.NoPen)
+        p.setBrush(colour)
+        for bar in (0, 2.8):
+            p.drawRect(QRectF(x + bar, y - 2.4, 1.6, 4.8))
+        p.setPen(colour)
+        p.drawText(QRectF(x + 7, y - 4, width + 2, 8),
+                   Qt.AlignLeft | Qt.AlignVCenter, text)
 
     def draw_led(self, p, t):
         led = self.led if self.power == "on" and not self.blank else 0

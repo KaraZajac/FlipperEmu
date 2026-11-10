@@ -18,7 +18,8 @@ the app is on the Flipper, which `ufbt launch` runs into; a breakpoint on a
 line of it, and a variable of it printed there; its crash, where gdb stops
 and says what the firmware says of it; and after each of these the firmware
 runs on, and the debug flag the firmware has for a probe is off.  Then the
-stub on a TCP port, a second gdb turned away, a gdb that dies with the
+stub on a TCP port, a second gdb turned away, what `status` and `continue`
+say of a firmware a gdb has stopped, a gdb that dies with the
 firmware stopped, and a device that does not run.  Exit status 0 = pass.
 """
 import argparse
@@ -218,11 +219,17 @@ def gdb_checks(b, work, folder):
           code == 0 and "#0 " in text, text)
 
     # ---- two at once, and one that dies
-    g = Gdb(b, work, "python import time; time.sleep(8)")
+    g = Gdb(b, work, "python import time; time.sleep(12)")
     waiting = g.wait(running=False)
     code, text = gdb(b, "bt 1")
     check("a second gdb while one is on it: turned away",
           waiting and code == 1 and "a gdb is on it already" in text, text)
+    code, text = b.fe("status", "--json")
+    code2, text2 = b.fe("continue")
+    check("stopped under a gdb: `status` says whose stop it is, and `continue` "
+          "leaves it to the gdb",
+          code == 0 and '"stopped": "debug"' in text
+          and code2 == 1 and "a gdb is on it" in text2, text + text2)
     g.end()
     code, text = gdb(b, "python import os, signal; "
                         "os.kill(os.getpid(), signal.SIGKILL)")

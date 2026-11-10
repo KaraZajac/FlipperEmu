@@ -9,7 +9,8 @@ Boots a throwaway device with `flipperemu run`, which opens the window: here
 off-screen (QT_QPA_PLATFORM=offscreen) and silent (--audio none), so nothing
 shows on the desktop.  Then it checks the front-panel link (frames, the
 backlight), clicks buttons with the mouse, records the screen as a GIF
-(Device > Record the screen), opens the firmware's log with a
+(Device > Record the screen), pauses it and lets it go on (Device > Pause,
+and the launcher's `pause` from outside), opens the firmware's log with a
 click on the GPIO pins and sets the firmware's log level from it, copies a
 file to its card, drops an app on the window (which installs and starts it),
 does that again with F5 and closes the app, drops the same app as if it were
@@ -29,6 +30,7 @@ import os
 import pathlib
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -169,6 +171,51 @@ class Driver:
               and any(q != pictures[0] for q in pictures[1:])
               and abs(ms / 1000 - seconds) < 0.1 and seconds > 2)
 
+    def pausing(self):
+        """Device > Pause; and a pause that is not the window's own"""
+        w, v = self.win, self.win.view
+        frames = []
+        w.link.frame.connect(frames.append)
+        w.a_pause.trigger()             # as the menu and Ctrl+P do
+        said = self.until(lambda: w.stopped == "paused", 10)
+        self.settle()
+        frames.clear()
+        self.click("ok")                # felt when it goes on: the menu opens
+        self.spin(1.5)
+        check("pause: Device > Pause: the window says so, and the screen "
+              "stands still",
+              said and w.a_pause.isChecked() and v.paused == "paused"
+              and w.state_label.text() == "paused"
+              and w.windowTitle().endswith("(paused)") and not frames
+              and "paused" in w.statusBar().currentMessage())
+        self.shot("paused")
+        w.a_pause.trigger()
+        went = self.until(lambda: not w.stopped, 10)
+        moved = self.until(lambda: frames, 5)
+        self.settle()
+        check("pause: once more and it goes on, with the button that was "
+              "pressed meanwhile",
+              went and moved and not w.a_pause.isChecked() and not v.paused
+              and w.state_label.text() == "running"
+              and "paused" not in w.windowTitle())
+        self.click("back")
+        self.spin(1.0)
+
+        def launcher(*args):
+            return subprocess.run(
+                [sys.executable, str(w.launcher), "-d", w.name, *args],
+                capture_output=True, text=True, timeout=30)
+        there = launcher("pause")
+        said = self.until(lambda: w.stopped == "paused", 10)
+        shown = w.a_pause.isChecked() and w.state_label.text() == "paused"
+        back = launcher("continue")
+        went = self.until(lambda: not w.stopped, 10)
+        check("pause: the launcher's `pause` and `continue`, from outside: "
+              "the window shows what the emulator says",
+              there.returncode == 0 and said and shown
+              and back.returncode == 0 and went
+              and not w.a_pause.isChecked())
+
     def console(self):
         return self.win.log.text.toPlainText()
 
@@ -269,6 +316,7 @@ class Driver:
         self.spin(1.0)
         self.shot("on")
         self.recording()
+        self.pausing()
 
         # what the firmware logs: a click on the GPIO pins, where a real one
         # has its UART

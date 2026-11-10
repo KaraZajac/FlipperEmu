@@ -433,11 +433,17 @@ struct FlipperPanelState {
     uint32_t held, releasing;    /* bit per button */
     int64_t pressed_at[BTN_NUM];
     GPtrArray *watches;
+    int stopped;                 /* as last sent: a RunState, or -1: it runs */
 };
 /* the speaker or the motor changed: tell the window now, not at its tick */
 void flipper_panel_sync(FlipperPanelState *s);
 /* the firmware turned the Flipper off; the emulator is about to exit */
 void flipper_panel_power_off(FlipperPanelState *s);
+/* A link holds time still while the other side answers: its own stop, which
+ * is not a pause (and which a pause outlasts).  -> it did stop the machine,
+ * and flipper_vm_release() is to follow */
+bool flipper_vm_hold(void);
+void flipper_vm_release(void);
 
 /* ------------------------------------ secure enclave (flipper_enclave.c) */
 /* what the factory stores in the SoC's FUS; call before realizing the SoC */

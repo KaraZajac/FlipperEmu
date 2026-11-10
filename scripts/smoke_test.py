@@ -9,6 +9,8 @@
 Boots a throwaway device, waits for the firmware's own log milestones, presses
 Back (dismiss the first scene) and OK (main menu), checks the LCD changed,
 records the screen as a GIF while keys are pressed (`flipperemu record`),
+pauses it and lets it go on (`flipperemu pause`, `continue`: the firmware's
+own uptime must miss the time it stood still),
 runs `info device` on the CLI over the emulated USB serial port, checks the
 secure enclave (the firmware's own check of its keys, and a `crypto encrypt`
 against what scripts/fe_enclave.py computes), receives an
@@ -28,6 +30,7 @@ checks the LCD comes back after the warm reset.
 Exit status 0 = pass. Screenshots are kept in the --out directory.
 """
 import argparse
+import json
 import os
 import pathlib
 import re
@@ -99,6 +102,69 @@ def record_check(name: str, mon: Monitor, out: pathlib.Path):
           and colours == {(0xFF, 0x8C, 0x1A), (0x1A, 0x0E, 0x04)})
     return (f"record: the screen as a GIF ({len(pictures)} pictures, "
             f"{ms / 1000:.1f} s, {gif.stat().st_size} bytes)"), ok
+
+
+def pause_check(name: str, endpoint):
+    """`flipperemu pause` and `continue` (the monitor must be free for
+    them): the status tells, `press` and the CLI say why they cannot, and
+    the firmware's uptime misses the seconds it stood still.  endpoint: the
+    USB serial port, or None (then there is no uptime to ask for)."""
+    label = "pause: time stands still, and goes on with `continue`"
+    exe = str(ROOT / "flipperemu")
+
+    def emu(*words):
+        r = subprocess.run([exe, "-d", name, *words], capture_output=True,
+                           text=True, timeout=40)
+        return r.returncode, r.stdout + r.stderr
+
+    def uptime():
+        """(the firmware's seconds, the host's)"""
+        cli = FlipperCli(endpoint)
+        try:
+            cli.read_until_prompt(15)
+            h, m, sec = map(int, re.search(r"Uptime: (\d+)h(\d+)m(\d+)s",
+                                           cli.run("uptime", timeout=15)).groups())
+            return 3600 * h + 60 * m + sec, time.monotonic()
+        finally:
+            cli.close()
+
+    def still():
+        rc, said = emu("status", "--json")
+        return json.loads(said).get("stopped") if rc == 0 else f"? {said}"
+
+    said = {}
+    try:
+        up0 = uptime() if endpoint else None
+        said["pause"] = emu("pause")
+        t0 = time.monotonic()
+        said["status"] = still()
+        said["press"] = emu("press", "ok")
+        said["ls"] = emu("ls", "/ext") if endpoint else (1, "paused")
+        quick = time.monotonic() - t0
+        time.sleep(2.5)
+        t1 = time.monotonic()
+        said["continue"] = emu("continue")
+        said["after"] = still()
+        up1 = uptime() if endpoint else None
+    except (OSError, TimeoutError, ConnectionError, TypeError, AttributeError,
+            ValueError, subprocess.TimeoutExpired) as e:
+        subprocess.run([exe, "-d", name, "continue"], capture_output=True)
+        print(f"  pause: {e} ({said})")
+        return label, False
+    ok = (said["pause"][0] == 0 and "paused" in said["pause"][1]
+          and said["status"] == "paused"
+          and said["press"][0] != 0 and "paused" in said["press"][1]
+          and said["ls"][0] != 0 and "paused" in said["ls"][1] and quick < 8
+          and said["continue"][0] == 0 and "goes on" in said["continue"][1]
+          and said["after"] is None)
+    if ok and endpoint:
+        # the firmware counts whole seconds: each reading is up to 1 s late
+        missed = (up1[1] - up0[1]) - (up1[0] - up0[0])
+        ok = missed > (t1 - t0) - 1.2
+        label = f"pause: time stood still ({missed:.1f} s gone from its uptime)"
+    if not ok:
+        print(f"  pause: {said}")
+    return label, ok
 
 
 def reboot_check(mon: Monitor, uart: pathlib.Path, out: pathlib.Path, timeout: float) -> bool:
@@ -821,6 +887,10 @@ def main() -> int:
             results.append(("input: OK changed the screen",
                             desk.read_bytes() != menu.read_bytes()))
             results.append(record_check(name, mon, out))
+            port = None if args.no_usb else usb_endpoint(mon)
+            mon.close()                 # the launcher's commands want it
+            results.append(pause_check(name, port))
+            mon = Monitor(str(devdir / "monitor.sock"))
             if not args.no_usb:
                 results.append(("usb: CLI 'info device' over CDC", usb_cli_check(mon)))
                 results.append(("enclave: keys valid, `crypto encrypt` = the host's",
@@ -867,10 +937,16 @@ def main() -> int:
         text = uart.read_text(errors="replace") if uart.exists() else ""
         results.append(("no crash in log", not CRASH.search(text)))
     finally:
+        if sys.exc_info()[0] is not None:
+            proc.terminate()            # the launcher stops its emulator
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
         qemu_log.close()
         if not args.keep:
             shutil.rmtree(devdir, ignore_errors=True)

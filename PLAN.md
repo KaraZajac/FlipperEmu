@@ -213,7 +213,12 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       GIF itself (two colours, only the rectangle that changed, the time each
       picture was shown for); checked by `smoke_test.py` (Pillow reads it) and
       `gui_check.py` (Qt's reader does)
-- ☐ Pause and continue, from the launcher and the window
+- ☑ Pause and continue: `./flipperemu pause` / `continue`, Device > Pause in the
+      window (Ctrl+P, "PAUSED" on the glass). The panel has the pause as a property
+      (`paused`), says why the machine stands still (`stopped`, and `running 0 WHY`
+      on the front-panel link: a pause, a debugger), and keeps the NFC link's own
+      stops for a card's answer apart from it; what needs the firmware says why it
+      cannot (BRINGUP_LOG 81)
 
 ## M6: research tooling ☐
 - ☐ Snapshot workflow (`savevm` on qcow2 images; boot once, jump straight to an app)

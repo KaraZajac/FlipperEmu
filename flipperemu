@@ -21,6 +21,7 @@ you flash stays flashed, settings and files persist across runs.
   ./flipperemu sd eject | insert             pull its microSD card out, push it back
   ./flipperemu sound off | on                its speaker
   ./flipperemu reset                         reboot it, as Left + Back do on a real one
+  ./flipperemu pause | continue              time stands still on it, and goes on
   ./flipperemu flash fw.dfu                  just program the flash
   ./flipperemu sd --resources update.tgz     (re)build the SD card
   ./flipperemu cli                           USB CLI of a running device
@@ -728,6 +729,77 @@ def qom_get(m, path, prop):
         return None
 
 
+def stopped(m):
+    """Why a running device stands still, or "": "paused" (somebody paused
+    it), "debug" (a debugger has it), or another of QEMU's run states.  A
+    link's own stop for an answer (NFC) is none: that is over in a moment."""
+    why = qom_get(m, "/machine/panel", "stopped")
+    if why is None:                 # an emulator from before it could say
+        hit = re.search(r"paused(?: \((.+?)\))?", m.cmd("info status"))
+        why = (hit.group(1) or "paused") if hit else ""
+    return why
+
+
+def still_text(dev, why):
+    """... in words, with what ends it"""
+    if why == "paused":
+        return f"it is paused (`./flipperemu -d {dev.name} continue`)"
+    if why == "debug":
+        return "a debugger has it stopped (`continue` there)"
+    return f"it stands still (QEMU's state: {why})"
+
+
+def cmd_pause(args):
+    """Time stands still on a running device, until `continue`"""
+    dev = Device(args.device)
+    m = open_monitor(dev)
+    try:
+        was = stopped(m)
+        if not was:
+            if m.cmd("qom-set /machine/panel paused true").strip():
+                m.cmd("stop")       # an emulator from before `paused`
+        why = stopped(m)
+        gdb = gdb_stub(m)
+    finally:
+        m.close()
+    if was == "paused":
+        print(f"[{dev.name}] is paused already")
+    elif was:
+        sys.exit(f"[{dev.name}] not paused: {still_text(dev, was)}")
+    elif why != "paused":
+        sys.exit(f"[{dev.name}] did not pause")
+    elif gdb and gdb[1]:
+        print(f"[{dev.name}] paused: a gdb is on it, and `continue` there "
+              "lets it go on")
+    else:
+        print(f"[{dev.name}] paused: `./flipperemu -d {dev.name} continue` "
+              "lets it go on")
+    return 0
+
+
+def cmd_continue(args):
+    """A paused device goes on"""
+    dev = Device(args.device)
+    m = open_monitor(dev)
+    try:
+        was = stopped(m)
+        gdb = gdb_stub(m)
+        if was and gdb and gdb[1]:
+            # it would run, and the gdb would still take it to stand still
+            sys.exit(f"[{dev.name}] a gdb is on it, and it stands still: "
+                     "`continue` there lets it go on")
+        if was:
+            if m.cmd("qom-set /machine/panel paused false").strip():
+                m.cmd("cont")       # an emulator from before `paused`
+        why = stopped(m)
+    finally:
+        m.close()
+    if why:
+        sys.exit(f"[{dev.name}] does not go on: {still_text(dev, why)}")
+    print(f"[{dev.name}] " + ("goes on" if was else "is not paused: it runs"))
+    return 0
+
+
 def cmd_gui(args):
     dev = Device(args.device)
     if not dev.running():
@@ -795,6 +867,7 @@ def device_status(dev):
     m = Monitor(str(dev.monitor))
     try:
         g = lambda path, prop: qom_get(m, path, prop)
+        st["stopped"] = stopped(m) or None
         st["usb"] = read_usb(m)
         st["battery"] = read_battery(m)
         st["sd"] = {"card": dev.sd.exists(), "inserted": g("/machine", "sd-card")}
@@ -876,6 +949,8 @@ def cmd_status(args):
                 + (f"; kept in {st['log']['file']}" if st["log"]["file"] else "")),
     ]
     print(f"[{dev.name}] running: {st['firmware'] or '?'}")
+    if st["stopped"]:
+        print(f"{'time':9}: {still_text(dev, st['stopped'])}")
     for name, text in rows:
         print(f"{name:9}{':' if name else ' '} {text}")
     return 0
@@ -959,11 +1034,14 @@ def cmd_reset(args):
     m = open_monitor(dev)
     try:
         err = m.cmd("system_reset")
+        still = stopped(m)
     finally:
         m.close()
     if err:
         sys.exit(f"reset: {err}")
-    print(f"[{dev.name}] reset")
+    print(f"[{dev.name}] reset"
+          + (f"; it starts when it goes on: {still_text(dev, still)}"
+             if still else ""))
     return 0
 
 
@@ -1208,10 +1286,12 @@ def usb_serial(dev):
     from fe_cli import usb_endpoint
     m = open_monitor(dev)
     try:
+        still = stopped(m)
         ep = usb_endpoint(m)
         usb = read_usb(m)
         end = time.monotonic() + 10         # just started: the PC finds it soon
-        while (ep and usb["cable"] == "computer" and time.monotonic() < end
+        while (not still and ep and usb["cable"] == "computer"
+               and time.monotonic() < end
                and usb["device"] in ("none", "enumerating")):
             time.sleep(0.2)
             usb = read_usb(m)
@@ -1221,6 +1301,8 @@ def usb_serial(dev):
     why = None
     if not ep:
         why = "it was started with --usb none"
+    elif still:
+        why = still_text(dev, still)
     elif usb["cable"] != "computer":
         why = (f"its USB port is {usb_text(usb)}; `./flipperemu -d {dev.name} "
                "usb plug` plugs it into the computer")
@@ -2185,11 +2267,17 @@ def cmd_record(args):
 
 
 def cmd_press(args):
-    from fe_monitor import Monitor
-    m = Monitor(str(Device(args.device).monitor))
-    for key in args.keys:
-        m.press(key, args.hold)
-        time.sleep(args.gap / 1000)
+    dev = Device(args.device)
+    m = open_monitor(dev)
+    try:
+        still = stopped(m)
+        if still:
+            sys.exit(f"[{dev.name}] feels no button: {still_text(dev, still)}")
+        for key in args.keys:
+            m.press(key, args.hold)
+            time.sleep(args.gap / 1000)
+    finally:
+        m.close()
 
 
 def cmd_info(args):
@@ -2333,6 +2421,14 @@ def main():
     p = sub.add_parser("reset", help="reboot a running device, as holding Left + "
                        "Back does on a real one")
     p.set_defaults(func=cmd_reset)
+
+    p = sub.add_parser("pause", help="time stands still on a running device, "
+                       "until `continue`: its screen, its timers, its radios")
+    p.set_defaults(func=cmd_pause)
+
+    p = sub.add_parser("continue", aliases=["cont", "resume"],
+                       help="a paused device goes on")
+    p.set_defaults(func=cmd_continue)
 
     p = sub.add_parser("cli", help="the USB CLI of a running device")
     p.add_argument("commands", nargs="*",

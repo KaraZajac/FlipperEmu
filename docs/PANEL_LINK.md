@@ -35,6 +35,22 @@ Then everything below, once, so that the program can draw the panel as it is; af
 each message when what it reports changes.
 
 ```
+running 1
+running 0 paused
+```
+
+Whether time goes on in the emulator. `running 0` is followed by why it stands still:
+`paused` when somebody paused it (`./flipperemu pause`, the window's Device > Pause, the
+monitor's `stop`), `debug` when a debugger has it stopped (a gdb that has just got on,
+a breakpoint, its Ctrl-C), and otherwise QEMU's name for its run state (`io-error`,
+`shutdown`, …). While it stands still no other
+line comes: the screen, the lights and the properties are as the firmware left them.
+The panel itself goes on (it runs on the host's clock), so a `press` is taken, and felt
+by the firmware when it goes on. The NFC link stops the emulator for the moment a card
+on it takes to answer; that is not reported, and `running 1` holds through it. An
+emulator from before this message sends none: take that as `running 1`.
+
+```
 lcd 0000…ff00
 ```
 
@@ -123,7 +139,8 @@ When the program goes, the buttons it held are released.
 refresh
 ```
 
-Everything again, as on connecting: the lights, the LCD and the watched properties.
+Everything again, as on connecting: whether it runs, the lights, the LCD and the watched
+properties.
 
 ```
 watch /machine/soc/usb attached
@@ -132,10 +149,10 @@ watch /machine/soc/usb attached
 Report this QOM property now, and whenever it changes (64 at most). Watches end with the
 connection: a program asks again after each hello.
 
-There is no message that changes a property. The window makes its changes as a terminal
-would, with the launcher's commands (`flipperemu usb unplug`, `flipperemu nfc card.nfc`,
-…), which go through the monitor. Then what changed comes back over the link, whoever
-changed it.
+There is no message that changes a property, or that pauses the emulator. The window
+makes its changes as a terminal would, with the launcher's commands (`flipperemu usb
+unplug`, `flipperemu nfc card.nfc`, `flipperemu pause`, …), which go through the
+monitor. Then what changed comes back over the link, whoever changed it.
 
 ## What the window watches
 
