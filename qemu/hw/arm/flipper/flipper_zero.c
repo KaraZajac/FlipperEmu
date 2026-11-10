@@ -250,7 +250,7 @@ static void flipper_led_changed(void *opaque)
 
     lp5562_rgbw(s->led, &r, &g, &b, &w);
     s->lcd->backlight = w;
-    s->lcd->led_rgb = (r << 16) | (g << 8) | b;
+    st7567_set_led(s->lcd, (r << 16) | (g << 8) | b);
     s->lcd->dirty = true;
 }
 

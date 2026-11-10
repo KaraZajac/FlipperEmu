@@ -188,13 +188,14 @@ static void panel_lights(FlipperPanelState *s, bool all)
     St7567State *lcd = s->lcd;
     uint32_t freq = s->speaker->on ? s->speaker->freq_mhz : 0;
     uint32_t duty = s->speaker->on ? s->speaker->duty_ppm : 0;
+    uint32_t led = st7567_led(lcd, LED_FOR_PANEL);
 
     if (all || lcd->backlight != s->backlight) {
         s->backlight = lcd->backlight;
         flipper_link_send(&s->lk, "backlight %u\n", s->backlight);
     }
-    if (all || lcd->led_rgb != s->led) {
-        s->led = lcd->led_rgb;
+    if (all || led != s->led) {
+        s->led = led;
         flipper_link_send(&s->lk, "led %06x\n", s->led);
     }
     if (all || lcd->vibro != s->vibro) {

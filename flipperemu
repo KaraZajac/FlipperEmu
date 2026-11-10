@@ -893,11 +893,34 @@ def device_status(dev):
         st["subghz"] = {"radio": g("/machine/subghz", "radio"),
                         "last_transmission": newest(dev.dir / "subghz-tx")}
         st["sound"] = {"muted": g("/machine/speaker", "mute")}
+        st["lights"] = {"led": g("/machine/led", "led"),
+                        "blinking": g("/machine/led", "blinking"),
+                        "backlight": g("/machine/led", "backlight"),
+                        "engines": g("/machine/led", "engines")}
         st["log"] = {"level": g("/machine", "log-level"),
                      "file": str(dev.uart) if dev.uart.exists() else None}
     finally:
         m.close()
     return st
+
+
+LED_COLOURS = {(1, 0, 0): "red", (0, 1, 0): "green", (0, 0, 1): "blue",
+               (1, 1, 0): "yellow", (0, 1, 1): "cyan", (1, 0, 1): "magenta",
+               (1, 1, 1): "white"}
+
+
+def lights_text(lights):
+    """The LED and the backlight, as `status` says them"""
+    led, back = lights["led"], lights["backlight"]
+    if led is None:                 # an emulator from before it could say
+        return "?"
+    rgb = [int(led[i:i + 2], 16) for i in (0, 2, 4)]
+    levels = {v for v in rgb if v}
+    name = LED_COLOURS.get(tuple(int(v > 0) for v in rgb)) \
+        if len(levels) == 1 else None
+    colour = "off" if not levels else f"{name} ({led})" if name else led
+    return (f"the LED: {'blinks ' if lights['blinking'] else ''}{colour}; "
+            f"the backlight: {f'{back} of 255' if back else 'off'}")
 
 
 def log_level_text(level):
@@ -945,6 +968,7 @@ def cmd_status(args):
                        and radio.get("freq", "").isdigit() else "")
                     + f"; last sent: {last(st['subghz']['last_transmission'])}"),
         ("sound", "muted" if st["sound"]["muted"] else "on"),
+        ("lights", lights_text(st["lights"])),
         ("log", f"the firmware's level: {log_level_text(st['log']['level'])}"
                 + (f"; kept in {st['log']['file']}" if st["log"]["file"] else "")),
     ]

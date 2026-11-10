@@ -15,6 +15,7 @@
  */
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/timer.h"
 #include "hw/core/qdev-properties.h"
 #include "qapi/visitor.h"
 #include "flipper.h"
@@ -425,15 +426,314 @@ static void bq25896_class_init(ObjectClass *klass, const void *data)
 
 /* -------------------------------------------------------------- LP5562 */
 
+/*
+ * Four PWM outputs: B, G and R are the status LED, W is the backlight.  Each
+ * is set from its I2C register or by one of three program engines (register
+ * 70h says which).  An engine runs up to 16 commands on the chip's 32768 Hz
+ * clock: ramp or wait, set PWM, go to start, branch, end, trigger.  The
+ * firmware fades the backlight with a ramp on engine 1 and blinks the LED
+ * with a loop on engine 2.
+ */
+
+enum { EXEC_HOLD, EXEC_STEP, EXEC_RUN, EXEC_ONCE };         /* ENGx_EXEC */
+enum { MODE_DISABLED, MODE_LOAD, MODE_RUN, MODE_DIRECT };   /* ENGx_MODE */
+
+#define LP_CHIP_EN      0x40
+#define LP_CYCLES(n)    muldiv64(n, NANOSECONDS_PER_SECOND, 32768)
+#define LP_COMMAND      16          /* clock cycles one command takes */
+/* the engines are looked at no more often than this */
+#define LP_SLICE_NS     (2 * SCALE_MS)
+
+static const uint8_t lp5562_pwm_reg[] = { 0x02, 0x03, 0x04, 0x0E }; /* BGRW */
+
+static int lp5562_exec(Lp5562State *s, int n)
+{
+    return (s->regs[0x00] >> (4 - 2 * n)) & 3;
+}
+
+static int lp5562_mode(Lp5562State *s, int n)
+{
+    return (s->regs[0x01] >> (4 - 2 * n)) & 3;
+}
+
+/* the chip is off, or an engine is being loaded: none of them goes on */
+static bool lp5562_frozen(Lp5562State *s)
+{
+    return !(s->regs[0x00] & LP_CHIP_EN) ||
+           lp5562_mode(s, 0) == MODE_LOAD || lp5562_mode(s, 1) == MODE_LOAD ||
+           lp5562_mode(s, 2) == MODE_LOAD;
+}
+
+/* the engine that output ch (B, G, R, W) is mapped to, or -1: its register */
+static int lp5562_engine_of(Lp5562State *s, int ch)
+{
+    return ((s->regs[0x70] >> (2 * ch)) & 3) - 1;
+}
+
+static uint8_t lp5562_out(Lp5562State *s, int ch)
+{
+    int n = lp5562_engine_of(s, ch);
+
+    if (!(s->regs[0x00] & LP_CHIP_EN)) {
+        return 0;
+    }
+    if (n < 0) {
+        return s->regs[lp5562_pwm_reg[ch]];
+    }
+    switch (lp5562_mode(s, n)) {
+    case MODE_DISABLED:
+        return 0;
+    case MODE_DIRECT:           /* engine 1 is the B register, 2 G, 3 R */
+        return s->regs[0x02 + n];
+    default:
+        return s->eng[n].pwm;
+    }
+}
+
 void lp5562_rgbw(Lp5562State *s, uint8_t *r, uint8_t *g, uint8_t *b,
                  uint8_t *w)
 {
-    bool en = s->regs[0x00] & 0x40;                 /* CHIP_EN */
+    *b = lp5562_out(s, 0);
+    *g = lp5562_out(s, 1);
+    *r = lp5562_out(s, 2);
+    *w = lp5562_out(s, 3);
+}
 
-    *b = en ? s->regs[0x02] : 0;
-    *g = en ? s->regs[0x03] : 0;
-    *r = en ? s->regs[0x04] : 0;
-    *w = en ? s->regs[0x0E] : 0;
+static void lp5562_tell(Lp5562State *s, bool always)
+{
+    uint32_t out = (uint32_t)lp5562_out(s, 3) << 24 | lp5562_out(s, 2) << 16 |
+                   lp5562_out(s, 1) << 8 | lp5562_out(s, 0);
+
+    if ((always || out != s->shown) && s->changed) {
+        s->shown = out;
+        s->changed(s->opaque);
+    }
+}
+
+static void lp5562_set_pwm(Lp5562Engine *e, int pwm)
+{
+    e->pwm = MIN(MAX(pwm, 0), 255);
+    e->peak = MAX(e->peak, e->pwm);
+}
+
+static void lp5562_trigger(Lp5562State *s, int to, int from)
+{
+    Lp5562Engine *e = &s->eng[to];
+
+    e->trig |= 1 << from;
+    if (e->blocked && (e->trig & e->need) == e->need) {
+        e->blocked = false;         /* it has them all: it goes on */
+        e->wait = 0;
+    }
+}
+
+/* engine n takes the command at its PC */
+static void lp5562_begin(Lp5562State *s, int n)
+{
+    Lp5562Engine *e = &s->eng[n];
+    int exec = lp5562_exec(s, n), at = e->pc;
+    const uint8_t *mem = &s->regs[0x10 + 0x20 * n + 2 * at];
+    uint16_t cmd = mem[0] << 8 | mem[1];
+    unsigned time = (cmd >> 8) & 0x3F, count = (cmd >> 7) & 0x3F;
+    int64_t cycles = LP_COMMAND;
+
+    e->busy = true;
+    e->pc = (at + 1) & 15;
+    if (exec != EXEC_RUN) {                         /* this one, then hold */
+        s->regs[0x00] &= ~(3 << (4 - 2 * n));
+    }
+    if (!(cmd & 0x8000)) {
+        if (time) {                                 /* ramp, or wait */
+            cycles = time * (cmd & 0x4000 ? 512 : 16);
+            e->step = LP_CYCLES(cycles);
+            e->ramp = cmd & 0x7F ? (cmd & 0x7F) + 1 : 0;
+            e->down = cmd & 0x80;
+        } else if (cmd & 0x4000) {                  /* set PWM */
+            lp5562_set_pwm(e, cmd & 0xFF);
+        } else {                                    /* go to start */
+            e->pc = 0;
+        }
+    } else if ((cmd & 0xE000) == 0xA000) {          /* branch */
+        if (!count || e->loops[at] < count) {
+            e->loops[at] += count != 0;
+            e->pc = cmd & 15;
+        } else {
+            e->loops[at] = 0;
+        }
+    } else if ((cmd & 0xE000) == 0xC000) {          /* end */
+        if (cmd & 0x1000) {                         /* int */
+            s->regs[0x0C] |= 4 >> n;
+        }
+        if (cmd & 0x0800) {                         /* reset */
+            e->pwm = 0;
+        }
+        e->pc = 0;
+        e->busy = false;
+        s->regs[0x00] &= ~(3 << (4 - 2 * n));
+        return;
+    } else if ((cmd & 0xE000) == 0xE000) {          /* trigger */
+        e->need = (cmd >> 7) & 7;
+        for (int to = 0; to < 3; to++) {
+            if (cmd & (2 << to)) {
+                lp5562_trigger(s, to, n);
+            }
+        }
+    }
+    if (exec == EXEC_ONCE && e->pc == ((at + 1) & 15)) {
+        e->pc = at;                                 /* and it stays there */
+    }
+    e->wait = LP_CYCLES(cycles);
+}
+
+/* an engine with nothing in hand takes its next command, if it may */
+static void lp5562_kick(Lp5562State *s, int n)
+{
+    if (!s->eng[n].busy && lp5562_mode(s, n) == MODE_RUN &&
+        lp5562_exec(s, n) != EXEC_HOLD && !lp5562_frozen(s)) {
+        lp5562_begin(s, n);
+    }
+}
+
+/* the time of what engine n is at is over: a step of a ramp, or a command */
+static void lp5562_over(Lp5562State *s, int n)
+{
+    Lp5562Engine *e = &s->eng[n];
+
+    if (e->ramp) {
+        lp5562_set_pwm(e, e->pwm + (e->down ? -1 : 1));
+        if (--e->ramp) {
+            e->wait = e->step;
+            return;
+        }
+    }
+    if (e->need) {                                  /* triggers to wait for */
+        if ((e->trig & e->need) != e->need) {
+            e->blocked = true;
+            return;
+        }
+        e->trig &= ~e->need;
+        e->need = 0;
+    }
+    e->busy = false;
+    lp5562_kick(s, n);
+}
+
+/* bring the engines up to now */
+static void lp5562_sync(Lp5562State *s)
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), left = now - s->at;
+
+    s->at = now;
+    while (!lp5562_frozen(s)) {
+        Lp5562Engine *first = NULL;
+        int64_t t;
+
+        for (int n = 0; n < 3; n++) {
+            Lp5562Engine *e = &s->eng[n];
+
+            if (e->busy && !e->blocked && (!first || e->wait < first->wait)) {
+                first = e;
+            }
+        }
+        if (!first) {
+            break;
+        }
+        t = MIN(first->wait, left);
+        left -= t;
+        for (int n = 0; n < 3; n++) {
+            if (s->eng[n].busy && !s->eng[n].blocked) {
+                s->eng[n].wait -= t;
+            }
+        }
+        if (first->wait) {
+            break;
+        }
+        lp5562_over(s, first - s->eng);
+        lp5562_tell(s, false);      /* each change: a flash can be short */
+    }
+}
+
+static void lp5562_arm(Lp5562State *s)
+{
+    int64_t wait = INT64_MAX;
+
+    for (int n = 0; n < 3 && !lp5562_frozen(s); n++) {
+        if (s->eng[n].busy && !s->eng[n].blocked) {
+            wait = MIN(wait, s->eng[n].wait);
+        }
+    }
+    if (wait == INT64_MAX) {
+        timer_del(s->timer);
+    } else {
+        timer_mod(s->timer, s->at + MAX(wait, LP_SLICE_NS));
+    }
+}
+
+static void lp5562_timer(void *opaque)
+{
+    Lp5562State *s = opaque;
+
+    lp5562_sync(s);
+    lp5562_arm(s);
+}
+
+static void lp5562_reset(Lp5562State *s)
+{
+    memset(s->regs, 0, sizeof(s->regs));
+    s->regs[0x05] = s->regs[0x06] = s->regs[0x07] = s->regs[0x0F] = 0xAF;
+    s->regs[0x70] = 0x39;       /* B: engine 1, G: engine 2, R: engine 3 */
+    memset(s->eng, 0, sizeof(s->eng));
+}
+
+static void lp5562_write(Lp5562State *s, uint8_t reg, uint8_t data)
+{
+    uint8_t old = s->regs[0x01];
+    int n;
+
+    switch (reg) {
+    case 0x00:                                      /* ENABLE */
+        s->regs[reg] = data;
+        break;
+    case 0x01:                                      /* OP_MODE */
+        s->regs[reg] = data & 0x3F;
+        for (n = 0; n < 3; n++) {
+            int mode = lp5562_mode(s, n);
+
+            /* disabled, load and direct make an engine start afresh */
+            if (mode != MODE_RUN && mode != ((old >> (4 - 2 * n)) & 3)) {
+                uint8_t pwm = mode == MODE_DISABLED ? 0 : s->eng[n].pwm;
+
+                memset(&s->eng[n], 0, sizeof(s->eng[n]));
+                s->eng[n].pwm = pwm;
+            }
+        }
+        break;
+    case 0x09 ... 0x0B:                             /* an engine's PC */
+        if (lp5562_exec(s, reg - 0x09) == EXEC_HOLD) {
+            s->eng[reg - 0x09].pc = data & 15;
+        }
+        return;
+    case 0x0C:                                      /* STATUS: read only */
+        return;
+    case 0x0D:                                      /* RESET */
+        if (data == 0xFF) {
+            lp5562_reset(s);
+        }
+        return;
+    case 0x10 ... 0x6F:                             /* an engine's program */
+        if (lp5562_mode(s, (reg - 0x10) / 0x20) == MODE_LOAD) {
+            s->regs[reg] = data;
+        }
+        return;
+    default:
+        if (reg < sizeof(s->regs)) {
+            s->regs[reg] = data;
+        }
+        return;
+    }
+    for (n = 0; n < 3; n++) {
+        lp5562_kick(s, n);
+    }
 }
 
 static int lp5562_event(I2CSlave *i2c, enum i2c_event ev)
@@ -442,8 +742,8 @@ static int lp5562_event(I2CSlave *i2c, enum i2c_event ev)
 
     if (ev == I2C_START_SEND) {
         s->first = true;
-    } else if (ev == I2C_FINISH && s->changed) {
-        s->changed(s->opaque);
+    } else if (ev == I2C_FINISH) {
+        lp5562_tell(s, true);
     }
     return 0;
 }
@@ -457,34 +757,111 @@ static int lp5562_send(I2CSlave *i2c, uint8_t data)
         s->first = false;
         return 0;
     }
-    if (s->ptr == 0x0D) {
-        if (data == 0xFF) {                         /* reset */
-            memset(s->regs, 0, sizeof(s->regs));
-            s->regs[0x05] = s->regs[0x06] = s->regs[0x07] = 0xAF;
-            s->regs[0x0F] = 0xAF;
-        }
-    } else if (s->ptr < sizeof(s->regs)) {
-        s->regs[s->ptr] = data;
-    }
-    s->ptr++;
+    lp5562_sync(s);
+    lp5562_write(s, s->ptr++, data);
+    lp5562_arm(s);
     return 0;
 }
 
 static uint8_t lp5562_recv(I2CSlave *i2c)
 {
     Lp5562State *s = LP5562(i2c);
-    uint8_t v = s->ptr < sizeof(s->regs) ? s->regs[s->ptr] : 0;
+    uint8_t reg = s->ptr++, v;
 
-    s->ptr++;
-    return v;
+    lp5562_sync(s);
+    switch (reg) {
+    case 0x09 ... 0x0B:
+        return s->eng[reg - 0x09].pc;
+    case 0x0C:                                      /* reading clears it */
+        v = s->regs[reg];
+        s->regs[reg] = 0;
+        return v;
+    default:
+        return reg < sizeof(s->regs) ? s->regs[reg] : 0;
+    }
+}
+
+/* the engine that is at work on output ch, or -1 */
+static int lp5562_at_work(Lp5562State *s, int ch)
+{
+    int n = lp5562_engine_of(s, ch);
+
+    return n >= 0 && (s->regs[0x00] & LP_CHIP_EN) &&
+           lp5562_mode(s, n) == MODE_RUN && s->eng[n].busy ? n : -1;
+}
+
+/* the LED as rrggbb.  A colour that an engine is at work on (a blink) is the
+ * brightest the engine has made it, so that it is the same whenever asked */
+static char *lp5562_get_led(Object *obj, Error **errp)
+{
+    Lp5562State *s = LP5562(obj);
+    uint32_t rgb = 0;
+
+    lp5562_sync(s);
+    for (int ch = 2; ch >= 0; ch--) {
+        int n = lp5562_at_work(s, ch);
+
+        rgb = rgb << 8 | (n < 0 ? lp5562_out(s, ch) : s->eng[n].peak);
+    }
+    return g_strdup_printf("%06x", rgb);
+}
+
+static bool lp5562_get_blinking(Object *obj, Error **errp)
+{
+    Lp5562State *s = LP5562(obj);
+
+    lp5562_sync(s);
+    return lp5562_at_work(s, 0) >= 0 || lp5562_at_work(s, 1) >= 0 ||
+           lp5562_at_work(s, 2) >= 0;
+}
+
+static void lp5562_get_backlight(Object *obj, Visitor *v, const char *name,
+                                 void *opaque, Error **errp)
+{
+    Lp5562State *s = LP5562(obj);
+    uint8_t w;
+
+    lp5562_sync(s);
+    w = lp5562_out(s, 3);
+    visit_type_uint8(v, name, &w, errp);
+}
+
+/* the three engines: "off", "load", "direct", or what it does, where its PC
+ * is and its PWM, as "run@3=255" ("wait": for a trigger) */
+static char *lp5562_get_engines(Object *obj, Error **errp)
+{
+    static const char *const mode[] = { "off", "load", NULL, "direct" };
+    Lp5562State *s = LP5562(obj);
+    GString *text = g_string_new(NULL);
+
+    lp5562_sync(s);
+    for (int n = 0; n < 3; n++) {
+        Lp5562Engine *e = &s->eng[n];
+
+        g_string_append(text, n ? " " : "");
+        if (mode[lp5562_mode(s, n)]) {
+            g_string_append(text, mode[lp5562_mode(s, n)]);
+        } else {
+            g_string_append_printf(text, "%s@%u=%u", e->blocked ? "wait" :
+                                   e->busy ? "run" : "hold", e->pc, e->pwm);
+        }
+    }
+    return g_string_free(text, false);
 }
 
 static void lp5562_reset_hold(Object *obj, ResetType type)
 {
     Lp5562State *s = LP5562(obj);
 
-    memset(s->regs, 0, sizeof(s->regs));
-    s->regs[0x05] = s->regs[0x06] = s->regs[0x07] = s->regs[0x0F] = 0xAF;
+    lp5562_reset(s);
+    timer_del(s->timer);
+}
+
+static void lp5562_init(Object *obj)
+{
+    Lp5562State *s = LP5562(obj);
+
+    s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, lp5562_timer, s);
 }
 
 static void lp5562_class_init(ObjectClass *klass, const void *data)
@@ -495,6 +872,12 @@ static void lp5562_class_init(ObjectClass *klass, const void *data)
     k->send = lp5562_send;
     k->recv = lp5562_recv;
     RESETTABLE_CLASS(klass)->phases.hold = lp5562_reset_hold;
+    object_class_property_add_str(klass, "led", lp5562_get_led, NULL);
+    object_class_property_add_bool(klass, "blinking", lp5562_get_blinking,
+                                   NULL);
+    object_class_property_add(klass, "backlight", "uint8",
+                              lp5562_get_backlight, NULL, NULL, NULL);
+    object_class_property_add_str(klass, "engines", lp5562_get_engines, NULL);
 }
 
 static const TypeInfo flipper_power_types[] = {
@@ -514,6 +897,7 @@ static const TypeInfo flipper_power_types[] = {
         .name = TYPE_LP5562,
         .parent = TYPE_I2C_SLAVE,
         .instance_size = sizeof(Lp5562State),
+        .instance_init = lp5562_init,
         .class_init = lp5562_class_init,
     },
 };

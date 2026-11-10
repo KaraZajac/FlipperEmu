@@ -25,16 +25,17 @@ QEMU, so none has QEMU's speed, built-in GDB stub, snapshots or tracing plugins.
 
 ## Status
 
-Verified on 2026-11-10 with `scripts/smoke_test.py` (boot, SD mount, LCD, input, a
-recording of the screen, pause and continue, CLI over USB, the secure enclave, IR
-receive and transmit,
+Verified on 2026-11-10 with `scripts/smoke_test.py` (boot, SD mount, LCD, input, the
+backlight's fade, a recording of the screen, pause and continue, CLI over USB, the
+secure enclave, IR receive and transmit,
 Sub-GHz receive and transmit, 125 kHz RFID read, emulate and T5577 write, iButton read
 and emulate, NFC read (NTAG215, MIFARE Classic 1K) and emulate, USB/IP export, warm
 reboot, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed
 unlshd-094**. The window passes `scripts/gui_check.py` (clicked buttons, a recording
-of the screen, Pause, the firmware log and its level, a file copied to the card, an app
-dropped on it, the bench, switching off and on, the Left + Back reboot, installing
-firmware) on the same three, off-screen. `scripts/ufbt_check.py` (ufbt 0.2.6 building
+of the screen, Pause, the firmware log and its level, the backlight fading in, a file
+copied to the card, an app dropped on it, the LED blinking while NFC reads, the bench,
+switching off and on, the Left + Back reboot, installing firmware) on the same three,
+off-screen. `scripts/ufbt_check.py` (ufbt 0.2.6 building
 `examples/hello` and launching it there) and `scripts/gdb_check.py` (gdb with the
 firmware's and that app's symbols) pass on the official one.
 
@@ -135,6 +136,9 @@ firmware's and that app's symbols) pass on the official one.
   `./flipperemu nfc dump.json` puts a card the Proxmark3 dumped in the field.
 - Speaker: TIM16's PWM tone plays through QEMU audio (desktop sound or a WAV recording).
   The duty cycle sets the volume, as on the real piezo.
+- Lights: the LED chip (LP5562) runs the programs the firmware loads into its three
+  engines, so the LED blinks while an app reads or sends, and the backlight fades in
+  and out. `./flipperemu status` says what they do (`the LED: blinks cyan (00ffff)`).
 - Power: STOP2 deep sleep (1–2 % of a host core when idle), a fuel gauge and charger you
   can set (`./flipperemu battery`, `usb`), and a USB cable that carries VBUS. The
   firmware switches the Flipper off as on hardware (the power-off dialog, `power off`,
@@ -161,7 +165,6 @@ firmware's and that app's symbols) pass on the official one.
   cards. When the Flipper emulates a MIFARE Classic, the virtual reader gets as far as
   its UID, ATQA and SAK: the Crypto1 answers go out through a bit-banged pin that the
   model does not decode.
-- LP5562 engine programs are approximated (steady-state brightness only).
 - Not yet exercised: XIP app loaders that run code from internal flash, and the
   radio-stack stage of updates (the emulated CPU2 can't install a stack).
 - The window has been checked off-screen (Qt's offscreen platform, `scripts/gui_check.py`),
@@ -303,8 +306,9 @@ The window and the emulator talk over the [front-panel link](docs/PANEL_LINK.md)
 LCD, the lights and the buttons, and the QOM properties the bench shows. Any other
 program can use it too. `scripts/gui_check.py FIRMWARE` checks the window off-screen: it
 boots a throwaway device, clicks its buttons, records its screen, pauses it, reads the
-firmware's log and sets its level, copies a file to its card, drops an app on it and
-starts it again with F5, switches it off and on, and reboots it.
+firmware's log and sets its level, counts the steps of the backlight's fade, copies a
+file to its card, drops an app on it and starts it again with F5, watches the LED blink
+while NFC reads, switches it off and on, and reboots it.
 
 ## The `flipperemu` tool
 
@@ -570,6 +574,8 @@ scripts/smoke_test.py path/to/firmware.elf|.dfu|update.tgz [--no-sd] [--keep] [-
 Boots a throwaway device headless and checks that:
 - the firmware reports "Startup complete" and "card mounted";
 - the LCD draws, and OK changes the screen;
+- the LED chip ran the firmware's fade of the backlight to its end (engine 1 holds at
+  the brightness that `status` shows);
 - `flipperemu record` writes the screen as a GIF while keys are pressed;
 - `flipperemu pause` makes time stand still (the firmware's uptime misses those
   seconds, and `press` and `ls` say why they cannot) until `continue`;

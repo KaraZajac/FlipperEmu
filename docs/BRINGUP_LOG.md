@@ -988,6 +988,52 @@ All three are small, self-contained, and suitable for sending upstream.
       (`smoke_test.py`); in the window, a click on OK that changes nothing until
       it goes on (`gui_check.py`).
 
+82. **The LED chip runs its programs.** The LP5562 was four PWM registers: what the
+    firmware wrote there was the light. But the firmware leaves two things to the
+    chip's own engines, and neither was seen. The backlight is faded by a program
+    on engine 1 (`lp5562_execute_ramp`: set PWM, ramp, branch back once, end), and
+    the blink of an app that reads or sends is a loop on engine 2 (set PWM, wait
+    10 ms, set PWM 0, wait, go to start). The backlight jumped, and NFC > Read
+    showed a dark LED.
+    - The three engines are interpreted now: the 16 commands each, on the chip's
+      32768 Hz clock (a step is 16 or 512 cycles times the step time), ramp and
+      wait, set PWM, go to start, branch with its loop counts, end, the triggers;
+      run, step, run once and hold; the map of which engine drives which LED
+      (it resets to 0x39, not 0).
+    - Time is the machine's. An engine is worked out up to now whenever the
+      firmware reads or writes the chip, and by a timer that is not set more often
+      than every 2 ms: a fade steps every half millisecond, and nobody looks that
+      often. A set PWM is seen up to 1.5 ms late for that; the blink's 10 ms came
+      out as 8.7.
+    - A ramp of n increments takes n + 1 steps, as the datasheet has it. The
+      firmware's fade program asks for half the difference and runs the ramp
+      twice, so a fade to anything but 255 ends one or two above what was asked
+      for, and stays there: the white LED remains mapped to the engine. On the
+      chip too, by the datasheet.
+    - A full fade is 125 ms and the panel looks every 16 ms: the window gets eight
+      to twelve values on the way, and draws them.
+    - Momentum fades it in twice. It lights the screen early in its start; a
+      second later its notification service starts, puts every light out and
+      the screen on again, and the ramp begins from 0 a second time. The window
+      check, which wanted one rise from dark, counts the last one now.
+    - A flash of 10 ms falls between two looks of the panel more often than not.
+      So the LCD model keeps the brightest colour the LED had since each reader
+      (the panel link; QEMU's own picture) last looked, and gives that first.
+    - Then every blink began with a white flash. It is in the firmware: the
+      notification app starts the blink while red (charging) is still written,
+      and takes it away 2.6 ms later, at the end of its sequence. Nobody sees that
+      on a real one, and the latch made 16 ms of it. A colour that the LED has for
+      less than 4 ms of the firmware's time is not reported now.
+    - `/machine/led` has `led`, `blinking`, `backlight` and `engines` (`hold@0=255
+      run@4=0 off`: each engine's state, program counter and PWM); `status` has a
+      `lights` row from them ("blinks cyan (00ffff)"). While an engine blinks a
+      channel, `led` is the colour of its flashes and not the instant's.
+    - The CLI's `led bl N` is no test for the fade: after a key press the
+      notification service holds the backlight, and the command changes nothing.
+      The window check counts the steps of the fade when the firmware starts
+      (ten or so on the way to 255) and the flashes of NFC > Read; the smoke test
+      reads engine 1's end (`hold@0=255`).
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

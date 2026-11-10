@@ -821,8 +821,31 @@ package with a radio stack in it, which stops in the updater (BRINGUP_LOG 78).
   with nothing on VBUS the board powers off (it says `power 0` on the panel link and
   QEMU exits); while USB power is there it keeps running, and goes off when the cable
   does.
-- **LP5562**: register file. W PWM is the backlight and R/G/B the status LED, both drawn
-  next to the LCD.
+- **LP5562**: W PWM is the backlight and R/G/B the status LED, both drawn next to the
+  LCD. Each output follows its I2C register or one of the chip's three program engines
+  (LED_MAP, 70h; it resets to 39h). An engine runs up to 16 commands of 16 bits on the
+  chip's 32768 Hz clock, here QEMU's virtual clock: ramp or wait (a step is the step
+  time × 16 or 512 clock cycles; an increment of n is n + 1 steps of one), set PWM, go
+  to start, branch with a loop count (0: for ever; a count per command, so loops nest),
+  end (PC to 0, EXEC to hold, optionally an interrupt bit in STATUS and the PWM to 0)
+  and trigger (send to engines, wait for engines; a trigger that came early is kept).
+  Every other command takes 16 cycles (0.49 ms). ENABLE's EXEC fields hold, step, run or
+  execute once; OP_MODE's fields disable (PWM 0), load (program memory can be written
+  only then, and all three engines stand still meanwhile), run, or make the engine
+  follow a register (direct). The PC can be written while the engine holds; STATUS is
+  cleared by reading it. The engines are brought up to date when the firmware talks to
+  the chip and on a timer of their own, which is not armed more often than every 2 ms:
+  a set PWM can be reported up to 1.5 ms late, and the lengths of ramps and waits are
+  exact. The logarithmic mode (LOG_EN) and the currents are kept and not applied: what
+  is reported is the PWM value. The firmware fades the backlight with set PWM, ramp,
+  branch (once), end on engine 1 and leaves the white output on that engine, so the
+  backlight is what the engine ended with: a ramp of n + 1 steps run twice ends one or
+  two above an asked value that is not 0 or 255, as on the chip. It blinks the LED with
+  set PWM, wait, set PWM 0, wait, go to start on engine 2. Read-only properties on
+  `/machine/led`: `led` (`rrggbb`; a colour an engine is at work on is the brightest
+  that engine has made it, so a blink reads the same whenever it is asked), `blinking`,
+  `backlight`, and `engines` (`hold@0=255 run@3=0 off`: what each does, its PC and its
+  PWM; `off`, `load`, `direct`, and `wait` for one that waits for a trigger).
 - **CC1101**: status byte, header/burst/strobe framing, config and status registers,
   MARCSTATE, PATABLE, and GDO0/GDO2 driven from IOCFG (self-test passes). Receive: a
   signal written to `/machine/subghz`'s `rx` property (+high/−low µs at a frequency, or

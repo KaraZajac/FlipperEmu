@@ -68,14 +68,24 @@ backlight 255
 ```
 
 The backlight, 0 to 255 (the LP5562's white channel). The firmware dims it to 0 after its
-idle timeout and lights it on a key press.
+idle timeout and lights it on a key press. It fades both ways, over about 125 ms: the
+steps of the fade come as they are when the panel looks (every 16 ms), so eight to
+twelve values on the way.
 
 ```
 led ff0000
 ```
 
 The RGB LED, as `rrggbb`. Red while charging, off on battery, blue in DFU mode; white
-for a moment on a reset.
+for a moment on a reset. While an app reads or sends, the firmware blinks it: 10 ms on
+in every 90 ms, which comes as `led 00ffff`, `led 000000` and so on. A flash can be
+shorter than the 16 ms between two looks of the panel, so a look reports the brightest
+colour the LED has had since the last one, and the colour it has now with the next.
+No flash is missed that way, and each is shown for 16 ms at least. A colour that the
+LED has for less than 4 ms of the firmware's time is not reported at all: the firmware
+sets the LED in several steps (red is still on for 3 ms when a blink in cyan starts),
+and nobody sees those on a real one. To know whether it blinks without counting
+flashes, read `/machine/led`'s `blinking` (below: `watch`).
 
 ```
 vibro 1

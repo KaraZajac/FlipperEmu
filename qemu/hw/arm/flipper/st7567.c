@@ -217,8 +217,8 @@ static bool st7567_update(void *opaque)
     }
     /* status strip: RGB LED, vibro and speaker indicators */
     int sy = 64 * sc + 2 * b, r = s->status_h / 3;
+    uint32_t led = s->status_h ? st7567_led(s, LED_FOR_PICTURE) : s->led_rgb;
     if (s->status_h) {
-        uint32_t led = s->led_rgb;
         fill(fb, stride, b, sy + (s->status_h - 2 * r) / 2, 2 * r, 2 * r,
              led ? led : 0x303030);
         if (s->vibro) {
@@ -232,8 +232,62 @@ static bool st7567_update(void *opaque)
     }
     qemu_console_update(s->con, 0, 0, w, h);
     s->dirty = false;
-    s->status_dirty = false;
+    s->status_dirty = led != s->led_rgb;    /* a flash: the next one ends it */
     return true;
+}
+
+static unsigned led_light(uint32_t rgb)
+{
+    return (rgb >> 16 & 255) + (rgb >> 8 & 255) + (rgb & 255);
+}
+
+/*
+ * The LED, for one who looks at it now and then.  A flash can be shorter than
+ * the time between two looks, so a look gets the brightest colour since the
+ * last one.  And the firmware sets the LED in several steps (red is still on
+ * for a moment when a blink in cyan starts): a colour that it had for less
+ * than LED_SEEN_NS is not one that anybody sees, and no look gets it.
+ */
+#define LED_SEEN_NS     (4 * SCALE_MS)
+
+void st7567_set_led(St7567State *s, uint32_t rgb)
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    if (rgb == s->led_rgb) {
+        return;
+    }
+    if (now - s->led_since >= LED_SEEN_NS) {
+        for (int i = 0; i < ARRAY_SIZE(s->led_seen); i++) {
+            /* (not once more for one who has seen it already) */
+            if (!s->led_told[i] &&
+                led_light(s->led_rgb) > led_light(s->led_seen[i])) {
+                s->led_seen[i] = s->led_rgb;
+            }
+        }
+        s->led_was = s->led_rgb;
+        s->led_at = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    }
+    memset(s->led_told, 0, sizeof(s->led_told));
+    s->led_rgb = rgb;
+    s->led_since = now;
+}
+
+uint32_t st7567_led(St7567State *s, int who)
+{
+    bool settled = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->led_since >=
+                   LED_SEEN_NS;
+    uint32_t now = settled ? s->led_rgb : s->led_was;
+    uint32_t seen = s->led_seen[who];
+
+    s->led_seen[who] = 0;
+    /* (one who has not looked for long gets no flash from long ago) */
+    if (led_light(seen) > led_light(now) &&
+        qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - s->led_at <= 100) {
+        return seen;
+    }
+    s->led_told[who] |= settled;
+    return now;
 }
 
 static void st7567_invalidate(void *opaque)

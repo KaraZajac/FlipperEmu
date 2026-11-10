@@ -46,10 +46,19 @@ struct St7567State {
     /* board status shown next to the panel */
     uint8_t backlight;
     uint32_t led_rgb;
+    uint32_t led_seen[2];        /* LED_FOR_...: the brightest since it looked */
+    bool led_told[2];            /* ... and it has seen led_rgb as it is */
+    uint32_t led_was;            /* the last colour that it had for long */
+    int64_t led_since;           /* virtual ns: it has been led_rgb since */
+    int64_t led_at;              /* ms (host) when led_seen was last set */
     bool vibro, speaker;
     uint64_t bytes;
 };
 bool st7567_pixel(St7567State *s, int x, int y);
+/* the LED, for one who looks at it now and then (st7567.c) */
+enum { LED_FOR_PICTURE, LED_FOR_PANEL };
+void st7567_set_led(St7567State *s, uint32_t rgb);
+uint32_t st7567_led(St7567State *s, int who);
 
 /* ----------------------------------------------------- BQ27220 gauge */
 #define TYPE_BQ27220 "bq27220"
@@ -95,11 +104,28 @@ struct Bq25896State {
 /* ------------------------------------------------- LP5562 LED driver */
 #define TYPE_LP5562 "lp5562"
 OBJECT_DECLARE_SIMPLE_TYPE(Lp5562State, LP5562)
+/* one of its three program engines */
+typedef struct Lp5562Engine {
+    uint8_t pc, pwm;
+    uint8_t peak;                /* the highest PWM since it was loaded */
+    uint8_t loops[16];           /* how often the branch there was taken */
+    uint8_t trig, need;          /* triggers it has got; those it waits for */
+    uint8_t ramp;                /* steps left of the ramp it is in */
+    bool down;
+    bool busy;                   /* it is in a command */
+    bool blocked;                /* ... that waits for a trigger */
+    int64_t step;                /* ns: a step of the ramp */
+    int64_t wait;                /* ns until what it is at is over */
+} Lp5562Engine;
 struct Lp5562State {
     I2CSlave parent_obj;
     uint8_t regs[0x71];
     uint8_t ptr;
     bool first;
+    Lp5562Engine eng[3];
+    QEMUTimer *timer;
+    int64_t at;                  /* virtual ns the engines are at */
+    uint32_t shown;              /* the outputs `changed` was last called for */
     void (*changed)(void *opaque);
     void *opaque;
 };

@@ -8,7 +8,9 @@
 Boots a throwaway device with `flipperemu run`, which opens the window: here
 off-screen (QT_QPA_PLATFORM=offscreen) and silent (--audio none), so nothing
 shows on the desktop.  Then it checks the front-panel link (frames, the
-backlight), clicks buttons with the mouse, records the screen as a GIF
+backlight and its fade when the firmware starts, the LED's blink while NFC >
+Read looks for a card), clicks buttons with the mouse, records the screen as
+a GIF
 (Device > Record the screen), pauses it and lets it go on (Device > Pause,
 and the launcher's `pause` from outside), opens the firmware's log with a
 click on the GPIO pins and sets the firmware's log level from it, copies a
@@ -26,6 +28,7 @@ emulator).  Exit status 0 = pass. Pictures are kept in --out.
 """
 import argparse
 import importlib.machinery
+import json
 import os
 import pathlib
 import re
@@ -201,20 +204,60 @@ class Driver:
         self.click("back")
         self.spin(1.0)
 
-        def launcher(*args):
-            return subprocess.run(
-                [sys.executable, str(w.launcher), "-d", w.name, *args],
-                capture_output=True, text=True, timeout=30)
-        there = launcher("pause")
+        there = self.launcher("pause")
         said = self.until(lambda: w.stopped == "paused", 10)
         shown = w.a_pause.isChecked() and w.state_label.text() == "paused"
-        back = launcher("continue")
+        back = self.launcher("continue")
         went = self.until(lambda: not w.stopped, 10)
         check("pause: the launcher's `pause` and `continue`, from outside: "
               "the window shows what the emulator says",
               there.returncode == 0 and said and shown
               and back.returncode == 0 and went
               and not w.a_pause.isChecked())
+
+    def launcher(self, *args):
+        """the launcher, from outside the window"""
+        w = self.win
+        return subprocess.run(
+            [sys.executable, str(w.launcher), "-d", w.name, *args],
+            capture_output=True, text=True, timeout=30)
+
+    def blink(self):
+        """The LED chip's engines, as the window gets them: NFC > Read blinks
+        the LED while it looks for a card (a loop on engine 2)"""
+        w, v = self.win, self.win.view
+        w.command("app", "NFC")
+        self.settle()
+        self.spin(1.5)
+        self.leds.clear()
+        self.click("ok")                # its first item: Read
+        came = self.until(lambda: len(self.leds) >= 10, 12)
+        last = self.leds[-6:]
+        self.shot("blink")
+        said = self.launcher("status", "--json")
+        try:
+            lights = json.loads(said.stdout)["lights"]
+        except (ValueError, KeyError):
+            lights = {}
+        # Back ends the reading, as a person would end it.  (Asked to close
+        # while it reads, this app fails a check of its own on the way out,
+        # nfc_scanner_free's, and the firmware starts again: app_check.py.)
+        self.click("back")
+        self.spin(1.5)
+        n = len(self.leds)
+        self.spin(1.0)
+        still = len(self.leds) == n and v.led == self.leds[-1]
+        w.close_app()
+        self.settle()
+        self.spin(1.0)
+        colours = {c for c in last if c}
+        check("led: it blinks while NFC > Read looks for a card: flashes of "
+              f"one colour ({', '.join(f'{c:06x}' for c in colours)}) with "
+              "dark between; `status` says that it blinks, in which colour; "
+              "Back ends it",
+              came and len(colours) == 1 and last.count(0) == 3
+              and lights.get("blinking") is True
+              and lights.get("led") == f"{max(colours):06x}" and still)
 
     def console(self):
         return self.win.log.text.toPlainText()
@@ -300,6 +343,9 @@ class Driver:
     def checks(self):
         w, v = self.win, self.win.view
         v.setFocus()
+        self.backlights, self.leds = [], []     # as the link reports them
+        w.link.backlight.connect(self.backlights.append)
+        w.link.led.connect(self.leds.append)
         check("link: the window connected; a frame arrived",
               self.until(lambda: w.state == "on" and v.frame, 20))
         if not check("boot: 'Startup complete'", self.booted()):
@@ -336,6 +382,7 @@ class Driver:
         # complete' at that level: the computer seeing it again is the sign
         usb = lambda: w.props.get(("/machine/soc/usb", "device"), "")
         had = len(w.fwlog.shown_text())
+        self.backlights.clear()
         w.fwlog.level_actions["error"].trigger()
         again = (self.until(lambda: not usb().startswith("0483:"), 20)
                  and self.until(lambda: usb().startswith("0483:"), self.timeout))
@@ -348,10 +395,23 @@ class Driver:
               again and level() == "error"
               and "[I][" not in new and "[W][" not in new)
         self.shot("fwlog")
+        # The firmware started again with the window looking: it fades the
+        # backlight in (a ramp on engine 1 of the LED chip), 16 ms a look.
+        # The last rise is the one to count: Momentum lights the screen early,
+        # and begins again from dark when its notification service starts
+        lit = self.backlights[:] or [v.backlight]
+        i = len(lit) - 1
+        while i > 0 and lit[i - 1] < lit[i]:
+            i -= 1
+        rise = lit[i:]
+        check("backlight: the firmware fades it in when it starts: "
+              f"{len(rise)} values on the way from {rise[0]} to {rise[-1]}",
+              len(rise) >= 5 and rise[0] < 100 and rise[-1] == v.backlight)
         self.click("back")
         self.spin(1.0)
 
         self.files_and_apps()
+        self.blink()
 
         w.hold("nfc", ["ntag215", "04A1B2C3D4E5F6", "https://example.com"])
         w.set_cable("unplugged")

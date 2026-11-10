@@ -61,7 +61,9 @@ NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
 ## M4: senses ◐
 - ☑ Speaker: TIM16 CH1 PWM → QEMU audio (desktop driver or `--audio wav:FILE`); tones
       verified by FFT (440 Hz, 1 kHz, notes)
-- ☐ LP5562 engine interpreter (blinks, ramps)
+- ☑ LP5562 engine interpreter (2026-11-10): the three program engines on the chip's
+      32768 Hz clock (ramp/wait, set PWM, go to start, branch, end, trigger), so the
+      LED blinks and the backlight fades; `status` has a `lights` row
 - ☑ Battery/USB power (2026-11-10): `./flipperemu battery`, `usb plug|unplug|charger`
       and the window; SYSDWN under 3.15 V, so a flat battery switches the Flipper off
 - ☑ STOP2 deep sleep (CPU2 performs the SHCI clock switch); now the default, 1–2 % host CPU idle

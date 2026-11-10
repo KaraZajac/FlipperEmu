@@ -11,6 +11,8 @@ Back (dismiss the first scene) and OK (main menu), checks the LCD changed,
 records the screen as a GIF while keys are pressed (`flipperemu record`),
 pauses it and lets it go on (`flipperemu pause`, `continue`: the firmware's
 own uptime must miss the time it stood still),
+looks at the LED chip's engines (the backlight's fade must have run to its
+end on engine 1),
 runs `info device` on the CLI over the emulated USB serial port, checks the
 secure enclave (the firmware's own check of its keys, and a `crypto encrypt`
 against what scripts/fe_enclave.py computes), receives an
@@ -165,6 +167,21 @@ def pause_check(name: str, endpoint):
     if not ok:
         print(f"  pause: {said}")
     return label, ok
+
+
+def lights_check(mon: Monitor):
+    """The LP5562's engines: the firmware fades the backlight with a ramp on
+    engine 1.  After a key press it must be on, at what the engine ended its
+    program with, and the engine on hold at its start again.  (The LED's
+    blink, on engine 2, is in gui_check.py.)"""
+    try:
+        engines = json.loads(mon.cmd("qom-get /machine/led engines"))
+        level = json.loads(mon.cmd("qom-get /machine/led backlight"))
+    except ValueError:
+        engines, level = "?", 0
+    ok = level > 0 and engines.split()[0] == f"hold@0={level}"
+    return (f"lights: the backlight's fade ran to its end on engine 1 "
+            f"({engines})", ok)
 
 
 def reboot_check(mon: Monitor, uart: pathlib.Path, out: pathlib.Path, timeout: float) -> bool:
@@ -886,6 +903,7 @@ def main() -> int:
             results.append((f"lcd: desktop drawn ({d1} dark px)", d1 > 500))
             results.append(("input: OK changed the screen",
                             desk.read_bytes() != menu.read_bytes()))
+            results.append(lights_check(mon))
             results.append(record_check(name, mon, out))
             port = None if args.no_usb else usb_endpoint(mon)
             mon.close()                 # the launcher's commands want it

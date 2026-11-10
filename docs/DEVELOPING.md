@@ -149,6 +149,34 @@ window says "STOPPED BY A DEBUGGER", and `./flipperemu continue` leaves it to gd
 `continue`, because a firmware that runs under a gdb that takes it to be stopped is no
 help to anyone. `./flipperemu pause` with a gdb attached is gdb's Ctrl-C.
 
+## The LED and the backlight
+
+```
+$ ../../flipperemu status
+…
+lights   : the LED: blinks cyan (00ffff); the backlight: 255 of 255
+$ ../../flipperemu status --json
+…  "lights": {"led": "00ffff", "blinking": true, "backlight": 255,
+              "engines": "hold@0=255 run@4=0 off"},
+```
+
+Both hang on one chip, an LP5562, which has three small engines that run programs of
+their own. The firmware gives them what would cost it a timer: the fade of the
+backlight (engine 1) and the blink of a notification sequence such as
+`sequence_blink_start_cyan` (engine 2). The emulator runs those programs on the chip's
+clock, so a sequence of yours looks in the window as it does on a Flipper: the
+backlight fades over an eighth of a second, and a blink is 10 ms of light in every 90.
+
+- `led` is the LED's colour as `rrggbb`; while it blinks, the colour of the flashes,
+  so that a look between two of them does not say "off". `blinking` says which it is.
+- `backlight` is 0 to 255. After a fade it is where the chip's ramp ended, which is
+  one or two above what the firmware asked for unless that was 255.
+- `engines` has each of the three: `off`, `load` (the firmware writes its program),
+  `direct`, or what it does, the command it is at, and its PWM: `run@4=0`,
+  `hold@0=255`, `wait@2=0` (for a trigger from another engine).
+
+A recording (`record`) is of the screen, without the lights. The window shows both.
+
 ## Why `./flipperemu ufbt`, and not `ufbt` alone
 
 **Because the tools go for a real Flipper first.** `ufbt launch` looks for its Flipper
@@ -383,6 +411,14 @@ on and asks again; the seconds have to be gone from the uptime. `scripts/gui_che
 pauses through the window's menu action, clicks OK while it stands still (no picture
 comes, and the click is felt when it goes on), and has the window follow a `pause` and
 a `continue` given in a terminal.
+
+The lights are checked against the firmware's own use of the chip:
+`scripts/gui_check.py` counts the values of the backlight that reach the window while
+the firmware fades it in after a restart (more than four, each above the one before,
+ending where it stays), and starts NFC > Read for the blink: flashes of one colour
+with dark between, `status` saying that it blinks and in which colour, and an end to
+it with Back. `scripts/smoke_test.py` reads engine 1 after the fade: on hold, at the
+brightness the backlight has.
 
 By hand: the official self-update script sending a package without a radio stack
 (what `fbt flash_usb` sends) to a running device, which installed it and came back.
