@@ -200,8 +200,16 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         stand-in `fbt` for what the launcher hands to a tree's own
   - ☐ `fbt` in a firmware's tree, tried: build, `run -f` the `.elf`, `flash_usb`,
         `launch APPSRC=`; ufbt with Momentum's and Unleashed's SDK
-  - ☐ An update package sent to a running device by the launcher itself (`push` and
-        `update install`, without the radio stage), for `ufbt flash_usb`
+  - ☑ `./flipperemu update PKG` (2026-11-10): an update package sent to a running
+        device by the launcher itself, file by file through the CLI and then `update
+        install`, without the radio stage; waited for on the USB serial port, with the
+        updater's stages read from the log, so that its error screen is reported in
+        seconds (a log level that hides them is lent one meanwhile; a level that the
+        updater leaves changed is said); `ufbt flash_usb` through the wrapper is this
+        with the SDK's package;
+        `scripts/update_check.py` (BRINGUP_LOG 84)
+  - ☐ A quicker way for a big package onto the card of a running device than the CLI's
+        20 KB/s (Momentum's 12 MB take nine minutes)
   - ☑ Debugging an app: `./flipperemu gdb` on a device that runs. The stub on
         demand, on a socket in the device's folder; the toolchain's gdb; the firmware's
         ELF, found by what the flash holds; the apps' symbols through the SDK's

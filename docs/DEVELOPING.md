@@ -194,7 +194,9 @@ than `default`. It also
 - refuses the targets that go through a debug probe (`flash`, `debug`, `blackmagic`,
   `jflash`, …). They would reach the real Flipper on your desk, or nothing.
   `./flipperemu flash` and `./flipperemu gdb` are what does that here;
-- refuses `ufbt flash_usb`. See [below](#when-it-goes-wrong).
+- does `ufbt flash_usb` itself: the SDK's update package has a radio stack in it, which
+  the emulated Flipper cannot install, so the launcher sends that package without the
+  stage (`./flipperemu update`). See [below](#when-it-goes-wrong).
 
 Without the wrapper it is one argument, and it has to be there every time:
 
@@ -224,6 +226,11 @@ ufbt status                            # which one it has
 ```
 
 Momentum and Unleashed publish theirs. Their documentation has the URL.
+
+It works the other way round too: `./flipperemu ufbt flash_usb` puts the firmware of
+the SDK that ufbt has on the running Flipper, through the firmware's own updater, as
+`ufbt flash_usb` does with a real one. Files and settings stay, and it takes three or
+four minutes.
 
 ## gdb, with the firmware's symbols and your app's
 
@@ -331,6 +338,9 @@ flipperemu -d mine run -f build/f7-firmware-D/firmware.elf
 flipperemu -d mine run --update dist/f7-D/f7-update-local
                                        # through the firmware's own updater, as
                                        # qFlipper does: settings and files stay
+flipperemu -d mine update dist/f7-D/f7-update-local
+                                       # the same with the device running: sent
+                                       # through its CLI, installed, waited for
 
 flipperemu -d mine fbt flash_usb       # with the device running: fbt builds the
                                        # package and sends it over USB
@@ -342,7 +352,8 @@ folder on your PATH.)
 `flipperemu fbt …` is `./fbt …` of the tree you are in, with the emulated port named
 as for ufbt, and the same targets refused. `fbt launch APPSRC=my_app`, `fbt cli` and
 `fbt flash_usb` talk to the emulated Flipper. `fbt flash_usb_full` is refused: its
-package has a radio stack in it.
+package has a radio stack in it. `./fbt updater_package` builds that package, and
+`flipperemu update` sends it without the stage.
 
 Then `./flipperemu log -f` for what the firmware says, at the level you set
 (`log --set-level debug`), and
@@ -355,7 +366,18 @@ Then `./flipperemu log -f` for what the firmware says, at the level you set
   with the official tools). The emulated second core is ST's FUS without a radio
   stack, and cannot install one. The updater stops at that stage and gives it this
   name; nothing was written. Hold Back, and the Flipper starts as it was. `./flipperemu
-  run --update PACKAGE` installs the same package without that stage.
+  update PACKAGE` installs the same package without that stage on a device that runs,
+  `./flipperemu run --update PACKAGE` on one that does not.
+- **`./flipperemu update` takes minutes.** Most of it is the transfer: the firmware's
+  CLI takes some 20 KB/s, on a real Flipper too, and a release's package is 2.5 to
+  12 MB. Then the updater works for a minute or two with no USB. A second `update`
+  with the same package sends only what changed. `run --update` writes the package
+  into the card's image instead, in a second, and needs the device stopped for it.
+- **No log after an update.** The updater sets the firmware's log level when it is
+  done: the official one to the default, Unleashed's to none. That is the firmware's
+  doing, and a real Flipper has it too. `update` says so when the level is another
+  than before; `./flipperemu log --set-level info` and `./flipperemu reset` bring the
+  log back, and `status` shows the level.
 - **`ufbt launch` ends with "Unexpected response: Application … has to be closed
   manually".** The app that runs does not take the loader's request to close: an app
   with a loop of its own has to ask for it (`furi_thread_set_signal_callback`, as
@@ -389,11 +411,12 @@ Then `./flipperemu log -f` for what the firmware says, at the level you set
 `scripts/ufbt_check.py FIRMWARE` goes this way on a throwaway device, with
 `examples/hello` and the `ufbt` on the PATH: build, `launch`, the app's log lines,
 buttons, `launch` over the app that runs, the crash and the restart, `ufbt cli` in a
-terminal of its own with a second command kept waiting, the refused targets, a
+terminal of its own with a second command kept waiting, the refused targets,
+`ufbt flash_usb` (the SDK's package sent without its radio stack, and installed), a
 stopped device. For `fbt` it has a stand-in that says what it was called with: the
 tree's `fbt` is found from a folder inside it and run in its root, the emulated port
 is named, a port you name yourself is left alone, and the same targets are refused. It
-passes on the official 1.5.1 with ufbt 0.2.6 and its SDK (25 checks). Without `ufbt`,
+passes on the official 1.5.1 with ufbt 0.2.6 and its SDK (29 checks). Without `ufbt`,
 or with an SDK for another API than the firmware's, it checks nothing and its exit
 status is 77.
 
@@ -431,6 +454,20 @@ brightness the backlight has.
 An app that does not live through the request to close is the NFC app in the middle
 of a read: `scripts/app_check.py` asks it, and wants the crash named and the firmware
 back with no app running.
+
+`scripts/update_check.py FIRMWARE` sends a running device its own update package with
+`update` (`--package PKG`: another firmware's). It wants the launcher to wait until
+the Flipper is back and to say what runs on it, a file that was on the card still
+there, a manifest on the card without the radio stage, the updater's stages in the
+log, no crash, and the log level as before or else named. Then the same with the
+radio stage kept: only the two changed files are sent, the updater's error is
+reported with the way out of it, and a held Back brings the firmware back. That part
+runs with the firmware's log level at none: the launcher has to lend the updater a
+level to see its error, and to give none back. And the refusals: a folder and a file
+that are no package, a pulled USB cable, a device that does not run. 25 checks; it
+passes on the official 1.5.1 and on Unleashed with their own packages, and from the
+official firmware to Unleashed with `--package`. `ufbt_check.py` has the real `ufbt
+flash_usb` go through the wrapper (29 checks now).
 
 By hand: the official self-update script sending a package without a radio stack
 (what `fbt flash_usb` sends) to a running device, which installed it and came back.

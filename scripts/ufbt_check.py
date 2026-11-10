@@ -17,8 +17,9 @@ buttons pressed are counted there; launched again while it runs, it is
 closed and the new one started; its crash is in the log, and the Flipper
 restarts.  Then `ufbt cli` in a terminal of its own, with a command typed
 and a second command kept waiting; the targets that are refused, because
-they go to a debug probe or bring a radio stack; and what a stopped device
-takes.  Exit status 0 = pass.
+they go to a debug probe; `ufbt flash_usb`, which the launcher does itself,
+with the SDK's update package less its radio stack; and what a stopped
+device takes.  Exit status 0 = pass.
 
 `./flipperemu fbt` is checked with a stand-in for a firmware tree's `fbt`,
 which says what it was called with: which fbt is found, where it is run, the
@@ -175,14 +176,35 @@ def ufbt_checks(b, folder):
     code, text = tool(b, folder, "flash")
     check("`ufbt flash` (a debug probe's): refused, with what does it here",
           code == 1 and "debug probe" in text and "flash FILE" in text, text)
-    code, text = tool(b, folder, "flash_usb")
-    check("`ufbt flash_usb` (a package with a radio stack): refused, with what "
-          "does it here",
-          code == 1 and "radio stack" in text and "run --update" in text, text)
+    code, text = tool(b, folder, "faps", "flash_usb")
+    check("`ufbt faps flash_usb` (a package with a radio stack, and more to "
+          "do): refused, with what does it here",
+          code == 1 and "radio stack" in text
+          and "with no other target" in text, text)
     code, text = tool(b, folder, "status")
     check("`ufbt status` (ufbt's own): passed on as it is",
           code == 0 and "SDK" in text.upper(), text)
     return True
+
+
+def flash_usb_checks(b, folder):
+    """Last of what is done with the running device: it is another one after"""
+    start = time.time()
+    code, text = tool(b, folder, "flash_usb")
+    m = re.search(r"updated in (\d+) s: it runs (\S+)", text)
+    check("`ufbt flash_usb`: the launcher sends the SDK's package without "
+          "its radio stack, and the firmware installs it "
+          f"({time.time() - start:.0f} s)",
+          code == 0 and m and "radio stack" in text
+          and "without its radio stage" in text
+          and "Traceback" not in text, text[-2500:])
+    ok, text = b.answers()
+    check("and its CLI answers after that", ok, text)
+    log = b.uart_text()
+    at = log.rfind("UpdWorker")
+    crash = CRASH.search(log, at) if at >= 0 else None
+    check("no crash in the firmware's log while it updated", at >= 0 and
+          not crash, log[-1500:])
 
 
 def stand_in_tree(work):
@@ -224,9 +246,10 @@ def fbt_checks(b, work):
           text)
     code, text = fbt(b, tree, "flash_usb_full")
     check("`fbt flash_usb_full` (with a radio stack): refused, with "
-          "`fbt flash_usb` and `run --update`",
+          "`fbt flash_usb` and the launcher's `update`",
           code == 1 and "stand-in" not in text and "radio stack" in text
-          and "`fbt flash_usb` sends" in text and "run --update" in text, text)
+          and "`fbt flash_usb` sends" in text and "update PACKAGE" in text,
+          text)
     code, text = fbt(b, tree, "flash")
     check("`fbt flash` (a debug probe's): refused",
           code == 1 and "stand-in" not in text and "debug probe" in text, text)
@@ -240,6 +263,11 @@ def stopped_checks(b, folder, tree):
     code, text = tool(b, folder, "launch")
     check("a stopped device: `ufbt launch` says that it is not running",
           code == 1 and "is not running" in text, text)
+    code, text = tool(b, folder, "flash_usb")
+    check("a stopped device: `ufbt flash_usb` says so too, with `run "
+          "--update` and the SDK's package",
+          code == 1 and "is not running" in text and "run --update" in text
+          and "f7-update-" in text, text)
     code, text = tool(b, folder)
     check("a stopped device: `ufbt` alone still builds", code == 0, text[-1500:])
     code, text = fbt(b, tree, "launch", "APPSRC=my_app")
@@ -277,6 +305,8 @@ def main():
             time.sleep(2)
             done = ufbt_checks(b, folder)
             tree = fbt_checks(b, work) if done else None
+            if done:
+                flash_usb_checks(b, folder)
             b.stop()
             if done:
                 stopped_checks(b, folder, tree)

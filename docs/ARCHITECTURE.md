@@ -402,6 +402,28 @@ radio stack, so the launcher blanks the package's radio stage. It keeps every ma
 line, because the firmware reads the manifest's optional keys in order and stops at the
 first missing one.
 
+`./flipperemu update PKG` is for a device that runs, whose card image is the firmware's
+to write and not the launcher's. The same package, without the same stage, goes to
+`/ext/update/` through the CLI's `storage write_chunk` (`fe_files.push`: 1024 bytes a
+time, md5 compared at the end, files that are there with the same bytes skipped), and
+`update install` follows. That command gives no prompt back: "Restarting to apply
+update. BRB", and the firmware resets 100 ms later. The updater has no USB, because
+the firmware does not start the CLI's serial port in a special boot mode. So the
+launcher waits on the monitor for the CDC ACM device to be gone and back, and reads
+the UART log meanwhile: `[I][UpdWorker] Stage N, progress P`. The stage numbers are
+the firmware's enum and not the same in every firmware, so they are learned on the
+way: the stage that a start ended with at progress 100 is "completed", and a later
+stage above that one is the updater's error stage, where it waits on its screen for
+a held Back. That is reported at once, with the key press that leaves it.
+
+All of that needs the updater's `info` lines. The log level is in an RTC backup
+register (the machine's `log-level` property reads and writes it), and the firmware
+takes it when it starts. If it is none, error or warn, the launcher writes `info`
+there before `update install`, for the starts of the update, and the old level again
+if the update did not end well. An updater that ends well writes a level itself (the
+official one the default, Unleashed's none), and that one stays: the launcher only
+says that it is another than before.
+
 ## Timers (`stm32wb55_tim.c`) and the IR receiver
 
 TIM2 is a real timer model, written for TIM1/16/17's layout too:
@@ -800,8 +822,12 @@ serial port whose name holds `flip_`, which is a real Flipper, and only when the
 none the environment's `FLIPPER_PATH`. So the launcher names it, as scons takes it:
 `FLIP_PORT=devices/NAME/usb.tty` after the tool's arguments. Around that it holds the
 port's lock (`devices/NAME/usb.lock`, which its own commands take turns on), and it
-reads the targets to refuse two kinds: the ones for a debug probe, and an update
-package with a radio stack in it, which stops in the updater (BRINGUP_LOG 78).
+reads the targets to refuse two kinds: the ones for a debug probe, and `fbt
+flash_usb_full`, whose package has a radio stack in it and stops in the updater
+(BRINGUP_LOG 78). `ufbt flash_usb` has the same stack in its package, but that package
+is built already: it is the SDK's, `$UFBT_HOME/current/f7-update-*`. For that target
+ufbt is not run at all, and `update` sends the package without the stage (BRINGUP_LOG
+84).
 
 ## Board
 

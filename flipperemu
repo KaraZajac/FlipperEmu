@@ -13,6 +13,7 @@ you flash stays flashed, settings and files persist across runs.
   ./flipperemu run -f update.tgz --headless  update package, no window
   ./flipperemu run --update update.tgz       install it through the firmware's own
                                              updater (OTA, keeps settings and files)
+  ./flipperemu update update.tgz             the same, on a device that runs already
   ./flipperemu stop                          shut a running device down cleanly
   ./flipperemu gui                           the window, for a device that runs already
   ./flipperemu status                        what is plugged in and held to it
@@ -264,9 +265,9 @@ def find_resources_for(fw: pathlib.Path):
     return None
 
 
-def stage_update(dev: Device, pkg: pathlib.Path, keep_radio: bool) -> str:
-    """Put an update package on the SD card the way qFlipper does; return the
-    manifest path as the firmware sees it.
+def unpack_update(pkg: pathlib.Path, tmp: pathlib.Path, keep_radio: bool):
+    """An update package (a .tgz, its folder, or the update.fuf in that), made
+    ready for the card under tmp: (its folder, what its manifest calls it).
 
     The emulated CPU2 is ST's FUS without a radio stack and cannot install
     one, so unless keep_radio is set the radio stage is blanked exactly as
@@ -274,33 +275,51 @@ def stage_update(dev: Device, pkg: pathlib.Path, keep_radio: bool) -> str:
     in place: the firmware reads the manifest's optional keys in file order,
     and a missing one would hide all the keys after it.
     """
-    import tempfile
     from make_sdcard import safe_extract
-    with tempfile.TemporaryDirectory(prefix="fe-update-") as tmp:
-        tmp = pathlib.Path(tmp)
-        if pkg.is_dir():
-            shutil.copytree(pkg, tmp / pkg.name)
-        else:
-            with tarfile.open(pkg, "r:*") as tar:
-                safe_extract(tar, tmp)
-        manifests = sorted(tmp.rglob("update.fuf"))
+    def one(manifests):
         if len(manifests) != 1:
             sys.exit(f"{pkg}: expected one update.fuf, found {len(manifests)}")
-        pdir = manifests[0].parent
-        if not keep_radio:
-            fuf = pdir / "update.fuf"
-            text = fuf.read_text()
-            text = re.sub(r"(?m)^Radio: .*$", "Radio: ", text)
-            text = re.sub(r"(?m)^Radio version: .*$",
-                          "Radio version: 00 00 00 00 00 00", text)
-            fuf.write_text(text)
-            (pdir / "radio.bin").unlink(missing_ok=True)
-        info = re.search(r"(?m)^Info: *(.+)$", (pdir / "update.fuf").read_text())
+        return manifests[0].parent
+
+    if pkg.name == "update.fuf" and pkg.is_file():
+        pkg = pkg.resolve().parent
+    if pkg.is_dir():
+        folder = one(sorted(pkg.rglob("update.fuf"))).resolve()
+        shutil.copytree(folder, tmp / folder.name)
+    elif not pkg.exists():
+        sys.exit(f"{pkg}: no such update package")
+    else:
+        try:
+            with tarfile.open(pkg, "r:*") as tar:
+                safe_extract(tar, tmp)
+        except (tarfile.TarError, ValueError, EOFError):
+            sys.exit(f"{pkg}: not an update package (a .tgz, or the folder "
+                     "that was in one)")
+    pdir = one(sorted(tmp.rglob("update.fuf")))
+    if not keep_radio:
+        fuf = pdir / "update.fuf"
+        text = fuf.read_text()
+        text = re.sub(r"(?m)^Radio: .*$", "Radio: ", text)
+        text = re.sub(r"(?m)^Radio version: .*$",
+                      "Radio version: 00 00 00 00 00 00", text)
+        fuf.write_text(text)
+        (pdir / "radio.bin").unlink(missing_ok=True)
+    info = re.search(r"(?m)^Info: *(.+)$", (pdir / "update.fuf").read_text())
+    return pdir, (info.group(1).strip() if info else pdir.name)
+
+
+def stage_update(dev: Device, pkg: pathlib.Path, keep_radio: bool) -> str:
+    """Put an update package on the SD card (of a device that does not run)
+    the way qFlipper does; return the manifest path as the firmware sees it,
+    and what the package calls itself."""
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="fe-update-") as tmp:
+        pdir, label = unpack_update(pkg, pathlib.Path(tmp), keep_radio)
         img = ["-i", str(dev.sd)]
         subprocess.run(["mmd", *img, "::update"], capture_output=True)
         subprocess.run(["mdeltree", *img, f"::update/{pdir.name}"], capture_output=True)
         subprocess.run(["mcopy", *img, "-s", "-Q", str(pdir), "::update/"], check=True)
-    return f"/ext/update/{pdir.name}/update.fuf", (info.group(1).strip() if info else pdir.name)
+    return f"/ext/update/{pdir.name}/update.fuf", label
 
 
 # --------------------------------------------------------------- commands
@@ -647,6 +666,23 @@ class Session:
         return self.proc.wait()
 
 
+def start_update(cli, manifest):
+    """Tell the firmware, at its CLI prompt, to install the package whose
+    manifest this is.  None when it restarts to do so (no prompt comes after
+    that), else what it said instead."""
+    cli.write(f"update install {manifest}\r".encode())
+    out, end = b"", time.time() + 20
+    while time.time() < end and b"BRB" not in out and b"Error" not in out:
+        if cli._fill(0.2):
+            out += cli.buf
+            cli.buf = b""
+    text = out.decode(errors="replace")
+    if "BRB" in text:
+        return None
+    err = re.search(r"Error: [^\r\n]*", text)
+    return err.group(0) if err else text.strip() or "no answer to `update install`"
+
+
 def usb_helpers(dev: Device, proc, usb_mode, manifest, label=None):
     """Link devices/<name>/usb.tty to QEMU's pty for the USB serial port, and
     start a staged update through the firmware's CLI (as qFlipper does)."""
@@ -675,26 +711,18 @@ def usb_helpers(dev: Device, proc, usb_mode, manifest, label=None):
         cli = FlipperCli(ep)
         try:
             cli.read_until_prompt(60)
-            cli.write(f"update install {manifest}\r".encode())
-            out, end = b"", time.time() + 20
-            while time.time() < end and b"BRB" not in out and b"Error" not in out:
-                if cli._fill(0.2):
-                    out += cli.buf
-                    cli.buf = b""
+            refused = start_update(cli, manifest)
         finally:
             cli.close()
     except (OSError, TimeoutError, ConnectionError) as e:
         print(f"[{dev.name}] could not start the update over USB: {e}", flush=True)
         return
-    text = out.decode(errors="replace")
-    if "BRB" in text:
+    if refused:
+        print(f"[{dev.name}] update refused: {refused}", flush=True)
+    else:
         print(f"[{dev.name}] updater started: {manifest}", flush=True)
         dev.save_info(firmware=f"{label} (installed by update)",
                       flashed=time.strftime("%Y-%m-%d %H:%M:%S"), source=manifest)
-    else:
-        err = re.search(r"Error: [^\r\n]*", text)
-        print(f"[{dev.name}] update refused: {err.group(0) if err else text.strip()}",
-              flush=True)
 
 
 def cmd_stop(args):
@@ -1446,18 +1474,30 @@ def cmd_tool(args):
                  f"`./flipperemu -d {dev.name} gdb` debugs it")
     stack = sorted(targets & TOOL_STACK[name])
     if stack:
-        pkg = "PACKAGE"
-        if name == "ufbt":
-            found = sorted(sdk_home().glob("current/f7-update-*"))
-            pkg = str(found[-1]) if found else "its SDK's f7-update-… folder"
-        sys.exit(f"flipperemu: `{name} {stack[0]}` sends an update package with a "
-                 "radio stack in it, which this Flipper's second core cannot "
-                 "install: its updater would stop at \"CRC mismatch #[3-99]\" "
-                 "(a held Back leaves it).\n"
-                 + ("`fbt flash_usb` sends the package without one, and works.  "
-                    if name == "fbt" else "")
-                 + f"`./flipperemu -d {dev.name} run --update {pkg}`, with "
-                 "the device stopped, installs it without that stage")
+        why = (f"`{name} {stack[0]}` sends an update package with a radio "
+               "stack in it, which this Flipper's second core cannot "
+               "install: its updater would stop at \"CRC mismatch #[3-99]\"")
+        if name == "fbt":
+            sys.exit(f"flipperemu: {why} (a held Back leaves it).\n"
+                     "`fbt flash_usb` sends the package without one, and "
+                     f"works.  `./flipperemu -d {dev.name} update PACKAGE` "
+                     "sends a full one (dist/…/f7-update-…) without that "
+                     "stage")
+        # ufbt has one package to send: its SDK's, with the stack
+        found = sorted(sdk_home().glob("current/f7-update-*"))
+        if not found:
+            sys.exit(f"flipperemu: `ufbt {stack[0]}` sends its SDK's update "
+                     f"package, and there is none in {sdk_home() / 'current'} "
+                     "(`ufbt update` gets the SDK)")
+        if len(targets) > 1:
+            sys.exit(f"flipperemu: {why}.\n`./flipperemu -d {dev.name} ufbt "
+                     f"{stack[0]}`, with no other target, sends it without "
+                     "that stage")
+        if dev.running():
+            print(f"[{dev.name}] {why}.  Sending that package without the "
+                  f"stage (./flipperemu -d {dev.name} update {found[-1]})",
+                  flush=True)
+        return send_update(dev, found[-1])
     lock = None
     if not any(a.startswith("FLIP_PORT=") for a in rest):
         port = sorted(targets & TOOL_PORT)
@@ -1590,6 +1630,202 @@ def cmd_push(args):
         close()
     print(copied_text(dev, files, copied, same))
     return 0
+
+
+# ---- an update package, to a device that runs
+
+LOG_QUIET = ("none", "error", "warn")   # levels that hide the updater's steps
+
+
+def firmware_log_level(dev, level=None):
+    """The firmware's log level, as its RTC register has it.  With a level:
+    written there first, which the firmware takes at its next start."""
+    m = open_monitor(dev)
+    try:
+        if level:
+            m.cmd(f"qom-set /machine log-level {level}")
+        return qom_get(m, "/machine", "log-level")
+    finally:
+        m.close()
+
+
+def await_update(dev, log, timeout):
+    """Wait for the firmware's updater: what became of it ("back": the
+    Flipper runs again, with its USB serial port; "error": the updater stopped
+    at one; "ended": the emulator did; "restarted": it was started anew;
+    "timeout"), and how often its log showed the firmware starting.
+
+    The updater has no USB: the serial port coming back is the end of it.
+    Until then its log says where it is (`[I][UpdWorker] Stage 9, progress
+    0`).  The stage numbers are the firmware's own, and differ between
+    firmwares, so only this is made of them: a stage that ended at 100
+    before a restart is the one for "done", and one above it is an error,
+    after which the updater stays on its screen."""
+    import fe_log
+    tty = sys.stderr.isatty()
+    start = time.monotonic()
+    starts, stage, full, done, gone, look = 0, None, False, None, False, 0.0
+    while True:
+        now = time.monotonic()
+        for item in log.poll():
+            if item is fe_log.RESTART:
+                return "restarted", starts
+            if item is fe_log.REBOOT:
+                starts, gone = starts + 1, True
+                if stage is not None and full:
+                    done = stage
+                stage = None
+            elif item.tag == "UpdWorker":
+                hit = re.match(r"Stage (\d+), progress (\d+)", item.text)
+                if hit:
+                    stage, full = int(hit.group(1)), hit.group(2) == "100"
+        if done is not None and stage is not None and stage > done:
+            return "error", starts
+        if now >= look:
+            look = now + 1
+            if not dev.running():
+                return "ended", starts
+            m = open_monitor(dev)
+            try:
+                usb = read_usb(m)
+            finally:
+                m.close()
+            if "CDC ACM" not in (usb["device"] or ""):
+                gone = True
+            elif gone:
+                return "back", starts
+        if now - start > timeout:
+            return "timeout", starts
+        if tty:
+            sys.stderr.write(f"\r\x1b[K  the updater works: {now - start:.0f} s"
+                             + (f", start {starts}" if starts else "")
+                             + (f", stage {stage}" if stage is not None else ""))
+            sys.stderr.flush()
+        time.sleep(0.25)
+
+
+def send_update(dev, pkg, keep_radio=False, wait=True, timeout=900.0):
+    """Send an update package to a running device's SD card through the
+    firmware's CLI, have the firmware install it, and wait until it has."""
+    import fe_files
+    import fe_log
+    import tempfile
+    if not dev.running():
+        sys.exit(f"[{dev.name}] is not running: `./flipperemu -d {dev.name} run "
+                 f"--update {pkg}` starts it and installs the package")
+    was, lent = None, False
+
+    def give_back():
+        """The log level that was lent to the updater: as it was again,
+        from the firmware's next start"""
+        if lent and dev.running():
+            firmware_log_level(dev, was)
+
+    with tempfile.TemporaryDirectory(prefix="fe-update-") as tmp:
+        pdir, label = unpack_update(pkg, pathlib.Path(tmp), keep_radio)
+        size = sum(f.stat().st_size for f in pdir.rglob("*") if f.is_file())
+        manifest = f"/ext/update/{pdir.name}/update.fuf"
+        files, close = open_card(dev)
+        try:
+            print(f"[{dev.name}] sending {label} ({size / 1e6:.1f} MB"
+                  + ("" if keep_radio else ", without its radio stage")
+                  + f") to /ext/update/{pdir.name} through the Flipper's "
+                  "CLI, which takes some 20 KB/s; what is there already is "
+                  "not sent again", flush=True)
+            with held_interrupt("stopping after this piece") as stop:
+                copied, same = fe_files.push(
+                    files, [pdir], "/ext/update/", progress=transfer_progress(),
+                    stop=stop, say=lambda line: print(
+                        "  " + line.replace(f"{tmp}/", ""), flush=True))
+            log = fe_log.Log(dev.uart, tail=4096)
+            log.poll()                  # from here on: what the updater logs
+            was = firmware_log_level(dev)
+            if wait and was in LOG_QUIET:
+                # the updater is the firmware's next start, and takes the
+                # level that the register has by then.  Without its "Stage"
+                # lines an error on its screen is not seen from here
+                lent = True
+                firmware_log_level(dev, "info")
+                print(f"[{dev.name}] the firmware's log level is {was}: info "
+                      "while the updater works, for its steps to be seen",
+                      flush=True)
+            try:
+                refused = start_update(files.cli, manifest)
+            except BaseException:
+                give_back()
+                raise
+        finally:
+            close()
+    if refused:
+        give_back()
+        sys.exit(f"[{dev.name}] update refused: {refused}")
+    stamp = dict(firmware=f"{label} (installed by update)",
+                 flashed=time.strftime("%Y-%m-%d %H:%M:%S"), source=manifest)
+    if not wait:
+        dev.save_info(**stamp)
+        print(f"[{dev.name}] updater started: {manifest} (it has no USB while "
+              f"it works; `./flipperemu -d {dev.name} status` shows the serial "
+              "port when it is back)")
+        return 0
+    print(f"[{dev.name}] updater started: the Flipper starts a few times, "
+          "without USB, until it is done", flush=True)
+    start = time.monotonic()
+    try:
+        how, starts = await_update(dev, log, timeout)
+    except KeyboardInterrupt:
+        give_back()
+        raise KeyboardInterrupt("no longer waiting: the update goes on on the "
+                                "Flipper") from None
+    finally:
+        log.close()
+        if sys.stderr.isatty():
+            sys.stderr.write("\r\x1b[K")
+    took = time.monotonic() - start
+    look = (f"`./flipperemu -d {dev.name} shot FILE.png` shows its screen, "
+            f"`./flipperemu -d {dev.name} log` what it logged")
+    if how != "back":
+        give_back()
+    if how == "error":
+        sys.exit(f"[{dev.name}] the updater stopped at an error after "
+                 f"{took:.0f} s, and waits on its screen: holding Back there "
+                 f"(`./flipperemu -d {dev.name} press --hold 1500 back`) "
+                 f"starts the firmware that is on the Flipper.  {look}")
+    if how == "ended":
+        sys.exit(f"[{dev.name}] the emulator ended while the updater worked")
+    if how == "restarted":
+        sys.exit(f"[{dev.name}] was started anew while the updater worked")
+    if how == "timeout":
+        sys.exit(f"[{dev.name}] the Flipper's USB serial port is not back "
+                 f"after {took:.0f} s (its log shows {starts} starts): the "
+                 f"updater may still work, or wait at an error.  {look}")
+    cli = open_cli(dev, timeout=30.0)
+    try:
+        now = dict(re.findall(r"(?m)^([\w.]+) *: (.*)$", cli.run("info device")))
+    finally:
+        cli.close()
+    dev.save_info(**stamp)
+    runs = now.get("firmware.version") or "a firmware that does not say which"
+    more = ", ".join(f"{what} {now[key]}" for key, what in (
+        ("firmware.commit.hash", "commit"), ("firmware.build.date", "built"))
+        if now.get(key))
+    print(f"[{dev.name}] updated in {took:.0f} s: it runs {runs}"
+          + (f" ({more})" if more else ""))
+    left = firmware_log_level(dev)
+    if left != was:
+        # the firmware's own doing (the official updater: default; Unleashed's:
+        # none), and what a real Flipper has after an update too
+        print(f"[{dev.name}] its updater left the firmware's log level at "
+              f"{log_level_text(left)} (it was {log_level_text(was)}): "
+              f"`./flipperemu -d {dev.name} log --set-level {was}` sets it "
+              "again, from the firmware's next start "
+              f"(`./flipperemu -d {dev.name} reset`)")
+    return 0
+
+
+def cmd_update(args):
+    return send_update(Device(args.device), pathlib.Path(args.package),
+                       keep_radio=args.keep_radio, wait=not args.no_wait,
+                       timeout=args.timeout)
 
 
 def cmd_pull(args):
@@ -2511,6 +2747,28 @@ def main():
     p.add_argument("-f", "--force", action="store_true",
                    help="copy what is there unchanged too")
     p.set_defaults(func=cmd_push)
+
+    p = sub.add_parser(
+        "update", help="send an update package to a running device, and "
+                       "have its firmware install it",
+        description="Send an update package to the SD card of a running "
+        "device through its firmware's CLI, and have the firmware install it "
+        "with its own updater, as qFlipper and `fbt flash_usb` do with a "
+        "real Flipper: settings and files stay.  A file that is on the card "
+        "already with the same bytes is not sent again.  The Flipper starts "
+        "a few times, without USB, while its updater works; this waits "
+        "until its USB serial port is back.  For a device that does not "
+        "run: `run --update PKG`.")
+    p.add_argument("package", metavar="PKG",
+                   help="a .tgz, its unpacked folder, or the update.fuf in it")
+    p.add_argument("--keep-radio", action="store_true",
+                   help="keep the radio stack stage (the emulated CPU2 cannot "
+                        "install it, so the updater will fail)")
+    p.add_argument("--no-wait", action="store_true",
+                   help="leave when the updater has started")
+    p.add_argument("--timeout", type=float, default=900.0, metavar="S",
+                   help="how long to wait for the updater (default: 900 s)")
+    p.set_defaults(func=cmd_update)
 
     p = sub.add_parser(
         "pull", help="copy files and folders from the SD card",

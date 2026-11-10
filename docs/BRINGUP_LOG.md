@@ -1064,6 +1064,64 @@ All three are small, self-contained, and suitable for sending upstream.
       "no crash" check, and wants the report: 25 checks now, on each of the three
       firmwares. Momentum's and Unleashed's NFC app crash in the same way.
 
+84. **An update for a Flipper that runs.** `run --update` writes the package into the
+    card's image and then starts the device. A device that runs has its card to
+    itself, and `ufbt flash_usb` was refused for the radio stack in the SDK's package
+    (78): the one target of the app loop with no way through. `./flipperemu update
+    PKG` sends the package as the firmware's own tools send it, file by file through
+    the CLI, and then `update install`.
+    - The CLI takes 22 KB/s (`storage write_chunk`, 1024 bytes a time, as `push`
+      does it): 111 s for the official package's 2.5 MB, nine minutes or so for
+      Momentum's 12. A real Flipper is no faster. A file that is on the card with
+      the same size and md5 is not sent again, so a second time costs seconds.
+    - `update install` gives no prompt back. "Verifying update package", then
+      `Error: …. Stopping update.`, or `OK.` and "Restarting to apply update. BRB",
+      and 100 ms later the firmware is gone. The launcher reads for one of the two.
+    - The updater has no USB: in a special boot mode the firmware does not start the
+      CLI's serial port (`[W][CliVcp] Skipping start in special boot mode`). So
+      "done" is the CDC ACM device there again after it was gone. The official
+      1.5.1 starts four times on the way and takes 96 to 100 s.
+    - What it does meanwhile is in the UART log: `[I][UpdWorker] Stage N, progress
+      P`, a line when the stage changes (unpacking the resources says nothing for
+      40 s). The numbers are the firmware's enum, and another firmware may count
+      differently, so the launcher learns them: the stage that a start ended with
+      at progress 100 is "completed", and a later stage above it is the error
+      stage. With the radio stage kept (`--keep-radio`) that is `Stage 3` and then
+      `Stage 18, progress 0`. The launcher says so after seconds and not after its
+      timeout: the updater waits on "Update Failed! CRC mismatch #[3-99]" for a
+      held Back, which starts the firmware that is there.
+    - Updated to Unleashed, the Flipper came back and its log said nothing more,
+      from the updater's `Stage 11` on. `status`: "the firmware's level: none".
+      Unleashed's updater ends its flash stage with
+      `furi_hal_rtc_set_log_level(FuriLogLevelNone)` where the official one has
+      `FuriLogLevelDefault` (production builds; `update_task_worker_flasher.c`). So
+      a real Flipper is as silent after it. The launcher says so when the level is
+      another than before the update, with `log --set-level` to set it again.
+    - That made the next update blind: no stage lines, and a wait of 15 minutes in
+      front of an error screen. The level is in the RTC register, and the updater
+      is the firmware's next start: when the level hides `info`, the launcher
+      writes `info` there before `update install`, and the old level again when
+      the update does not end well. With that the error is seen after 4 s at level
+      none too.
+    - The launcher counted the firmware's starts from the log and said "4 starts"
+      at the end. With a log that goes silent on the way it said 2. It says none
+      now.
+    - `ufbt flash_usb` through the wrapper does not run ufbt. Its package is the
+      SDK's (`$UFBT_HOME/current/f7-update-*`) and nothing is built for it, so the
+      launcher sends that one without the stage. `fbt flash_usb_full` builds its
+      package first and sends it in the same run: it stays refused, with `fbt
+      flash_usb` and `update dist/…` named.
+    - A fright on the way: the first screenshot after an update said "Flipper
+      crashed and was rebooted: furi_check failed", with no `[CRASH]` in the log.
+      The firmware keeps a pointer to a crash's message in an RTC backup register,
+      which is in the device's `nvram.bin`, and shows the message at every start
+      until a button is pressed. This one was left from entry 83's test on that
+      device. A new device showed "Firmware update: Success".
+    - `scripts/update_check.py`: 25 checks. Official 1.5.1 with its own
+      package: 218 s, 100 of them the updater. Unleashed with its own (5.3 MB):
+      368 s, 127 the updater. Official to Unleashed: 354 s, 138 the updater.
+      `ufbt_check.py` runs the real `ufbt flash_usb` now: 29 checks.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
@@ -1094,6 +1152,10 @@ All three are small, self-contained, and suitable for sending upstream.
 - OTA (`run --update`): Unleashed → official 1.5.1 in 68 s, including writing the
   flash and unpacking 1074 resource files to the SD. Momentum's 11 MB resource
   bundle takes longer.
+- `update` on a device that runs, official 1.5.1's package (2.5 MB without the radio
+  stack): 218 s, of which 111 s through the CLI at 22 KB/s and 100 s in the updater,
+  where the firmware starts four times. The updater's error with the radio stage
+  kept: reported 4 s after `update install`.
 - The enclave check through the firmware (`enclave_check.py -f`): four boots and 22
   checks in 40 to 48 s, on each of the three firmwares.
 - USB: 33 ms from D+ pull-up to enumerated: 25 ms of attach debounce, suspend and
