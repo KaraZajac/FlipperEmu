@@ -4,8 +4,8 @@ FlipperView is the widget in the middle of the window (fe_gui.py).  It shows
 what the front-panel link reports: the picture on the LCD, the backlight, the
 LED, the vibration motor, the speaker.  It turns the mouse and the keyboard
 into button presses, and its ports are where a Flipper has them, to click:
-the USB plug in the lower face of its nose, the infrared window in the upper
-one, the GPIO sockets along the top, the microSD card at the bottom right.
+the USB plug in its right side, the infrared window in the upper face of its
+nose, the GPIO sockets along the top, the microSD card at the bottom right.
 
 The drawing is this project's own, with the proportions of the real thing: a
 body that narrows to a blunt nose at the left and has its top right corner cut
@@ -23,12 +23,12 @@ from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QTransform
 
 # ---- where everything is, in LCD pixels
 
-VIEW_W, VIEW_H = 424, 180
-BX, BY, BW, BH = 30.0, 10.0, 380.0, 151.0       # the box around its body
+VIEW_W, VIEW_H = 440, 180                       # (room at the right: the cable)
+BX, BY, BW, BH = 14.0, 10.0, 380.0, 151.0       # the box around its body
 
 # Its outline, clockwise from the top left, and how far each corner's round
 # reaches.  The nose is at the left: the face above it has the infrared
-# window, the face below it the USB port.
+# window.  The right side is upright: the USB port is in the middle of it.
 OUTLINE = ((58, 0, 10), (326, 0, 16), (380, 62, 12), (380, 151, 8),
            (40, 151, 9), (0, 96, 4.5), (0, 83, 4.5))
 # The flat front.  Between the two are the faces that slope away to the
@@ -58,12 +58,11 @@ SD_X, SD_W, SD_H = BX + 298, 40.0, 20.0         # the card, in the bottom edge
 SD_OUT = (2.5, 13.0)                            # how far it shows: in, pulled
 USB_OUT = 11.0                                  # how far an unplugged plug is
 
-# The two faces of the nose are at an angle, and so is what is in them: each
-# is drawn in a frame of its own.  USB: the origin is the port, x points out
-# of it.  Infrared: the origin is the middle of the window, x runs along the
-# edge, y points into the body.
-USB_T = QTransform().translate(BX + 20, BY + 123.5).rotate(
-    math.degrees(math.atan2(40, -55)))
+# What is in an edge is drawn in a frame of its own.  USB, in the right side:
+# the origin is the port, x points out of it.  Infrared, in the upper face of
+# the nose, which is at an angle: the origin is the middle of the window, x
+# runs along the edge, y points into the body.
+USB_T = QTransform().translate(BX + BW, BY + 106.5)
 IR_T = QTransform().translate(BX + 29, BY + 41.5).rotate(
     math.degrees(math.atan2(-83, 58)))
 IR_WINDOW = QRectF(-27, 0.5, 54, 4.6)
@@ -586,14 +585,14 @@ class FlipperView(QtWidgets.QWidget):
             p.restore()
 
     def draw_cable(self, p, t):
-        """The USB plug in the lower face of the nose, or a little way out"""
+        """The USB plug in the right side, or a little way out of it"""
         out = 0.0 if self.cable != "unplugged" else USB_OUT
         end = USB_T.map(QPointF(out + 14, 0))
         wire = QPainterPath()                   # it hangs down, off the picture
         wire.moveTo(end)
-        wire.cubicTo(USB_T.map(QPointF(out + 31, 0)),
-                     QPointF(end.x() - 9, VIEW_H - 16),
-                     QPointF(end.x() - 13, VIEW_H + 6))
+        wire.cubicTo(QPointF(end.x() + 15, end.y()),
+                     QPointF(end.x() + 13, VIEW_H - 22),
+                     QPointF(end.x() + 5, VIEW_H + 6))
         p.setPen(QPen(QColor("#2b2c31"), 4.4, Qt.SolidLine, Qt.RoundCap))
         p.setBrush(Qt.NoBrush)
         p.drawPath(wire)

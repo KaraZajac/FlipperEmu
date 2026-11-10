@@ -207,7 +207,7 @@ instead, and `--headless` no window at all.
   Power, a flat battery off USB), the window stays and shows it off. Hold Back to switch
   it on, or plug its USB cable in. It starts with its battery as it was, and with the
   cards, tags and keys that were held to it.
-- **The USB plug** in the lower left face of its nose: click it to unplug the cable,
+- **The USB plug** in its right side: click it to unplug the cable,
   again to plug it back in. The USB menu also has a charger (power without data).
   Unplugged, the Flipper runs on its battery and sleeps deeply when idle.
 - **The microSD card** at the bottom right: click it to pull it out (as rudely as a

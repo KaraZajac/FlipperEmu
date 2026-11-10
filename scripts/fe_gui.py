@@ -76,8 +76,8 @@ real one: Back held for 5 seconds on the desktop offers to switch it off.</p>
 Left held after letting go of Back and it starts in DFU mode.</p>
 <p>When it is <b>off</b>, hold Back to switch it on, or plug its USB cable in
 (click the plug).</p>
-<p>Its ports are where a real one has them. Click the <b>USB plug</b> in the
-lower left face of its nose to plug it in and out, the <b>microSD card</b>
+<p>Its ports are where a real one has them. Click the <b>USB plug</b> in its
+right side to plug it in and out, the <b>microSD card</b>
 at the bottom right to pull it out and push it back, the <b>infrared
 window</b> in the upper left face to point a remote at it, and the <b>GPIO
 pins</b> along the top for what the firmware logs (it comes out of two of
