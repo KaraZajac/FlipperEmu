@@ -30,9 +30,9 @@ USB, the secure enclave, IR receive and transmit, Sub-GHz receive and transmit, 
 RFID read, emulate and T5577 write, iButton read and emulate, NFC read (NTAG215, MIFARE
 Classic 1K) and emulate, USB/IP export, warm reboot, no crash): **official 1.5.1**,
 **Momentum mntm-012**, **Unleashed unlshd-094**. The window passes
-`scripts/gui_check.py` (clicked buttons, the firmware log and its level, the bench,
-switching off and on, the Left + Back reboot, installing firmware) on the same three,
-off-screen.
+`scripts/gui_check.py` (clicked buttons, the firmware log and its level, a file copied
+to the card, an app dropped on it, the bench, switching off and on, the Left + Back
+reboot, installing firmware) on the same three, off-screen.
 
 | | |
 |:-:|:-:|
@@ -236,6 +236,18 @@ instead, and `--headless` no window at all.
   remote of buttons; `.sub` captures and Princeton keys go on the air. A real radio (an
   RTL-SDR through `rtl_tcp`, a HackRF, an IQ recording), a Proxmark3 or a script can be
   its antenna. Files dropped on the window go where they belong.
+- **Apps**: drop a `.fap` on the window (or Apps > Install and start an app, Ctrl+O).
+  It is copied to the card and started, and the app that ran is closed first. **F5**
+  does that again with the same file: build, F5, look. The console has what
+  [`./flipperemu app`](#apps) says: what the file was built for, where it went, what
+  the firmware logged about the start. Apps > Close the app that runs; Apps > List its
+  apps.
+- **Files to the card**: Device > microSD card > Copy files to it (Ctrl+Shift+O) or
+  Copy a folder to it, also in the menu of the card's slot and of its tile. You name
+  the folder on the card; left empty for files that have a place of their own, each
+  goes there (`.sub` to `/ext/subghz`, ...). A file of no known kind that is dropped
+  on the window is copied the same way. This works while the Flipper is off too: then
+  the files go into the card's image, and a dropped app is copied and not started.
 - **The console** (View > The console, Ctrl+L) says what you did and what the Flipper
   did (its transmissions, what a reader read), and has a line for the Flipper's CLI.
 - **The firmware log** (View > The firmware log, Ctrl+Shift+L) is what the firmware
@@ -262,7 +274,8 @@ The window and the emulator talk over the [front-panel link](docs/PANEL_LINK.md)
 LCD, the lights and the buttons, and the QOM properties the bench shows. Any other
 program can use it too. `scripts/gui_check.py FIRMWARE` checks the window off-screen: it
 boots a throwaway device, clicks its buttons, reads the firmware's log and sets its
-level, switches it off and on, and reboots it.
+level, copies a file to its card, drops an app on it and starts it again with F5,
+switches it off and on, and reboots it.
 
 ## The `flipperemu` tool
 
@@ -482,6 +495,9 @@ dist/my_app.fap -> /ext/apps/Tools/my_app.fap (26916 bytes)
 
 ARGS is what the app is started with, spaces and all: for the firmware's own apps the
 path of a file to open.
+
+In [the window](#the-window) the same command is behind a `.fap` dropped on it and
+behind F5, with its lines in the console.
 
 `scripts/app_check.py FIRMWARE` checks this on a throwaway device with an app the
 firmware brought along: 23 checks on each of the three firmwares.

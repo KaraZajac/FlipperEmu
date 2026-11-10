@@ -28,6 +28,7 @@ import time
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt
 
+import fe_files
 import fe_gui_widgets as W
 from fe_gui_link import PanelLink
 from fe_gui_view import VIEW_H, VIEW_W, FlipperView, app_icon
@@ -60,6 +61,8 @@ FILES = {
     "subghz": ("Sub-GHz captures", "Sub-GHz captures (*.sub)", "subghz-tx"),
 }
 FIRMWARE = "Firmware (*.tgz *.tar.gz *.tar *.dfu *.elf *.bin)"
+APPS = "Flipper apps (*.fap)"
+APP_WAIT_S = 45             # a question about an app on its screen: this long
 SCALES = (2, 3, 4, 5, 6)
 POWER_ON_MS = 1500          # hold Back this long, and an off Flipper starts
 RESET_MS = 3000             # Left + Back held this long: it reboots
@@ -85,7 +88,9 @@ them). Right-click for their menus, and anywhere else on the Flipper for the
 Device menu.</p>
 <p>Files dropped on the window go where they belong: .nfc and Proxmark3
 .json cards, .rfid tags, .ibtn keys, .sub captures, .ir remotes, and
-firmware.</p>"""
+firmware. An app (<b>.fap</b>) is copied to its card and started, and
+<b>F5</b> does that again with the same file, after a new build. Anything
+else dropped is copied to its microSD card, into a folder you name.</p>"""
 
 
 def config_path():
@@ -310,6 +315,12 @@ class MainWindow(QtWidgets.QMainWindow):
                           lambda: self.set_sd(False), live=True)
         self.a_sd_in = A(self.menu_sd, "Push it in",
                          lambda: self.set_sd(True), live=True)
+        self.menu_sd.addSeparator()
+        A(self.menu_sd, "Copy files to it…", self.ask_copy_files,
+          "Ctrl+Shift+O",
+          tip="Through the firmware while it runs, into the card's image "
+              "while it is off")
+        A(self.menu_sd, "Copy a folder to it…", self.ask_copy_folder)
         self.menu_battery = m.addMenu("Battery")
         for text, percent in (("Full (100 %)", 100), ("Good (87 %)", 87),
                               ("Low (15 %)", 15), ("Very low (5 %)", 5),
@@ -323,6 +334,20 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addSeparator()
         A(m, "Quit" if owner else "Close", self.close, "Ctrl+Q",
           tip="Stops the emulator" if owner else "Leaves the emulator running")
+
+        m = self.menu_apps = bar.addMenu("&Apps")
+        self.a_app = A(m, "Install and start an app…", self.ask_app, "Ctrl+O",
+                       tip="Copy a .fap from this computer to its card, close "
+                           "the app that runs, and start this one")
+        self.a_app_again = A(m, "Install and start it again", self.app_again,
+                             "F5", tip="The same file again: after a new build")
+        self.recent_menu(m, "app")
+        m.addSeparator()
+        A(m, "Close the app that runs", self.close_app, live=True,
+          tip="As the loader asks it to; with its Back button if it does not "
+              "listen")
+        A(m, "List its apps", self.list_apps, live=True,
+          tip="The apps the firmware has, and the .fap files on its card")
 
         m = self.menu_usb = bar.addMenu("&USB")
         group = QtGui.QActionGroup(self)
@@ -625,7 +650,12 @@ class MainWindow(QtWidgets.QMainWindow):
         for cable, a in self.a_cable.items():
             a.setEnabled(live or (owner and self.state == "off"))
         self.a_terminal.setEnabled(live and self.cable == "computer")
-        self.menu_sd.setEnabled(live and not self.sd_none)
+        self.menu_sd.setEnabled(self.can_copy())
+        again = self.recent("app")
+        self.a_app.setEnabled(self.can_copy())
+        self.a_app_again.setEnabled(live and bool(again))
+        self.a_app_again.setText(f"Install and start {short(again[0])} again"
+                                 if again else "Install and start it again")
         self.menu_battery.setEnabled(live)
         self.fwlog.set_settable(live or (owner and self.state == "off"))
 
@@ -1032,8 +1062,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ------------------------------------------------------------ commands
 
-    def command(self, *args, then=None, quiet=False):
-        self.runner.run(*args, then=then, quiet=quiet)
+    def command(self, *args, then=None, quiet=False, limit=None):
+        self.runner.run(*args, then=then, quiet=quiet, limit=limit)
 
     def on_failed(self, text):
         self.log.add(text, "error")
@@ -1133,6 +1163,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.use_file(kind, path)
 
     def use_file(self, kind, path, remember=True):
+        if kind == "app":
+            return self.start_app(path, remember)
         if remember:
             self.remember(kind, path)
         if kind == "ir":
@@ -1421,6 +1453,103 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.show_log()
         self.command("flash", path, then=done)
 
+    # ------------------------------------------------------------ apps, files
+
+    def can_copy(self):
+        """its card takes files: through the firmware while it runs, in the
+        card's image while it does not"""
+        return not self.sd_none and self.state in ("on", "busy", "off", "lost")
+
+    def ask_app(self):
+        start = self.settings.get("dir/app", os.path.expanduser("~"))
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Install and start an app", start, f"{APPS};;All files (*)")
+        if path:
+            self.start_app(path)
+
+    def start_app(self, path, remember=True):
+        """Copy a .fap to the card and start it (the launcher's `app`)"""
+        if remember:
+            self.remember("app", path)
+            self.update_actions()
+        if not self.can_copy():
+            self.on_failed(f"{short(path)}: there is no Flipper with a microSD "
+                           "card to put it on just now")
+        elif not self.is_live():
+            self.log.add(f"{short(path)}: the Flipper is off, so it is only "
+                         "copied to its card")
+            self.command("app", "--no-start", path, limit=W.COPY_MS)
+        else:
+            self.command("app", "--wait", APP_WAIT_S, path,
+                         then=self.app_done, limit=W.COPY_MS)
+
+    def app_done(self, code, text):
+        if code:
+            self.show_log()             # what the loader and the log said
+        elif text:
+            self.statusBar().showMessage(text.splitlines()[-1], 8000)
+
+    def app_again(self):
+        paths = self.recent("app")
+        if paths:
+            self.start_app(paths[0], remember=False)
+
+    def close_app(self):
+        self.command("app", "--close", then=self.app_done)
+
+    def list_apps(self):
+        self.show_log()
+        self.command("app", "--list")
+
+    def ask_copy_files(self):
+        start = self.settings.get("dir/copy", os.path.expanduser("~"))
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self, "Copy files to the microSD card", start)
+        if paths:
+            self.settings.set("dir/copy", os.path.dirname(paths[0]))
+            self.ask_copy(paths)
+
+    def ask_copy_folder(self):
+        start = self.settings.get("dir/copy", os.path.expanduser("~"))
+        path = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Copy a folder to the microSD card", start)
+        if path:
+            self.settings.set("dir/copy", os.path.dirname(path.rstrip("/")))
+            self.ask_copy([path])
+
+    def ask_copy(self, paths):
+        """Which folder on the card?  Then copy them there"""
+        homed = all(os.path.isfile(p) and os.path.splitext(p)[1].lower()
+                    in (*fe_files.HOMES, ".fap") for p in paths)
+        what = (short(paths[0].rstrip("/")) if len(paths) == 1
+                else f"these {len(paths)}")
+        label = f"Copy {what} into this folder on the card:"
+        if homed:
+            label += ("\n(empty: where the Flipper keeps files of that kind, "
+                      "as .sub in /ext/subghz)")
+        folder, ok = QtWidgets.QInputDialog.getText(
+            self, "Copy to the microSD card", label,
+            text="" if homed else self.settings.get("card/folder", "/ext"))
+        if ok:
+            self.copy_to_card(paths, folder.strip())
+
+    def copy_to_card(self, paths, folder=""):
+        """The launcher's `push`: into the folder, or each file where its
+        kind lives"""
+        if folder and not folder.startswith("/ext"):
+            self.on_failed(f"copy: {folder}: a folder on the card starts with "
+                           "/ext, as /ext/my_files")
+            return
+        if not self.can_copy():
+            self.on_failed("copy: there is no Flipper with a microSD card to "
+                           "copy to just now")
+            return
+        if folder:
+            self.settings.set("card/folder", folder)
+        self.command("push", *paths, *([folder.rstrip("/") + "/"]
+                                       if folder else []),
+                     then=self.app_done, limit=W.COPY_MS)
+
     def save_screen(self):
         self.save_image(self.view.lcd_picture(4), "screen")
 
@@ -1518,7 +1647,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 return kind
         if p.endswith((".tgz", ".tar.gz", ".tar", ".dfu", ".elf", ".bin")):
             return "firmware"
-        return None
+        if p.endswith(".fap"):
+            return "app"
+        return "file" if os.path.exists(path) else None
 
     def dragEnterEvent(self, e):
         urls = e.mimeData().urls() if e.mimeData().hasUrls() else []
@@ -1526,10 +1657,15 @@ class MainWindow(QtWidgets.QMainWindow):
             e.acceptProposedAction()
 
     def dropEvent(self, e):
+        others = []                     # of no kind: for the card
         for u in e.mimeData().urls():
             path = u.toLocalFile()
             kind = self.kind_of(path) if path else None
-            if kind == "firmware":
+            if kind == "file":
+                others.append(path)
+            elif kind == "app":
+                self.start_app(path)
+            elif kind == "firmware":
                 if self.session:
                     self.install(path)
                 else:
@@ -1539,6 +1675,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.use_file(kind, path)
             elif kind and self.is_live():
                 self.use_file(kind, path)
+        if others:                      # (asked when the drop is over)
+            QtCore.QTimer.singleShot(0, lambda: self.ask_copy(others))
         e.acceptProposedAction()
 
     # ------------------------------------------------------------ closing

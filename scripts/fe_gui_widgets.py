@@ -26,6 +26,8 @@ from PySide6.QtCore import Qt
 import fe_log
 
 COMMAND_MS = 90_000                 # no command of the launcher takes this long
+COPY_MS = 30 * 60_000               # ... but one that copies files to the card
+LAST_LINE_MS = 1500                 # a command's newest line: shown after this
 
 
 def strip_name(line, name):
@@ -60,11 +62,18 @@ class Runner(QtCore.QObject):
         self.watchdog = QtCore.QTimer(self)
         self.watchdog.setSingleShot(True)
         self.watchdog.timeout.connect(self._too_long)
+        self.lines, self.shown, self.quiet = [], 0, False
+        self.newest = QtCore.QTimer(self)
+        self.newest.setSingleShot(True)
+        self.newest.setInterval(LAST_LINE_MS)
+        self.newest.timeout.connect(self._show)
 
-    def run(self, *args, then=None, quiet=False):
+    def run(self, *args, then=None, quiet=False, limit=None):
         """then(code, text) once it is done; quiet: its output only if it
-        fails"""
-        self.queue.append(([str(a) for a in args], then, quiet))
+        fails; limit: it may take this many ms (COMMAND_MS).  What it prints
+        is shown line by line as it comes."""
+        self.queue.append(([str(a) for a in args], then, quiet,
+                           limit or COMMAND_MS))
         if not self.proc:
             self._next()
 
@@ -76,27 +85,55 @@ class Runner(QtCore.QObject):
             self.current = None
             self.changed.emit()
             return
-        args, then, quiet = self.queue.pop(0)
+        args, then, quiet, limit = self.queue.pop(0)
         p = launcher_process(self, self.launcher, self.name, args)
         p.finished.connect(lambda code, status: self._done(p, args, then, quiet,
                                                            code, status))
         p.errorOccurred.connect(lambda err: self._error(p, args, then, err))
-        self.proc, self.current = p, args
-        self.watchdog.start(COMMAND_MS)
+        p.readyRead.connect(lambda: self._read(p, quiet))
+        self.proc, self.current, self.limit = p, args, limit
+        self.lines, self.partial, self.shown, self.quiet = [], b"", 0, quiet
+        self.watchdog.start(limit)
         p.start()
         self.changed.emit()
+
+    def _show(self, keep=0):
+        """Show its lines, but for the `keep` newest"""
+        while not self.quiet and self.shown < len(self.lines) - keep:
+            self.output.emit(self.lines[self.shown])
+            self.shown += 1
+
+    def _read(self, p, quiet, last=False):
+        """Its lines as they come.  The newest is held back for a moment: of
+        a command that fails, the last line is what went wrong, and that is
+        said in another way.  A command that waits (for an answer on the
+        Flipper's screen) has said why by then."""
+        if p is not self.proc:
+            return
+        self.partial += bytes(p.readAll().data())
+        *whole, self.partial = self.partial.split(b"\n")
+        if last and self.partial:
+            whole.append(self.partial)
+            self.partial = b""
+        for raw in whole:
+            line = strip_name(raw.decode(errors="replace").rstrip(), self.name)
+            if line.strip():
+                self.lines.append(line)
+        self._show(keep=1)
+        if not last and self.shown < len(self.lines):
+            self.newest.start()
 
     def _done(self, p, args, then, quiet, code, status):
         if p is not self.proc:
             return
         self.watchdog.stop()
-        text = bytes(p.readAll().data()).decode(errors="replace")
-        lines = [strip_name(l.rstrip(), self.name) for l in text.splitlines()]
-        lines = [l for l in lines if l.strip()]
+        self.newest.stop()
+        self._read(p, quiet, last=True)
+        lines = self.lines
         if status != QtCore.QProcess.NormalExit and not code:
             code = -1
         if not quiet or code:
-            for line in lines[:-1] if code else lines:
+            for line in (lines[:-1] if code else lines)[self.shown:]:
                 self.output.emit(line)
         if code:                        # its last words: what went wrong
             self.failed.emit(lines[-1] if lines else
@@ -119,7 +156,7 @@ class Runner(QtCore.QObject):
     def _too_long(self):
         if self.proc:
             self.output.emit(f"{self.current[0]}: no answer for "
-                             f"{COMMAND_MS // 1000} s; stopped it")
+                             f"{self.limit // 1000} s; stopped it")
             self.proc.kill()
 
     def stop(self):

@@ -9,9 +9,14 @@ Boots a throwaway device with `flipperemu run`, which opens the window: here
 off-screen (QT_QPA_PLATFORM=offscreen) and silent (--audio none), so nothing
 shows on the desktop.  Then it checks the front-panel link (frames, the
 backlight), clicks buttons with the mouse, opens the firmware's log with a
-click on the GPIO pins and sets the firmware's log level from it, holds an NFC
-tag to it from the bench, unplugs USB, switches it off as a real one is (Back
-held for 5 s, then Power Off: the window stays, the emulator exits), switches
+click on the GPIO pins and sets the firmware's log level from it, copies a
+file to its card, drops an app on the window (which installs and starts it),
+does that again with F5 and closes the app, drops the same app as if it were
+built for another API (refused, or asked about on the Flipper's screen and
+then answered with a button), holds an NFC tag to it from the
+bench, unplugs USB, switches it off as a real one is (Back held for 5 s, then
+Power Off: the window stays, the emulator exits), copies a file to the card
+of the switched-off Flipper, switches
 it on again (Back held: the tag is there again), switches it off the hard way
 and on again by plugging USB in, reboots it with Left + Back, installs the
 firmware again from the Device menu, and closes the window (which stops the
@@ -31,12 +36,13 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
-from PySide6 import QtCore, QtWidgets  # noqa: E402
+from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 from PySide6.QtCore import QPoint, Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 
 import fe_gui  # noqa: E402
 import fe_gui_view  # noqa: E402
+from app_check import other_api  # noqa: E402
 
 CRASH = re.compile(r"\[CRASH\]|furi_check failed|HardFault|Kernel is Dead")
 results = []
@@ -126,6 +132,85 @@ class Driver:
     def tile(self, kind):
         return self.win.tiles[kind].line1.full
 
+    def console(self):
+        return self.win.log.text.toPlainText()
+
+    def drop(self, path):
+        """a file dragged from a file manager and let go over the window"""
+        mime = QtCore.QMimeData()
+        mime.setUrls([QtCore.QUrl.fromLocalFile(str(path))])
+        self.win.dropEvent(QtGui.QDropEvent(
+            QtCore.QPointF(40, 40), Qt.CopyAction, mime, Qt.LeftButton,
+            Qt.NoModifier))
+
+    def files_and_apps(self):
+        """Files to the card and an app started, as the menus and a drop do
+        it.  The app is one the firmware brought along on its card."""
+        w, v = self.win, self.win.view
+        note = self.out / "fe-gui note.txt"
+        note.write_text("from the window\n")
+        w.copy_to_card([str(note)], "/ext/fe-gui")
+        self.settle()
+        check("files: a file copied to the card (microSD card > Copy files "
+              "to it)",
+              f"-> /ext/fe-gui/{note.name}" in self.console()
+              and "1 copied (through the firmware)" in self.console())
+
+        w.command("pull", "/ext/apps/GPIO/gpio.fap", self.out)
+        self.settle()
+        fap = self.out / "gpio.fap"
+        if not check("apps: an app from its card to work with", fap.is_file()):
+            return
+        runs = lambda: re.findall(r'"(.+)" runs', self.console())
+        before = v.frame
+        self.drop(fap)
+        ran = self.until(lambda: len(runs()) >= 1, 90)
+        self.settle()
+        check("apps: a .fap dropped on the window is put on the card and "
+              "started",
+              ran and v.frame != before and w.a_app_again.isEnabled()
+              and w.a_app_again.text() == "Install and start gpio.fap again")
+        self.shot("app")
+        w.a_app_again.trigger()         # F5
+        again = self.until(lambda: len(runs()) >= 2, 90)
+        self.settle()
+        check("apps: F5 closes it and starts the same file again",
+              again and f'"{runs()[0]}" closed' in self.console())
+        w.close_app()
+        w.command("app")
+        self.settle()
+        check("apps: closed from the Apps menu: no app runs",
+              ran and self.console().count(f'"{runs()[0]}" closed') >= 2
+              and "no app runs" in self.console())
+        self.spin(1.0)
+
+        # The same app, as if it were built for the next API.  The official
+        # firmware's loader refuses it; Momentum and Unleashed ask on the
+        # Flipper's screen, and the launcher waits for the answer
+        other = self.out / "other-api.fap"
+        other.write_bytes(other_api(fap.read_bytes()))
+        had = len(self.console())
+        new = lambda: self.console()[had:]
+        self.drop(other)
+        self.until(lambda: "did not start it" in new()
+                   or "no answer yet" in new(), 90)
+        if "no answer yet" in new():
+            self.hold(Qt.Key_Right, 150)            # Continue
+            ok = self.until(lambda: '" runs' in new(), 60)
+            self.settle()
+            check("apps: one built for another API: the Flipper asks on its "
+                  "screen, the console says so, and Continue starts it",
+                  ok and "this firmware's API is" in new())
+            w.close_app()
+            self.settle()
+        else:
+            self.settle()
+            check("apps: one built for another API: the loader's refusal is "
+                  "in the console",
+                  "did not start it" in new()
+                  and "this firmware's API is" in new())
+        self.spin(1.0)
+
     # ---- the checks
 
     def checks(self):
@@ -180,6 +265,8 @@ class Driver:
         self.click("back")
         self.spin(1.0)
 
+        self.files_and_apps()
+
         w.hold("nfc", ["ntag215", "04A1B2C3D4E5F6", "https://example.com"])
         w.set_cable("unplugged")
         self.settle()
@@ -201,6 +288,11 @@ class Driver:
         if not off:
             return
         w.fwlog.level_actions["debug"].trigger()        # ... while it is off
+        w.copy_to_card([str(self.out / "fe-gui note.txt")], "/ext/fe-gui-off")
+        self.settle()
+        check("files: copied while it is off: into the card's image",
+              "-> /ext/fe-gui-off/fe-gui note.txt" in self.console()
+              and "1 copied (in the card's image)" in self.console())
 
         self.hold(Qt.Key_Escape, fe_gui.POWER_ON_MS + 300)
         on = self.until(lambda: w.state == "on", 20) and self.booted()

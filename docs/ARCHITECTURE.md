@@ -884,6 +884,11 @@ units of one LCD pixel, so it scales without blurring; the LCD's colours follow 
 backlight. `fe_gui_link.py` is its end of the link, `fe_gui_widgets.py` the bench, the
 dialogs, the console and the firmware log (which is `uart.log`, read as it grows: it
 does not come over the link), and `fe_gui.py` the menus and what ties them together.
+What a menu, a tile or a dropped file changes, it changes with one of the launcher's
+own commands, run one after the other (`Runner`: the monitor and the CLI take one
+client at a time), and the command's lines come into the console as it prints them. A
+dropped `.fap` is `flipperemu app FILE`, the card's copy items are `push`: the window
+has no second way into the Flipper that could behave differently from the terminal's.
 
 ## Real radios: the CC1101's link (`flipper_rf.c`, `scripts/fe_sdr.py`)
 
