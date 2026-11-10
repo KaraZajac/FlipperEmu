@@ -25,6 +25,7 @@ you flash stays flashed, settings and files persist across runs.
   ./flipperemu sd --resources update.tgz     (re)build the SD card
   ./flipperemu cli                           USB CLI of a running device
   ./flipperemu cli "storage list /ext"       run CLI commands, print output
+  ./flipperemu log -f                        what the firmware logs, as it logs it
   ./flipperemu ir NEC 0x04 0x08              point a virtual IR remote at it
   ./flipperemu subghz capture.sub            put a Sub-GHz signal on the air
   ./flipperemu rfid EM4100 DEADBEEF01        hold a 125 kHz tag to it (or a .rfid)
@@ -141,7 +142,8 @@ class Device:
         self.elf = self.dir / "firmware.elf"
         self.meta = self.dir / "device.json"
         self.monitor = self.dir / "monitor.sock"
-        self.uart = self.dir / "uart.log"
+        self.uart = self.dir / "uart.log"       # what the firmware logged, this run
+        self.uart_old = self.dir / "uart.log.1"     # ... and the run before
         self.nvram = self.dir / "nvram.bin"     # gauge + RTC backup domain
         self.enclave = self.dir / "enclave.keys"    # the secure enclave's keys
         self.usb_sock = self.dir / "usb.sock"   # --usb unix
@@ -383,6 +385,56 @@ def battery_voltage(percent):
     return BATTERY_CURVE[-1][1]
 
 
+def chardev_path(path):
+    """A path as the value of a -chardev option: its commas doubled"""
+    return str(path).replace(",", ",,")
+
+
+def serial_args(dev: Device, serial):
+    """USART1: the firmware's log, and pins 13 and 14 of a real one.  Whatever
+    it is connected to, what the firmware writes to it is kept in the
+    device's uart.log, for `flipperemu log` and the window."""
+    log = f",logfile={chardev_path(dev.uart)},logappend=on"
+    if serial in ("stdio", "pty", "null"):
+        backend = serial
+    elif serial.startswith("tcp:"):
+        host, _, port = serial[4:].rpartition(":")
+        if not port.isdigit() or not 0 < int(port) < 65536:
+            sys.exit(f"--serial: expected tcp:PORT or tcp:HOST:PORT, not {serial!r}")
+        # the firmware listens on it too (for an expansion module): this
+        # computer only, unless asked
+        backend = (f"socket,host={host.strip('[]') or '127.0.0.1'},port={port},"
+                   "server=on,wait=off")
+    elif serial.startswith("file:"):
+        path = pathlib.Path(serial[5:])
+        backend = f"file,path={chardev_path(path)},append=on"
+        if path.resolve() == dev.uart.resolve():
+            log = ""                    # it is the log
+    else:
+        return ["-serial", serial]      # QEMU's own words: no uart.log
+    name, _, options = backend.partition(",")
+    return ["-chardev", f"{name},id=uart" + (f",{options}" if options else "") + log,
+            "-serial", "chardev:uart"]
+
+
+def new_log(dev: Device, serial):
+    """A run starts a new log, and the one before it is kept as uart.log.1.
+    (Each QEMU of a run adds to the log: switching the Flipper off and on in
+    its window loses nothing.)"""
+    try:
+        if dev.uart.stat().st_size:
+            os.replace(dev.uart, dev.uart_old)
+    except OSError:
+        pass
+    if serial.startswith("file:"):
+        path = pathlib.Path(serial[5:])
+        try:
+            if path.is_file():
+                os.truncate(path, 0)
+        except OSError:
+            pass
+
+
 def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
     """gauge: {property: value} of /machine/gauge to start with"""
     machine = (f"flipper-zero,name={args.name or dev.name[:8]}"
@@ -392,6 +444,8 @@ def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
         machine += ",legacy-sleep=on"
     if args.unplugged:
         machine += ",usb-cable=off"
+    if args.log_level:
+        machine += f",log-level={args.log_level}"
     usb = []
     if args.usb == "pty":
         usb = ["-chardev", "pty,id=usb"]
@@ -444,12 +498,7 @@ def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
         cmd += ["-display", "gtk,show-menubar=off,zoom-to-fit=off"]
     else:                               # none, or the window is ours
         cmd += ["-display", "none"]
-    if args.serial == "stdio":
-        cmd += ["-serial", "stdio"]
-    elif args.serial.startswith("tcp:"):
-        cmd += ["-serial", f"tcp::{args.serial[4:]},server=on,wait=off"]
-    else:
-        cmd += ["-serial", args.serial]
+    cmd += serial_args(dev, args.serial)
     if args.gdb or args.wait_gdb:
         cmd += ["-gdb", f"tcp::{args.gdb_port}"]
     if args.wait_gdb:
@@ -499,6 +548,7 @@ def cmd_run(args):
     print(f"[{dev.name}] {info.get('firmware', '?')}  "
           f"(monitor: {dev.monitor}"
           + (f", gdb: :{args.gdb_port}" if args.gdb or args.wait_gdb else "") + ")")
+    new_log(dev, args.serial)
     session = Session(dev, args, window, gauge, manifest, label)
     session.start()
     # killing the launcher stops the emulator too (Ctrl-C already reaches both)
@@ -546,6 +596,7 @@ class Session:
         self.proc = subprocess.Popen(qemu_cmd(dev, args, self.window, self.gauge))
         manifest, label = self.update
         self.update = (None, None)          # an update is started once
+        args.log_level = None               # ... and its log level set once
         if args.usb == "pty" or manifest:
             threading.Thread(target=usb_helpers,
                              args=(dev, self.proc, args.usb, manifest, label),
@@ -755,9 +806,15 @@ def device_status(dev):
         st["subghz"] = {"radio": g("/machine/subghz", "radio"),
                         "last_transmission": newest(dev.dir / "subghz-tx")}
         st["sound"] = {"muted": g("/machine/speaker", "mute")}
+        st["log"] = {"level": g("/machine", "log-level"),
+                     "file": str(dev.uart) if dev.uart.exists() else None}
     finally:
         m.close()
     return st
+
+
+def log_level_text(level):
+    return {None: "?", "default": "default (info)"}.get(level, level)
 
 
 def cmd_status(args):
@@ -801,6 +858,8 @@ def cmd_status(args):
                        and radio.get("freq", "").isdigit() else "")
                     + f"; last sent: {last(st['subghz']['last_transmission'])}"),
         ("sound", "muted" if st["sound"]["muted"] else "on"),
+        ("log", f"the firmware's level: {log_level_text(st['log']['level'])}"
+                + (f"; kept in {st['log']['file']}" if st["log"]["file"] else "")),
     ]
     print(f"[{dev.name}] running: {st['firmware'] or '?'}")
     for name, text in rows:
@@ -891,6 +950,40 @@ def cmd_reset(args):
     if err:
         sys.exit(f"reset: {err}")
     print(f"[{dev.name}] reset")
+    return 0
+
+
+def cmd_log(args):
+    import fe_log
+    dev = Device(args.device)
+    if args.set_level:
+        m = open_monitor(dev)
+        try:
+            err = m.cmd(f"qom-set /machine log-level {args.set_level}")
+            level = qom_get(m, "/machine", "log-level")
+        finally:
+            m.close()
+        if err:
+            sys.exit(f"log: {err}")
+        print(f"[{dev.name}] the firmware's log level: {log_level_text(level)}, "
+              f"from its next start (./flipperemu -d {dev.name} reset)")
+        return 0
+    path = dev.uart_old if args.previous else dev.uart
+    try:
+        pattern = fe_log.smart(args.grep) if args.grep else None
+    except re.error as e:
+        sys.exit(f"log: --grep {args.grep!r}: {e}")
+    if args.lines is not None and args.lines < 0:
+        sys.exit("log: --lines: 0 or more")
+    if args.follow and not path.exists():
+        print(f"[{dev.name}] no log yet: waiting for it to run", file=sys.stderr)
+    n = fe_log.show(path, follow=args.follow, count=args.lines,
+                    level=fe_log.LEVELS.get(args.level, ""), pattern=pattern,
+                    color={"always": True, "never": False}.get(args.color))
+    if n is None:
+        sys.exit(f"[{dev.name}] no log" + (" of a run before this one"
+                                           if args.previous else
+                                           " yet: it has not run"))
     return 0
 
 
@@ -1411,7 +1504,16 @@ def main():
     p.add_argument("--usbip-host", default="127.0.0.1",
                    help="address to serve USB/IP on (default 127.0.0.1)")
     p.add_argument("--serial", default="stdio",
-                   help="USART1 log: stdio (default), file:PATH, pty, tcp:PORT, null")
+                   help="USART1, where the firmware logs: stdio (default), "
+                        "file:PATH, pty, tcp:PORT (on this computer; "
+                        "tcp:HOST:PORT for another address of it), null. "
+                        "Whichever it is, `flipperemu log` has the log too")
+    p.add_argument("--log-level", metavar="LEVEL",
+                   choices=("default", "none", "error", "warn", "info", "debug",
+                            "trace"),
+                   help="start with the firmware's log level (Settings > System "
+                        "> Log Level) set to none, error, warn, info, debug, "
+                        "trace or default; it stays until it is changed")
     p.add_argument("--gdb", action="store_true", help="enable the gdb stub")
     p.add_argument("--wait-gdb", action="store_true", help="gdb stub, halt at reset")
     p.add_argument("--gdb-port", type=int, default=1234)
@@ -1487,6 +1589,33 @@ def main():
                         "(default: interactive session, Ctrl-] quits)")
     p.add_argument("--timeout", type=float, default=30)
     p.set_defaults(func=cmd_cli)
+
+    p = sub.add_parser("log", help="what the firmware logs (to its UART: pins "
+                       "13 and 14 of a real Flipper), of this run or the last")
+    p.add_argument("-f", "--follow", action="store_true",
+                   help="and what it logs from now on, until ^C (through stops "
+                        "and starts of the device too)")
+    p.add_argument("-n", "--lines", type=int, metavar="N",
+                   help="only the last N lines of what is there")
+    p.add_argument("-l", "--level", choices=("error", "warn", "info", "debug",
+                                             "trace"),
+                   help="only lines at least this serious (of what it logged: "
+                        "--set-level is what it logs)")
+    p.add_argument("-g", "--grep", metavar="REGEX",
+                   help="only lines that hold this (capitals in it matter only "
+                        "if it has any)")
+    p.add_argument("--previous", action="store_true",
+                   help="the log of the run before this one")
+    p.add_argument("--color", choices=("auto", "always", "never"), default="auto",
+                   help="the firmware's colours: auto (default) is in a terminal")
+    p.add_argument("--set-level", metavar="LEVEL",
+                   choices=("default", "none", "error", "warn", "info", "debug",
+                            "trace"),
+                   help="instead: set the firmware's own log level (Settings > "
+                        "System > Log Level) of a running device: none, error, "
+                        "warn, info, debug, trace or default. The firmware "
+                        "reads it when it starts: `reset` applies it")
+    p.set_defaults(func=cmd_log)
 
     p = sub.add_parser("ir", help="send an infrared signal to a running device's receiver")
     p.add_argument("signal", nargs="+",

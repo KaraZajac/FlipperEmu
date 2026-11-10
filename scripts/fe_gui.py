@@ -47,6 +47,7 @@ WATCHES = (
     ("/machine/ibutton", "tx"), ("/machine/ibutton", "reader"),
     ("/machine/ir", "tx"), ("/machine/subghz", "radio"),
     ("/machine/speaker", "mute"),
+    ("/machine", "log-level"),
 )
 
 # what can come from a file: (the menu's word for them, file filter, where
@@ -79,8 +80,9 @@ Left held after letting go of Back and it starts in DFU mode.</p>
 lower left face of its nose to plug it in and out, the <b>microSD card</b>
 at the bottom right to pull it out and push it back, the <b>infrared
 window</b> in the upper left face to point a remote at it, and the <b>GPIO
-pins</b> along the top for the log. Right-click for their menus, and anywhere
-else on the Flipper for the Device menu.</p>
+pins</b> along the top for what the firmware logs (it comes out of two of
+them). Right-click for their menus, and anywhere else on the Flipper for the
+Device menu.</p>
 <p>Files dropped on the window go where they belong: .nfc and Proxmark3
 .json cards, .rfid tags, .ibtn keys, .sub captures, .ir remotes, and
 firmware.</p>"""
@@ -189,6 +191,8 @@ class MainWindow(QtWidgets.QMainWindow):
                               f"FlipperEmu window (pid {os.getpid()})", self)
         self.runner = W.Runner(self.launcher, name, self)
         self.log = W.LogDock(self)
+        self.fwlog = W.FirmwareLogDock(self.dir / "uart.log", self)
+        self.front = {}                 # dock: it is the tab in front
         self.build()
         self.build_menus()
         self.connect_all()
@@ -238,8 +242,16 @@ class MainWindow(QtWidgets.QMainWindow):
         box.addWidget(self.bench)
         self.bench.setVisible(self.settings.get("bench", True))
         self.setCentralWidget(central)
+        # the console and the firmware's log: two tabs of one place
         self.addDockWidget(Qt.BottomDockWidgetArea, self.log)
-        self.log.setVisible(self.settings.get("log", False))
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.fwlog)
+        self.tabifyDockWidget(self.log, self.fwlog)
+        for dock, key in ((self.log, "log"), (self.fwlog, "fwlog")):
+            dock.setVisible(self.settings.get(key, False))
+            dock.visibilityChanged.connect(
+                lambda on, d=dock: self.front.__setitem__(d, on))
+        (self.fwlog if self.settings.get("front") == "fwlog"
+         else self.log).raise_()
         self.tone_label = QtWidgets.QLabel()
         self.state_label = QtWidgets.QLabel()
         self.statusBar().addPermanentWidget(self.tone_label)
@@ -434,10 +446,12 @@ class MainWindow(QtWidgets.QMainWindow):
         a.setChecked(self.view.grid)
         self.a_bench = A(m, "The bench", self.show_bench, checkable=True)
         self.a_bench.setChecked(self.bench.isVisibleTo(self))
-        self.a_log = self.log.toggleViewAction()
-        self.a_log.setText("The log")
-        self.a_log.setShortcut(QtGui.QKeySequence("Ctrl+L"))
-        m.addAction(self.a_log)
+        self.a_log = self.dock_action(
+            m, self.log, "The console", "Ctrl+L",
+            "What happened, and a line for the Flipper's CLI")
+        self.a_fwlog = self.dock_action(
+            m, self.fwlog, "The firmware log", "Ctrl+Shift+L",
+            "What the firmware logs, as it logs it")
         a = A(m, "Always on top", self.set_on_top, checkable=True)
         a.setChecked(self.settings.get("on_top", False))
 
@@ -462,6 +476,24 @@ class MainWindow(QtWidgets.QMainWindow):
         t["ir"].primary.clicked.connect(self.ask_ir)
         t["subghz"].set_menu(self.menu_subghz)
         t["subghz"].primary.clicked.connect(lambda: self.ask_file("subghz"))
+
+    def dock_action(self, menu, dock, text, shortcut, tip):
+        """Shows a dock; one that is a tab behind the other comes to the
+        front, and the one in front is closed"""
+        a = self.act(menu, text, None, shortcut, checkable=True, tip=tip)
+
+        def toggle():
+            if dock.isHidden():
+                self.show_dock(dock)
+            elif self.front.get(dock, True):
+                dock.hide()
+            else:
+                dock.raise_()
+            a.setChecked(not dock.isHidden())
+        a.triggered.connect(toggle)
+        a.setChecked(not dock.isHidden())
+        dock.toggleViewAction().toggled.connect(a.setChecked)
+        return a
 
     def recent_menu(self, menu, kind, title="Recent"):
         sub = menu.addMenu(title)
@@ -529,6 +561,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.runner.failed.connect(self.on_failed)
         self.log.cli.connect(self.run_cli)
         self.log.leave.connect(lambda: self.view.setFocus())
+        self.fwlog.leave.connect(lambda: self.view.setFocus())
+        self.fwlog.crashed.connect(self.on_crash)
+        self.fwlog.level_wanted.connect(self.set_log_level)
+        self.fwlog.save_wanted.connect(self.save_fwlog)
 
     # ------------------------------------------------------------ the states
 
@@ -591,6 +627,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.a_terminal.setEnabled(live and self.cable == "computer")
         self.menu_sd.setEnabled(live and not self.sd_none)
         self.menu_battery.setEnabled(live)
+        self.fwlog.set_settable(live or (owner and self.state == "off"))
 
     def on_hello(self):
         self.props.clear()
@@ -756,6 +793,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.muted = bool(value)
             self.a_mute.setChecked(self.muted)
             self.on_speaker(*self.tone)
+        if key == ("/machine", "log-level"):
+            self.fwlog.set_level(value)
         if not first and old != value:
             self.changed(path, name, old, value)
         self.tiles_due.start()
@@ -1003,8 +1042,61 @@ class MainWindow(QtWidgets.QMainWindow):
             self.sd_none = True
             self.tiles_due.start()
 
+    def show_dock(self, dock):
+        dock.setVisible(True)
+        dock.raise_()                   # (of the two tabs, the one in front)
+
     def show_log(self):
-        self.log.setVisible(True)
+        """The console"""
+        self.show_dock(self.log)
+
+    def show_fwlog(self):
+        self.show_dock(self.fwlog)
+
+    def on_crash(self, kind, message):
+        """The firmware's log says that it crashed (or halted)"""
+        text = (f"The firmware {'halted' if kind == 'HALT' else 'crashed'}: "
+                f"{message or 'it does not say why'}")
+        self.log.add(f"{text}  (the firmware log has the rest: Ctrl+Shift+L)",
+                     "error")
+        self.statusBar().showMessage(text, 15000)
+
+    def set_log_level(self, level):
+        """The firmware's own log level.  It reads it when it starts: set,
+        and started again"""
+        word = dict(self.fwlog.LEVELS)[level].lower()
+        if self.state == "off" and self.session:
+            self.session.args.log_level = level     # for when it is switched on
+            self.fwlog.set_level(level)
+            self.log.add(f"The firmware's log level: {word}, when it is "
+                         "switched on.", "you")
+            return
+
+        def done(code, text):
+            if code:                    # as it was
+                self.fwlog.set_level(self.P("/machine", "log-level"))
+                return
+            self.log.add(f"The firmware's log level: {word}. It starts again "
+                         "to take it.", "you")
+            self.reboot()
+        self.command("log", "--set-level", level, then=done, quiet=True)
+
+    def save_fwlog(self):
+        start = os.path.join(self.settings.get("dir/logs",
+                                               os.path.expanduser("~")),
+                             f"{self.name}-{time.strftime('%H%M%S')}.log")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save the firmware log", start, "Logs (*.log *.txt)")
+        if not path:
+            return
+        self.settings.set("dir/logs", os.path.dirname(path))
+        try:
+            with open(path, "w") as f:
+                f.write(self.fwlog.shown_text() + "\n")
+        except OSError as e:
+            self.on_failed(f"saving the log: {e}")
+            return
+        self.statusBar().showMessage(f"Saved {path}", 5000)
 
     def run_cli(self, line):
         if not self.is_live():
@@ -1365,7 +1457,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if zone == "ir":
             self.menu_ir.popup(pos)
         elif zone == "gpio":
-            self.show_log()
+            self.show_fwlog()
 
     def on_context_menu(self, zone, pos):
         menu = {"usb": self.menu_usb, "sd": self.menu_sd,
@@ -1469,6 +1561,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.set("scale", self.view.k)
         self.settings.set("bench", self.bench.isVisibleTo(self))
         self.settings.set("log", self.log.isVisibleTo(self))
+        self.settings.set("fwlog", self.fwlog.isVisibleTo(self))
+        self.settings.set("front", "fwlog" if self.front.get(self.fwlog)
+                          else "log")
 
 
 def run(name, directory, launcher, session=None, scale=None):

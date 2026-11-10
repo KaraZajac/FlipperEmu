@@ -713,6 +713,45 @@ All three are small, self-contained, and suitable for sending upstream.
     (01 is a DS1990's), when they were taken for a ROM without its CRC, one byte
     short. Six bytes are always a serial now.
 
+## A bench for developers (M9)
+
+70. **A level it reads once.** The firmware's log level is the low four bits of RTC
+    backup register 1, and the firmware reads them when it starts: written while it
+    runs, they change nothing until the next start. So the machine has the level as a
+    property, `log-level`, which goes into the backup domain before the first
+    instruction, or on a running machine for its next start. `log --set-level` says
+    so, and the window sets it and reboots. Read back, the property is what is in the
+    register, so a level chosen in the firmware's own Settings shows too. 0 is the
+    firmware's default, which it takes for info. The window's check first asked for
+    debug and looked for `[D]` lines after the restart: there on official and
+    Momentum, and none on Unleashed, whose release has no debug lines in it (the
+    words of "Starting service %s" are not in its flash; at trace it starts with the
+    lines of info). The level it does take, as every build must, is one that says
+    less: the check asks for errors only, and sees the info lines stop.
+
+71. **One log, one writer.** The log is kept by the serial chardev's `logfile`, which
+    every QEMU of a run appends to: the window switches the Flipper off and on by
+    starting a new QEMU, and the log stays one. `--serial file:` on the same path
+    would have written every byte twice, so there the file is the chardev and has no
+    `logfile`. `gui_check.py` counted "Startup complete" in the log to see a boot; with
+    every boot of a run in one file it counts the ones it has waited for. And
+    `--serial tcp:PORT` had listened on every interface of the computer, for a port
+    the firmware can read as well as write: it is 127.0.0.1 now, unless another
+    address is asked for.
+
+72. **Red that is not on the line.** A crash report is `[CRASH][thread] message` in
+    red, the registers, and only then the colour's reset. The register lines carry no
+    colour code: on a terminal they are red because the line before left red on. A
+    reader that drops lines (`log -g`, the window's filter) has to carry the colour
+    from line to line, and put it in front of a line whose predecessor it dropped.
+
+73. **A tab that is not hidden.** The console and the firmware log are two docks in
+    one place, so they are tabs. Qt does not call the one behind hidden (`isHidden()`
+    is false, `isVisibleTo()` true); what tells them apart is `visibilityChanged`,
+    which the window keeps. View > The firmware log on the tab behind brings it to the
+    front, and only on the one in front closes it; the log behind keeps its lines
+    and shows them when it comes to the front.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

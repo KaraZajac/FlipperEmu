@@ -72,6 +72,7 @@ struct FlipperZeroState {
     uint32_t scale;
     uint32_t region;
     bool legacy_sleep;
+    int log_level;               /* the firmware's, to start with; -1: as is */
     bool usb_cable;              /* plugged in from the start */
     QemuInputHandlerState *input;
     uint32_t keys_down;          /* bit per button */
@@ -555,7 +556,8 @@ static void flipper_zero_init(MachineState *machine)
     soc = DEVICE(&s->soc);
     uid64 = g_str_hash(s->name ? s->name : "Qemu") | 0x0011223300000000ull;
     qdev_prop_set_uint64(soc, "uid64", uid64);
-    qdev_prop_set_uint32(soc, "rtc-bkp1", s->legacy_sleep ? 0x00002000 : 0);
+    qdev_prop_set_uint32(soc, "rtc-bkp1", (s->legacy_sleep ? 0x00002000 : 0) |
+                         (s->log_level > 0 ? s->log_level : 0));
     dinfo = drive_get(IF_PFLASH, 0, 0);
     if (dinfo) {
         qdev_prop_set_drive_err(soc, "flash-drive", blk_by_legacy_dinfo(dinfo),
@@ -645,6 +647,10 @@ static void flipper_zero_init(MachineState *machine)
         flipper_nvram_load(s);
         s->exit_notifier.notify = flipper_nvram_save;
         qemu_add_exit_notifier(&s->exit_notifier);
+    }
+    if (s->log_level >= 0 && s->soc.rtc.backup_valid) {
+        /* over what the saved backup domain had */
+        s->soc.rtc.bkp[1] = (s->soc.rtc.bkp[1] & ~0xFu) | s->log_level;
     }
     s->led->changed = flipper_led_changed;
     s->led->opaque = s;
@@ -802,6 +808,53 @@ static void flipper_set_legacy(Object *obj, bool v, Error **errp)
     FLIPPER_ZERO(obj)->legacy_sleep = v;
 }
 
+/*
+ * The firmware keeps its log level in the low four bits of RTC backup
+ * register 1 (Settings > System > Log Level writes it there) and reads it
+ * when it starts: set while it runs, it is the level of its next start.
+ */
+static const char *const flipper_log_levels[] = {
+    "default", "none", "error", "warn", "info", "debug", "trace",
+};
+
+static char *flipper_get_log_level(Object *obj, Error **errp)
+{
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+    int level = s->log_level;
+
+    if (phase_check(PHASE_MACHINE_INITIALIZED)) {
+        level = s->soc.rtc.bkp[1] & 0xF;
+    }
+    if (level < 0) {
+        return g_strdup("");
+    }
+    if (level >= ARRAY_SIZE(flipper_log_levels)) {
+        return g_strdup_printf("%d", level);
+    }
+    return g_strdup(flipper_log_levels[level]);
+}
+
+static void flipper_set_log_level(Object *obj, const char *value, Error **errp)
+{
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+    int level = g_ascii_strcasecmp(value, "warning") ? -1 : 3;
+
+    for (int i = 0; i < ARRAY_SIZE(flipper_log_levels); i++) {
+        if (!g_ascii_strcasecmp(value, flipper_log_levels[i])) {
+            level = i;
+        }
+    }
+    if (level < 0) {
+        error_setg(errp, "log-level: default, none, error, warn, info, "
+                   "debug or trace, not '%s'", value);
+        return;
+    }
+    s->log_level = level;
+    if (phase_check(PHASE_MACHINE_INITIALIZED)) {
+        s->soc.rtc.bkp[1] = (s->soc.rtc.bkp[1] & ~0xFu) | level;
+    }
+}
+
 static bool flipper_get_usb_cable(Object *obj, Error **errp)
 {
     return FLIPPER_ZERO(obj)->usb_cable;
@@ -844,6 +897,7 @@ static void flipper_zero_instance_init(Object *obj)
     s->scale = 4;
     s->region = 2;                      /* US/CA/AU */
     s->legacy_sleep = false;            /* the firmware's default: STOP2 */
+    s->log_level = -1;
     s->usb_cable = true;
     s->sd_in = true;
     object_property_add_uint32_ptr(obj, "lcd-scale", &s->scale,
@@ -852,6 +906,11 @@ static void flipper_zero_instance_init(Object *obj)
                                    OBJ_PROP_FLAG_READWRITE);
     object_property_add_bool(obj, "legacy-sleep", flipper_get_legacy,
                              flipper_set_legacy);
+    object_property_add_str(obj, "log-level", flipper_get_log_level,
+                            flipper_set_log_level);
+    object_property_set_description(obj, "log-level",
+        "The firmware's log level: default, none, error, warn, info, debug "
+        "or trace (not given: as it was left).  It reads it when it starts");
     object_property_add_bool(obj, "usb-cable", flipper_get_usb_cable,
                              flipper_set_usb_cable);
     object_property_set_description(obj, "usb-cable",

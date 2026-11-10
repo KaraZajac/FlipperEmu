@@ -4,21 +4,26 @@ Runner runs the launcher's commands (`flipperemu -d NAME nfc card.nfc` ...)
 one at a time, as a terminal would, and Background the ones that run until
 they are stopped (a real radio, a card on the NFC link).  Tile is one place
 on the bench under the Flipper, the dialogs make up new cards, tags, keys and
-signals, RemoteWindow is an infrared remote made of an .ir file, and LogDock
-is what happened, with a line for the Flipper's CLI.
+signals, RemoteWindow is an infrared remote made of an .ir file, LogDock is
+the console (what happened, with a line for the Flipper's CLI) and
+FirmwareLogDock is what the firmware itself logs, as it logs it.
 
 Copyright (c) 2026, Kara Zajac
 SPDX-License-Identifier: BSD-3-Clause
 """
+import collections
 import html
 import os
 import random
+import re
 import signal
 import sys
 import time
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt
+
+import fe_log
 
 COMMAND_MS = 90_000                 # no command of the launcher takes this long
 
@@ -648,18 +653,18 @@ class RemoteWindow(QtWidgets.QWidget):
         box.addStretch(1)
 
 
-# ---------------------------------------------------------------- the log
+# ---------------------------------------------------------------- the console
 
 class LogDock(QtWidgets.QDockWidget):
-    """What happened: what you did, what the Flipper did; and a line for
-    commands of the Flipper's CLI"""
+    """The console.  What happened: what you did, what the Flipper did; and a
+    line for commands of the Flipper's CLI"""
     cli = QtCore.Signal(str)
     leave = QtCore.Signal()                 # Esc in the CLI line
     COLOURS = {"info": None, "you": "#1e66f5", "flipper": "#8839ef",
                "error": "#d20f39", "dim": "#8c8fa1"}
 
     def __init__(self, parent=None):
-        super().__init__("Log", parent)
+        super().__init__("Console", parent)
         self.setObjectName("log")
         self.setFeatures(QtWidgets.QDockWidget.DockWidgetClosable)
         w = QtWidgets.QWidget()
@@ -725,3 +730,293 @@ class LogDock(QtWidgets.QDockWidget):
                              f"&nbsp; {body}")
         bar = self.text.verticalScrollBar()
         bar.setValue(bar.maximum())
+
+
+# ---------------------------------------------------------------- the firmware's log
+
+class FirmwareLogDock(QtWidgets.QDockWidget):
+    """What the firmware logs.  A real Flipper writes it to its UART, pins 13
+    and 14 of the GPIO header; the emulator keeps it in the device's
+    uart.log, and this reads that as it grows (fe_log.py: `flipperemu log`
+    reads the same in a terminal)."""
+    crashed = QtCore.Signal(str, str)       # CRASH or HALT, and what it said
+    level_wanted = QtCore.Signal(str)       # one of the firmware's levels
+    save_wanted = QtCore.Signal()
+    leave = QtCore.Signal()                 # Esc in the filter line
+    KEEP = 5000                             # lines
+    TAIL = 512 << 10                        # of a log that is there: its end
+    POLL_MS = 100
+    SHOW = (("Everything", ""), ("Debug and above", "D"),
+            ("Info and above", "I"), ("Warnings and errors", "W"),
+            ("Errors", "E"))
+    # the firmware's levels, named as its own Settings name them
+    LEVELS = (("default", "Default"), ("none", "None"), ("error", "Error"),
+              ("warn", "Warning"), ("info", "Info"), ("debug", "Debug"),
+              ("trace", "Trace"))
+    # the firmware's colours, on a light and on a dark background
+    LIGHT = {"red": "#d20f39", "green": "#40a02b", "yellow": "#df8e1d",
+             "blue": "#1e66f5", "magenta": "#8839ef", "cyan": "#179299",
+             "dim": "#8c8fa1"}
+    DARK = {"red": "#f38ba8", "green": "#a6e3a1", "yellow": "#f9e2af",
+            "blue": "#89b4fa", "magenta": "#cba6f7", "cyan": "#94e2d5",
+            "dim": "#7f849c"}
+    STAMP = re.compile(r"\d+ ")
+
+    def __init__(self, path, parent=None):
+        super().__init__("Firmware log", parent)
+        self.setObjectName("fwlog")
+        self.setFeatures(QtWidgets.QDockWidget.DockWidgetClosable)
+        self.path = str(path)
+        self.reader = fe_log.Log(self.path, tail=self.TAIL)
+        self.entries = collections.deque(maxlen=self.KEEP)  # (Line, its
+        # pieces of one colour), or (Mark, None)
+        self.colour = None              # the one the last line left on
+        self.marks = []                 # those since the last line shown
+        self.caught_up = False          # what was there already has been read
+        self.in_front = False           # (a tab behind another is not)
+        self.stale = False              # the text is not what `entries` holds
+        self.level = ""                 # the least serious one shown
+        self.pattern = None
+        self.formats = {}
+
+        w = QtWidgets.QWidget()
+        box = QtWidgets.QVBoxLayout(w)
+        box.setContentsMargins(4, 2, 4, 4)
+        row = QtWidgets.QHBoxLayout()
+        self.show_box = QtWidgets.QComboBox()
+        for text, level in self.SHOW:
+            self.show_box.addItem(text, level)
+        self.show_box.setFocusPolicy(Qt.NoFocus)
+        self.show_box.setToolTip("Which of the lines it logged are shown")
+        self.show_box.currentIndexChanged.connect(self._filter)
+        row.addWidget(self.show_box)
+        self.find = QtWidgets.QLineEdit()
+        self.find.setPlaceholderText("only lines with…   (or /a regular "
+                                     "expression/)")
+        self.find.setClearButtonEnabled(True)
+        self.find.setToolTip("Only the lines that hold this are shown: a tag "
+                             "as [Loader], a word. Capitals matter only if "
+                             "you type any.")
+        self.find.installEventFilter(self)
+        row.addWidget(self.find, 1)
+        self.level_button = QtWidgets.QPushButton()
+        self.level_button.setFocusPolicy(Qt.NoFocus)
+        self.level_button.setAutoDefault(False)
+        self.level_button.setToolTip(
+            "How much the firmware logs: its own log level, the one of "
+            "Settings > System > Log Level. It reads it when it starts, so "
+            "choosing one here restarts it.")
+        menu = QtWidgets.QMenu(self.level_button)
+        menu.addAction("The firmware logs (it starts again):").setEnabled(False)
+        group = QtGui.QActionGroup(self)
+        self.level_actions = {}
+        for name, text in self.LEVELS:
+            a = menu.addAction(text + (" (which is Info)" if name == "default"
+                                       else ""))
+            a.setCheckable(True)
+            a.triggered.connect(lambda _=False, n=name:
+                                self.level_wanted.emit(n))
+            group.addAction(a)
+            self.level_actions[name] = a
+        self.level_button.setMenu(menu)
+        row.addWidget(self.level_button)
+        for text, tip, slot in (
+                ("Clear", "Empty this view (the log itself stays, in "
+                 + self.path + ")", self.clear),
+                ("Save…", "Save the lines shown here as text",
+                 self.save_wanted.emit)):
+            b = QtWidgets.QPushButton(text)
+            b.setFocusPolicy(Qt.NoFocus)
+            b.setAutoDefault(False)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, s=slot: s())
+            row.addWidget(b)
+        box.addLayout(row)
+        self.text = QtWidgets.QPlainTextEdit()
+        self.text.setReadOnly(True)
+        self.text.setUndoRedoEnabled(False)
+        self.text.setMaximumBlockCount(self.KEEP)
+        self.text.setFocusPolicy(Qt.ClickFocus)
+        self.text.setMinimumHeight(110)
+        font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
+        self.text.setFont(font)
+        self.text.setTabStopDistance(
+            8 * QtGui.QFontMetricsF(font).horizontalAdvance(" "))
+        box.addWidget(self.text)
+        self.setWidget(w)
+        self.set_level(None)
+        self._palette()
+        self._empty()
+
+        self.later = QtCore.QTimer(self, singleShot=True, interval=200)
+        self.later.timeout.connect(self._filter)
+        self.find.textChanged.connect(lambda: self.later.start())
+        self.visibilityChanged.connect(self._front)
+        self.timer = QtCore.QTimer(self, interval=self.POLL_MS)
+        self.timer.timeout.connect(self.poll)
+        self.timer.start()
+
+    # ---- what the firmware wrote
+
+    def poll(self):
+        """What is new in the log"""
+        new = []
+        for item in self.reader.poll():
+            if isinstance(item, fe_log.Mark):
+                self.colour = None
+                new.append((item, None))
+                continue
+            pieces, self.colour = fe_log.segments(item.raw, self.colour)
+            if not item.plain.strip():
+                continue
+            new.append((item, pieces))
+            crash = fe_log.crash_of(item) if self.caught_up else None
+            if crash:
+                self.crashed.emit(*crash)
+        if not self.reader.more:
+            self.caught_up = True
+        if not new:
+            return
+        self.entries.extend(new)
+        if self.stale or not self.in_front or len(new) > self.KEEP // 2:
+            self.stale = True
+            if self.in_front:
+                self.rebuild()
+        else:
+            self._append(new)
+            self._empty()
+
+    def _pieces(self, line, pieces):
+        """A line as it is shown: its time in a column of its own"""
+        if line.ms is None:
+            return pieces
+        skip = self.STAMP.match(line.plain).end()
+        out = [(f"{line.ms:>7} ", "dim")]
+        for text, colour in pieces:
+            if skip < len(text):
+                out.append((text[skip:], colour))
+            skip = max(0, skip - len(text))
+        return out
+
+    def _append(self, entries):
+        bar = self.text.verticalScrollBar()
+        at_end = bar.value() >= bar.maximum() - 2
+        document = self.text.document()
+        cursor = QtGui.QTextCursor(document)
+        cursor.movePosition(QtGui.QTextCursor.End)
+        first = document.isEmpty()
+        plain = self.formats[None]
+        cursor.beginEditBlock()
+        for item, pieces in entries:
+            if isinstance(item, fe_log.Mark):
+                self.marks.append(item)
+                continue
+            if not fe_log.passes(item, self.level, self.pattern):
+                continue
+            lines = [[(f"──── {mark} ────", "dim")] for mark in self.marks]
+            self.marks = []
+            for line in lines + [self._pieces(item, pieces)]:
+                if not first:
+                    cursor.insertBlock()
+                first = False
+                for text, colour in line:
+                    cursor.insertText(text, self.formats.get(colour, plain))
+        cursor.endEditBlock()
+        if at_end:
+            bar.setValue(bar.maximum())
+
+    def rebuild(self):
+        """The text again: of what is kept, what passes the filter"""
+        self.stale = False
+        self.marks = []
+        self.text.clear()
+        self._append(self.entries)
+        bar = self.text.verticalScrollBar()
+        bar.setValue(bar.maximum())
+        self._empty()
+
+    def _empty(self):
+        """What an empty view says"""
+        if self.entries:
+            text = "None of the lines it logged passes the filter."
+        else:
+            text = ("Nothing logged yet.\n\nWhat the firmware writes to its "
+                    "UART shows here: on a real Flipper that is pins 13 and "
+                    "14 of the GPIO header.\nIt is kept in " + self.path
+                    + ", and `flipperemu log -f` follows it in a terminal.")
+        if text != self.text.placeholderText():
+            self.text.setPlaceholderText(text)
+
+    def _front(self, on):
+        self.in_front = on
+        if on and self.stale:
+            self.rebuild()
+
+    def clear(self):
+        self.entries.clear()
+        self.rebuild()
+
+    def shown_text(self):
+        return self.text.toPlainText()
+
+    # ---- which of it is shown
+
+    def _filter(self):
+        self.later.stop()
+        text = self.find.text().strip()
+        pattern = None
+        if len(text) > 2 and text[0] == text[-1] == "/":
+            try:
+                pattern = fe_log.smart(text[1:-1])
+            except re.error:
+                pass                    # (not one yet: the words as they are)
+        if text and not pattern:
+            pattern = fe_log.smart(re.escape(text))
+        self.level, self.pattern = self.show_box.currentData(), pattern
+        self.stale = True
+        if self.in_front:
+            self.rebuild()
+
+    def eventFilter(self, obj, e):
+        if obj is self.find and e.type() == QtCore.QEvent.KeyPress \
+                and e.key() == Qt.Key_Escape:
+            if self.find.text():
+                self.find.clear()
+            else:
+                self.leave.emit()
+            return True
+        return super().eventFilter(obj, e)
+
+    def _palette(self):
+        dark = self.text.palette().color(QtGui.QPalette.Base).lightness() < 128
+        self.formats = {None: QtGui.QTextCharFormat()}
+        for name, colour in (self.DARK if dark else self.LIGHT).items():
+            f = QtGui.QTextCharFormat()
+            f.setForeground(QtGui.QColor(colour))
+            self.formats[name] = f
+
+    def changeEvent(self, e):
+        super().changeEvent(e)
+        if e.type() == QtCore.QEvent.PaletteChange and self.formats:
+            self._palette()
+            self.stale = True
+            if self.in_front:
+                self.rebuild()
+
+    # ---- how much the firmware logs
+
+    def set_level(self, name):
+        """name: the firmware's log level as the emulator reports it (None:
+        it does not)"""
+        words = dict(self.LEVELS)
+        for level, a in self.level_actions.items():
+            a.setChecked(level == name)
+        if name == "default":
+            self.level_button.setText("Firmware level: default (info)")
+        elif name in words:
+            self.level_button.setText(f"Firmware level: {words[name].lower()}")
+        else:
+            self.level_button.setText("Firmware level")
+
+    def set_settable(self, on):
+        self.level_button.setEnabled(on)

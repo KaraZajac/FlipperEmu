@@ -30,8 +30,9 @@ USB, the secure enclave, IR receive and transmit, Sub-GHz receive and transmit, 
 RFID read, emulate and T5577 write, iButton read and emulate, NFC read (NTAG215, MIFARE
 Classic 1K) and emulate, USB/IP export, warm reboot, no crash): **official 1.5.1**,
 **Momentum mntm-012**, **Unleashed unlshd-094**. The window passes
-`scripts/gui_check.py` (clicked buttons, the bench, switching off and on, the Left + Back
-reboot, installing firmware) on the same three, off-screen.
+`scripts/gui_check.py` (clicked buttons, the firmware log and its level, the bench,
+switching off and on, the Left + Back reboot, installing firmware) on the same three,
+off-screen.
 
 | | |
 |:-:|:-:|
@@ -51,7 +52,9 @@ reboot, installing firmware) on the same three, off-screen.
   `/ext/.int`, dolphin animations load from the card, and `.fap` apps launch.
 - Persistent devices: the internal flash (`flash.img`) and the battery-backed state (fuel
   gauge data memory and RTC backup domain, `nvram.bin`) survive restarts.
-- USART1 log console (`[I][Flipper] Startup complete`, …) on stdio, a file, a pty or TCP.
+- The firmware's log (USART1: `[I][Flipper] Startup complete`, …) on stdio, a pty or
+  TCP, and kept in a file whatever else. `./flipperemu log` reads and follows it, the
+  window shows it as it comes, and both set how much the firmware logs, up to trace.
 - USB: the firmware enumerates on a built-in virtual host. Its USB serial port (the CLI
   and the protobuf RPC) is bridged to a pty or socket, and `./flipperemu cli` talks to
   it. When an app switches the port to HID (Bad USB, USB remote), the host plays the
@@ -172,7 +175,8 @@ scripts/fetch_firmware.py                     # -> firmware/official-<ver>/
 ```
 
 A Flipper opens in a window. Click its buttons, or use the **arrows**; **Enter/Space**
-is OK and **Backspace/Esc** is Back. The firmware log streams to the terminal.
+is OK and **Backspace/Esc** is Back. The firmware log streams to the terminal, and
+[the window has it too](#the-firmware-log).
 
 ### Your own builds and other firmwares
 
@@ -210,7 +214,8 @@ instead, and `--headless` no window at all.
   finger would) and push it back in.
 - **The infrared window** in the upper left face: click it for the Infrared menu, to
   point a remote at it. It glows when the Flipper transmits.
-- **The GPIO pins** along the top: click them for the log.
+- **The GPIO pins** along the top: click them for the firmware log, which on a real
+  Flipper comes out of two of them.
 - **The lights and sounds** show on the body: the LED glows, the body shakes when the
   motor runs, and a speaker sign shows a tone (it plays through `--audio`).
 - **The bench** under it has a tile for each of USB, the microSD card, the battery, NFC,
@@ -222,12 +227,15 @@ instead, and `--headless` no window at all.
   dumps, new NTAG21x and MIFARE Classic tags), 125 kHz tags (`.rfid` files, new tags of
   24 protocols, a blank T5577) and iButton keys (`.ibtn` files, new Dallas, Cyfral and
   Metakom keys, blanks it can write). A reader's field around it, and virtual readers
-  held to an emulating Flipper, whose reads land in the log. An `.ir` file opens as a
+  held to an emulating Flipper, whose reads land in the console. An `.ir` file opens as a
   remote of buttons; `.sub` captures and Princeton keys go on the air. A real radio (an
   RTL-SDR through `rtl_tcp`, a HackRF, an IQ recording), a Proxmark3 or a script can be
   its antenna. Files dropped on the window go where they belong.
-- **The log** (View > The log, Ctrl+L) says what you did and what the Flipper did (its
-  transmissions, what a reader read), and has a line for the Flipper's CLI.
+- **The console** (View > The console, Ctrl+L) says what you did and what the Flipper
+  did (its transmissions, what a reader read), and has a line for the Flipper's CLI.
+- **The firmware log** (View > The firmware log, Ctrl+Shift+L) is what the firmware
+  itself logs, in its colours, as it logs it: see [The firmware log](#the-firmware-log).
+  When the firmware crashes, the window says so, and the log has the rest.
 - **View**: zoom from 2× to 6×, a white, black or Catppuccin Mocha body, the LCD's pixel
   grid. Device > Save the screen saves the LCD as a PNG; Install firmware flashes another
   one and starts it.
@@ -239,8 +247,8 @@ its zoom, colours and recent files in `~/.config/FlipperEmu/gui.ini`.
 
 | | |
 |:-:|:-:|
-| ![off](docs/img/27-window-off.png) | ![log](docs/img/29-window-log.png) |
-| Off: hold Back to switch it on, or plug it in | The log, with a line for the CLI |
+| ![off](docs/img/27-window-off.png) | ![console](docs/img/29-window-log.png) |
+| Off: hold Back to switch it on, or plug it in | The console, with a line for the CLI |
 
 <p align="center"><img src="docs/img/28-window-colours.png" width="50%"
 alt="The three colours: white, black and Catppuccin Mocha"></p>
@@ -248,13 +256,14 @@ alt="The three colours: white, black and Catppuccin Mocha"></p>
 The window and the emulator talk over the [front-panel link](docs/PANEL_LINK.md): the
 LCD, the lights and the buttons, and the QOM properties the bench shows. Any other
 program can use it too. `scripts/gui_check.py FIRMWARE` checks the window off-screen: it
-boots a throwaway device, clicks its buttons, switches it off and on, and reboots it.
+boots a throwaway device, clicks its buttons, reads the firmware's log and sets its
+level, switches it off and on, and reboots it.
 
 ## The `flipperemu` tool
 
 | command | what it does |
 |---|---|
-| `run [-f FW] [--headless] [--gdb\|--wait-gdb] [--serial S] [--usb U] [--no-sd]` | (flash and) boot |
+| `run [-f FW] [--headless] [--gdb\|--wait-gdb] [--serial S] [--usb U] [--no-sd] [--log-level L]` | (flash and) boot |
 | `run --update PKG` | install an update package through the firmware's own updater (keeps settings and files) |
 | `run --unplugged` \| `run --battery PERCENT` \| `run --gtk` | start on battery (USB cable out); with this charge; in QEMU's own window (the bare LCD) |
 | `stop` | shut a running device down cleanly (saves its NVRAM) |
@@ -267,6 +276,8 @@ boots a throwaway device, clicks its buttons, switches it off and on, and reboot
 | `reset` | reboot it, as holding Left + Back does |
 | `run --usbip [PORT]` | export the USB device over USB/IP (then `sudo scripts/usbip_attach.py`) |
 | `cli ["CMD" …]` | the device's CLI over USB: interactive, or run commands and print their output |
+| `log [-f] [-n N] [-l LEVEL] [-g REGEX] [--previous]` | what the firmware logged (its UART), in its colours: follow it, the last N lines, this level and worse, the lines that match |
+| `log --set-level LEVEL` | how much the firmware logs, from its next start: none, error, warn, info, debug, trace or default |
 | `ir PROTO ADDR CMD` \| `ir raw …` \| `ir FILE.ir [NAME]` | send an infrared signal to the device's receiver |
 | `subghz FILE.sub` \| `subghz princeton KEY` \| `subghz raw +H -L …` | put a Sub-GHz signal on the air (`--freq`) |
 | `subghz --sdr rtl_tcp[:HOST[:PORT]]` \| `--sdr hackrf` \| `--sdr FILE.cu8` | a real radio (or a recording) as the CC1101's antenna, until ^C |
@@ -288,12 +299,58 @@ boots a throwaway device, clicks its buttons, switches it off and on, and reboot
 | `gdb` | attach gdb (with symbols when the device was flashed from an `.elf`) |
 | `info` | which firmware is on the device |
 
-`--serial` (the USART1 log) takes `stdio` (default), `file:PATH`, `pty`, `tcp:PORT` or
-`null`. `--audio` takes `auto` (default), `wav:FILE`, a QEMU audio driver or `none`.
+`--serial` (the USART1 log) takes `stdio` (default), `file:PATH`, `pty`, `tcp:PORT`
+(on this computer only; `tcp:HOST:PORT` for another address) or `null`. Whatever it is,
+the log is also kept in `devices/NAME/uart.log`. `--audio` takes `auto` (default),
+`wav:FILE`, a QEMU audio driver or `none`.
 `--usb` (the USB serial port) takes `pty` (default), `unix`
 (`devices/NAME/usb.sock`), `tcp:PORT` or `none` (cable unplugged). Anything after `--` is
 passed straight to QEMU, e.g. `-- -icount shift=auto` for deterministic timing, or
 `-- -d in_asm,cpu -D trace.log`.
+
+### The firmware log
+
+What the firmware logs (`FURI_LOG_I` and the rest) leaves a real Flipper on USART1, pins
+13 and 14 of its GPIO header, for whoever holds a serial adapter to them. FlipperEmu
+keeps it in `devices/NAME/uart.log`, so it is there to read while the device runs and
+after it has stopped:
+
+```sh
+./flipperemu log                      # what it logged in this run, in the firmware's colours
+./flipperemu log -f                   # ... and what it logs from now on, until ^C
+./flipperemu log -n 20 -l warn        # the last 20 warnings and errors
+./flipperemu log -f -g '\[Loader\]'   # only the lines that match (here: of one tag)
+./flipperemu log --previous           # the run before this one (uart.log.1)
+
+./flipperemu log --set-level debug    # how much the firmware logs ...
+./flipperemu reset                    # ... which it reads when it starts
+./flipperemu run --log-level trace    # or from the first line of a run
+```
+
+A run starts a new `uart.log` and keeps the one before it as `uart.log.1`. Reboots,
+and switching the Flipper off and on in the window, stay in one log: `log` marks them
+with `--- it started again ---`, and `log -f` goes on through them, and through `stop`
+and `run`. A crash report is in it as the firmware wrote it, registers and all.
+
+The level is the firmware's own, the one of Settings > System > Log Level: none, error,
+warn, info, debug or trace, and `default` for the firmware's default, which is info. It
+is kept where the firmware keeps it (the RTC's backup registers, in `nvram.bin`), so it
+stays until it is set again, here or in Settings. `-l` only chooses among the lines it
+logged. What more there is to see at debug and trace is the build's to say: official
+1.5.1 and Momentum log their services starting and much else, while Unleashed's release
+(unlshd-094) is built without its debug lines, and starts with the same ones at trace as
+at info.
+
+In the window the firmware log is a tab beside the console (View > The firmware log,
+Ctrl+Shift+L, or a click on the GPIO pins). It shows the last 5000 lines as they come,
+and keeps at the newest one unless you scroll up. Choose which levels show, type a tag or
+a word to see only the lines with it (`/…/` for a regular expression), and set the
+firmware's level from the button: the Flipper restarts to take it. Save… writes what is
+shown to a text file. When a `[CRASH]` goes by, the status bar and the console say what
+it was.
+
+<p align="center"><img src="docs/img/30-window-fwlog.png" width="75%"
+alt="The firmware log in the window, with the firmware's level at debug"></p>
 
 ### Smoke-testing a build
 
@@ -892,7 +949,8 @@ key would on hardware.
 ```
 
 QEMU's own `-d` tracing works too. `scripts/fe_monitor.py` drives the HMP monitor
-(`devices/NAME/monitor.sock`) for screenshots, key presses and `info registers`.
+(`devices/NAME/monitor.sock`) for screenshots, key presses and `info registers`. What the
+firmware says about itself, at any log level, is in [the firmware log](#the-firmware-log).
 
 ### Running QEMU by hand
 

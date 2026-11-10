@@ -751,6 +751,16 @@ firmware keeps `/int` on the card as `/ext/.int`.
   there alone (pushed back, it is the same image); `usb-cable=off`
   starts a run with the USB cable unplugged. The speaker's `mute` silences it without
   the firmware knowing.
+- **The log**: the firmware logs to USART1, QEMU's first serial port. The launcher gives
+  its chardev a `logfile` (`devices/NAME/uart.log`, appended to by every QEMU of a run),
+  so the log is kept whatever `--serial` connects the port to. How much the firmware
+  logs is the low nibble of RTC BKP1R (`FuriLogLevel`; 0 is its default, info), which
+  it reads once, when it starts. The machine property `log-level` is that nibble by
+  name: `-M flipper-zero,log-level=debug` sets it before the first instruction, and
+  `qom-set /machine log-level …` for the next start; reading it gives what the
+  firmware's own Settings wrote. `scripts/fe_log.py` reads the log for `flipperemu
+  log` and for the window: lines, levels, the colours the firmware left on, and where
+  it started again (a timestamp that goes back).
 
 ## The front panel (`flipper_panel.c`, `scripts/fe_gui*.py`)
 
@@ -784,7 +794,8 @@ button presses and releases. Nothing of it runs while no program is connected.
 The window itself (`fe_gui_view.py`) draws a body of FlipperEmu's own in QPainter, in
 units of one LCD pixel, so it scales without blurring; the LCD's colours follow the
 backlight. `fe_gui_link.py` is its end of the link, `fe_gui_widgets.py` the bench, the
-dialogs and the log, and `fe_gui.py` the menus and what ties them together.
+dialogs, the console and the firmware log (which is `uart.log`, read as it grows: it
+does not come over the link), and `fe_gui.py` the menus and what ties them together.
 
 ## Real radios: the CC1101's link (`flipper_rf.c`, `scripts/fe_sdr.py`)
 
@@ -900,4 +911,5 @@ the emulated field.
 | `nvram.bin` | coin-cell / gauge state: BQ27220 data memory, RTC calendar offset, BKP0R–BKP19R |
 | `enclave.keys` | the FUS's key store on CPU2: the secure enclave's keys (text, one key per line) |
 | `held.json` | (while it runs) the names of what the launcher held to it, for `status` and the window |
+| `uart.log`, `uart.log.1` | what a serial adapter on pins 13 and 14 would have recorded: the firmware's log of this run, and of the one before |
 | `firmware.elf` | symbols for gdb (copied when flashing an ELF) |

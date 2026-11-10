@@ -536,7 +536,8 @@ class FlipperView(QtWidgets.QWidget):
             "sd": {True: "The microSD card: click to pull it out",
                    False: "The microSD card: click to push it in",
                    None: "No microSD card in this run"}[self.sd],
-            "gpio": "The GPIO pins: click for the log, and a line for its CLI",
+            "gpio": "The GPIO pins. What the firmware logs comes out of two "
+                    "of them (13 and 14): click to read it",
             "ir": "The infrared window: click to point a remote at it",
         }.get(zone, "")
 

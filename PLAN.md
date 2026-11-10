@@ -165,6 +165,20 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
 - ☐ The window by hand on a desktop session (it has only run on Qt's offscreen
       platform here); a USB DFU device behind the firmware's DFU mode
 
+## M9: a bench for firmware developers ◐
+- ☑ The firmware log (2026-11-10): USART1 kept in `devices/NAME/uart.log` whatever
+      `--serial` is (and the run before in `uart.log.1`); `./flipperemu log` reads and
+      follows it (last lines, a level, a regex, through reboots and restarts); the
+      firmware's own log level as the machine property `log-level` (`run --log-level`,
+      `log --set-level`); in the window a tab beside the console, with the firmware's
+      colours, filters, the level, and a notice when the firmware crashes
+- ☐ Files and apps: copy files to and from the card of a running device, install a
+      `.fap` and start it, from the launcher and by dropping it on the window
+- ☐ The firmware's own tools against an emulated Flipper (`fbt`/`ufbt` launch and
+      debug over the USB serial port), and a page on the developer's loop
+- ☐ A recording of the screen (GIF) from the launcher and the window
+- ☐ gdb on demand for a device that runs already; pause and continue
+
 ## M6: research tooling ☐
 - ☐ Snapshot workflow (`savevm` on qcow2 images; boot once, jump straight to an app)
 - ☐ TCG plugin for coverage/trace of firmware or a single FAP

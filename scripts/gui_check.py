@@ -8,13 +8,14 @@
 Boots a throwaway device with `flipperemu run`, which opens the window: here
 off-screen (QT_QPA_PLATFORM=offscreen) and silent (--audio none), so nothing
 shows on the desktop.  Then it checks the front-panel link (frames, the
-backlight), clicks buttons with the mouse, holds an NFC tag to it from the
-bench, unplugs USB, switches it off as a real one is (Back held for 5 s, then
-Power Off: the window stays, the emulator exits), switches it on again (Back
-held: the tag is there again), switches it off the hard way and on again by
-plugging USB in, reboots it with Left + Back, installs the firmware again from
-the Device menu, and closes the window (which stops the emulator).  Exit status
-0 = pass. Pictures are kept in --out.
+backlight), clicks buttons with the mouse, opens the firmware's log with a
+click on the GPIO pins and sets the firmware's log level from it, holds an NFC
+tag to it from the bench, unplugs USB, switches it off as a real one is (Back
+held for 5 s, then Power Off: the window stays, the emulator exits), switches
+it on again (Back held: the tag is there again), switches it off the hard way
+and on again by plugging USB in, reboots it with Left + Back, installs the
+firmware again from the Device menu, and closes the window (which stops the
+emulator).  Exit status 0 = pass. Pictures are kept in --out.
 """
 import argparse
 import importlib.machinery
@@ -53,6 +54,7 @@ class Driver:
     def __init__(self, uart, out, timeout, firmware):
         self.uart, self.out, self.timeout = uart, out, timeout
         self.firmware = firmware
+        self.seen = 0                   # boots that were waited for
 
     def __call__(self, name, directory, launcher, session=None, scale=None):
         self.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -92,13 +94,17 @@ class Driver:
         self.spin(0.5)
 
     def boots(self):
+        """how often it has started: the log is the whole run's"""
         try:
             return self.uart.read_text(errors="replace").count("Startup complete")
         except OSError:
             return 0
 
     def booted(self):
-        return self.until(lambda: self.boots() >= 1, self.timeout)
+        """it has started (again, since the last time this was asked)"""
+        ok = self.until(lambda: self.boots() > self.seen, self.timeout)
+        self.seen = self.boots()
+        return ok
 
     def click(self, key):
         """a mouse click on a button of the drawn Flipper"""
@@ -141,6 +147,39 @@ class Driver:
         self.spin(1.0)
         self.shot("on")
 
+        # what the firmware logs: a click on the GPIO pins, where a real one
+        # has its UART
+        level = lambda: w.props.get(("/machine", "log-level"))
+        gpio = fe_gui_view.ZONES["gpio"].boundingRect().center()
+        QTest.mouseClick(v, Qt.LeftButton, Qt.NoModifier,
+                         QPoint(round(gpio.x() * v.k), round(gpio.y() * v.k)))
+        self.spin(0.6)
+        check("firmware log: a click on the GPIO pins opens it, with what "
+              "the firmware logged",
+              w.front.get(w.fwlog) and "[I][" in w.fwlog.shown_text()
+              and level() == "default"
+              and w.fwlog.level_button.text() == "Firmware level: default (info)")
+        # Its level, which the firmware reads when it starts.  Errors only is
+        # what every build shows: debug says nothing more on one that is built
+        # without its debug lines (Unleashed's releases).  No 'Startup
+        # complete' at that level: the computer seeing it again is the sign
+        usb = lambda: w.props.get(("/machine/soc/usb", "device"), "")
+        had = len(w.fwlog.shown_text())
+        w.fwlog.level_actions["error"].trigger()
+        again = (self.until(lambda: not usb().startswith("0483:"), 20)
+                 and self.until(lambda: usb().startswith("0483:"), self.timeout))
+        self.settle()
+        self.spin(2)
+        text, mark = w.fwlog.shown_text(), "it started again"
+        new = text.split(mark)[-1] if mark in text[had:] else text[had:]
+        check("firmware log: its level set to error: it starts again, and "
+              "logs errors only",
+              again and level() == "error"
+              and "[I][" not in new and "[W][" not in new)
+        self.shot("fwlog")
+        self.click("back")
+        self.spin(1.0)
+
         w.hold("nfc", ["ntag215", "04A1B2C3D4E5F6", "https://example.com"])
         w.set_cable("unplugged")
         self.settle()
@@ -161,6 +200,7 @@ class Driver:
         self.shot("off")
         if not off:
             return
+        w.fwlog.level_actions["debug"].trigger()        # ... while it is off
 
         self.hold(Qt.Key_Escape, fe_gui.POWER_ON_MS + 300)
         on = self.until(lambda: w.state == "on", 20) and self.booted()
@@ -168,6 +208,8 @@ class Driver:
         self.spin(1.5)
         check("power: Back held switches it on; the tag is held to it again",
               on and "NTAG215" in self.tile("nfc"))
+        check("firmware log: a level chosen while it is off is the one it "
+              "starts with", level() == "debug")
 
         w.hard_off()
         off = self.until(lambda: w.state == "off" and not w.qemu_up, 20)
@@ -180,7 +222,6 @@ class Driver:
               on and self.tile("usb") == "Plugged into a computer")
 
         # Left + Back for 3 s: held in reset; let go: it starts again
-        boots = self.boots()
         QTest.keyPress(v, Qt.Key_Left)
         QTest.keyPress(v, Qt.Key_Escape)
         self.spin(fe_gui.RESET_MS / 1000 + 0.3)
@@ -188,8 +229,7 @@ class Driver:
         QTest.keyRelease(v, Qt.Key_Escape)
         self.spin(0.05)
         QTest.keyRelease(v, Qt.Key_Left)
-        check("reset: Left + Back for 3 s reboot it",
-              blank and self.until(lambda: self.boots() > boots, self.timeout))
+        check("reset: Left + Back for 3 s reboot it", blank and self.booted())
         self.spin(2)
         self.shot("rebooted")
         text = self.uart.read_text(errors="replace")
