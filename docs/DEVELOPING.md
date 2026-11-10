@@ -193,13 +193,16 @@ Then `./flipperemu log -f` for what the firmware says, at the level you set
 `examples/hello` and the `ufbt` on the PATH: build, `launch`, the app's log lines,
 buttons, `launch` over the app that runs, the crash and the restart, `ufbt cli` in a
 terminal of its own with a second command kept waiting, the refused targets, a
-stopped device. It passes on the official 1.5.1 with ufbt 0.2.6 and its SDK. Without
-`ufbt`, or with an SDK for another API than the firmware's, it checks nothing and its
-exit status is 77.
+stopped device. For `fbt` it has a stand-in that says what it was called with: the
+tree's `fbt` is found from a folder inside it and run in its root, the emulated port
+is named, a port you name yourself is left alone, and the same targets are refused. It
+passes on the official 1.5.1 with ufbt 0.2.6 and its SDK (25 checks). Without `ufbt`,
+or with an SDK for another API than the firmware's, it checks nothing and its exit
+status is 77.
 
 By hand: the official self-update script sending a package without a radio stack
 (what `fbt flash_usb` sends) to a running device, which installed it and came back.
 
-Not tried: `flipperemu fbt` in a firmware's tree (no checkout of one was at hand for
-it; what it does with the arguments is ufbt's path, which is checked), and ufbt with
-another firmware's SDK.
+Not tried: a firmware built by `fbt` in its own tree, and then run, updated and
+launched to with the commands above. The stand-in shows what `fbt` is handed, and not
+that a build of it works here. Neither is ufbt with another firmware's SDK.

@@ -19,6 +19,10 @@ restarts.  Then `ufbt cli` in a terminal of its own, with a command typed
 and a second command kept waiting; the targets that are refused, because
 they go to a debug probe or bring a radio stack; and what a stopped device
 takes.  Exit status 0 = pass.
+
+`./flipperemu fbt` is checked with a stand-in for a firmware tree's `fbt`,
+which says what it was called with: which fbt is found, where it is run, the
+port it is given, what is refused.  No firmware is built here.
 """
 import argparse
 import os
@@ -181,12 +185,70 @@ def ufbt_checks(b, folder):
     return True
 
 
-def stopped_checks(b, folder):
+def stand_in_tree(work):
+    """A folder that looks like a firmware's tree to the launcher, with an
+    `fbt` that says where it was run and with what: (the tree, a folder of an
+    app in it)"""
+    tree = (work / "tree").resolve()
+    app = tree / "applications_user" / "my_app"
+    app.mkdir(parents=True)
+    (tree / "SConstruct").write_text("")
+    fbt = tree / "fbt"
+    fbt.write_text('#!/bin/sh\necho "stand-in fbt in $PWD: $*"\n')
+    fbt.chmod(0o755)
+    return tree, app
+
+
+def fbt(b, folder, *args):
+    r = subprocess.run([sys.executable, str(ROOT / "flipperemu"), "-d", b.name,
+                        "fbt", *args], cwd=folder, capture_output=True,
+                       text=True, timeout=120, stdin=subprocess.DEVNULL)
+    return r.returncode, r.stdout + r.stderr
+
+
+def fbt_checks(b, work):
+    tree, app = stand_in_tree(work)
+    port = f"FLIP_PORT={b.dir / 'usb.tty'}"
+    code, text = fbt(b, app, "launch", "APPSRC=my_app")
+    check("`fbt launch` in a folder of a tree: the tree's fbt, run in its "
+          "root, with the emulated port named",
+          code == 0
+          and f"stand-in fbt in {tree}: launch APPSRC=my_app {port}" in text,
+          text)
+    code, text = fbt(b, tree, "flash_usb")
+    check("`fbt flash_usb` (the package without a radio stack): passed on, "
+          "with the port", code == 0 and f": flash_usb {port}" in text, text)
+    code, text = fbt(b, tree, "cli", "FLIP_PORT=/dev/null")
+    check("a port that is named already: passed on as it is",
+          code == 0 and text.strip().endswith(": cli FLIP_PORT=/dev/null"),
+          text)
+    code, text = fbt(b, tree, "flash_usb_full")
+    check("`fbt flash_usb_full` (with a radio stack): refused, with "
+          "`fbt flash_usb` and `run --update`",
+          code == 1 and "stand-in" not in text and "radio stack" in text
+          and "`fbt flash_usb` sends" in text and "run --update" in text, text)
+    code, text = fbt(b, tree, "flash")
+    check("`fbt flash` (a debug probe's): refused",
+          code == 1 and "stand-in" not in text and "debug probe" in text, text)
+    code, text = fbt(b, work, "launch")
+    check("`fbt` outside a firmware's tree: said so",
+          code == 1 and "no `fbt` in this folder or above it" in text, text)
+    return tree
+
+
+def stopped_checks(b, folder, tree):
     code, text = tool(b, folder, "launch")
     check("a stopped device: `ufbt launch` says that it is not running",
           code == 1 and "is not running" in text, text)
     code, text = tool(b, folder)
     check("a stopped device: `ufbt` alone still builds", code == 0, text[-1500:])
+    code, text = fbt(b, tree, "launch", "APPSRC=my_app")
+    check("a stopped device: `fbt launch` says that it is not running",
+          code == 1 and "stand-in" not in text and "is not running" in text,
+          text)
+    code, text = fbt(b, tree, "updater_package")
+    check("a stopped device: `fbt` still builds",
+          code == 0 and ": updater_package FLIP_PORT=" in text, text)
 
 
 def main():
@@ -214,9 +276,10 @@ def main():
                  b.uart_text()[-2000:]):
             time.sleep(2)
             done = ufbt_checks(b, folder)
+            tree = fbt_checks(b, work) if done else None
             b.stop()
             if done:
-                stopped_checks(b, folder)
+                stopped_checks(b, folder, tree)
     finally:
         b.stop()
         shutil.rmtree(work, ignore_errors=True)

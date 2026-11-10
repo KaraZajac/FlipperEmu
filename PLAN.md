@@ -194,7 +194,8 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         emulated port named (`FLIP_PORT=`), so that a real Flipper that is plugged in
         is not the one it finds; the port held meanwhile; probe targets and packages
         with a radio stack refused with what does it here; `examples/hello`;
-        `docs/DEVELOPING.md`; `scripts/ufbt_check.py` (BRINGUP_LOG 78)
+        `docs/DEVELOPING.md`; `scripts/ufbt_check.py` (BRINGUP_LOG 78), which has a
+        stand-in `fbt` for what the launcher hands to a tree's own
   - ☐ `fbt` in a firmware's tree, tried: build, `run -f` the `.elf`, `flash_usb`,
         `launch APPSRC=`; ufbt with Momentum's and Unleashed's SDK
   - ☐ An update package sent to a running device by the launcher itself (`push` and

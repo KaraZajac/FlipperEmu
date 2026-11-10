@@ -894,8 +894,9 @@ All three are small, self-contained, and suitable for sending upstream.
       the page says what the message means.
     - ufbt's scripts print carriage-return progress bars: a log of them read with
       `tail` is one line of 40 kB.
-    `scripts/ufbt_check.py`: 17 checks on the official 1.5.1 with ufbt 0.2.6. `fbt` in
-    a firmware's tree is not tried yet.
+    `scripts/ufbt_check.py`: 25 checks on the official 1.5.1 with ufbt 0.2.6, eight
+    of them on what the launcher hands to `fbt` (a stand-in script that prints its
+    arguments). A firmware built by `fbt` in its tree is not tried yet.
 
 ## Things that were right the first time (and why)
 

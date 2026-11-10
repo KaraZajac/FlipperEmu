@@ -535,8 +535,9 @@ Everything else (a plain build, `ufbt create`, `ufbt update`) is passed on as it
 
 [docs/DEVELOPING.md](docs/DEVELOPING.md) goes through it: the loop for an app, the SDK
 that has to match the firmware, a firmware tree, and what the usual failures mean.
-`scripts/ufbt_check.py FIRMWARE` checks it with the `ufbt` on the PATH (17 checks on
-the official firmware; `fbt` in a firmware tree has not been tried yet).
+`scripts/ufbt_check.py FIRMWARE` checks it with the `ufbt` on the PATH (25 checks on
+the official firmware). For `fbt` it checks what the launcher hands to it, with a
+stand-in: a firmware built by `fbt` in its tree has not been tried yet.
 
 ### Smoke-testing a build
 
