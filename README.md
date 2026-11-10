@@ -403,9 +403,28 @@ that opened the pty by itself (`screen`, a script) is not seen, so close it firs
 the cable out, or while an app on the Flipper has turned the port into a keyboard, the
 commands say that there is no CLI and why.
 
+When it stops in the middle:
+
+- **Ctrl-C in a `push`** ends it after the piece that is on its way, and takes the
+  unfinished file off the card again.
+- **Ctrl-C in a `pull`** waits for the file that is on its way and throws it away. The
+  firmware cannot be told to stop sending a file. A second Ctrl-C leaves at once; the
+  Flipper then sends the rest to nobody, and its CLI answers again when it is through.
+- **The card pulled out** (`sd eject`) ends a `push` with the card's error, and `ls`
+  says that the slot is empty. `sd insert` brings back what was on it, the beginning of
+  that file included.
+- **A program killed** while it had the port leaves nothing in it for the next one: what
+  it had written and the firmware had not taken is dropped, and so is what the firmware
+  was still saying to it.
+
+One thing the emulator leaves as it is, because it is the firmware's: a CLI command
+that is cut off (a terminal closed in the middle of `storage tree` of a full card) is
+still finished by the firmware, slowly, and until then no new CLI session starts. The
+launcher then says that there is no prompt, and that this may be why.
+
 `scripts/files_check.py FIRMWARE` checks all of this on a throwaway device: a folder
 copied there and back through the firmware and through the image, each reading what the
-other wrote.
+other wrote, and then the interruptions above.
 
 ### Smoke-testing a build
 

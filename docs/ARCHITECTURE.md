@@ -317,6 +317,26 @@ Host sequence, as a PC does it:
 Mode switches re-enumerate on their own. Opening Bad USB turns the CDC port into a HID
 keyboard (`046d:c529`); leaving the app turns it back.
 
+**Hanging up.** When the chardev's client goes, the order matters. What it wrote and the
+device has not taken yet still goes out, for half a second at most; then DTR and RTS
+drop; what is left after that is thrown away, and nothing is taken from the chardev in
+between. The firmware is the reason. `cli_vcp.c` reads a bulk OUT packet when the
+endpoint's interrupt comes and a session exists, and at no other time. A packet that
+arrives after DTR dropped is acknowledged by the interrupt handler and never read; with
+both buffers of the double-buffered endpoint in software's hands the endpoint NAKs from
+then on, in every later session, until the device is reset. So no byte is sent to a
+port that is closed. The other direction has a smaller case: the firmware arms one IN
+packet at a time, and one may be left armed for the client that went. The host takes it
+and drops it before it raises DTR for the next client. Unplugging the cable empties the
+queue as well.
+
+What the model cannot shorten is the firmware's own end of a session. On DTR low its CLI
+service joins the shell's thread, and a command that does not look at its pipe
+(`storage read_chunks`, `storage tree`) runs to its end first, each write waiting 100 ms
+for a reader that is gone. Until then the service takes no events: opening the port
+gives no prompt, and each open and close queues two more events in its 8-entry queue
+(see "Bus time" below for what the ninth does).
+
 **Bus time.** A full-speed bulk transaction (token, data, handshake and the gaps between
 them) takes about 103 + 8n bit times at 12 Mbit/s: 51 µs for 64 bytes. The host
 completes one no sooner than that after the CPU arms the endpoint, or after the bus
@@ -718,6 +738,16 @@ builds FAT32 images from official resources (`.tgz`), update packages (heatshrin
 `resources.ths` or `.tar.gz`) or a directory, using mtools, so no root is needed. Current
 firmware keeps `/int` on the card as `/ext/.int`.
 
+A card that is pulled out (the machine's `sd-card=off`, the launcher's `sd eject`) is
+gone from the bus as well, not only from the detect pin: the firmware looks at that pin
+when its storage service has nothing else to do, so in the middle of a transfer the
+card's silence is what it notices. The slot is a second SPI peripheral on PC12 beside
+the card
+(`flipper-sd-slot`). With no card in it, the card's own chip select stays high and the
+slot answers 0xFF, which is the idle level the firmware's driver reads as "no answer".
+A card that is pushed in is reset first, as one that just got power, so the firmware's
+mount begins with a card in its idle state.
+
 The launcher's `ls`, `push`, `pull`, `rm` and `mkdir` (`scripts/fe_files.py`) have two
 ways to that card, and take the one that cannot disagree with the firmware. While the
 device runs, the firmware has the filesystem mounted and its FAT in memory, so the
@@ -729,11 +759,17 @@ behind one interface, and `scripts/files_check.py` holds them to the same result
 
 A file goes to the firmware in pieces of 1024 bytes, each announced by its own
 `storage write_chunk PATH N` and sent when the firmware answers `Ready`. The firmware
-reads a piece whole before it writes it, so when a write fails (a full card, an error
-from the card) no bytes of the file are left on the line for its shell to read as
+reads a piece whole before it writes it, so when a write fails (a full card, a card
+that was pulled out) no bytes of the file are left on the line for its shell to read as
 commands. It comes back in pieces of 8192 (`read_chunks`), each asked for with a `y`.
 The port is one line with one reader: a command holds `devices/NAME/usb.lock` (an
 flock with its holder's name in it) for as long as it has the CLI.
+
+Between two pieces of a write the firmware is at its prompt, so that is where a `push`
+that gets Ctrl-C stops, and removes what it wrote. `read_chunks` has no such place: once
+begun, the firmware sends the file to its end, and a port that is closed on it does not
+end the command (see "Hanging up" under USB). So a `pull` that gets Ctrl-C keeps asking
+for the pieces and drops them.
 
 ## Board
 

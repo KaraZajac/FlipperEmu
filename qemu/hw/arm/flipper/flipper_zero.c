@@ -52,6 +52,40 @@
 #define TYPE_FLIPPER_ZERO MACHINE_TYPE_NAME("flipper-zero")
 OBJECT_DECLARE_SIMPLE_TYPE(FlipperZeroState, FLIPPER_ZERO)
 
+/*
+ * The microSD slot when no card is in it.  Nothing drives MISO then, and the
+ * board's pull-up holds it high: every byte the firmware clocks in with the
+ * slot selected is 0xFF.  That is how it learns that nothing answers (it
+ * waits for a byte that is not 0xFF, eight times); zeroes would be an R1
+ * that says "done", and the wait for a card that is no longer busy would
+ * never end.
+ */
+#define TYPE_FLIPPER_SD_SLOT "flipper-sd-slot"
+OBJECT_DECLARE_SIMPLE_TYPE(FlipperSdSlot, FLIPPER_SD_SLOT)
+
+struct FlipperSdSlot {
+    SSIPeripheral parent_obj;
+    bool empty;
+};
+
+static uint32_t flipper_sd_slot_transfer(SSIPeripheral *dev, uint32_t tx)
+{
+    return FLIPPER_SD_SLOT(dev)->empty ? 0xff : 0;
+}
+
+static void flipper_sd_slot_realize(SSIPeripheral *dev, Error **errp)
+{
+}
+
+static void flipper_sd_slot_class_init(ObjectClass *oc, const void *data)
+{
+    SSIPeripheralClass *k = SSI_PERIPHERAL_CLASS(oc);
+
+    k->realize = flipper_sd_slot_realize;
+    k->transfer = flipper_sd_slot_transfer;
+    k->cs_polarity = SSI_CS_LOW;
+}
+
 struct FlipperZeroState {
     MachineState parent_obj;
     WB55SocState soc;
@@ -78,6 +112,9 @@ struct FlipperZeroState {
     uint32_t keys_down;          /* bit per button */
     bool sd_drive;               /* there is a card: -drive if=sd */
     bool sd_in;                  /* ... and it is in the slot */
+    bool sd_cs;                  /* PC12: the slot's chip select */
+    DeviceState *sd_spi;         /* the card's SPI side */
+    FlipperSdSlot *sd_slot;      /* what the slot answers without a card */
     char *nvram;                 /* battery-backed state file */
     char *enclave;               /* the FUS's key store (flipper_enclave.c) */
     Notifier exit_notifier;
@@ -404,11 +441,32 @@ static void flipper_nvram_save(Notifier *n, void *data)
     }
 }
 
-/* The slot's switch: low with a card in it.  The firmware looks at it all
- * the time, and mounts or unmounts the card when it changes. */
+/* The slot's switch: low with a card in it.  The firmware looks at it
+ * when it has nothing else to do with the card, and mounts or unmounts it
+ * when it changes. */
 static void flipper_sd_detect(FlipperZeroState *s)
 {
     qemu_set_irq(soc_in(s, 'C', 10), s->sd_drive && s->sd_in ? 0 : 1);
+}
+
+/* The slot's chip select reaches the card that is in it */
+static void flipper_sd_select(FlipperZeroState *s)
+{
+    bool in = s->sd_drive && s->sd_in;
+
+    s->sd_slot->empty = !in;
+    qemu_set_irq(qdev_get_gpio_in_named(DEVICE(s->sd_slot), SSI_GPIO_CS, 0),
+                 s->sd_cs);
+    qemu_set_irq(qdev_get_gpio_in_named(s->sd_spi, SSI_GPIO_CS, 0),
+                 in ? s->sd_cs : 1);
+}
+
+static void flipper_sd_cs(void *opaque, int n, int level)
+{
+    FlipperZeroState *s = opaque;
+
+    s->sd_cs = level;
+    flipper_sd_select(s);
 }
 
 /* External levels the board holds on MCU pins. A GPIO port reset releases
@@ -606,7 +664,6 @@ static void flipper_zero_init(MachineState *machine)
 
     dinfo = drive_get(IF_SD, 0, 0);
     dev = spi_dev(spi2, "ssi-sd", 1);
-    soc_out(s, 'C', 12, qdev_get_gpio_in_named(dev, SSI_GPIO_CS, 0));
     DeviceState *card = qdev_new(TYPE_SD_CARD_SPI);
     qdev_prop_set_drive_err(card, "drive",
                             dinfo ? blk_by_legacy_dinfo(dinfo) : NULL,
@@ -614,6 +671,11 @@ static void flipper_zero_init(MachineState *machine)
     qdev_realize_and_unref(card, qdev_get_child_bus(dev, "sd-bus"),
                            &error_fatal);
     s->sd_drive = dinfo != NULL;
+    s->sd_spi = dev;
+    s->sd_slot = FLIPPER_SD_SLOT(spi_dev(spi2, TYPE_FLIPPER_SD_SLOT, 2));
+    s->sd_cs = true;
+    flipper_sd_select(s);
+    soc_out(s, 'C', 12, qemu_allocate_irq(flipper_sd_cs, s, 0));
 
     /* ---- SPI1: CC1101 + ST25R3916 */
     SSIBus *spi1 = s->soc.spi[0].bus;
@@ -874,7 +936,9 @@ static bool flipper_get_sd_card(Object *obj, Error **errp)
 }
 
 /* Pulled out and pushed back in, it is the same card: the image of -drive.
- * While it is out the firmware leaves it alone. */
+ * Out, it is gone in the middle of whatever it was doing: a block that was
+ * on its way is not written, and the firmware gets no more answers.  In
+ * again, it has been without power, and starts as it does at power-on. */
 static void flipper_set_sd_card(Object *obj, bool v, Error **errp)
 {
     FlipperZeroState *s = FLIPPER_ZERO(obj);
@@ -883,8 +947,12 @@ static void flipper_set_sd_card(Object *obj, bool v, Error **errp)
         s->sd_in = v;
     } else if (v && !s->sd_drive) {
         error_setg(errp, "no microSD card: started without -drive if=sd");
-    } else {
+    } else if (v != s->sd_in) {
         s->sd_in = v;
+        if (v) {
+            device_cold_reset(s->sd_spi);
+        }
+        flipper_sd_select(s);
         flipper_sd_detect(s);
     }
 }
@@ -971,6 +1039,11 @@ static const TypeInfo flipper_zero_type[] = {
         .instance_init = flipper_zero_instance_init,
         .class_init = flipper_zero_class_init,
         .interfaces = arm_machine_interfaces,
+    }, {
+        .name = TYPE_FLIPPER_SD_SLOT,
+        .parent = TYPE_SSI_PERIPHERAL,
+        .instance_size = sizeof(FlipperSdSlot),
+        .class_init = flipper_sd_slot_class_init,
     },
 };
 DEFINE_TYPES(flipper_zero_type)

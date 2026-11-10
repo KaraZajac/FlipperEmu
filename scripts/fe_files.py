@@ -53,6 +53,10 @@ class FilesError(Exception):
     """Something about files that the user is to read"""
 
 
+class Interrupted(KeyboardInterrupt):
+    """Ctrl-C, taken where the Flipper was at its prompt"""
+
+
 class StorageError(FilesError):
     """The firmware's storage service said no"""
     WORDS = {
@@ -64,6 +68,7 @@ class StorageError(FilesError):
         "filesystem not ready": "no SD card in the slot (`sd insert` pushes "
                                 "it back in)",
         "file is already open": "an app on the Flipper has that file open",
+        "internal error": "the SD card gave an error",
     }
 
     def __init__(self, reason, path=None):
@@ -217,7 +222,9 @@ class CliFiles:
             raise FilesError(f"{path}: the firmware said {out!r}")
         return out
 
-    def write(self, path, data, progress=None):
+    def write(self, path, data, progress=None, stop=None):
+        """stop: asked after each piece (the firmware is at its prompt then);
+        true ends it there, and takes what there is of the file away again"""
         cli = self.cli
         try:
             self.remove(path)               # write_chunk appends
@@ -227,23 +234,43 @@ class CliFiles:
         at = 0
         while True:
             piece = data[at:at + WRITE_CHUNK]
-            cli.write(f'storage write_chunk "{path}" {len(piece)}\r'.encode())
-            cli.read_line(15)               # the command, echoed
-            word = cli.read_line(15)
-            if word != "Ready":
-                cli.read_until_prompt(15)
-                self._check(word, path)
-                raise FilesError(f"{path}: the firmware said {word!r}")
-            cli.write(piece)
-            tail = cli.read_until_prompt(60)
-            self._check(tail.decode(errors="replace"), path)
+            try:
+                self._piece(path, piece)
+            except StorageError as e:
+                if not at:
+                    raise
+                # it took the file's beginning, and then no more of it
+                raise FilesError(
+                    f"{path}: the card stopped after {at} of {len(data)} "
+                    f"bytes ({e.reason}); was it pulled out?") from None
             at += len(piece)
             if progress:
                 progress(at, len(data))
             if at >= len(data):
                 return
+            if stop and stop():
+                try:
+                    self.remove(path)
+                    left = "is off the card again"
+                except FilesError:
+                    left = f"is on the card with {at} bytes of it"
+                raise Interrupted(f"interrupted: {path} was not finished, "
+                                  f"and {left}")
 
-    def read(self, path, progress=None):
+    def _piece(self, path, piece):
+        cli = self.cli
+        cli.write(f'storage write_chunk "{path}" {len(piece)}\r'.encode())
+        cli.read_line(15)                   # the command, echoed
+        word = cli.read_line(15)
+        if word != "Ready":
+            cli.read_until_prompt(15)
+            self._check(word, path)
+            raise FilesError(f"{path}: the firmware said {word!r}")
+        cli.write(piece)
+        tail = cli.read_until_prompt(60)
+        self._check(tail.decode(errors="replace"), path)
+
+    def read(self, path, progress=None, stop=None):
         cli = self.cli
         cli.write(f'storage read_chunks "{path}" {READ_CHUNK}\r'.encode())
         cli.read_line(15)                   # the command, echoed
@@ -253,17 +280,27 @@ class CliFiles:
             cli.read_until_prompt(15)
             self._check(head, path)
             raise FilesError(f"{path}: the firmware said {head!r}")
-        size, out = int(m.group(1)), bytearray()
-        while len(out) < size:
+        # The firmware sends the whole file once it has begun, with no way to
+        # tell it to stop; and a port closed on it in the middle leaves it
+        # sending to nobody for minutes, with its CLI gone that long.  So a
+        # read that is stopped is still read to its end, and thrown away.
+        size, out, at, given_up = int(m.group(1)), bytearray(), 0, False
+        while at < size:
             ready = cli.read_exactly(len(READY), 30)
             if ready != READY:
                 raise FilesError(f"{path}: the firmware said {ready!r} in the "
                                  "middle of the file")
             cli.write(b"y")
-            out += cli.read_exactly(min(size - len(out), READ_CHUNK), 60)
-            if progress:
-                progress(len(out), size)
+            piece = cli.read_exactly(min(size - at, READ_CHUNK), 60)
+            at += len(piece)
+            if not given_up:
+                out += piece
+                if progress:
+                    progress(at, size)
+                given_up = bool(stop and at < size and stop())
         cli.read_until_prompt(15)
+        if given_up:
+            raise Interrupted(f"interrupted: {path} was not copied")
         return bytes(out)
 
 
@@ -385,7 +422,7 @@ class ImageFiles:
         self._folder(path)
         self._m("mdeltree", self._at(path))
 
-    def read(self, path, progress=None):
+    def read(self, path, progress=None, stop=None):
         st = self.stat(path)
         if not st:
             raise StorageError("file/dir not exist", path)
@@ -399,7 +436,7 @@ class ImageFiles:
     def md5(self, path):
         return md5(self.read(path))
 
-    def write(self, path, data, progress=None):
+    def write(self, path, data, progress=None, stop=None):
         with tempfile.NamedTemporaryFile(prefix="fe-file-") as tmp:
             tmp.write(data)
             tmp.flush()
@@ -461,13 +498,16 @@ def plan_push(files, sources, remote):
     return folders, jobs
 
 
-def push(files, sources, remote=None, force=False, say=print, progress=None):
+def push(files, sources, remote=None, force=False, say=print, progress=None,
+         stop=None):
     """Copy local files and folders to the card; (copied, unchanged).
 
     remote: the folder to put them in; for one file, also its new name.
     None: each file goes where its kind lives (HOMES).  A folder goes into
     `remote` with all that is in it.  A file that is there already with the
-    same bytes is left alone, unless force."""
+    same bytes is left alone, unless force.  stop: asked between files and
+    between the pieces of one; true ends it (Interrupted) with no half of a
+    file left behind."""
     folders, jobs = plan_push(files, sources, remote)
     made = set(ROOTS)
 
@@ -482,6 +522,8 @@ def push(files, sources, remote=None, force=False, say=print, progress=None):
         need(folder)
     copied = same = 0
     for local, target in jobs:
+        if stop and stop():
+            raise Interrupted(f"interrupted before {local}")
         data = local.read_bytes()
         need(parent(target))
         st = files.stat(target)
@@ -494,7 +536,8 @@ def push(files, sources, remote=None, force=False, say=print, progress=None):
             same += 1
             continue
         files.write(target, data,
-                    progress and (lambda a, b: progress(str(local), a, b)))
+                    progress and (lambda a, b: progress(str(local), a, b)),
+                    stop)
         if files.md5(target) != md5(data):
             raise FilesError(f"{target}: what the Flipper has is not what was "
                              "sent")
@@ -511,11 +554,12 @@ def safe_rel(name):
     return pathlib.Path(*parts)
 
 
-def pull(files, sources, local=".", force=False, say=print, progress=None):
+def pull(files, sources, local=".", force=False, say=print, progress=None,
+         stop=None):
     """Copy files and folders from the card; (copied, unchanged).
 
     local: the folder to put them in (made if it is not there); for one file,
-    also its new name."""
+    also its new name.  stop: as for push."""
     as_folder = str(local).endswith(("/", os.sep))
     local = pathlib.Path(local)
     sources = [clean(s) for s in sources]
@@ -545,6 +589,8 @@ def pull(files, sources, local=".", force=False, say=print, progress=None):
         folder.mkdir(parents=True, exist_ok=True)
     copied = same = 0
     for remote, target, size in jobs:
+        if stop and stop():
+            raise Interrupted(f"interrupted before {remote}")
         if target.is_dir():
             raise FilesError(f"{target} is a folder: {remote} cannot take its "
                              "place")
@@ -554,7 +600,9 @@ def pull(files, sources, local=".", force=False, say=print, progress=None):
             say(f"{remote} = {target} (unchanged)")
             same += 1
             continue
-        data = files.read(remote, progress and (lambda a, b: progress(remote, a, b)))
+        data = files.read(remote,
+                          progress and (lambda a, b: progress(remote, a, b)),
+                          stop)
         target.write_bytes(data)
         say(f"{remote} -> {target} ({len(data)} bytes)")
         copied += 1

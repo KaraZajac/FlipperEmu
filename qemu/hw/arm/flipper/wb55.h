@@ -567,6 +567,9 @@ struct WB55UsbState {
     uint8_t cdc_if, cdc_in, cdc_out;
     uint16_t cdc_out_mps;
     bool chr_open, dtr_sent, dtr_pending;
+    bool hup;                   /* the port was closed: DTR is to drop */
+    bool stale;                 /* the device may hold a packet for who left */
+    int64_t hup_by, reopen_at;
     Fifo8 to_dev, to_chr;
     guint watch;
 

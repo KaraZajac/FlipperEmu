@@ -127,13 +127,13 @@ class FlipperCli:
         self.buf += data
         return True
 
-    def read_until_prompt(self, timeout):
-        """Everything up to and including the next CLI prompt."""
+    def read_until_prompt(self, timeout, what=None):
+        """Everything up to and including the next CLI prompt.
+        what: what to say when it does not come"""
         end = time.time() + timeout
         while not self.buf.endswith(PROMPT):
             if time.time() > end:
-                raise TimeoutError("no CLI prompt (is the firmware's CLI over "
-                                   "USB enabled?)")
+                raise TimeoutError(what or "the Flipper's CLI does not answer")
             self._fill(min(0.2, max(0.0, end - time.time())))
         out, self.buf = self.buf, b""
         return out
@@ -170,7 +170,9 @@ class FlipperCli:
     def run(self, command, timeout=30.0, color=False):
         """Run one CLI command, return its output (without echo and prompt)."""
         self.write(command.encode() + b"\r")
-        out = self.read_until_prompt(timeout)
+        out = self.read_until_prompt(
+            timeout, f"the Flipper's CLI was not done with `{command}` "
+                     f"after {timeout:g} s")
         out = out[:-len(PROMPT)]
         first, _, rest = out.partition(b"\r\n")       # the echoed command
         if not color:

@@ -1038,7 +1038,10 @@ def open_cli(dev, prompt=True, timeout=15.0):
     cli = FlipperCli(ep, lock=dev.dir / "usb.lock")
     if prompt:
         try:
-            cli.read_until_prompt(timeout)
+            cli.read_until_prompt(
+                timeout, "no CLI prompt (is the firmware's CLI over USB "
+                         "enabled, and not still at a command that was cut "
+                         "off?)")
         except TimeoutError as e:
             cli.close()
             sys.exit(f"[{dev.name}] {e}")
@@ -1091,6 +1094,32 @@ def transfer_progress():
     return show
 
 
+class held_interrupt:
+    """Ctrl-C during a transfer to the card: taken note of, and acted on where
+    the Flipper is at its prompt, so that no half of a file stays behind.  A
+    second one is not held back.  Gives the question "was there one?"."""
+
+    def __init__(self, how):
+        self.how = how                      # what is said at the first one
+
+    def __enter__(self):
+        self.hit = False
+        self.old = signal.signal(signal.SIGINT, self.note)
+        return lambda: self.hit
+
+    def note(self, *_):
+        self.hit = True
+        signal.signal(signal.SIGINT, self.old)
+        if sys.stderr.isatty():
+            print(f"\r\x1b[K({self.how}; Ctrl-C again stops at once)",
+                  file=sys.stderr)
+        else:
+            print(f"({self.how})", file=sys.stderr)
+
+    def __exit__(self, *exc):
+        signal.signal(signal.SIGINT, self.old)
+
+
 def copied_text(dev, files, copied, same):
     text = f"[{dev.name}] {copied} copied"
     if same:
@@ -1130,8 +1159,11 @@ def cmd_push(args):
         sys.exit(f"push: what is to go to {remote}? (push LOCAL... [REMOTE])")
     files, close = open_card(dev)
     try:
-        copied, same = fe_files.push(files, sources, remote, force=args.force,
-                                     progress=transfer_progress())
+        with held_interrupt("stopping after this piece") as stop:
+            copied, same = fe_files.push(files, sources, remote,
+                                         force=args.force,
+                                         progress=transfer_progress(),
+                                         stop=stop)
     finally:
         close()
     print(copied_text(dev, files, copied, same))
@@ -1146,8 +1178,21 @@ def cmd_pull(args):
         else "."
     files, close = open_card(dev)
     try:
-        copied, same = fe_files.pull(files, sources, local, force=args.force,
-                                     progress=transfer_progress())
+        with held_interrupt("stopping when the Flipper has sent this file: "
+                            "it cannot be told to stop") as stop:
+            copied, same = fe_files.pull(files, sources, local,
+                                         force=args.force,
+                                         progress=transfer_progress(),
+                                         stop=stop)
+    except fe_files.Interrupted:
+        raise
+    except KeyboardInterrupt:
+        if isinstance(files, fe_files.CliFiles):
+            raise fe_files.Interrupted(
+                "interrupted; if the Flipper was sending a file, it sends the "
+                "rest to nobody, and its CLI answers again when that is done"
+            ) from None
+        raise
     finally:
         close()
     print(copied_text(dev, files, copied, same))
@@ -1942,6 +1987,12 @@ def main():
         sys.exit(f"flipperemu: {e}")
     except fe_files.FilesError as e:
         sys.exit(f"flipperemu: {e}")
+    except KeyboardInterrupt as e:
+        if sys.stderr.isatty():
+            sys.stderr.write("\r\x1b[K")
+        print(f"flipperemu: {e}" if str(e) else "flipperemu: interrupted",
+              file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

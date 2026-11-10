@@ -805,6 +805,36 @@ All three are small, self-contained, and suitable for sending upstream.
     chunk, one of no bytes) there and back both ways and has each way read what the
     other wrote: 41 checks on official 1.5.1, Momentum mntm-012 and Unleashed
     unlshd-094.
+76. **A card that is out, and a caller who hangs up.** Two things a transfer met when it
+    did not get to its end.
+    - `sd eject` moved the card-detect pin and nothing else, and the firmware reads that
+      pin only when its storage service is idle. A `push` under way went on writing to
+      a card that was "out", to its last byte. The slot is now on the SPI bus itself:
+      with the card out it answers 0xFF and the card is not selected, and the write in
+      progress fails (`internal error` is the firmware's word for it). A card pushed
+      in is reset first.
+    - A `push` stopped with Ctrl-C left the CLI dead until the emulator was restarted:
+      no prompt for any later command. The endpoint registers showed why: bulk OUT at
+      0x7141, receive valid but both of its two buffers with software, which NAKs for
+      good. The model had dropped DTR the moment the pty closed and then gone on sending
+      the rest of what the launcher had written. `cli_vcp.c` reads a packet only when
+      the endpoint's interrupt comes while a session exists; these came when there was
+      none, were acknowledged, and nobody looked again. Unplugging did not help, because
+      the model kept those bytes for the next plug. Now the last bytes go first, then
+      DTR drops, and the rest is discarded (ARCHITECTURE, "Hanging up").
+    - With that gone, a `pull` stopped with Ctrl-C showed what is the firmware's own.
+      `storage read_chunks` cannot be stopped, and a closed port does not stop it: the
+      shell goes on sending the file into a pipe nobody reads, 100 ms a write. For
+      300 kB that is minutes without a CLI. Trying the port a few times in that
+      time filled the CLI service's queue of eight events (two per open and close,
+      and its thread was waiting for the shell), and the ninth failed its `furi_check`
+      in the USB interrupt: `[CRASH][ISR USB_LP] furi_check failed`, and a reboot.
+      Nothing in the model was wrong there, so the launcher keeps out of it: a `pull`
+      that is interrupted reads its file to the end and drops it, and a `push` stops
+      between two pieces and takes the file off the card.
+    `files_check.py` has seven checks more for this, 48 on each of the three firmwares:
+    a pull and a push interrupted, a push and a `cli` killed, the card pulled out in
+    the middle of a push and pushed in again.
 
 ## Things that were right the first time (and why)
 

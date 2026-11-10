@@ -11,7 +11,9 @@ compares.  Then it stops the device and does the same in the card's image
 (mtools), which has to show what the firmware wrote; starts it again, and the
 firmware has to show what was written into the image.  Also: what is said
 when a path is wrong, when two commands want the USB serial port, and when
-the cable is unplugged.  Exit status 0 = pass.
+the cable is unplugged; and what is left when it goes wrong in the middle: a
+transfer interrupted, a command killed, the card pulled out.  Exit status
+0 = pass.
 """
 import argparse
 import filecmp
@@ -19,6 +21,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -61,6 +64,21 @@ class Bench:
                             self.name, *map(str, args)], capture_output=True,
                            text=True, timeout=timeout, stdin=subprocess.DEVNULL)
         return r.returncode, r.stdout + r.stderr
+
+    def bg(self, *args):
+        """A launcher command that is not waited for"""
+        return subprocess.Popen([sys.executable, str(ROOT / "flipperemu"), "-d",
+                                 self.name, *map(str, args)], text=True,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT)
+
+    def answers(self):
+        """The CLI gives two commands their two answers, and nothing else:
+        (it does, what it said)"""
+        code, text = self.fe("cli", "loader info", "uptime")
+        lines = text.strip().splitlines()
+        return (code == 0 and len(lines) == 2 and "pplication" in lines[0]
+                and lines[1].startswith("Uptime:")), text
 
     def start(self, first=False):
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -184,6 +202,88 @@ def file_checks(b, src, out, way):
           text)
 
 
+def rough_checks(b, big, out):
+    """It goes wrong in the middle.  /ext/fe-rough/big.bin is on the card."""
+    def ended(p, sig, after):
+        time.sleep(after)
+        p.send_signal(sig)
+        try:
+            text = p.communicate(timeout=120)[0]
+        except subprocess.TimeoutExpired:
+            p.kill()
+            text = p.communicate()[0] + "\n(did not end)"
+        return p.returncode, text
+
+    # the firmware cannot be told to stop sending a file: it is read to its
+    # end and dropped, and then the port is free
+    code, text = ended(b.bg("pull", "/ext/fe-rough/big.bin", out / "back.bin"),
+                       signal.SIGINT, 4.0)
+    ok, said = b.answers()
+    check("a pull interrupted: said in a line, nothing copied, and the next "
+          "command gets its answer",
+          code == 130 and "was not copied" in text and "Traceback" not in text
+          and not (out / "back.bin").exists() and ok, text + said)
+
+    code, text = ended(b.bg("push", big, "/ext/fe-rough/again.bin"),
+                       signal.SIGINT, 5.0)
+    code2, listed = b.fe("ls", "/ext/fe-rough")
+    ok, said = b.answers()
+    check("a push interrupted: said in a line, no half of the file left, and "
+          "the next command gets its answer",
+          code == 130 and "off the card again" in text
+          and "Traceback" not in text and code2 == 0
+          and "again.bin" not in listed and "big.bin" in listed and ok,
+          text + listed + said)
+
+    # No goodbye at all.  What the killed one had written and the firmware
+    # had not taken is not left in the port for the next command, ...
+    code, text = ended(b.bg("push", big, "/ext/fe-rough/killed.bin"),
+                       signal.SIGKILL, 5.0)
+    ok, said = b.answers()
+    code2, listed = b.fe("ls", "/ext/fe-rough")
+    check("a push killed: the next command gets its answer; the file's "
+          "beginning is on the card",
+          ok and code2 == 0 and "killed.bin" in listed, said + listed)
+    # ... and what the firmware was still saying to it is not the next one's
+    # to read.  (`top` ends when its listener goes.  A command that does not
+    # look, `storage tree` of a full card, is finished first, to nobody, and
+    # the CLI is gone that long: on a Flipper on a desk as well.)
+    for after in (2.3, 2.65, 3.0):
+        ended(b.bg("cli", "top"), signal.SIGKILL, after)
+        ok, said = b.answers()
+        if not ok:
+            break
+    check("a `cli` killed while the firmware talks: the next command gets "
+          "its own answer, and only that", ok, said)
+
+    p = b.bg("push", big, "/ext/fe-rough/third.bin")
+    time.sleep(5.0)
+    b.fe("sd", "eject")
+    try:
+        text = p.communicate(timeout=60)[0]
+    except subprocess.TimeoutExpired:
+        p.kill()
+        text = p.communicate()[0] + "\n(did not end)"
+    code2, text2 = b.fe("ls", "/ext")       # (the firmware's CLI says that)
+    check("the card pulled out in the middle of a push: the push ends and "
+          "says so, and ls says that there is no card",
+          p.returncode == 1
+          and ("was it pulled out?" in text or "SD card" in text)
+          and code2 == 1 and "no SD card" in text2, text + text2)
+    b.fe("sd", "insert")
+    end = time.time() + 15
+    while True:
+        code, text = b.fe("ls", "/ext/fe-rough")
+        if code == 0 or time.time() > end:
+            break
+        time.sleep(0.5)
+    code2, text2 = b.fe("rm", "-r", "/ext/fe-rough")
+    ok, said = b.answers()      # (some firmware has its commands on the card)
+    check("pushed in again: the card is back, with what was on it",
+          code == 0 and "big.bin" in text and code2 == 0 and ok,
+          text + text2 + said)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -197,6 +297,8 @@ def main():
     src, out = work / "src", work / "out"
     src.mkdir()
     make_tree(src)
+    big = work / "big.bin"
+    big.write_bytes(os.urandom(800_000))
     try:
         if not check("boot: 'Startup complete'", b.start(first=True)):
             return 1
@@ -253,6 +355,8 @@ def main():
         check("stopped: /int is the firmware's to show",
               code == 1 and "start the device" in text, text)
         code, image = b.fe("ls", "-R", "/ext/fe-check")
+        code, text = b.fe("push", big, "/ext/fe-rough/")
+        check("in the card's image: a big file", code == 0, text)
 
         if check("boot again: 'Startup complete'", b.start()):
             code2, live = b.fe("ls", "-R", "/ext/fe-check")
@@ -269,6 +373,7 @@ def main():
             code2, text2 = b.fe("ls", "/ext/fe-check")
             check("through the firmware: rm -r", code == 0 and code2 == 1,
                   text + text2)
+            rough_checks(b, big, work)
         check("no crash in the firmware's log",
               not CRASH.search(b.uart_text(every=True)))
     finally:

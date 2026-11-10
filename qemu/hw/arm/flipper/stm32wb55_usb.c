@@ -106,6 +106,8 @@ enum { STAT_DIS = 0, STAT_STALL = 1, STAT_NAK = 2, STAT_VALID = 3 };
 #define KICK_NS         (20 * 1000)     /* react 20 us after a CPU write */
 #define POLL_NS         (1 * MS)        /* fallback poll while a transfer waits */
 #define IDLE_POLL_NS    (10 * MS)
+#define CLOSE_WAIT_NS   (500 * MS)  /* a closed port's last bytes: how long */
+#define REOPEN_NS       (10 * MS)   /* from a port's hang-up to its next use */
 #define CTL_TIMEOUT_NS  (500 * MS)
 #define CTL_GAP_NS      (50 * 1000)     /* between control transfers */
 #define EP0_SETTLE_NS   (50 * MS)       /* then send the SETUP regardless */
@@ -658,6 +660,22 @@ static UsbTx usb_out(WB55UsbState *s, int ea, const uint8_t *data, int len)
     return TX_ACK;
 }
 
+/* the device has a packet for the host on this endpoint */
+static bool usb_in_armed(WB55UsbState *s, int ea)
+{
+    int n = usb_listening(s) ? usb_find_ep(s, ea) : -1;
+    uint16_t r;
+
+    if (n < 0) {
+        return false;
+    }
+    r = s->epr[n];
+    if (STAT_TX(r) != STAT_VALID || (r & EP_TYPE) == EPT_ISO) {
+        return false;
+    }
+    return !IS_DBLBULK(r) || !!(r & EP_DTOG_TX) != !!(r & EP_SWBUF_TX);
+}
+
 static UsbTx usb_in(WB55UsbState *s, int ea, uint8_t *buf, int *plen)
 {
     int n = usb_listening(s) ? usb_find_ep(s, ea) : -1;
@@ -752,6 +770,8 @@ static void host_detach(WB55UsbState *s)
     s->hstate = H_DETACHED;
     s->ctl.active = false;
     s->cdc = false;
+    s->hup = false;                         /* the port went with the device */
+    fifo8_reset(&s->to_dev);
     s->addr = 0;
     s->failures = 0;
     if (s->timer) {
@@ -1061,6 +1081,7 @@ static void enum_next(WB55UsbState *s, int64_t now)
             s->hstate = H_RUNNING;
             s->failures = 0;
             s->dtr_sent = false;
+            s->hup = s->stale = false;
             s->kb_mods = s->kb_lone_mods = s->mouse_btn = 0;
             s->alt_code = s->alt_digits = 0;
             memset(s->kb_keys, 0, sizeof(s->kb_keys));
@@ -1218,8 +1239,58 @@ static int cdc_step(WB55UsbState *s, int64_t now)
     if (!s->cdc) {
         return -1;
     }
-    if (s->chr_open != s->dtr_sent) {
+    if (s->hup) {
+        /*
+         * The port was closed.  As a computer does it then: what the program
+         * wrote still goes out, for as long as the device takes it; then DTR
+         * and RTS drop, and what is left is gone.  Nothing is sent to a
+         * device whose port is closed: the firmware's CLI does not read a
+         * packet that comes when it has no session, and no later one either.
+         */
+        if (!fifo8_is_empty(&s->to_dev) && now < s->hup_by && !s->dtr_sent) {
+            /* written and closed before the port's DTR was up: that first */
+            s->dtr_pending = true;
+            ctl_start(s, now, 0x21, 0x22, 0x0003, s->cdc_if, 0, NULL);
+            return 1;
+        }
+        if (fifo8_is_empty(&s->to_dev) || now >= s->hup_by) {
+            fifo8_reset(&s->to_dev);
+            s->hup = false;
+            qemu_chr_fe_accept_input(&s->chr);
+            if (s->dtr_sent) {
+                s->dtr_pending = false;
+                s->stale = true;
+                s->reopen_at = now + REOPEN_NS;
+                ctl_start(s, now, 0x21, 0x22, 0, s->cdc_if, 0, NULL);
+            }
+            return 1;
+        }
+    } else if (s->chr_open != s->dtr_sent) {
         /* DTR and RTS follow the chardev connection, as with a terminal */
+        if (s->chr_open && s->stale) {
+            /*
+             * The device may still hold a packet for the program that left
+             * (one at most: nobody took it, and the firmware waits for
+             * that).  It is not for the program that came: that one would
+             * read the end of somebody else's answer as the start of its
+             * own.  A computer hands it on; a careful program then throws
+             * away what it finds in a port it opens, and this does it for
+             * all of them.
+             */
+            if (now < s->reopen_at) {
+                host_wake(s, s->reopen_at);
+                return 0;
+            }
+            if (!usb_in_armed(s, s->cdc_in)) {
+                s->stale = false;
+            } else if (usb_in(s, s->cdc_in, pkt, &n) == TX_ACK) {
+                s->stale = false;
+                return 1;
+            } else {
+                host_wake(s, now + IDLE_POLL_NS);
+                return 0;
+            }
+        }
         s->dtr_pending = s->chr_open;
         ctl_start(s, now, 0x21, 0x22, s->chr_open ? 0x0003 : 0, s->cdc_if, 0,
                   NULL);
@@ -1236,10 +1307,14 @@ static int cdc_step(WB55UsbState *s, int64_t now)
             progress = 1;
         }
     }
-    /* the host reads the bulk IN endpoint only while the port is open */
-    if (s->chr_open && fifo8_num_free(&s->to_chr) >= sizeof(pkt) &&
+    /*
+     * The host reads the bulk IN endpoint only while the port is open; and
+     * while a closed one sends its last bytes, with nobody left to read
+     * what comes back.
+     */
+    if ((s->chr_open || s->hup) && fifo8_num_free(&s->to_chr) >= sizeof(pkt) &&
         usb_in(s, s->cdc_in, pkt, &n) == TX_ACK) {
-        if (n) {
+        if (n && !s->hup) {
             fifo8_push_all(&s->to_chr, pkt, n);
             usb_chr_flush(s);
         }
@@ -1967,6 +2042,9 @@ static int usb_chr_can_receive(void *opaque)
     if (s->hstate != H_RUNNING || s->usbip_imported) {
         return 0;                           /* keep it in the chardev */
     }
+    if (s->cdc && s->hup) {
+        return 0;                           /* after the hang-up */
+    }
     return s->cdc ? fifo8_num_free(&s->to_dev) : 256;
 }
 
@@ -1992,6 +2070,8 @@ static void usb_chr_event(void *opaque, QEMUChrEvent event)
     case CHR_EVENT_CLOSED:
         s->chr_open = false;
         fifo8_reset(&s->to_chr);
+        s->hup = true;
+        s->hup_by = now_ns() + CLOSE_WAIT_NS;
         break;
     default:
         return;
