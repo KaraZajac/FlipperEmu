@@ -8,7 +8,9 @@
 
 Boots a throwaway device, waits for the firmware's own log milestones, presses
 Back (dismiss the first scene) and OK (main menu), checks the LCD changed,
-runs `info device` on the CLI over the emulated USB serial port, receives an
+runs `info device` on the CLI over the emulated USB serial port, checks the
+secure enclave (the firmware's own check of its keys, and a `crypto encrypt`
+against what scripts/fe_enclave.py computes), receives an
 NEC frame through the virtual IR receiver (`ir rx`), captures an `ir tx` and
 decodes it back, receives a Princeton key over the virtual air (`subghz rx`),
 captures a `subghz tx`, receives a key from an SDR recording through the
@@ -691,6 +693,37 @@ def usb_cli_check(mon: Monitor) -> bool:
     return re.search(r"hardware[._]name", out) is not None
 
 
+def enclave_check(mon: Monitor, devdir: pathlib.Path, uart: pathlib.Path) -> bool:
+    """The firmware's check of the enclave's keys passed, and what it encrypts
+    with one of them is what the host computes from the key file
+    (scripts/enclave_check.py -f FIRMWARE goes through all of it)."""
+    import fe_enclave
+    from enclave_check import Failure, enclave_info, fw_cli_encrypt
+    iv, text = bytes(range(16)), "fifteen chars.."
+    try:
+        key = fe_enclave.read_store(devdir / "enclave.keys")[1][1]
+        cli = FlipperCli(usb_endpoint(mon))
+        try:
+            cli.read_until_prompt(15)
+            info = enclave_info(cli)
+            got = fw_cli_encrypt(cli, 1, iv, text)
+        finally:
+            cli.close()
+    except (OSError, TimeoutError, ConnectionError, TypeError, ValueError, KeyError,
+            Failure) as e:
+        print(f"  enclave: {e}")
+        return False
+    if info != (10, True) or \
+            "Secure Enclave verification failed" in uart.read_text(errors="replace"):
+        print(f"  enclave: the firmware finds {info[0]} of its 10 keys valid")
+        return False
+    want = fe_enclave.cli_encrypt(key, iv, text)
+    if got != want:
+        print(f"  enclave: `crypto encrypt 1` gave {got.hex()}, the host {want.hex()}")
+        return False
+    return True
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -753,6 +786,8 @@ def main() -> int:
                             desk.read_bytes() != menu.read_bytes()))
             if not args.no_usb:
                 results.append(("usb: CLI 'info device' over CDC", usb_cli_check(mon)))
+                results.append(("enclave: keys valid, `crypto encrypt` = the host's",
+                                enclave_check(mon, devdir, uart)))
                 results.append(("ir: NEC frame received and decoded", ir_check(mon)))
                 results.append(("subghz: Princeton key received at 433.92 MHz",
                                 subghz_check(mon)))

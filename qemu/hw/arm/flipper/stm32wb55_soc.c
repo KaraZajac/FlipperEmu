@@ -194,6 +194,8 @@ static void wb55_soc_init(Object *obj)
     object_initialize_child(obj, "flash", &s->flash, TYPE_WB55_FLASH);
     object_initialize_child(obj, "hsem", &s->hsem, TYPE_WB55_HSEM);
     object_initialize_child(obj, "ipcc", &s->ipcc, TYPE_WB55_IPCC);
+    object_initialize_child(obj, "aes1", &s->aes1, TYPE_WB55_AES);
+    object_initialize_child(obj, "aes2", &s->aes2, TYPE_WB55_AES);
     object_initialize_child(obj, "exti", &s->exti, TYPE_WB55_EXTI);
     object_initialize_child(obj, "syscfg", &s->syscfg, TYPE_WB55_SYSCFG);
     object_initialize_child(obj, "rtc", &s->rtc, TYPE_WB55_RTC);
@@ -226,6 +228,7 @@ static void wb55_soc_init(Object *obj)
     /* board-facing knobs */
     object_property_add_alias(obj, "flash-drive", OBJECT(&s->flash), "drive");
     object_property_add_alias(obj, "uid64", OBJECT(&s->ipcc), "uid64");
+    object_property_add_alias(obj, "fus-keys", OBJECT(&s->ipcc), "keys");
     object_property_add_alias(obj, "rtc-bkp1", OBJECT(&s->rtc), "bkp1");
 
     qdev_init_gpio_out_named(DEVICE(obj), s->gpio_out, "gpio-out", WB55_PINS);
@@ -386,6 +389,7 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->hsem), 0, NVIC(WB55_IRQ_HSEM));
     s->ipcc.flash = &s->flash;
     s->ipcc.rcc = &s->rcc;
+    s->ipcc.aes = &s->aes1;             /* where the FUS loads a key */
     soc_map(SYS_BUS_DEVICE(&s->ipcc), 0x58000C00, errp);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->ipcc), 0, NVIC(WB55_IRQ_IPCC_C1_RX));
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->ipcc), 1, NVIC(WB55_IRQ_IPCC_C1_TX));
@@ -522,8 +526,18 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
     wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_APB2RSTR, 18, dev);
     dev = soc_regfile("adc1", 0x50040000, 0x400, WB55_RF_ADC);
     wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_AHB2RSTR, 13, dev);
-    soc_regfile("aes1", 0x50060000, 0x400, WB55_RF_AES);
-    soc_regfile("aes2", 0x58001800, 0x400, WB55_RF_AES);
+    /* AES1 is the application's, and the one the FUS lends keys to; AES2
+     * belongs to the radio stack, when there is one */
+    dev = DEVICE(&s->aes1);
+    qdev_prop_set_string(dev, "name", "aes1");
+    soc_map(SYS_BUS_DEVICE(dev), 0x50060000, errp);
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, NVIC(WB55_IRQ_AES1));
+    wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_AHB2RSTR, 16, dev);
+    dev = DEVICE(&s->aes2);
+    qdev_prop_set_string(dev, "name", "aes2");
+    soc_map(SYS_BUS_DEVICE(dev), 0x58001800, errp);
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, NVIC(WB55_IRQ_AES2));
+    wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_AHB3RSTR, 17, dev);
     soc_regfile("pka", 0x58002000, 0x2000, WB55_RF_PLAIN);
     soc_regfile("crc", 0x40023000, 0x400, WB55_RF_PLAIN);
     /* COMP1/2: EXTI lines 20/21, and TIM2's TI4 when TIM2_OR remaps it */

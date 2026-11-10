@@ -4,7 +4,9 @@
  * CPU2 runs ST's closed radio firmware. It is not emulated; instead this model
  * behaves like a real device whose CPU2 runs the Firmware Upgrade Service
  * (FUS) with no wireless stack installed, a state the Flipper firmware handles
- * ("Stack isn't installed!") and that keeps the crypto enclave path alive.
+ * ("Stack isn't installed!"). The FUS keeps the application's AES keys, the
+ * Flipper's "secure enclave": the four key commands are decoded here and
+ * carried out in stm32wb55_fus.c.
  * A dead CPU2 is NOT an option: furi_hal_crypto_enclave_load_key() leaks its
  * mutex when furi_hal_bt_is_alive() is false and the desktop then deadlocks
  * (targets/f7/furi_hal/furi_hal_crypto.c, firmware 1.5.1).
@@ -31,6 +33,7 @@
 #include "qemu/error-report.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
+#include "qapi/error.h"
 #include "system/address-spaces.h"
 #include "system/memory.h"
 #include "wb55.h"
@@ -49,6 +52,10 @@
 
 /* SHCI */
 #define SHCI_OPCODE_FUS_GET_STATE      0xFC52
+#define SHCI_OPCODE_FUS_STORE_USR_KEY  0xFC58
+#define SHCI_OPCODE_FUS_LOAD_USR_KEY   0xFC59
+#define SHCI_OPCODE_FUS_LOCK_USR_KEY   0xFC5D
+#define SHCI_OPCODE_FUS_UNLOAD_USR_KEY 0xFC5E
 #define SHCI_OPCODE_C2_SET_SYSTEM_CLOCK 0xFC79
 #define SHCI_EVTCODE                   0xFF
 #define SHCI_SUB_EVT_CODE_READY        0x9200
@@ -207,12 +214,18 @@ static void cpu2_system_command(WB55IpccState *s)
     uint8_t status = SHCI_UNKNOWN_CMD;
     uint8_t extra[2];
     int nextra = 0;
+    uint8_t payload[255];
 
     if (!buf) {
         return;
     }
     /* TL_CmdPacket_t: header(8) | type(1) | cmdcode(2) | plen(1) | payload */
     uint16_t opcode = rd8(buf + 9) | (rd8(buf + 10) << 8);
+    int plen = rd8(buf + 11);
+
+    /* the answer goes over the command: take the command out first */
+    address_space_read(&address_space_memory, buf + 12, MEMTXATTRS_UNSPECIFIED,
+                       payload, plen);
 
     switch (opcode) {
     case SHCI_OPCODE_FUS_GET_STATE:
@@ -230,14 +243,30 @@ static void cpu2_system_command(WB55IpccState *s)
          * legacy-sleep flag. Payload: 0 HSE->PLL, 1 PLL(on)->HSE,
          * 2 PLL(off)->HSE.
          */
-        if (s->rcc) {
-            uint8_t sel = rd8(buf + 12);
+        if (s->rcc && plen >= 1) {
+            uint8_t sel = payload[0];
             wb55_rcc_c2_set_sysclk(s->rcc, sel ? 2 : 3, sel == 2);
             status = 0x00;
         }
         break;
+    /* The customer key storage. The answers are a status byte, 0x00 or
+     * 0x01, and for a key stored the index the FUS gave it. */
+    case SHCI_OPCODE_FUS_STORE_USR_KEY:
+        extra[0] = 0;
+        status = wb55_fus_store_key(s, payload, plen, &extra[0]);
+        nextra = 1;
+        break;
+    case SHCI_OPCODE_FUS_LOAD_USR_KEY:
+        status = plen >= 1 ? wb55_fus_load_key(s, payload[0]) : 0x01;
+        break;
+    case SHCI_OPCODE_FUS_UNLOAD_USR_KEY:
+        status = plen >= 1 ? wb55_fus_unload_key(s, payload[0]) : 0x01;
+        break;
+    case SHCI_OPCODE_FUS_LOCK_USR_KEY:
+        status = plen >= 1 ? wb55_fus_lock_key(s, payload[0]) : 0x01;
+        break;
     default:
-        /* No keys, no stack, no clock switch: the FUS refuses. */
+        /* No stack to start or to talk to, no upgrade: the FUS refuses. */
         if (s->unknown_cmd_log < 16) {
             s->unknown_cmd_log++;
             qemu_log_mask(LOG_UNIMP, "flipper-cpu2: SHCI 0x%04x -> error\n",
@@ -249,7 +278,7 @@ static void cpu2_system_command(WB55IpccState *s)
     wr8(buf + 0, TL_SYSRSP_PKT_TYPE);
     wr8(buf + 1, TL_BLEEVT_CC_OPCODE);
     wr8(buf + 2, 3 + 1 + nextra);
-    wr8(buf + 3, 1);                    /* numcmd */
+    wr8(buf + 3, 0xFF);                 /* NumHCI (AN5185 6.3.4) */
     wr8(buf + 4, opcode & 0xFF);
     wr8(buf + 5, opcode >> 8);
     wr8(buf + 6, status);
@@ -365,8 +394,14 @@ static void wb55_ipcc_reset_hold(Object *obj, ResetType type)
     s->c1toc2sr = s->c2toc1sr = 0;
     s->c2_booted = false;
     timer_del(s->boot_timer);
+    wb55_fus_reset(s);
     qemu_set_irq(s->irq_rx, 0);
     qemu_set_irq(s->irq_tx, 0);
+}
+
+static void wb55_ipcc_realize(DeviceState *dev, Error **errp)
+{
+    wb55_fus_realize(WB55_IPCC(dev), errp);
 }
 
 static void wb55_ipcc_init(Object *obj)
@@ -384,11 +419,16 @@ static void wb55_ipcc_init(Object *obj)
 static const Property wb55_ipcc_props[] = {
     DEFINE_PROP_UINT32("fus-version", WB55IpccState, fus_version, 0x01020000),
     DEFINE_PROP_UINT64("uid64", WB55IpccState, uid64, 0),
+    /* the FUS's keys on the host: stm32wb55_fus.c */
+    DEFINE_PROP_STRING("keys", WB55IpccState, key_file),
 };
 
 static void wb55_ipcc_class_init(ObjectClass *klass, const void *data)
 {
-    device_class_set_props(DEVICE_CLASS(klass), wb55_ipcc_props);
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    dc->realize = wb55_ipcc_realize;
+    device_class_set_props(dc, wb55_ipcc_props);
     RESETTABLE_CLASS(klass)->phases.hold = wb55_ipcc_reset_hold;
 }
 

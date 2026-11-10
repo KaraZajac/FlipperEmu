@@ -16,10 +16,10 @@ it; the file comments name that function. Register layouts come from RM0434 and 
         ┌───────────────┴──────────────────────────────────────────┐
   stm32wb55_soc.c  (SoC: memory map, NVIC lines, DMA requests, GPIO fan-out)
         │   Cortex-M4F (QEMU armv7m, 63 IRQs, MPU, FPU)
-        │   rcc pwr flash hsem ipcc(+CPU2) exti syscfg rtc lptim×2 spi×2 i2c×2
-        │   dma(+dmamux) rng dwt dbgmcu usb(+virtual host) tim2
+        │   rcc pwr flash hsem ipcc(+CPU2, FUS key store) aes×2 exti syscfg rtc
+        │   lptim×2 spi×2 i2c×2 dma(+dmamux) rng dwt dbgmcu usb(+virtual host) tim2
         │   gpio×6 usart1 lpuart1 (QEMU L4x5 models)
-        │   tim1/16/17 adc aes pka crc comp iwdg … (register files)
+        │   tim1/16/17 adc pka crc comp iwdg … (register files)
         │
    SPI2 ── st7567 (LCD, CS PC11, A0 PB1, RST PB0)   ── ssi-sd + sd-card-spi (CS PC12, CD PC10)
    SPI1 ── cc1101 (CS PD0, GDO0 → PA1)              ── st25r3916 (CS PE4, IRQ → PA2)
@@ -114,14 +114,145 @@ CPU2 runs ST's closed radio firmware, so it's modelled by behaviour instead:
 - It links an `SHCI_SUB_EVT_CODE_READY / FUS_FW_RUNNING` event into CPU1's
   system queue (spare buffer from the memory-manager table) and raises IPCC channel 2.
 - System commands are answered synchronously in the command buffer: `FUS_GET_STATE` →
-  idle, `SET_SYSTEM_CLOCK` → the clock switch STOP2 needs (see Clocks and time), and
-  everything else → status 0x01, as a FUS with no keys and no stack would.
+  idle, `SET_SYSTEM_CLOCK` → the clock switch STOP2 needs (see Clocks and time), the four
+  key commands → the key store (next section), and everything else → status 0x01, as a
+  FUS with no stack would. The answer is a command-complete event in the form of
+  AN5185 6.3.4 (NumHCI 0xFF, the opcode, the status, then any payload). It is written
+  over the command, so the command's payload is copied out first.
 - Buffers released on channel 4 are taken back.
 
 The firmware reacts exactly as on a stackless device: "C2 boot completed, mode: FUS",
 "Stack isn't installed!", "Radio stack start failed". A **dead** CPU2 is not an option:
 `furi_hal_crypto_enclave_load_key()` leaks its mutex when BT isn't alive, and the desktop
 then deadlocks.
+
+## The secure enclave (`stm32wb55_fus.c`, `stm32wb55_aes.c`, `flipper_enclave.c`)
+
+What the firmware calls its secure enclave is two parts of the STM32WB55. ST's FUS keeps
+AES keys for the application in flash that CPU1 cannot read (AN5185, "Customer key
+storage"), and the AES1 peripheral can be handed a key that CPU1 can use but not read
+back. `furi_hal_crypto_enclave_load_key(slot, iv)` sends `FUS_LOAD_USR_KEY`, the FUS
+writes the key into AES1's key registers and closes them, and the firmware runs AES-CBC
+on data it supplies.
+
+**The key store** (`stm32wb55_fus.c`) holds a master key at index 0 and up to 100 others.
+A key is written once, at the next free index, and never changed or removed.
+
+| SHCI command | |
+|---|---|
+| `FUS_STORE_USR_KEY` 0xFC58 | type, size, key (and a 12-byte IV) → status, index. A master key goes to index 0, once. A simple or encrypted key gets the next index from 1. An encrypted key is AES-GCM under the master key with its tag left off, which is CTR starting at counter block IV‖2 |
+| `FUS_LOAD_USR_KEY` 0xFC59 | index → the key into AES1. Refused for the master key, a locked key and an empty index |
+| `FUS_UNLOAD_USR_KEY` 0xFC5E | AES1's key registers zeroed and opened again |
+| `FUS_LOCK_USR_KEY` 0xFC5D | no more loads of that index until the next reset |
+
+The store is a text file on the host (`devices/NAME/enclave.keys`, machine option
+`enclave=FILE`, SoC property `fus-keys`): one `INDEX TYPE BITS HEX` line per key, kept
+decrypted, mode 0600, rewritten through a temporary file after every key stored. A file
+that exists is taken as it is, an empty one included. A file that doesn't exist is filled
+by the board's provisioning hook. A file that doesn't parse stops QEMU with
+`FILE:LINE: message`, because starting with part of a key store would hide the mistake.
+
+**AES** (`stm32wb55_aes.c`) models AES1 and AES2 from RM0434 chapter 24: AES-128/256 in
+ECB, CBC, CTR and GCM/GMAC, a block per four writes of `DINR`, computed at once, with
+`CCF` (and the interrupt, if enabled) up when the fourth word is in.
+- Byte order: a `DINR`/`DOUTR` word is four bytes of the block as a big-endian number,
+  swapped by half-words, bytes or bits for `DATATYPE` 01/10/11. `KEYR7` (`KEYR3` for a
+  128-bit key) holds the key's first four bytes, `IVR3` the IV's, and `IVR0` is the
+  block counter of CTR and GCM.
+- Key derivation (`MODE` 01) replaces `KEYR` with the last round keys of the schedule.
+  Decryption in `MODE` 10 expects them there, and with a plain key the result is as
+  wrong as on the chip; `MODE` 11 derives on the fly.
+- CBC keeps its chain in `IVR` across `EN` going down, so a message can be fed in parts.
+- GCM runs its four phases (`GCMPH`): H = E(K, 0) on enabling, header blocks into
+  GHASH, payload as CTR with the ciphertext into GHASH, then the block of lengths in
+  and the tag out. `NPBLB` strips the padding of a short last block when encrypting.
+- Secure mode: when the FUS loads a key, `KEYR` reads as zero and ignores writes until
+  the key is unloaded. The rest of the peripheral works as before.
+- An RCC reset (`AHB2RSTR.AES1RST`, `AHB3RSTR.AES2RST`) clears every register, the key
+  included. The firmware resets AES1 after every operation by turning its bus off.
+- Not modelled: CCM, DMA, computation time. The suspend registers are storage.
+
+The firmware uses AES1 in two ways (`targets/f7/furi_hal/furi_hal_crypto.c`). With
+enclave keys it does CBC with `DATATYPE` 00 and hands over key, IV and data as the
+32-bit words they are in memory, little-endian. Every group of four bytes is therefore
+reversed on its way in and out, and what `furi_hal_crypto_encrypt()` computes is
+
+```
+ciphertext = swap(AES-256-CBC-encrypt(K, swap(iv), swap(plaintext)))     swap: reverse each 4-byte group
+```
+
+`scripts/fe_enclave.py` computes the same on the host. With keys of its own
+(`furi_hal_crypto_ctr()`, `furi_hal_crypto_gcm()`) the firmware swaps the bytes itself,
+and the result is standard CTR and GCM.
+
+One thing to know when comparing with the CLI: `crypto encrypt` takes its text as a C
+string, rounds the length up to whole blocks, and encrypts what its buffer holds after
+the string's NUL without clearing it (`crypto_cli.c`). Those bytes are whatever the heap
+had there, so the last block is the same from run to run only when the text ends one
+character short of a block: 15, 31, 47… characters. The code is the firmware's, so a real
+Flipper does the same. The host tool fills with zeros, and the checks use texts of those
+lengths.
+
+**The factory's part** (`flipper_enclave.c`). Flipper Devices fills the store at the
+factory: the master key, ten factory keys that are the same on every Flipper, and an
+empty index 11 where the firmware puts a key of the device's own the first time one is
+needed. Those keys never leave a Flipper, and they are not in FlipperEmu. An emulated
+Flipper is provisioned with keys of its own, the same everywhere and public by
+construction:
+
+```
+key N = SHA-256("FlipperEmu enclave key N")      N = 0 (master), 1 … 10
+```
+
+The firmware checks its enclave with a known-answer test
+(`furi_hal_crypto_enclave_verify()`): one block encrypted with each factory key,
+compared with a ciphertext in the firmware's source. The desktop runs it at every start
+and shows "Secure Enclave is damaged" if a key fails. `info device` reports its two
+counts, and `furi_hal_crypto_enclave_ensure_key()` goes by the first of them: it makes
+the device's own key only when all ten factory slots hold a key that loads.
+Only the real keys give those ten ciphertexts. So the board gives the FUS a second hook:
+when the FUS loads one of FlipperEmu's own factory keys, it hands AES1 the firmware's
+IV, input and expected output for that index along with the key, and AES1 answers that
+one CBC block from the table. Every other block, with every key, is plain AES. A factory
+slot that holds some other key gets no such answer, and fails the test as a wrong key
+does on hardware. The ten ciphertexts say nothing about the real keys that the
+firmware's source doesn't already say.
+
+What this gives and what it cannot:
+- The firmware's enclave paths run as on a device: the self-test, `crypto` in the CLI,
+  key storage, the device's own key (U2F makes it and keeps its counter file under it).
+- Nothing an emulated Flipper encrypts is secret.
+- What a real Flipper's factory keys encrypted cannot be read: the stock Sub-GHz
+  keystore decrypts to noise (the firmware logs a `Failed to load line` error per line
+  and has no manufacturer codes), and so does the stock U2F certificate's private key.
+
+AN5185 leaves several things open, and no real device was there to ask. They are
+decided as follows, and marked in the source:
+- The FUS writes only AES1's key registers. `KEYSIZE` and the rest of `AES_CR` are the
+  application's. The firmware always selects 256 bits, so a 128-bit enclave key works
+  as an AES-256 key of 16 zero bytes followed by the key, and that is what the host
+  tools compute too.
+- A key goes into the key registers in the order its bytes were stored: the first four
+  are `KEYR7` (`KEYR3` for a 128-bit key), each word a big-endian number, which is how
+  the manual writes a key. Nothing inside the emulator depends on that choice, since the
+  host tools compute the same way. A real Flipper given the same key of one's own might
+  produce another ciphertext.
+- The first key's index when there is no master key is 1.
+- An encrypted key's cipher follows the master key's size (AES-256 for a 256-bit
+  master key; the note only says "AES-128 GCM").
+- Unloading a different index than the loaded one unloads all the same. Locking an
+  empty index, or the key now loaded, is accepted.
+- In the AES model: `WRERR`/`RDERR` details, writes to `KEYR`/`IVR` ignored while `EN`
+  is set, and `NPBLB` applying to every payload block written while it is set (the
+  peripheral cannot know which block is the last).
+
+`scripts/enclave_check.py` tests the model against published vectors (FIPS 197,
+SP 800-38A, the GCM specification's test cases) under qtest, driving the registers in
+the firmware's order, and then the whole enclave through a firmware's CLI: the
+self-test, `crypto encrypt`/`decrypt` against the host's computation, a Sub-GHz
+keystore of made-up codes that the firmware encrypts with key 1 and loads back
+(`subghz encrypt_keeloq`), key storage and its refusals, the device's own key,
+persistence, a key of one's own in a factory slot, a blank and a malformed store.
 
 ## Flash and option bytes (`stm32wb55_flash.c`)
 
@@ -722,4 +853,5 @@ the emulated field.
 | `flash.img` | the STM32WB55 internal flash |
 | `sd.img` | the microSD card |
 | `nvram.bin` | coin-cell / gauge state: BQ27220 data memory, RTC calendar offset, BKP0R–BKP19R |
+| `enclave.keys` | the FUS's key store on CPU2: the secure enclave's keys (text, one key per line) |
 | `firmware.elf` | symbols for gdb (copied when flashing an ELF) |

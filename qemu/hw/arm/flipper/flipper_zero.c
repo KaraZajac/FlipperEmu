@@ -15,6 +15,8 @@
  *   qemu-system-arm -M flipper-zero -kernel firmware.elf \
  *       -drive if=sd,format=raw,file=sd.img -serial stdio
  *   -drive if=pflash,format=raw,file=flash.img  persistent 1 MiB flash
+ *   -M flipper-zero,nvram=FILE                  battery-backed state
+ *   -M flipper-zero,enclave=FILE                the secure enclave's keys
  *
  * Keys: arrows = D-pad, Enter/Space = OK, Backspace/Escape = Back.
  *
@@ -68,6 +70,7 @@ struct FlipperZeroState {
     uint32_t keys_down;          /* bit per button */
     bool sd_present;
     char *nvram;                 /* battery-backed state file */
+    char *enclave;               /* the FUS's key store (flipper_enclave.c) */
     Notifier exit_notifier;
 };
 
@@ -544,6 +547,10 @@ static void flipper_zero_init(MachineState *machine)
         object_property_set_bool(OBJECT(&s->soc.usb), "attached", true,
                                  &error_fatal);
     }
+    flipper_enclave_setup(&s->soc.ipcc);
+    if (s->enclave) {
+        qdev_prop_set_string(soc, "fus-keys", s->enclave);
+    }
     sysbus_realize(SYS_BUS_DEVICE(&s->soc), &error_fatal);
     flipper_provision(s, uid64);
 
@@ -679,6 +686,19 @@ static void flipper_set_nvram(Object *obj, const char *value, Error **errp)
     s->nvram = *value ? g_strdup(value) : NULL;
 }
 
+static char *flipper_get_enclave(Object *obj, Error **errp)
+{
+    return g_strdup(FLIPPER_ZERO(obj)->enclave);
+}
+
+static void flipper_set_enclave(Object *obj, const char *value, Error **errp)
+{
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+
+    g_free(s->enclave);
+    s->enclave = *value ? g_strdup(value) : NULL;
+}
+
 static char *flipper_get_usb_serial(Object *obj, Error **errp)
 {
     return g_strdup(FLIPPER_ZERO(obj)->usb_serial);
@@ -780,6 +800,11 @@ static void flipper_zero_class_init(ObjectClass *oc, const void *data)
         "Chardev id for the USB CDC port (CLI/RPC); plugs in the USB cable");
     object_class_property_set_description(oc, "nvram",
         "File keeping battery-backed state (gauge, RTC) between runs");
+    object_class_property_add_str(oc, "enclave", flipper_get_enclave,
+                                  flipper_set_enclave);
+    object_class_property_set_description(oc, "enclave",
+        "File keeping the secure enclave's keys; made with FlipperEmu's own "
+        "factory keys if it doesn't exist");
     object_class_property_set_description(oc, "name",
         "Device name programmed into OTP (max 8 chars)");
 }

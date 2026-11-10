@@ -279,28 +279,6 @@ static void regfile_tim_write(WB55RegfileState *s, hwaddr addr, uint32_t val)
     s->regs[addr / 4] = val;
 }
 
-static void regfile_aes_write(WB55RegfileState *s, hwaddr addr, uint32_t val)
-{
-    switch (addr) {
-    case 0x04:
-        return;                         /* SR read-only */
-    case 0x08:                          /* DINR: a block completes per 4 words */
-        s->regs[0x08 / 4] = val;
-        s->regs[0x0C / 4] = val;
-        if ((++s->regs[0xFC / 4] & 3) == 0) {
-            s->regs[0x04 / 4] |= 1u;    /* CCF */
-        }
-        return;
-    case 0x00:
-        if (val & (1u << 7)) {          /* CCFC: clear CCF */
-            s->regs[0x04 / 4] &= ~1u;
-        }
-        s->regs[0] = val & ~((1u << 7) | (1u << 8));
-        return;
-    }
-    s->regs[addr / 4] = val;
-}
-
 static uint64_t wb55_regfile_read(void *opaque, hwaddr addr, unsigned size)
 {
     WB55RegfileState *s = opaque;
@@ -330,7 +308,6 @@ static void wb55_regfile_write(void *opaque, hwaddr addr, uint64_t val,
     switch (s->kind) {
     case WB55_RF_ADC: regfile_adc_write(s, addr, val); break;
     case WB55_RF_TIM: regfile_tim_write(s, addr, val); break;
-    case WB55_RF_AES: regfile_aes_write(s, addr, val); break;
     default:          s->regs[addr / 4] = val; break;
     }
     if (s->changed) {

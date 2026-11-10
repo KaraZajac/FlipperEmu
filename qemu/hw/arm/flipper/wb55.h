@@ -149,9 +149,51 @@ struct WB55HsemState {
     uint32_t c1ier, c1isr, c2ier, c2isr, keyr;
 };
 
+/* ----------------------------------------------------------------- AES */
+#define TYPE_WB55_AES "stm32wb55-aes"
+OBJECT_DECLARE_SIMPLE_TYPE(WB55AesState, WB55_AES)
+
+/* One CBC encryption, in AES's own byte order: wb55_aes_enclave_load() */
+typedef struct WB55AesAnswer {
+    uint8_t iv[16], in[16], out[16];
+} WB55AesAnswer;
+
+struct WB55AesState {
+    SysBusDevice parent_obj;
+    MemoryRegion mmio;
+    qemu_irq irq;
+    char *name;
+    uint32_t cr, sr;
+    uint32_t key[8];             /* KEYR0..7 */
+    uint32_t iv[4];              /* IVR0..3 */
+    uint32_t susp[8];
+    uint32_t din[4], dout[4];
+    uint8_t nin, nout;           /* words written / words left to read */
+    uint8_t gcm_h[16], gcm_y[16];
+    bool secure;                 /* the key registers are CPU2's */
+    const WB55AesAnswer *answer;
+    bool warned_dma;
+};
+
+/* CPU2's side of AES1: a key CPU1 can use but not read */
+void wb55_aes_enclave_load(WB55AesState *s, const uint8_t *key, int len,
+                           const WB55AesAnswer *answer);
+void wb55_aes_enclave_unload(WB55AesState *s);
+
 /* ---------------------------------------------------------- IPCC + CPU2 */
 #define TYPE_WB55_IPCC "stm32wb55-ipcc"
 OBJECT_DECLARE_SIMPLE_TYPE(WB55IpccState, WB55_IPCC)
+
+/* The FUS's user keys (AN5185): index 0 the master key, 1..100 the others */
+#define WB55_FUS_KEYS        101
+enum { WB55_FUS_KEY_NONE = 0, WB55_FUS_KEY_SIMPLE, WB55_FUS_KEY_MASTER,
+       WB55_FUS_KEY_ENCRYPTED };
+typedef struct WB55FusKey {
+    uint8_t type;                /* WB55_FUS_KEY_*: how it was stored */
+    uint8_t len;                 /* 16 or 32 */
+    uint8_t data[32];            /* the key itself, decrypted if it came so */
+} WB55FusKey;
+
 struct WB55IpccState {
     SysBusDevice parent_obj;
     MemoryRegion mmio;
@@ -165,7 +207,30 @@ struct WB55IpccState {
     WB55FlashState *flash;       /* IPCCBR option byte -> table address */
     WB55RccState *rcc;           /* SHCI SET_SYSTEM_CLOCK switches SYSCLK */
     uint32_t unknown_cmd_log;
+    /* the FUS's user key store: stm32wb55_fus.c */
+    WB55AesState *aes;           /* AES1: where a loaded key goes */
+    char *key_file;              /* property "keys": the store on the host */
+    WB55FusKey key[WB55_FUS_KEYS];
+    bool key_locked[WB55_FUS_KEYS];     /* FUS_LOCK_USR_KEY: until a reset */
+    uint8_t key_loaded;          /* the index in AES1's key registers, or 0 */
+    /* board hooks. The keys a device leaves the factory with: called once
+     * for a store that doesn't exist yet, to fill it with
+     * wb55_fus_put_key(). */
+    void (*provision)(WB55IpccState *s);
+    /* A CBC encryption the key at `index` is known to produce, or NULL */
+    const WB55AesAnswer *(*key_answer)(int index, const uint8_t *key, int len);
 };
+
+bool wb55_fus_realize(WB55IpccState *s, Error **errp);
+void wb55_fus_reset(WB55IpccState *s);
+void wb55_fus_put_key(WB55IpccState *s, int index, int type,
+                      const uint8_t *key, int len);
+/* The SHCI commands: these return the status byte (0x00 done, 0x01 fail) */
+uint8_t wb55_fus_store_key(WB55IpccState *s, const uint8_t *p, int plen,
+                           uint8_t *index);
+uint8_t wb55_fus_load_key(WB55IpccState *s, uint8_t index);
+uint8_t wb55_fus_unload_key(WB55IpccState *s, uint8_t index);
+uint8_t wb55_fus_lock_key(WB55IpccState *s, uint8_t index);
 
 /* ---------------------------------------------------------------- EXTI */
 #define TYPE_WB55_EXTI "stm32wb55-exti"
@@ -426,7 +491,7 @@ struct WB55RegfileState {
     void (*changed)(void *opaque);
     void *changed_opaque;
 };
-enum { WB55_RF_PLAIN = 0, WB55_RF_ADC, WB55_RF_TIM, WB55_RF_AES, WB55_RF_CRC };
+enum { WB55_RF_PLAIN = 0, WB55_RF_ADC, WB55_RF_TIM, WB55_RF_CRC };
 
 /* ----------------------------------------------------------------- USB */
 #include "chardev/char-fe.h"
@@ -547,6 +612,7 @@ struct WB55SocState {
     WB55FlashState flash;
     WB55HsemState hsem;
     WB55IpccState ipcc;
+    WB55AesState aes1, aes2;         /* AES1: CPU2 can lend it a key */
     WB55ExtiState exti;
     WB55SyscfgState syscfg;
     WB55RtcState rtc;

@@ -8,6 +8,8 @@ arm_common_ss.add(when: 'CONFIG_FLIPPER_ZERO', if_true: files(
   'stm32wb55_flash.c',
   'stm32wb55_hsem.c',
   'stm32wb55_ipcc.c',
+  'stm32wb55_fus.c',
+  'stm32wb55_aes.c',
   'stm32wb55_exti.c',
   'stm32wb55_syscfg.c',
   'stm32wb55_rtc.c',
@@ -30,5 +32,6 @@ arm_common_ss.add(when: 'CONFIG_FLIPPER_ZERO', if_true: files(
   'flipper_rfid.c',
   'flipper_ibutton.c',
   't5577.c',
+  'flipper_enclave.c',
   'flipper_zero.c',
 ))

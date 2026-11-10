@@ -396,4 +396,9 @@ void flipper_rfid_set_drive(FlipperRfidState *s, uint32_t drive_hz);
 /* emulating: the load on the antenna (TIM2 CH3 on RFID_PULL) changed */
 void flipper_rfid_load(FlipperRfidState *s, bool on, int64_t when);
 
+/* ------------------------------------ secure enclave (flipper_enclave.c) */
+/* what the factory stores in the SoC's FUS; call before realizing the SoC */
+struct WB55IpccState;
+void flipper_enclave_setup(struct WB55IpccState *fus);
+
 #endif

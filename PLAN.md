@@ -60,7 +60,8 @@ NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
 - ☑ Speaker: TIM16 CH1 PWM → QEMU audio (desktop driver or `--audio wav:FILE`); tones
       verified by FFT (440 Hz, 1 kHz, notes)
 - ☐ LP5562 engine interpreter (blinks, ramps)
-- ◐ Battery/USB power: monitor control done (`qom-set /machine/gauge soc 5`, `/machine/charger usb true`); window UI todo
+- ◐ Battery/USB power: monitor control done (`qom-set /machine/gauge soc 5`,
+      `/machine/charger usb true`); the controls in a window are M8's
 - ☑ STOP2 deep sleep (CPU2 performs the SHCI clock switch); now the default, 1–2 % host CPU idle
 - ☑ IR: receive (TIM2 input capture + virtual receiver; 14 protocols, raw, .ir files;
       decoded by the Infrared app and `ir rx`) and transmit capture (TIM1 with its
@@ -134,6 +135,23 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       front of an emulating Flipper
 - ☐ 125 kHz RFID and IR through real front ends (a Proxmark3's LF, an IR transceiver),
       and iButton through a USB 1-Wire master (DS9490R)
+
+## M8: a Flipper on the desktop ◐
+- ☑ Secure enclave (2026-11-10): the FUS's customer key storage (the four SHCI key
+      commands; `devices/NAME/enclave.keys`) and AES1/AES2 (ECB, CBC, CTR, GCM, key
+      registers the FUS closes to CPU1). Factory keys of FlipperEmu's own, public; the
+      firmware's known-answer check answered from its own source. The self-test passes,
+      and `crypto` in the CLI, stored keys, the device's own key (U2F) and Sub-GHz
+      keystores of one's own work on official, Momentum and Unleashed
+      (`enclave_check.py`; `./flipperemu enclave`; BRINGUP_LOG 56-63). Content encrypted
+      with a real Flipper's keys (the stock KeeLoq keystore, the U2F certificate's key)
+      stays unreadable
+- ☐ U2F from a host: the app starts, takes the USB port as a HID token and shows
+      "Connected!"; a registration and a login from a browser or libfido2 over USB/IP
+      have not been tried
+- ☐ The window: the LCD inside a Flipper's body with buttons to click, the LED and the
+      vibration motor; menus that put cards, tags, keys and signals in front of it;
+      the USB cable to plug and unplug; battery and charger
 
 ## M6: research tooling ☐
 - ☐ Snapshot workflow (`savevm` on qcow2 images; boot once, jump straight to an app)

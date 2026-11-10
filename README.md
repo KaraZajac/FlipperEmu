@@ -19,10 +19,11 @@ QEMU, so none has QEMU's speed, built-in GDB stub, snapshots or tracing plugins.
 
 ## Status
 
-Verified on 2026-11-08 with `scripts/smoke_test.py` (boot, SD mount, LCD, input, CLI over
-USB, IR receive and transmit, Sub-GHz receive and transmit, 125 kHz RFID read, emulate
-and T5577 write, iButton read and emulate, NFC read (NTAG215, MIFARE Classic 1K) and emulate,
-USB/IP export, warm reboot, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed unlshd-094**.
+Verified on 2026-11-10 with `scripts/smoke_test.py` (boot, SD mount, LCD, input, CLI over
+USB, the secure enclave, IR receive and transmit, Sub-GHz receive and transmit, 125 kHz
+RFID read, emulate and T5577 write, iButton read and emulate, NFC read (NTAG215, MIFARE
+Classic 1K) and emulate, USB/IP export, warm reboot, no crash): **official 1.5.1**,
+**Momentum mntm-012**, **Unleashed unlshd-094**.
 
 | | |
 |:-:|:-:|
@@ -107,8 +108,14 @@ USB/IP export, warm reboot, no crash): **official 1.5.1**, **Momentum mntm-012**
   The duty cycle sets the volume, as on the real piezo.
 - Power: STOP2 deep sleep (1–2 % of a host core when idle), fuel gauge and charger you can
   set from the monitor, and a USB cable that carries VBUS.
+- Secure enclave: the key store of ST's FUS on CPU2 and the AES peripheral it loads keys
+  into, with factory keys of FlipperEmu's own. The firmware's check of its ten keys
+  passes, so there is no "Secure Enclave is damaged" at start. `furi_hal_crypto` and the
+  CLI's `crypto` commands work, apps can store keys, and U2F starts and makes the
+  device's own key. The keys persist in `devices/NAME/enclave.keys`;
+  `./flipperemu enclave` shows them and computes what the firmware encrypts.
 - CPU2 modelled as ST's FUS with no wireless stack. That's a real device state, and it
-  keeps the crypto-enclave and BT paths healthy.
+  keeps the BT paths healthy.
 - GDB stub with the release `.elf` symbols.
 
 **Not yet** (see [PLAN.md](PLAN.md))
@@ -125,9 +132,10 @@ USB/IP export, warm reboot, no crash): **official 1.5.1**, **Momentum mntm-012**
 - The GTK window is QEMU's standard display. It hasn't been tested on a desktop session
   here; all testing so far was headless, with screenshots taken through the monitor.
 
-You'll see "No Factory Keys Found / Secure Enclave is damaged" on the first screen. That
-is the firmware's own message: the per-device factory keys only exist inside a real
-Flipper's CPU2. Press Back.
+The enclave's factory keys are FlipperEmu's, not Flipper Devices': those never leave a
+real Flipper, and they are not in this project. So the files a real Flipper's keys
+encrypted stay closed to an emulated one, the stock Sub-GHz keystore among them; see
+[The secure enclave](#the-secure-enclave).
 
 ## Quick start
 
@@ -183,6 +191,7 @@ are erased). Without `-f` it boots whatever is already flashed.
 | `nfc --reader ntag` \| `nfc --reader scan` | hold an NFC reader to an emulating device and print what it reads |
 | `nfc --link iso-dep` \| `--link script:FILE.py` \| `--link log` | a card played by a program, in the field until ^C |
 | `nfc --link pm3[:PORT]` \| `nfc DUMP.json` | real cards through a Proxmark3; a Proxmark3 dump as the card |
+| `enclave` \| `enclave encrypt SLOT IV TEXT` \| `enclave wrap KEY` \| `enclave reset` | the keys in the device's secure enclave, and what the firmware computes with them |
 | `flash FW [--erase-all]` | program `.elf` / `.dfu` / `.bin` / update `.tgz` into `flash.img` |
 | `sd [--resources X] [--size 512M]` | rebuild the microSD from a resources tgz, update package or folder |
 | `press ok down down ok …` | press buttons on a running device |
@@ -206,7 +215,9 @@ scripts/smoke_test.py path/to/firmware.elf|.dfu|update.tgz [--no-sd] [--keep] [-
 Boots a throwaway device headless and checks that:
 - the firmware reports "Startup complete" and "card mounted";
 - the LCD draws, and OK changes the screen;
-- `info device` answers on the USB CLI.
+- `info device` answers on the USB CLI;
+- the secure enclave holds its ten factory keys, and `crypto encrypt` gives what the host
+  computes from the key file.
 
 It then tests each radio through the firmware's own CLI:
 - infrared: an NEC frame from the virtual remote is decoded, and an `ir tx` capture
@@ -225,6 +236,13 @@ Finally, a USB/IP client enumerates the device, the LCD comes back after `power 
 and the log must have no `[CRASH]`. Exit code 0 means pass, so it slots into a
 pre-flash habit or CI. `--keep` keeps the device directory (`uart.log`, `qemu.log`, the
 captures) to look at afterwards.
+
+Each area has a closer check of its own in `scripts/*_check.py`. For the enclave:
+
+```sh
+scripts/enclave_check.py                 # the AES peripheral against published vectors (under a second)
+scripts/enclave_check.py -f FIRMWARE     # and the enclave through the firmware (four boots, under a minute)
+```
 
 ### qFlipper, lab.flipper.net and other PC tools (USB/IP)
 
@@ -690,6 +708,76 @@ With `--usb` (the default) the virtual cable is plugged in, so the Flipper shows
 charging. As on hardware, a Flipper on USB never enters deep sleep: expect about 20 % of
 a host core while idle, against 1–2 % with `--usb none` or the cable pulled.
 
+### The secure enclave
+
+A Flipper keeps its keys where its firmware cannot read them: in the key store of ST's
+FUS, on the radio core. The firmware names a slot, the FUS puts that key into the AES
+peripheral, and the firmware encrypts with a key it never sees. The emulated machine has
+both halves, so the firmware's check of its factory keys passes at every start, and what
+is built on `furi_hal_crypto` runs: the CLI's `crypto` commands, U2F's key and counter
+files, apps that keep secrets.
+
+| slot | |
+|---|---|
+| 0 | the master key: it only decrypts keys that are delivered encrypted, and can never be loaded |
+| 1–10 | the factory keys, the same on every device (1 encrypts the Sub-GHz keystores, 2 the stock U2F certificate's key) |
+| 11 | the device's own key, which the firmware makes from random bytes the first time one is needed (U2F does) |
+| 12–100 | what apps and `crypto store_key` add, one after the other |
+
+```sh
+./flipperemu enclave                  # this device's keys, and how many the firmware accepts
+./flipperemu cli "crypto has_key 1"   # the firmware's side: Successfully loaded key from slot 1
+./flipperemu cli                      # then e.g.: crypto encrypt 1 000102030405060708090a0b0c0d0e0f
+./flipperemu enclave encrypt 1 000102030405060708090a0b0c0d0e0f "fifteen chars.."   # the same, computed here
+./flipperemu enclave decrypt 1 000102030405060708090a0b0c0d0e0f HEX
+./flipperemu enclave wrap KEY         # KEY under the master key, for
+                                      # `crypto store_key 12 encrypted 256 …`
+./flipperemu enclave reset            # the factory keys again (device stopped)
+./flipperemu enclave blank            # no keys at all: the firmware reports a damaged enclave
+```
+
+(`crypto encrypt` encrypts its text in whole blocks, and fills the last one with whatever
+followed the text in the firmware's memory. A text of 15, 31, 47… characters leaves no
+room for that, and only then is the ciphertext the same every time, and the same as
+computed here.)
+
+The keys are in `devices/NAME/enclave.keys`, one per line, yours to read and to edit
+while the device is stopped. As on the chip, a key is written once, in the next free
+slot: the firmware cannot change or remove one. The file is rewritten when it stores
+one.
+
+**The factory keys are FlipperEmu's own, and they are public.** Flipper Devices' keys
+never leave a real Flipper and are not in this project. Every emulated Flipper gets
+`SHA-256("FlipperEmu enclave key N")` in their place. Two things follow:
+
+- Nothing an emulated Flipper encrypts is secret, because anybody can compute its keys.
+  That suits development and testing. Don't register an emulated U2F token with an
+  account that matters.
+- What a real Flipper's keys encrypted stays closed. The stock Sub-GHz keystore
+  (`/ext/subghz/assets/keeloq_mfcodes`) decrypts to noise: the firmware logs
+  `Failed to load line` for each line and carries on without those manufacturer codes.
+  The stock U2F certificate's private key is encrypted the same way, so the
+  certificate of an emulated token does not match the key it signs with.
+
+Manufacturer codes of your own go where they go on a real Flipper: in
+`/ext/subghz/assets/keeloq_mfcodes_user`, in plain text (`keeloq_mfcodes_user.example`
+beside it shows the format). The firmware can also encrypt such a file the way the stock
+one is: after `sysctl debug 1`, `subghz encrypt_keeloq PLAIN_FILE ENCRYPTED_FILE IV`
+(the IV as 16 bytes of hex) writes a keystore under key 1, which this emulated Flipper
+reads and no real one does.
+
+The firmware's own check of the enclave encrypts one block with each factory key and
+compares it with a ciphertext that only the real key gives. For those ten blocks, and
+for nothing else, the emulated enclave answers what the firmware expects; the expected
+values are in the firmware's source. Every other block is plain AES with the key in the
+file. Put a key of your own in a factory slot and that slot fails the check, as a wrong
+key would on hardware.
+
+| | |
+|:-:|:-:|
+| ![u2f](docs/img/24-u2f-connected.png) | ![blank enclave](docs/img/25-enclave-blank.png) |
+| U2F, which needs the ten factory slots filled, and makes the device's own key | After `./flipperemu enclave blank`: the firmware finds no factory keys |
+
 ### Debugging firmware
 
 ```sh
@@ -732,7 +820,8 @@ qemu/patches/          fixes to upstream QEMU (SysTick, ssi-sd, SD SPI state)
 scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_monitor.py,
                        fe_cli.py, fe_ir.py, fe_subghz.py, fe_sdr.py (real radios),
                        fe_nfc_link.py (cards from programs), fe_pm3.py (Proxmark3),
-                       fe_usbip.py, usbip_attach.py, smoke_test.py, *_check.py
+                       fe_enclave.py (the enclave's keys and ciphers), fe_usbip.py,
+                       usbip_attach.py, smoke_test.py, *_check.py
 devices/ firmware/ build/ third_party/    generated, git-ignored
 ```
 
@@ -745,8 +834,10 @@ devices/ firmware/ build/ third_party/    generated, git-ignored
 - The `qemu-system-arm` you build is QEMU, a GPL-2.0 program that includes these
   BSD-3 files. If you distribute that binary, the GPL-2.0 applies to it.
 - No code was taken from other Flipper emulators (see [RESEARCH.md](RESEARCH.md)). The
-  firmware's behaviour was learned by reading its source, which is GPL-3.0; none of it
-  is copied here.
+  firmware's behaviour was learned by reading its source, which is GPL-3.0; none of its
+  code is copied here. One table of numbers is: the IVs, inputs and expected
+  ciphertexts of its enclave self-test (`qemu/hw/arm/flipper/flipper_enclave.c`), which
+  the emulated enclave has to answer with.
 - Screenshots show firmware UI artwork that belongs to its authors (Flipper Devices,
   Momentum). Flipper Zero is a trademark of Flipper Devices Inc. This project is not
   affiliated with or endorsed by them.

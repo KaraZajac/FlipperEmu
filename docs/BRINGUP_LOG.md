@@ -573,6 +573,97 @@ All three are small, self-contained, and suitable for sending upstream.
     and the firmware's B, FeliCa and ISO15693 probes get silence without a round
     trip.
 
+## The secure enclave (M8)
+
+56. **A check that only the real keys pass.** At every start the desktop encrypts one
+    block with each of the ten factory keys and compares the results with ciphertexts
+    in the firmware's source. The keys are in the FUS of every Flipper and nowhere
+    else, so an AES that computes correctly with any other key fails that check, and
+    the desktop says "Secure Enclave is damaged", as it did while the emulated FUS had
+    no key store at all. Patching the check out is not open to an emulator that runs
+    release packages unchanged. So the enclave answers it: the source gives IV, input
+    and expected output for each slot, and for those ten blocks AES1 returns the
+    expected output, as long as the slot holds FlipperEmu's own key. Every other block
+    is plain AES with the key in the file. The table tells nothing about the real keys
+    that the firmware's source doesn't tell already.
+
+    Two different counts come out of that check, and they matter to different code.
+    The desktop's warning and `info device` go by the keys that pass. The device's own
+    key (slot 11) is made when all ten factory slots hold a key that loads, passing or
+    not. Seen both ways: with a blank enclave U2F shows "Certificate error", and with
+    a foreign key in slot 3 (nine keys valid) it starts and the firmware logs
+    `Generating keys 11..11`.
+
+57. **Which way round the bytes go.** With enclave keys the firmware hands AES1 its IV
+    and data as the 32-bit words they are in memory, `DATATYPE` 00. With keys of its
+    own (CTR, GCM) it byte-swaps every word first. The model follows RM0434, where a
+    data word is four bytes of the block as a big-endian number, and the firmware's
+    unit tests gave the fixed point: their CTR and GCM vectors are standard ones (RFC
+    3686's, and test cases 13 to 16 of the GCM specification), so on a real Flipper
+    the byte-swapping register sequence gives standard results. The model check drives
+    AES1 with the same sequence and gets SP 800-38A's CTR example and GCM test cases 4
+    and 16. It follows that on the enclave path every group of four bytes is reversed
+    on the way in and out:
+    `swap(AES-256-CBC(K, swap(iv), swap(data)))`. The self-test table is stored with
+    the same swap, and `scripts/fe_enclave.py` computes it on the host, where
+    `crypto encrypt` and `decrypt` can be compared with it byte for byte.
+
+58. **A tag that was wrong for two messages.** In the model check, GCM test case 16
+    and one more shape came out with the right ciphertext and the wrong tag. The
+    model was right. The test driver had left `NPBLB` set by an earlier message with
+    a short last block, so the ends of the next message's blocks counted as padding
+    and stayed out of the tag. The firmware cannot do this: it turns the AES bus off
+    after every operation, and that resets the peripheral. The driver now does the
+    same.
+
+59. **Who refuses what.** `crypto store_key` names a slot, and the FUS's store
+    command takes none: it gives a new key the next free index and reports it. The CLI
+    checks the number before it asks, by loading that slot (which must fail) and the
+    one before it (which must not), and prints messages of its own: "already used",
+    "empty, which is not allowed". An encrypted key without its IV was expected to
+    come back from the FUS as "Failure"; the CLI stops that one too, wanting a "hex
+    encoded key with or without IV". Of the four refusals in the check only the second
+    master key is the FUS's own answer.
+
+60. **`crypto encrypt` and what follows the text.** A new check passed once and
+    failed on the next run, in the second block of a 21-character text. Decrypted on
+    the host, the firmware's output was the text, its NUL, and then
+    `00 00 0D F0 AD 8B 28 00 00 00` where zeros were expected. `crypto_cli.c` takes
+    the text as a C string, rounds its length up to whole blocks, reserves that much
+    room and encrypts it without clearing what lies behind the NUL: whatever the heap
+    held. The code is the firmware's, so a real Flipper does the same. The other
+    checks never met it, because their texts were 15, 31 and 47 characters long,
+    where the NUL is all the filling there is. The README's example was not, and
+    would have given readers a ciphertext that differs from the host's now and then.
+    The helper refuses other lengths now, and the documents say why.
+
+61. **A keystore of one's own.** The stock Sub-GHz keystore is encrypted with the real
+    key 1, so it could not show that keystores work with the emulated enclave. (It
+    still "loads": the firmware logs `Failed to load line` for each of its lines, 63
+    in 1.5.1, and goes on with no manufacturer codes.) The firmware has a debug
+    command, `subghz encrypt_keeloq`, that loads a keystore and saves it encrypted
+    under key 1 with a given IV. The check gives it four made-up codes and compares
+    the file with the host's computation. That needed two details from
+    `subghz_keystore.c`: the IV is changed before use (every byte plus the one before
+    it), and all lines run through one CBC chain, each filled with zeros to whole
+    blocks. Then the firmware loads its own encrypted file and encrypts it again with
+    another IV, which comes out right only if every line was decrypted and parsed.
+    `subghz rx` reports `keeloq_mfcodes_user OK` for the plain file and for the
+    encrypted one.
+
+62. **NumHCI.** AN5185 says every FUS response carries 0xFF in the event's NumHCI
+    field. The CPU2 model had written 1 there since the first boot, and nothing ever
+    noticed, because the system channel's transport does not read the field. It
+    writes 0xFF now.
+
+63. **One RFID read-back that failed once.** During these runs one smoke test on
+    Unleashed failed in "rfid: H10301 emulation captured, read back": both read
+    attempts found no tag. The enclave has no part in that path. 42 emulate and
+    read-back cycles on their own and eight more full smoke runs on Unleashed all
+    passed, and the failing run's device directory was gone before anyone looked at
+    its logs. It stays unexplained. A busy host during that one run is the likeliest
+    cause, and a guess.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
@@ -603,6 +694,8 @@ All three are small, self-contained, and suitable for sending upstream.
 - OTA (`run --update`): Unleashed → official 1.5.1 in 68 s, including writing the
   flash and unpacking 1074 resource files to the SD. Momentum's 11 MB resource
   bundle takes longer.
+- The enclave check through the firmware (`enclave_check.py -f`): four boots and 22
+  checks in 40 to 48 s, on each of the three firmwares.
 - USB: 33 ms from D+ pull-up to enumerated: 25 ms of attach debounce, suspend and
   reset timing (as a PC takes), ~8 ms of control transfers. The CLI banner shows within
   a second of opening the pty (QEMU checks a pty for a reader once a second).

@@ -21,6 +21,7 @@ you flash stays flashed, settings and files persist across runs.
   ./flipperemu subghz capture.sub            put a Sub-GHz signal on the air
   ./flipperemu rfid EM4100 DEADBEEF01        hold a 125 kHz tag to it (or a .rfid)
   ./flipperemu nfc card.nfc                  hold an NFC card to it (NTAG, Ultralight)
+  ./flipperemu enclave                       the keys in its secure enclave
   ./flipperemu gdb                           attach gdb to a --gdb run
   ./flipperemu shot out.png | press ok       drive a running device
   ./flipperemu info                          what is on the device
@@ -133,6 +134,7 @@ class Device:
         self.monitor = self.dir / "monitor.sock"
         self.uart = self.dir / "uart.log"
         self.nvram = self.dir / "nvram.bin"     # gauge + RTC backup domain
+        self.enclave = self.dir / "enclave.keys"    # the secure enclave's keys
         self.usb_sock = self.dir / "usb.sock"   # --usb unix
         self.usb_tty = self.dir / "usb.tty"     # --usb pty: symlink to the pty
         self.subghz_sock = self.dir / "subghz.sock"     # a radio bridge (fe_sdr.py)
@@ -304,7 +306,7 @@ def audio_args(args):
 
 def qemu_cmd(dev: Device, args):
     machine = (f"flipper-zero,name={args.name or dev.name[:8]},lcd-scale={args.scale}"
-               f",nvram={dev.nvram}")
+               f",nvram={dev.nvram},enclave={dev.enclave}")
     if args.legacy_sleep:
         machine += ",legacy-sleep=on"
     usb = []
@@ -886,6 +888,44 @@ def cmd_ibutton(args):
     return 0
 
 
+ENCLAVE_USAGE = """\
+./flipperemu [-d NAME] enclave ...
+
+  (nothing)               the keys in the device's secure enclave
+  encrypt SLOT IV [TEXT]  what `crypto encrypt SLOT IV` prints for TEXT (or stdin).
+                          The firmware fills the last block with what its heap
+                          holds, this with zeros: a TEXT of 15, 31, 47...
+                          characters has no filling, and gives the same.
+  decrypt SLOT IV HEX     what `crypto decrypt SLOT IV` prints for HEX
+  wrap KEY [IV]           KEY (hex, 16 or 32 bytes) encrypted under the master key:
+                          the last argument of `crypto store_key N encrypted BITS`
+  reset                   the factory keys again; the device's own key and the
+                          keys that were stored are gone, and what they encrypted
+  blank                   no keys at all: the firmware reports a damaged enclave,
+                          and `crypto store_key` can fill it
+
+Slot 0 is the master key, 1-10 are the factory keys, 11 the device's own key
+(the firmware makes it on first use), 12-100 what apps store. The factory keys
+of an emulated Flipper are FlipperEmu's and public (docs/ARCHITECTURE.md): what
+it encrypts is not secret, and it cannot read what a real Flipper encrypted.
+IV: 16 bytes in hex (12 for wrap)."""
+
+
+def cmd_enclave(args):
+    import fe_enclave
+    dev = Device(args.device)
+    action = args.action[0] if args.action else "show"
+    if action in ("reset", "blank"):
+        # the emulator reads the file at start and rewrites it from memory
+        dev.refuse_if_running()
+        dev.dir.mkdir(parents=True, exist_ok=True)
+    elif not dev.enclave.exists():
+        sys.exit(f"[{dev.name}] no enclave yet: the first run makes one, with "
+                 "FlipperEmu's factory keys")
+    return fe_enclave.main(["enclave", action, str(dev.enclave), *args.action[1:]],
+                           usage=ENCLAVE_USAGE)
+
+
 def cmd_shot(args):
     from fe_monitor import Monitor
     print(Monitor(str(Device(args.device).monitor)).screenshot(args.out))
@@ -909,6 +949,17 @@ def cmd_info(args):
     print(f"flash    : {'yes' if dev.flash.exists() else 'no'}")
     print(f"sd card  : {'yes' if dev.sd.exists() else 'no'}")
     print(f"symbols  : {'yes' if dev.elf.exists() else 'no'}")
+    if dev.enclave.exists():
+        import fe_enclave
+        try:
+            keys = fe_enclave.read_store(dev.enclave)
+            valid = fe_enclave.valid_factory_keys(keys)
+            print(f"enclave  : {len(keys)} keys, {valid} of {fe_enclave.FACTORY_KEYS} "
+                  "factory keys valid")
+        except (OSError, ValueError) as e:
+            print(f"enclave  : {e}")
+    else:
+        print("enclave  : made on the first run")
 
 
 def main():
@@ -1050,6 +1101,12 @@ def main():
                    help="instead: read the Dallas key the Flipper emulates and print "
                         "it (a virtual 1-Wire master; saved to devices/NAME/ibutton-tx/)")
     p.set_defaults(func=cmd_ibutton)
+
+    p = sub.add_parser("enclave", help="the keys in the device's secure enclave",
+                       usage=ENCLAVE_USAGE.removeprefix("./"),
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("action", nargs="*", help=argparse.SUPPRESS)
+    p.set_defaults(func=cmd_enclave)
 
     p = sub.add_parser("gdb", help="attach gdb to a running --gdb device")
     p.add_argument("--gdb-port", type=int, default=1234)
