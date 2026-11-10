@@ -11,14 +11,15 @@ Back (dismiss the first scene) and OK (main menu), checks the LCD changed,
 runs `info device` on the CLI over the emulated USB serial port, receives an
 NEC frame through the virtual IR receiver (`ir rx`), captures an `ir tx` and
 decodes it back, receives a Princeton key over the virtual air (`subghz rx`),
-captures a `subghz tx`, reads a 125 kHz EM4100
-tag (`rfid read`), reads back its own H10301 emulation (`rfid emulate`),
-writes an H10301 to a virtual T5577 (`rfid write`), reads a DS1990A iButton
-(`ikey read`), has a virtual 1-Wire reader read an emulated DS1990A, captures
-an emulated Metakom key and reads it back, reads an NTAG215 (`mfu info`) and dumps a MIFARE Classic 1K over NFC, has a
-virtual reader read an NTAG215 the firmware emulates,
-enumerates over USB/IP, then reboots through the CLI and checks the LCD comes
-back after the warm reset.
+captures a `subghz tx`, receives a key from an SDR recording through the
+radio link (scripts/fe_sdr.py), reads a 125 kHz EM4100 tag (`rfid read`),
+reads back its own H10301 emulation (`rfid emulate`), writes an H10301 to a
+virtual T5577 (`rfid write`), reads a DS1990A iButton (`ikey read`), has a
+virtual 1-Wire reader read an emulated DS1990A, captures an emulated Metakom
+key and reads it back, reads an NTAG215 (`mfu info`) and dumps a MIFARE
+Classic 1K over NFC, has a virtual reader read an NTAG215 the firmware
+emulates, enumerates over USB/IP, then reboots through the CLI and checks the
+LCD comes back after the warm reset.
 Exit status 0 = pass. Screenshots are kept in the --out directory.
 """
 import argparse
@@ -304,6 +305,24 @@ def rfid_write_check(mon: Monitor) -> bool:
     if not found:
         print(f"  rfid write: {out.strip()[-200:]!r} (T5577: {blocks})")
     return bool(found) and blocks.startswith("00107060")      # FSK2a RF/50, 3 blocks
+
+
+def subghz_sdr_check(mon: Monitor, devdir: pathlib.Path):
+    """A Princeton key in an RTL-SDR recording (cu8), played through the
+    CC1101's radio link by the SDR bridge (fe_sdr.py): `subghz rx` must
+    decode it.  None (skip) without numpy, which the bridge needs."""
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        return None
+    import sdr_check
+    try:
+        ok, info = sdr_check.check_file(devdir.name, mon)
+    except (OSError, TimeoutError, ConnectionError, ValueError) as e:
+        ok, info = False, str(e)
+    if not ok:
+        print(f"  subghz sdr: {info}")
+    return ok
 
 
 def ibutton_check(mon: Monitor, devdir: pathlib.Path) -> bool:
@@ -658,6 +677,8 @@ def main() -> int:
                                 subghz_check(mon)))
                 results.append(("subghz: transmission captured with exact timings",
                                 subghz_tx_check(mon)))
+                results.append(("subghz: a key in an SDR recording, via the radio link",
+                                subghz_sdr_check(mon, devdir)))
                 # after Sub-GHz TX: firmware 1.5.1's IR transmitter leaves DMA2
                 # ch1's half-transfer flag set, which garbles the next
                 # Sub-GHz transmission (BRINGUP_LOG, entry 27)

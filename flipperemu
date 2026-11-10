@@ -135,6 +135,7 @@ class Device:
         self.nvram = self.dir / "nvram.bin"     # gauge + RTC backup domain
         self.usb_sock = self.dir / "usb.sock"   # --usb unix
         self.usb_tty = self.dir / "usb.tty"     # --usb pty: symlink to the pty
+        self.subghz_sock = self.dir / "subghz.sock"     # a radio bridge (fe_sdr.py)
 
     def running(self):
         """Is a QEMU serving this device's monitor socket?"""
@@ -330,6 +331,10 @@ def qemu_cmd(dev: Device, args):
            # capture of what a reader would see, and what the virtual NFC
            # reader reads from an emulated card as a .nfc file
            "-global", f"cc1101.tx-dir={dev.dir / 'subghz-tx'}",
+           # a real radio (an SDR, through scripts/fe_sdr.py) can be the
+           # CC1101's antenna: `./flipperemu subghz --sdr ...`
+           "-chardev", f"socket,id=subghz-link,path={dev.subghz_sock},server=on,wait=off",
+           "-global", "cc1101.link=subghz-link",
            "-global", f"flipper-ir.tx-dir={dev.dir / 'ir-tx'}",
            "-global", f"flipper-rfid.tx-dir={dev.dir / 'rfid-tx'}",
            "-global", f"flipper-ibutton.tx-dir={dev.dir / 'ibutton-tx'}",
@@ -557,7 +562,16 @@ def cmd_subghz(args):
     dev = Device(args.device)
     if not dev.running():
         sys.exit(f"[{dev.name}] not running")
+    if args.sdr:                                # a real radio as the antenna
+        import fe_sdr
+        try:
+            return fe_sdr.run(dev.subghz_sock, args.sdr, args)
+        except (OSError, ConnectionError, ValueError) as e:
+            sys.exit(f"subghz --sdr: {e}")
     sig = args.signal
+    if not sig:
+        sys.exit("usage: subghz FILE.sub | subghz princeton KEY | subghz raw +H -L ... "
+                 "| subghz --sdr SOURCE")
     try:
         if sig[0].endswith(".sub"):
             label = pathlib.Path(sig[0]).name
@@ -944,13 +958,21 @@ def main():
                                               "protocol's encoder sends)")
     p.set_defaults(func=cmd_ir)
 
-    p = sub.add_parser("subghz", help="put a Sub-GHz signal on the air for a running device")
-    p.add_argument("signal", nargs="+",
+    p = sub.add_parser("subghz", help="put a Sub-GHz signal on the air for a running "
+                       "device, or make a real radio (an SDR) its antenna")
+    p.add_argument("signal", nargs="*",
                    help="FILE.sub (RAW capture or Princeton key), princeton KEY, "
                         "or raw +HIGH -LOW ... (µs)")
+    p.add_argument("--sdr", metavar="SOURCE",
+                   help="instead: receive from a real radio until ^C. SOURCE: "
+                        "rtl_tcp[:HOST[:PORT]] (an RTL-SDR behind `rtl_tcp`), "
+                        "hackrf[:SERIAL], an IQ recording (FILE.cu8|cs8|cs16|cf32), "
+                        "or - (IQ on stdin)")
     p.add_argument("--freq", help="MHz or Hz (default: the file's, else 433.92 MHz)")
     p.add_argument("--bits", type=int, default=24, help="princeton: key bits")
     p.add_argument("--te", type=int, default=390, help="princeton: TE in µs")
+    import fe_sdr
+    fe_sdr.add_options(p)
     p.set_defaults(func=cmd_subghz)
 
     p = sub.add_parser("rfid", help="hold a 125 kHz RFID tag to a running device")

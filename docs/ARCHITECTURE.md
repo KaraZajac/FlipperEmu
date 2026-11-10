@@ -26,7 +26,8 @@ it; the file comments name that function. Register layouts come from RM0434 and 
    I2C1 ── bq27220 @0x55   bq25896 @0x6B   lp5562 @0x30
    TIM16 CH1 (PB8) ── piezo → flipper-speaker → QEMU audio (desktop or WAV)
    PA0 + TIM2 TI1  ←─ IR receiver ← /machine/ir rx (marks/spaces)
-   PA1 + TIM2 TI2  ←─ CC1101 GDO0 (async RX) ← /machine/subghz rx (the "air")
+   PA1 + TIM2 TI2  ←─ CC1101 GDO0 (async RX) ← /machine/subghz rx (the "air"),
+                                                 or a real radio on its link (fe_sdr.py)
    TIM2 CH2 (DMA → ARR) ──→ CC1101 GDO0 (async TX) → devices/NAME/subghz-tx/*.sub
    USB ─── built-in host ── CDC ACM ⇄ chardev "usb" (pty/socket)  ·  HID → text on it
 ```
@@ -596,7 +597,7 @@ firmware keeps `/int` on the card as `/ext/.int`.
   with the same pacing. Transmit: in TX, GDO0 is the data input. The model records it
   from TIM2's output compare with exact timestamps. On leaving TX it writes a `.sub` RAW
   file (frequency and a custom preset from the live registers and PATABLE) to `tx-dir`,
-  and keeps it as the `tx` property.
+  and keeps it as the `tx` property. A real radio can also be the antenna: see below.
 - **ST25R3916**: register spaces A and B, IC identity 0x2A, IRQ status (clear on read) and
   mask registers driving the IRQ pin, oscillator-ready and VDD measurement.
 - **Speaker**: the piezo on PB8 is TIM16 CH1 in PWM mode. Every TIM16 write recomputes
@@ -608,6 +609,55 @@ firmware keeps `/int` on the card as `/ext/.int`.
 - **Pins held by the board** (re-applied after every reset, because a GPIO port reset
   releases external drivers): SD card detect, idle-low MISO lines (the CC1101 driver waits
   for CHIP_RDYn on MISO), and released buttons.
+
+## Real radios: the CC1101's link (`flipper_rf.c`, `scripts/fe_sdr.py`)
+
+The CC1101 has a chardev, `link` (`devices/NAME/subghz.sock`), with a line protocol on it
+([RADIO_LINK.md](RADIO_LINK.md)). The model announces its receive set-up whenever a
+register write or a strobe changes it: state, frequency, modulation, bandwidth, data
+rate, deviation, OOK decision boundary. The firmware loads a preset one register at a
+time, so the announcement waits for the writes to settle. Each change bumps an epoch, and
+anything queued or still in flight for an older one is dropped.
+
+The other end answers with two things:
+- **A timeline for GDO0**: what the chip would demodulate, as `+high/-low` µs. The model
+  queues it in a ring and plays it 60 ms behind arrival, so chunks join up. Each edge
+  goes through the same TIM2 capture pacing as the one-shot air's, with its exact
+  timestamp. A backlog is made up in long silences; a dry queue drops the line low.
+- **The band's power**, as dBm per bin. RSSI is the sum over the bins inside the chip's
+  current channel, so the firmware's reads are answered at once for any frequency and
+  bandwidth. That matters because the Frequency Analyzer spends 2 ms per frequency, and
+  the hopper decides on one read right after retuning. A channel off the band reads
+  thermal noise for its bandwidth (−167 dBm/Hz with the noise figure; −108.9 dBm at
+  650 kHz). The `rssi` property shows the reading.
+
+`fe_sdr.py` is such a bridge for an SDR. It reads IQ from `rtl_tcp` (the protocol
+directly, so no librtlsdr is needed and the dongle can be remote), from a HackRF through
+libhackrf (ctypes), or from a recording or stdin.
+- **Channel.** An overlap-save FFT filter cuts the CC1101's channel out of the band. Each
+  frame's spectrum gives up the bins around the channel's offset, shaped by a
+  raised-cosine passband of the chip's bandwidth, and an inverse FFT of just those bins
+  is the decimated baseband. The offset is a multiple of 4 bins, so with frames 3N/4
+  apart the phase runs on across them, which FSK needs.
+- **OOK.** The smoothed power (1/16 bit) is sliced at the chip's decision boundary below
+  the peak (`boundary`, 8 dB in the Flipper's presets), with hysteresis. At the midpoint
+  instead, a real transmitter's ripple (a beat with another carrier) broke highs up,
+  and the KeeLoq capture failed. Below a 2×boundary SNR it slices halfway in dB.
+- **2-FSK.** The phase step between samples, smoothed over a quarter bit, against the
+  transmitter's own centre (tracked per burst). A burst is gated by power over its
+  midpoint, whose edges come half a window late like the discriminator's, so a burst
+  neither starts early nor trails a glitch.
+- **Squelch.** The floor is each frame's median power, falling at once and rising slowly,
+  and the peak falls slowly; the squelch opens 12 dB over the floor. A low percentile
+  failed on faint 8-bit noise, which is a few levels of quantisation.
+- **Edges and spectrum.** Runs become µs with the fractions carried on, so the timeline
+  keeps time with the samples. Runs shorter than half the smoothing are merged away as
+  glitches. Every 50 ms a Welch spectrum goes out, normalised so its median bin is the
+  noise floor, with the DC spike patched and the edges' roll-off left out.
+- **Tuning.** The SDR sits a quarter of its rate above the channel, clear of its DC
+  spike. When the firmware stays off the band for 0.5 s, it retunes, and the samples
+  still buffered from before are skipped. Hopping and the analyzer move faster than any
+  SDR retunes, so they just read the band the SDR is on.
 
 ## Persistence per device (`devices/NAME/`)
 

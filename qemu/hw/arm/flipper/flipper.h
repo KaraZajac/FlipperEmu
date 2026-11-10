@@ -11,6 +11,7 @@
 #include "hw/i2c/i2c.h"
 #include "qom/object.h"
 #include "qemu/notify.h"
+#include "chardev/char-fe.h"
 
 /* ---------------------------------------------------------- ST7567 LCD */
 #define TYPE_ST7567 "st7567"
@@ -112,6 +113,23 @@ struct Cc1101State {
     int64_t tx_edge_ns;
     bool tx_level, tx_active;
     char *tx_last;               /* "@freq,+d,-d,..." of the last one */
+    /* a radio bridge on the "link" chardev (scripts/fe_sdr.py: an SDR) */
+    CharFrontend link;
+    GString *link_in, *link_out; /* a partial line in; bytes not yet sent */
+    guint link_watch;
+    bool link_open;
+    uint32_t link_epoch;         /* bumped whenever the receive set-up changes */
+    char *link_cfg;              /* that set-up, as last announced */
+    QEMUTimer *link_timer;       /* announces it once the writes settle */
+    int32_t *live;               /* the bridge's air: a ring of +high/-low µs */
+    unsigned live_rd, live_wr;
+    int64_t live_queued_us, live_next_ns;
+    QEMUTimer *live_timer;
+    bool live_playing, live_carrier;
+    float *spec;                 /* the bridge's spectrum: dBm per bin */
+    int spec_n;
+    double spec_f0, spec_step;   /* bin 0's frequency, the bin spacing (Hz) */
+    int64_t spec_ns;             /* when it came */
 };
 void cc1101_tx_data(Cc1101State *s, bool level, int64_t when);
 

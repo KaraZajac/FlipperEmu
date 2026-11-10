@@ -482,6 +482,60 @@ All three are small, self-contained, and suitable for sending upstream.
     the vCPU, so the gap was the host's, not the firmware's. A capture now ends when it
     is full or when the firmware lets go of PB14, and only falls back to a 1 s timer.
 
+## Real radios (M7)
+
+50. **A live stream, not a one-shot.** The CC1101's air was one finite signal, and its
+    RSSI was −40 or −100 dBm. A real radio needs more, and the SDR bridge provides it
+    over a socket (`docs/RADIO_LINK.md`):
+    - a timeline that never ends, tied to the chip's tuning. An epoch drops data still in
+      flight from before a retune, and a 60 ms jitter buffer joins the chunks;
+    - RSSI that answers at once at any frequency. The Frequency Analyzer spends 2 ms per
+      frequency (650 kHz wide), then sweeps ±300 kHz in 20 kHz steps 58 kHz wide. The
+      hopper stays only where its first read after retuning is over −90 dBm. So the
+      bridge sends the band's power bin by bin, and the model sums the bins inside the
+      channel.
+
+    With the noise floor at −167 dBm/Hz, a 650 kHz channel reads −108.9 dBm with no
+    signal, and −74 dBm with a carrier 30 dB over the noise (the estimate was −74). The
+    analyzer then shows 433.939 MHz for a transmitter at 433.95 MHz: the nearest of its
+    20 kHz steps.
+
+51. **Slicing OOK: where the threshold sits.** On synthetic signals, highs came out
+    30 µs long, because the midpoint in dB sits far below the peak and is crossed early
+    on the rising ramp and late on the falling one. The midpoint in linear power fixed
+    that, to within 3–10 µs. Real recordings (the rtl_433 test corpus) then showed what a
+    real transmitter does:
+    - a KeeLoq HCS200's highs ripple by 3 dB at 21 kHz, a beat with another carrier, and
+      its gaps sit 10–17 dB over the floor. A threshold 3 dB under the peak broke the
+      highs up. The CC1101 slices at its decision boundary (AGCCTRL0: 8 dB in the
+      Flipper's presets), now announced and used, with the smoothing cut to 1/16 bit so
+      highs are only about 10 µs long;
+    - a Nice FLO capture's first 130 ms is 8-bit noise, a few quantisation levels, whose
+      10th percentile lies 10.5 dB under its peaks. That opened the 10 dB squelch, and the
+      noise came out as 30 µs pulses. The floor is now the frame's median (still falling
+      at once and rising slowly), and the squelch 12 dB.
+
+    The firmware's own `subghz rx` then decodes the PT2262 capture (`Key:0x00755555`,
+    which is rtl_433's id 30037, cmd 85), both EV1527 remotes, a TE275 remote and the
+    HCS200 (serial 0174ACD and hop A44415AA, as rtl_433 has them). The Nice FLO captures
+    don't decode: the firmware's Nice FLO decoder wants a 25 ms ±7 ms gap before a frame,
+    and the capture's only frame follows a 58 ms one. That is a gap in the recording, not
+    in the bridge.
+
+52. **A channel wider than the SDR's band.** No real recording decoded at first, though
+    the bridge's own output was right (480/1480 µs, PT2262). The bridge called the
+    AM650 channel (650 kHz) "off the band" of a 250 kS/s recording, because it wanted
+    the whole channel inside the band, and so it sent nothing. Now only the channel's
+    middle has to be in the band, clear of its edges. What the SDR doesn't cover is
+    noise the CC1101 would have filtered anyway.
+
+53. **2-FSK: one gate, one delay.** The first high of every burst came out 29 µs long.
+    The gate (power over the squelch) opened at once, at 1% of the power ramp, while
+    every frequency transition came half a smoothing window late. Gating at the power's
+    midpoint gives the gate the discriminator's delay, at the start and at the end, and
+    the trailing 14–39 µs glitches went with it. Timings are now within 2–12 µs at all
+    three of the Flipper's deviations (47.6, 12.7 and 2.38 kHz), down to 12–15 dB SNR.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

@@ -21,6 +21,7 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 #include "qemu/osdep.h"
+#include <math.h>
 #include "qemu/log.h"
 #include "qemu/timer.h"
 #include "qemu/cutils.h"
@@ -28,6 +29,7 @@
 #include "qapi/error.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "wb55.h"
 #include "flipper.h"
 
@@ -71,7 +73,10 @@ static int cc1101_gdo_level(Cc1101State *s, uint8_t cfg)
     case 0x2F: lvl = 0; break;          /* HW to 0 */
     case 0x2E: lvl = 1; break;          /* high-Z: released (pull-up) */
     case 0x29: lvl = 0; break;          /* CHIP_RDYn */
-    case 0x0D: lvl = cc1101_hears(s) && s->carrier; break; /* async data */
+    case 0x0D:                          /* async data: the air, or a bridge's */
+        lvl = (cc1101_hears(s) && s->carrier) ||
+              (s->state == MARC_RX && s->live_carrier);
+        break;
     default:   lvl = 0; break;          /* no RF activity */
     }
     return (cfg & 0x40) ? !lvl : lvl;
@@ -198,6 +203,357 @@ static void cc1101_set_rx(Object *obj, const char *value, Error **errp)
     timer_mod(s->air_timer, s->air_next_ns);
 }
 
+/*
+ * ---- a radio bridge on the "link" chardev (docs/RADIO_LINK.md)
+ *
+ * A program on the other end, such as scripts/fe_sdr.py with a real SDR,
+ * is the antenna.  The chip announces its receive set-up whenever it
+ * changes ("cc1101 epoch=N state=rx freq=... mod=ook bw=... rate=... dev=..."),
+ * and the bridge answers with what a CC1101 so set would demodulate: a
+ * continuous timeline of "rx N +high -low ..." µs, and now and then the
+ * band's power ("spectrum F0 STEP dBm..."), from which RSSI is read at any
+ * frequency and bandwidth, as the frequency analyzer and the hopper sweep.
+ * The epoch drops whatever was still on its way for an earlier set-up.
+ * Every transmission also goes out ("tx freq=... raw=+d,-d,...").
+ */
+
+#define LIVE_MAX       (1 << 16)            /* durations queued */
+#define LIVE_DELAY_NS  (60 * SCALE_MS)      /* jitter buffer before playing */
+#define LINK_LINE_MAX  (1 << 20)
+#define LINK_OUT_MAX   (1 << 20)
+#define SPEC_MAX       8192
+#define SPEC_FRESH_NS  (1500 * SCALE_MS)
+
+static const char *cc1101_mod_name(Cc1101State *s)
+{
+    switch ((s->regs[0x12] >> 4) & 7) {     /* MDMCFG2.MOD_FORMAT */
+    case 0: return "2fsk";
+    case 1: return "gfsk";
+    case 3: return "ook";
+    case 4: return "4fsk";
+    case 7: return "msk";
+    default: return "unknown";
+    }
+}
+
+/* MDMCFG4: the channel filter, 26 MHz / (8 (4 + CHANBW_M) 2^CHANBW_E) */
+static uint32_t cc1101_bw_hz(Cc1101State *s)
+{
+    uint8_t m4 = s->regs[0x10];
+
+    return 26000000u / ((8u * (4 + ((m4 >> 4) & 3))) << (m4 >> 6));
+}
+
+/* MDMCFG4/3: (256 + DRATE_M) 2^DRATE_E 26 MHz / 2^28 */
+static uint32_t cc1101_rate_baud(Cc1101State *s)
+{
+    uint8_t m4 = s->regs[0x10], m3 = s->regs[0x11];
+
+    return ((uint64_t)(256 + m3) << (m4 & 15)) * 26000000u >> 28;
+}
+
+/* DEVIATN: 26 MHz / 2^17 (8 + DEVIATION_M) 2^DEVIATION_E */
+static uint32_t cc1101_dev_hz(Cc1101State *s)
+{
+    uint8_t d = s->regs[0x15];
+
+    return ((uint64_t)(8 + (d & 7)) << ((d >> 4) & 7)) * 26000000u >> 17;
+}
+
+static void cc1101_link_flush(Cc1101State *s);
+
+static gboolean cc1101_link_writable(void *do_not_use, GIOCondition cond,
+                                     void *opaque)
+{
+    Cc1101State *s = opaque;
+
+    s->link_watch = 0;
+    cc1101_link_flush(s);
+    return G_SOURCE_REMOVE;
+}
+
+static void cc1101_link_flush(Cc1101State *s)
+{
+    while (s->link_out->len) {
+        int w = qemu_chr_fe_write(&s->link, (const uint8_t *)s->link_out->str,
+                                  s->link_out->len);
+
+        if (w <= 0) {
+            if (!qemu_chr_fe_backend_connected(&s->link) || !s->link_open) {
+                g_string_truncate(s->link_out, 0);
+            } else if (!s->link_watch) {
+                s->link_watch = qemu_chr_fe_add_watch(&s->link,
+                                                      G_IO_OUT | G_IO_HUP,
+                                                      cc1101_link_writable, s);
+            }
+            return;
+        }
+        g_string_erase(s->link_out, 0, w);
+    }
+}
+
+static void G_GNUC_PRINTF(2, 3) cc1101_link_send(Cc1101State *s,
+                                                 const char *fmt, ...)
+{
+    va_list ap;
+
+    if (!s->link_open) {
+        return;
+    }
+    if (s->link_out->len > LINK_OUT_MAX) {
+        return;                         /* the bridge stopped reading */
+    }
+    va_start(ap, fmt);
+    g_string_append_vprintf(s->link_out, fmt, ap);
+    va_end(ap);
+    cc1101_link_flush(s);
+}
+
+/* the bridge's air stops: nothing queued, the line low */
+static void cc1101_live_stop(Cc1101State *s)
+{
+    timer_del(s->live_timer);
+    s->live_rd = s->live_wr = 0;
+    s->live_queued_us = 0;
+    s->live_playing = false;
+    if (s->live_carrier) {
+        s->live_carrier = false;
+        cc1101_update_gdo(s);
+    }
+}
+
+static void cc1101_link_check(Cc1101State *s);
+
+static void cc1101_link_announce(void *opaque)
+{
+    Cc1101State *s = opaque;
+
+    if (!s->link_cfg) {
+        cc1101_link_check(s);
+    }
+    cc1101_link_send(s, "cc1101 epoch=%u %s\n", s->link_epoch, s->link_cfg);
+}
+
+/* after a register write or a state change: has the receive set-up changed? */
+static void cc1101_link_check(Cc1101State *s)
+{
+    static const char *const names[] = {
+        [MARC_SLEEP] = "sleep", [MARC_IDLE] = "idle", [MARC_RX] = "rx",
+        [MARC_FSTXON] = "fstxon", [MARC_TX] = "tx",
+    };
+    /* AGCCTRL0.FILTER_LENGTH, for ASK/OOK: the decision boundary below the
+     * peak, 4/8/12/16 dB (the Flipper's OOK presets: 8) */
+    g_autofree char *cfg = g_strdup_printf(
+        "state=%s freq=%u mod=%s bw=%u rate=%u dev=%u boundary=%u",
+        s->state < ARRAY_SIZE(names) && names[s->state] ? names[s->state] : "idle",
+        cc1101_freq_hz(s), cc1101_mod_name(s), cc1101_bw_hz(s),
+        cc1101_rate_baud(s), cc1101_dev_hz(s), 4u * (1 + (s->regs[0x1B] & 3)));
+
+    if (s->link_cfg && !strcmp(cfg, s->link_cfg)) {
+        return;
+    }
+    g_free(s->link_cfg);
+    s->link_cfg = g_steal_pointer(&cfg);
+    s->link_epoch++;
+    cc1101_live_stop(s);
+    if (s->link_open) {                 /* a preset is many writes: settle */
+        timer_mod(s->link_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                                 SCALE_MS);
+    }
+}
+
+/*
+ * One step of the bridge's air.  It plays LIVE_DELAY_NS behind what came,
+ * so the bridge's chunks join up; an edge waits for the firmware's capture
+ * read as the one-shot air's do, keeping its timestamp.  A backlog (the
+ * firmware fell behind, or the bridge sent a burst) is made up in silence.
+ */
+static void cc1101_live_edge(void *opaque)
+{
+    Cc1101State *s = opaque;
+    int64_t when = s->live_next_ns;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t us;
+    int32_t d;
+
+    if (s->tim && s->state == MARC_RX && wb55_tim_capture_pending(s->tim) &&
+        now < when + 250 * SCALE_MS) {
+        timer_mod(s->live_timer, now + 20 * SCALE_US);
+        return;
+    }
+    if (s->live_rd == s->live_wr) {     /* ran dry: the bridge is late */
+        s->live_playing = false;
+        if (s->live_carrier) {
+            s->live_carrier = false;
+            cc1101_drive_gdo0(s, cc1101_gdo_level(s, s->regs[0x02]), when);
+        }
+        return;
+    }
+    d = s->live[s->live_rd++ & (LIVE_MAX - 1)];
+    us = ABS(d);
+    s->live_queued_us -= us;
+    if (d < 0 && us > 20000 && s->live_queued_us > 2 * LIVE_DELAY_NS / 1000) {
+        us -= MIN(us - 10000, s->live_queued_us - LIVE_DELAY_NS / 1000);
+    }
+    s->live_carrier = d > 0;
+    cc1101_drive_gdo0(s, cc1101_gdo_level(s, s->regs[0x02]), when);
+    s->live_next_ns = when + us * 1000;
+    timer_mod(s->live_timer, s->live_next_ns);
+}
+
+/* "rx EPOCH d d d ...": more of the timeline */
+static void cc1101_link_rx(Cc1101State *s, const char *p)
+{
+    char *end;
+    unsigned long epoch = strtoul(p, &end, 10);
+
+    if (end == p || epoch != s->link_epoch || s->state != MARC_RX) {
+        return;                         /* for an earlier set-up */
+    }
+    for (p = end; *p; p = end) {
+        long v = strtol(p, &end, 10);
+
+        if (end == p) {
+            break;
+        }
+        if (!v || v > 10000000 || v < -10000000) {
+            continue;
+        }
+        if (s->live_wr - s->live_rd >= LIVE_MAX) {
+            break;                      /* full: the rest is lost */
+        }
+        s->live[s->live_wr++ & (LIVE_MAX - 1)] = v;
+        s->live_queued_us += ABS(v);
+    }
+    if (!s->live_playing && s->live_rd != s->live_wr) {
+        s->live_playing = true;
+        s->live_next_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + LIVE_DELAY_NS;
+        timer_mod(s->live_timer, s->live_next_ns);
+    }
+}
+
+/* "spectrum F0 STEP dBm dBm ...": the band's power, bin by bin */
+static void cc1101_link_spectrum(Cc1101State *s, const char *p)
+{
+    char *end;
+    double f0 = strtod(p, &end), step;
+    int n = 0;
+
+    if (end == p) {
+        return;
+    }
+    p = end;
+    step = strtod(p, &end);
+    if (end == p || step <= 0) {
+        return;
+    }
+    if (!s->spec) {
+        s->spec = g_new(float, SPEC_MAX);
+    }
+    for (p = end; n < SPEC_MAX; p = end) {
+        double v = strtod(p, &end);
+
+        if (end == p) {
+            break;
+        }
+        s->spec[n++] = v;
+    }
+    s->spec_n = n;
+    s->spec_f0 = f0;
+    s->spec_step = step;
+    s->spec_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+}
+
+static void cc1101_link_line(Cc1101State *s, char *line)
+{
+    if (g_str_has_prefix(line, "rx ")) {
+        cc1101_link_rx(s, line + 3);
+    } else if (g_str_has_prefix(line, "spectrum ")) {
+        cc1101_link_spectrum(s, line + 9);
+    } else if (g_str_has_prefix(line, "hello ")) {
+        info_report("flipper-zero: Sub-GHz link: %s", g_strstrip(line + 6));
+    }
+}
+
+static int cc1101_link_can_read(void *opaque)
+{
+    return 65536;
+}
+
+static void cc1101_link_read(void *opaque, const uint8_t *buf, int size)
+{
+    Cc1101State *s = opaque;
+    char *nl;
+
+    g_string_append_len(s->link_in, (const char *)buf, size);
+    while ((nl = memchr(s->link_in->str, '\n', s->link_in->len))) {
+        *nl = 0;
+        cc1101_link_line(s, s->link_in->str);
+        g_string_erase(s->link_in, 0, nl + 1 - s->link_in->str);
+    }
+    if (s->link_in->len > LINK_LINE_MAX) {
+        g_string_truncate(s->link_in, 0);   /* no line ends: not a bridge */
+    }
+}
+
+static void cc1101_link_event(void *opaque, QEMUChrEvent event)
+{
+    Cc1101State *s = opaque;
+
+    switch (event) {
+    case CHR_EVENT_OPENED:
+        s->link_open = true;
+        g_string_truncate(s->link_in, 0);
+        g_string_truncate(s->link_out, 0);
+        cc1101_link_send(s, "hello flipperemu subghz 1\n");
+        cc1101_link_announce(s);
+        break;
+    case CHR_EVENT_CLOSED:
+        s->link_open = false;
+        g_string_truncate(s->link_out, 0);
+        cc1101_live_stop(s);
+        s->spec_n = 0;
+        break;
+    default:
+        break;
+    }
+}
+
+/* RSSI in dBm: a CC1101 tuned as now, in the air the bridge reports */
+static double cc1101_rssi_dbm(Cc1101State *s)
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    if (cc1101_hears(s) && s->air) {
+        return -40;                     /* the one-shot air: strong */
+    }
+    if (s->spec_n && now - s->spec_ns < SPEC_FRESH_NS) {
+        double f = cc1101_freq_hz(s), bw = cc1101_bw_hz(s), p = 0;
+        long lo = lround(ceil((f - bw / 2 - s->spec_f0) / s->spec_step));
+        long hi = lround(floor((f + bw / 2 - s->spec_f0) / s->spec_step));
+
+        if (hi < lo) {                  /* narrower than a bin: the nearest */
+            lo = hi = lround((f - s->spec_f0) / s->spec_step);
+        }
+        if (hi < 0 || lo >= s->spec_n) {
+            return -167 + 10 * log10(bw);   /* off the bridge's band: noise */
+        }
+        lo = MAX(lo, 0);
+        hi = MIN(hi, s->spec_n - 1);
+        for (long k = lo; k <= hi; k++) {
+            p += pow(10, s->spec[k] / 10);
+        }
+        if ((hi - lo + 1) * s->spec_step < bw) {    /* partly off the band: */
+            p += (bw - (hi - lo + 1) * s->spec_step) * pow(10, -16.7); /* noise */
+        }
+        return 10 * log10(p);
+    }
+    if (s->state == MARC_RX && s->live_carrier) {
+        return -60;                     /* a bridge with no spectrum */
+    }
+    return -100;
+}
+
 /* ---- transmit capture */
 
 void cc1101_tx_data(Cc1101State *s, bool level, int64_t when)
@@ -281,6 +637,9 @@ static void cc1101_tx_end(Cc1101State *s)
         g_string_append_c(sub, '\n');
         g_free(s->tx_last);
         s->tx_last = g_strdup(last->str);
+        cc1101_link_send(s, "tx freq=%u mod=%s rate=%u dev=%u raw=%s\n", freq,
+                         cc1101_mod_name(s), cc1101_rate_baud(s),
+                         cc1101_dev_hz(s), strchr(last->str, ',') + 1);
         if (s->tx_dir) {
             g_autoptr(GError) err = NULL;
             g_autofree char *path = NULL;
@@ -326,6 +685,7 @@ static void cc1101_set_state(Cc1101State *s, uint8_t state)
         cc1101_tx_end(s);
     }
     s->state = state;
+    cc1101_link_check(s);
 }
 
 static void cc1101_strobe(Cc1101State *s, uint8_t cmd)
@@ -342,6 +702,7 @@ static void cc1101_strobe(Cc1101State *s, uint8_t cmd)
     case 0x39: cc1101_set_state(s, MARC_SLEEP); break;
     default: break;                     /* SFRX SFTX SWORRST SNOP */
     }
+    cc1101_link_check(s);               /* SRES: the defaults' set-up */
     cc1101_update_gdo(s);
 }
 
@@ -350,9 +711,11 @@ static uint8_t cc1101_status_reg(Cc1101State *s, uint8_t addr)
     switch (addr) {
     case 0x30: return 0x00;             /* PARTNUM */
     case 0x31: return 0x14;             /* VERSION */
-    case 0x34:                          /* RSSI: dBm = value/2 - 74 */
-        return cc1101_hears(s) && s->air ? 0x44 /* -40 dBm */
-                                         : 0xCC /* -100 dBm */;
+    case 0x34: {                        /* RSSI: dBm = value/2 - 74 */
+        long v = lround((cc1101_rssi_dbm(s) + 74) * 2);
+
+        return (uint8_t)(int8_t)MIN(MAX(v, -128), 127);
+    }
     case 0x35: return s->state;         /* MARCSTATE */
     case 0x38: return 0x00;             /* PKTSTATUS */
     case 0x39: return 0x94;             /* VCO_VC_DAC */
@@ -399,6 +762,10 @@ static uint32_t cc1101_transfer(SSIPeripheral *dev, uint32_t val)
             if (s->addr == 0x00 || s->addr == 0x02) {
                 cc1101_update_gdo(s);
             }
+            if ((s->addr >= 0x0D && s->addr <= 0x12) || s->addr == 0x15 ||
+                s->addr == 0x1B) {      /* FREQ, MDMCFG4-2, DEVIATN, AGCCTRL0 */
+                cc1101_link_check(s);
+            }
         }
         if (s->burst && s->addr < 0x2E) {
             s->addr++;
@@ -428,6 +795,16 @@ static void cc1101_realize(SSIPeripheral *d, Error **errp)
     qdev_init_gpio_out_named(DEVICE(d), &s->gdo0, "gdo0", 1);
     qdev_init_gpio_out_named(DEVICE(d), &s->gdo2, "gdo2", 1);
     s->air_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, cc1101_air_edge, s);
+    s->live_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, cc1101_live_edge, s);
+    s->link_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, cc1101_link_announce, s);
+    s->live = g_new0(int32_t, LIVE_MAX);
+    s->link_in = g_string_new(NULL);
+    s->link_out = g_string_new(NULL);
+    if (qemu_chr_fe_backend_connected(&s->link)) {
+        qemu_chr_fe_set_handlers(&s->link, cc1101_link_can_read,
+                                 cc1101_link_read, cc1101_link_event, NULL, s,
+                                 NULL, true);
+    }
 }
 
 static char *cc1101_get_tx(Object *obj, Error **errp)
@@ -435,11 +812,19 @@ static char *cc1101_get_tx(Object *obj, Error **errp)
     return g_strdup(CC1101(obj)->tx_last ?: "");
 }
 
+static char *cc1101_get_rssi(Object *obj, Error **errp)
+{
+    return g_strdup_printf("%.1f", cc1101_rssi_dbm(CC1101(obj)));
+}
+
 static void cc1101_init(Object *obj)
 {
     object_property_add_str(obj, "tx", cc1101_get_tx, NULL);
     object_property_set_description(obj, "tx",
         "The last transmission: @freq_hz,+high,-low,... in µs");
+    object_property_add_str(obj, "rssi", cc1101_get_rssi, NULL);
+    object_property_set_description(obj, "rssi",
+        "The RSSI (dBm) the firmware reads now, at the chip's frequency and bandwidth");
     object_property_add_str(obj, "rx", cc1101_get_rx, cc1101_set_rx);
     object_property_set_description(obj, "rx",
         "Put a signal on the air: [@freq_hz,]+high,-low,... in µs, or file:PATH");
@@ -455,6 +840,9 @@ static void cc1101_reset_hold(Object *obj, ResetType type)
     s->patable[0] = 0xC6;
     s->state = MARC_IDLE;
     s->phase = 0;
+    if (s->live) {
+        cc1101_link_check(s);           /* idle again: the bridge's air stops */
+    }
 }
 
 static void cc1101_reset_exit(Object *obj, ResetType type)
@@ -468,6 +856,7 @@ static void cc1101_reset_exit(Object *obj, ResetType type)
 
 static const Property cc1101_props[] = {
     DEFINE_PROP_STRING("tx-dir", Cc1101State, tx_dir),
+    DEFINE_PROP_CHR("link", Cc1101State, link),     /* a radio bridge */
 };
 
 static void cc1101_class_init(ObjectClass *klass, const void *data)

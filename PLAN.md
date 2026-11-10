@@ -111,6 +111,23 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       at the TIM1 ISR's own writes, decoded and replayed (`ibutton --reader`,
       `ibutton_check.py`; BRINGUP_LOG 45-49)
 
+## M7: real radios ☐
+- ☑ Sub-GHz receive from an SDR (2026-11-09): the CC1101's link socket announces the
+      receive set-up and plays a timeline for GDO0; RSSI from the band's power, bin by
+      bin. `scripts/fe_sdr.py` (`./flipperemu subghz --sdr`): rtl_tcp, HackRF
+      (libhackrf), recordings, stdin; follows the firmware's tuning; OOK at the chip's
+      decision boundary, 2-FSK, squelch. Real rtl_433 captures decode in the
+      firmware (`sdr_check.py`; BRINGUP_LOG 50-53; docs/RADIO_LINK.md)
+- ☐ Sub-GHz transmit through a TX-capable SDR (HackRF): the link already carries each
+      transmission; modulate it (OOK/2-FSK) at the tuned frequency. Opt-in only
+- ☐ NFC: a frame link on the ST25R3916 (reader frames out, card answers in, and the
+      reverse in listen mode), so an external card, reader or real hardware can sit in
+      the field. Real hardware: PC/SC readers (ACR122U/PN533: Ultralight/NTAG and
+      ISO-DEP relayed after its own anticollision), a PN532 or a Proxmark3 (raw frames,
+      MIFARE Classic)
+- ☐ 125 kHz RFID and IR through real front ends (a Proxmark3's LF, an IR transceiver),
+      and iButton through a USB 1-Wire master (DS9490R)
+
 ## M6: research tooling ☐
 - ☐ Snapshot workflow (`savevm` on qcow2 images; boot once, jump straight to an app)
 - ☐ TCG plugin for coverage/trace of firmware or a single FAP
