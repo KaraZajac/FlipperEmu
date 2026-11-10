@@ -40,6 +40,7 @@ you flash stays flashed, settings and files persist across runs.
   ./flipperemu gdb                           gdb on a running device, with the
                                              firmware's and its apps' symbols
   ./flipperemu shot out.png | press ok       drive a running device
+  ./flipperemu record out.gif                its screen as an animated GIF, until ^C
   ./flipperemu info                          what is on the device
 
 Firmware formats: .elf (from fbt: build/f7-firmware-*/firmware.elf),
@@ -2145,6 +2146,44 @@ def cmd_shot(args):
     print(Monitor(str(Device(args.device).monitor)).screenshot(args.out))
 
 
+def cmd_record(args):
+    """What the LCD of a running device shows, as an animated GIF"""
+    import fe_record
+    dev = Device(args.device)
+    if not dev.running():
+        sys.exit(f"[{dev.name}] not running")
+    if not 1 <= args.scale <= 16:
+        sys.exit("--scale: 1 to 16 pixels to an LCD pixel")
+    if args.seconds is not None and args.seconds <= 0:
+        sys.exit("--seconds: more than 0")
+    done = []
+    before = {sig: signal.signal(sig, lambda *_: done.append(1))
+              for sig in (signal.SIGINT, signal.SIGTERM)}
+    print(f"[{dev.name}] recording its screen"
+          + (f" for {args.seconds:g} s" if args.seconds else "")
+          + ": Ctrl-C ends it", flush=True)
+    try:
+        rec = fe_record.record(dev.panel_sock, args.seconds, lambda: bool(done))
+    except OSError as e:
+        sys.exit(f"[{dev.name}] no front-panel link ({e}): a device started "
+                 "by an older FlipperEmu?")
+    finally:
+        for sig, handler in before.items():
+            signal.signal(sig, handler)
+    if rec is None:
+        sys.exit(f"[{dev.name}] another program has its front panel (its "
+                 "window?), and the emulator talks to one there.  In the "
+                 "window: Device > Record the screen")
+    if not rec.shots:
+        sys.exit(f"[{dev.name}] no picture came")
+    try:
+        frames, seconds, size = rec.save(args.out, scale=args.scale)
+    except OSError as e:
+        sys.exit(f"{args.out}: {e.strerror}")
+    print(f"[{dev.name}] {frames} picture{'s' if frames != 1 else ''}, "
+          f"{seconds:.1f} s: {args.out} ({size} bytes)")
+
+
 def cmd_press(args):
     from fe_monitor import Monitor
     m = Monitor(str(Device(args.device).monitor))
@@ -2534,6 +2573,15 @@ def main():
     p = sub.add_parser("shot", help="save the LCD of a running device as PNG")
     p.add_argument("out")
     p.set_defaults(func=cmd_shot)
+
+    p = sub.add_parser("record", help="the LCD of a running device as an "
+                       "animated GIF")
+    p.add_argument("out", help="the GIF to write")
+    p.add_argument("--seconds", type=float, metavar="N",
+                   help="how long (default: until Ctrl-C)")
+    p.add_argument("--scale", type=int, default=4, metavar="N",
+                   help="pixels to an LCD pixel (default 4: 512x256)")
+    p.set_defaults(func=cmd_record)
 
     p = sub.add_parser("press", help="press buttons on a running device")
     p.add_argument("keys", nargs="+", help="ok back up down left right")

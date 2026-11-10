@@ -25,17 +25,17 @@ QEMU, so none has QEMU's speed, built-in GDB stub, snapshots or tracing plugins.
 
 ## Status
 
-Verified on 2026-11-10 with `scripts/smoke_test.py` (boot, SD mount, LCD, input, CLI over
-USB, the secure enclave, IR receive and transmit, Sub-GHz receive and transmit, 125 kHz
-RFID read, emulate and T5577 write, iButton read and emulate, NFC read (NTAG215, MIFARE
-Classic 1K) and emulate, USB/IP export, warm reboot, no crash): **official 1.5.1**,
-**Momentum mntm-012**, **Unleashed unlshd-094**. The window passes
-`scripts/gui_check.py` (clicked buttons, the firmware log and its level, a file copied
-to the card, an app dropped on it, the bench, switching off and on, the Left + Back
-reboot, installing firmware) on the same three, off-screen. `scripts/ufbt_check.py`
-(ufbt 0.2.6 building `examples/hello` and launching it there) and
-`scripts/gdb_check.py` (gdb with the firmware's and that app's symbols) pass on the
-official one.
+Verified on 2026-11-10 with `scripts/smoke_test.py` (boot, SD mount, LCD, input, a
+recording of the screen, CLI over USB, the secure enclave, IR receive and transmit,
+Sub-GHz receive and transmit, 125 kHz RFID read, emulate and T5577 write, iButton read
+and emulate, NFC read (NTAG215, MIFARE Classic 1K) and emulate, USB/IP export, warm
+reboot, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed
+unlshd-094**. The window passes `scripts/gui_check.py` (clicked buttons, a recording
+of the screen, the firmware log and its level, a file copied to the card, an app
+dropped on it, the bench, switching off and on, the Left + Back reboot, installing
+firmware) on the same three, off-screen. `scripts/ufbt_check.py` (ufbt 0.2.6 building
+`examples/hello` and launching it there) and `scripts/gdb_check.py` (gdb with the
+firmware's and that app's symbols) pass on the official one.
 
 | | |
 |:-:|:-:|
@@ -148,6 +148,8 @@ official one.
   keeps the BT paths healthy.
 - gdb on a device that runs, with the firmware's symbols and those of the apps it
   loads: a breakpoint in an app's code, and a stop at a crash.
+- The screen as a picture (PNG) and as a recording (an animated GIF, a few kB for a
+  few seconds of an app), from the launcher and from the window.
 
 **Not yet** (see [PLAN.md](PLAN.md))
 - qFlipper's firmware *update* includes a radio-stack stage that the emulated CPU2
@@ -269,6 +271,10 @@ instead, and `--headless` no window at all.
 - **View**: zoom from 2× to 6×, a white, black or Catppuccin Mocha body, the LCD's pixel
   grid. Device > Save the screen saves the LCD as a PNG; Install firmware flashes another
   one and starts it.
+- **Device > Record the screen** (Ctrl+Shift+R) records what the LCD shows from then
+  on, with a red "● REC" and the time in the status bar. Choose it again to end it: the
+  window asks where to save the animated GIF. `./flipperemu record` does the same for
+  a device that runs without a window.
 
 Closing the window stops the emulator, as `./flipperemu stop` does. `./flipperemu gui`
 opens the window for a device that runs already (started with `--headless`); closing
@@ -333,6 +339,7 @@ switches it off and on, and reboots it.
 | `sd [--resources X] [--size 512M]` | rebuild the microSD from a resources tgz, update package or folder |
 | `press ok down down ok …` | press buttons on a running device |
 | `shot out.png` | save the LCD of a running device |
+| `record out.gif [--seconds N] [--scale N]` | what its LCD shows, as an animated GIF: until Ctrl-C, or for N seconds (a device without a window; with one: Device > Record the screen) |
 | `gdb [--elf FILE] [--apps DIR] [--with GDB] [-- GDB'S ARGUMENTS]` | gdb on a running device, with the firmware's symbols and its apps' |
 | `gdb --serve PORT` | its gdb stub on a TCP port of this computer, for an IDE |
 | `info` | which firmware is on the device |
@@ -1207,7 +1214,8 @@ scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_moni
                        fe_subghz.py, fe_sdr.py (real radios),
                        fe_nfc_link.py (cards from programs), fe_pm3.py (Proxmark3),
                        fe_enclave.py (the enclave's keys and ciphers), fe_gdb.py
-                       (gdb's side of `flipperemu gdb`), fe_usbip.py,
+                       (gdb's side of `flipperemu gdb`), fe_record.py (the
+                       screen as a GIF), fe_usbip.py,
                        usbip_attach.py, fe_gui.py (the window: fe_gui_view.py,
                        fe_gui_link.py, fe_gui_widgets.py), smoke_test.py, *_check.py
 devices/ firmware/ build/ third_party/    generated, git-ignored

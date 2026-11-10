@@ -8,6 +8,7 @@
 
 Boots a throwaway device, waits for the firmware's own log milestones, presses
 Back (dismiss the first scene) and OK (main menu), checks the LCD changed,
+records the screen as a GIF while keys are pressed (`flipperemu record`),
 runs `info device` on the CLI over the emulated USB serial port, checks the
 secure enclave (the firmware's own check of its keys, and a `crypto encrypt`
 against what scripts/fe_enclave.py computes), receives an
@@ -63,6 +64,41 @@ def dark_pixels(png: pathlib.Path, scale: int = 4) -> int:
     b = 4 * scale
     img = Image.open(png).convert("L").crop((b, b, b + 128 * scale, b + 64 * scale))
     return sum(n for level, n in enumerate(img.histogram()) if level < 60)
+
+
+def record_check(name: str, mon: Monitor, out: pathlib.Path):
+    """`flipperemu record` for 4 s, a key down and up meanwhile (the menu is
+    open, and is again after it): the GIF, as Pillow reads it"""
+    from PIL import Image
+    gif = out / "screen.gif"
+    rec = subprocess.Popen([str(ROOT / "flipperemu"), "-d", name, "record",
+                            str(gif), "--seconds", "4"],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    time.sleep(1.2)
+    mon.press("down")
+    time.sleep(1.0)
+    mon.press("up")
+    try:
+        said, _ = rec.communicate(timeout=20)
+    except subprocess.TimeoutExpired:
+        rec.kill()
+        return "record: `flipperemu record --seconds 4` did not end", False
+    if rec.returncode != 0 or not gif.is_file():
+        print(said, end="")
+        return "record: `flipperemu record` wrote a GIF", False
+    im = Image.open(gif)
+    pictures, ms = [], 0
+    for i in range(im.n_frames):
+        im.seek(i)
+        ms += im.info.get("duration", 0)
+        pictures.append(im.convert("RGB").tobytes())
+    colours = {c for _, c in im.convert("RGB").getcolors()}
+    ok = (im.size == (512, 256) and im.info.get("loop") == 0
+          and len(pictures) >= 3 and len(set(pictures)) >= 2
+          and 3900 <= ms <= 4300
+          and colours == {(0xFF, 0x8C, 0x1A), (0x1A, 0x0E, 0x04)})
+    return (f"record: the screen as a GIF ({len(pictures)} pictures, "
+            f"{ms / 1000:.1f} s, {gif.stat().st_size} bytes)"), ok
 
 
 def reboot_check(mon: Monitor, uart: pathlib.Path, out: pathlib.Path, timeout: float) -> bool:
@@ -784,6 +820,7 @@ def main() -> int:
             results.append((f"lcd: desktop drawn ({d1} dark px)", d1 > 500))
             results.append(("input: OK changed the screen",
                             desk.read_bytes() != menu.read_bytes()))
+            results.append(record_check(name, mon, out))
             if not args.no_usb:
                 results.append(("usb: CLI 'info device' over CDC", usb_cli_check(mon)))
                 results.append(("enclave: keys valid, `crypto encrypt` = the host's",

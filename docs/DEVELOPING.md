@@ -4,6 +4,7 @@ How to work on an app, or on a firmware, with an emulated Flipper where the real
 would be: the build tools you already use, pointed at it.
 
 - [An app, from its source to the screen](#an-app-from-its-source-to-the-screen)
+- [A GIF of your app](#a-gif-of-your-app)
 - [Why `./flipperemu ufbt`, and not `ufbt` alone](#why-flipperemu-ufbt-and-not-ufbt-alone)
 - [The SDK has to be the firmware's](#the-sdk-has-to-be-the-firmwares)
 - [gdb, with the firmware's symbols and your app's](#gdb-with-the-firmwares-symbols-and-your-apps)
@@ -47,6 +48,7 @@ The app is on the screen. From here on it is the loop of any app:
 ../../flipperemu log -f -g FeHello     # what it logs (FURI_LOG_I and the others), as it runs
 ../../flipperemu press up down ok      # buttons, when the window is not at hand
 ../../flipperemu shot hello.png        # its screen, as a picture
+../../flipperemu record hello.gif      # ... and as an animated GIF, until Ctrl-C
 ../../flipperemu ufbt launch           # after a change: the one that runs is closed,
                                        # the new build started
 ```
@@ -87,6 +89,37 @@ Two more ways to the same place, without ufbt in between:
   button.
 - In the window, a `.fap` dropped on the Flipper is started, and F5 does it again
   after the next build.
+
+## A GIF of your app
+
+For the app's README, or a bug report that shows what happens:
+
+```
+$ ../../flipperemu record hello.gif --seconds 7 &
+[default] recording its screen for 7 s: Ctrl-C ends it
+$ for key in up down right ok; do ../../flipperemu press $key; done
+[default] 5 pictures, 7.0 s: hello.gif (6384 bytes)
+```
+
+![The example app counting four button presses](img/31-record-hello.gif)
+
+*That file: `examples/hello`, and four buttons.*
+
+Without `--seconds` it records until Ctrl-C.
+
+It holds each picture the LCD showed, for as long as it showed it, in the colours of
+the lit screen, 512×256 (`--scale 1` to `16`: 1 is the LCD's own 128×64), and it plays
+in a loop.
+
+In the window it is Device > Record the screen (Ctrl+Shift+R), and the same once more
+to end it and save the file. The emulator shows its screen to one program at a time,
+so with the window open the recording is the window's to make, and
+`./flipperemu record` says so.
+
+The file is small because a picture after the first holds only the part of the screen
+that changed: in the one above the whole screen is 2.9 kB, and each step of the
+counter under one. The time is the time you watched it for. An emulated Flipper that runs slower or faster than a real one (under
+gdb, or with a host that is busy) is recorded as it was seen.
 
 ## Why `./flipperemu ufbt`, and not `ufbt` alone
 
@@ -308,6 +341,12 @@ backtrace, the firmware running on after each, the debug flag off throughout, th
 stub on a TCP port with a gdb of its own on it, a second gdb turned away, a gdb that
 dies with the firmware stopped. It passes on the official 1.5.1 with the SDK's
 toolchain (gdb 13.2) and ELF (19 checks), and is skipped (77) without them.
+
+A recording is checked where the screen is: `scripts/smoke_test.py` runs
+`./flipperemu record` for four seconds with two key presses and has Pillow read the
+file (its size, its two colours, more than one picture, the four seconds, the loop),
+and `scripts/gui_check.py` records through the window's menu action and has Qt's
+reader do the same.
 
 By hand: the official self-update script sending a package without a radio stack
 (what `fbt flash_usb` sends) to a running device, which installed it and came back.

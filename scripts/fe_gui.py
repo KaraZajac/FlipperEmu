@@ -23,6 +23,7 @@ import pathlib
 import shutil
 import signal
 import sys
+import threading
 import time
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -30,8 +31,10 @@ from PySide6.QtCore import Qt
 
 import fe_files
 import fe_gui_widgets as W
+import fe_record
 from fe_gui_link import PanelLink
-from fe_gui_view import VIEW_H, VIEW_W, FlipperView, app_icon
+from fe_gui_view import (LIT_BG, LIT_FG, VIEW_H, VIEW_W, FlipperView,
+                         app_icon)
 
 WATCHES = (
     ("/machine/soc/usb", "attached"), ("/machine/soc/usb", "device"),
@@ -153,6 +156,9 @@ def human_size(n):
 
 
 class MainWindow(QtWidgets.QMainWindow):
+    recorded = QtCore.Signal(str, str, str)     # a recording is written: the
+    # file, what it holds, or what went wrong (from the thread that wrote it)
+
     def __init__(self, name, directory, launcher, session=None, settings=None,
                  scale=None):
         super().__init__()
@@ -173,6 +179,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.gauge = {}                 # the battery as it was last reported
         self.muted = False
         self.tone = (0, 0)
+        self.recording = None           # a fe_record.Recording, while one runs
+        self.recording_since = 0.0
         self.sd_none = (session is not None and session.args.no_sd) or \
             not (self.dir / "sd.img").exists()
         self.held = {}                  # held.json: what the commands held to it
@@ -257,8 +265,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 lambda on, d=dock: self.front.__setitem__(d, on))
         (self.fwlog if self.settings.get("front") == "fwlog"
          else self.log).raise_()
+        self.rec_label = QtWidgets.QLabel()
+        self.rec_label.setStyleSheet("color: #d20f39; font-weight: bold")
         self.tone_label = QtWidgets.QLabel()
         self.state_label = QtWidgets.QLabel()
+        self.statusBar().addPermanentWidget(self.rec_label)
         self.statusBar().addPermanentWidget(self.tone_label)
         self.statusBar().addPermanentWidget(self.state_label)
         if self.settings.get("on_top", False):
@@ -307,6 +318,11 @@ class MainWindow(QtWidgets.QMainWindow):
         A(m, "Save the screen…", self.save_screen, "Ctrl+S")
         A(m, "Save a picture of the Flipper…", self.save_picture)
         A(m, "Copy the screen", self.copy_screen, "Ctrl+Shift+C")
+        self.a_record = A(m, "Record the screen", self.set_recording,
+                          "Ctrl+Shift+R", checkable=True,
+                          tip="What the screen shows from now on, as an "
+                              "animated GIF: once more ends it, and asks "
+                              "where to save it")
         self.a_terminal = A(m, "Open its CLI in a terminal", self.open_terminal,
                             live=True)
         m.addSeparator()
@@ -571,6 +587,8 @@ class MainWindow(QtWidgets.QMainWindow):
         L.lost.connect(self.on_lost)
         L.busy.connect(lambda: self.set_state("busy"))
         L.frame.connect(V.set_frame)
+        L.frame.connect(self.on_frame)
+        self.recorded.connect(self.on_recorded)
         L.backlight.connect(V.set_backlight)
         L.led.connect(V.set_led)
         L.vibro.connect(V.set_vibro)
@@ -689,6 +707,8 @@ class MainWindow(QtWidgets.QMainWindow):
             QtCore.QTimer.singleShot(300, lambda: self.qemu_gone(proc))
         if self.state == "on":
             self.scan_subghz()
+        if self.recording is not None:
+            self.show_recording()
 
     def qemu_gone(self, proc):
         s = self.session
@@ -1572,6 +1592,97 @@ class MainWindow(QtWidgets.QMainWindow):
     def copy_screen(self):
         QtWidgets.QApplication.clipboard().setImage(self.view.lcd_picture(4))
         self.statusBar().showMessage("The screen is on the clipboard", 3000)
+
+    # ---- a recording of the screen (fe_record.py), as an animated GIF
+
+    def set_recording(self, on):
+        """Device > Record the screen: on; and off, which asks where to"""
+        if on:
+            self.start_recording()
+            return
+        rec = self.stop_recording()
+        if rec is None:
+            return
+        if not rec.shots:
+            self.statusBar().showMessage(
+                "Nothing was recorded: the screen showed no picture", 5000)
+            return
+        start = os.path.join(self.settings.get("dir/shots",
+                                               os.path.expanduser("~")),
+                             f"{self.name}-screen-{time.strftime('%H%M%S')}.gif")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, f"Save the recording ({rec.seconds():.0f} s)", start,
+            "GIF (*.gif)")
+        if path:
+            self.settings.set("dir/shots", os.path.dirname(path))
+            self.save_recording(rec, path)
+        else:
+            self.statusBar().showMessage("The recording was not saved", 5000)
+
+    def start_recording(self):
+        if self.recording is None:
+            self.recording = fe_record.Recording()
+            self.recording_since = time.monotonic()
+            if self.state == "on" and self.view.frame is not None:
+                self.recording.add(self.view.frame)     # what it shows now
+        self.a_record.setChecked(True)
+        self.show_recording()
+
+    def stop_recording(self):
+        """-> the Recording that ran, or None"""
+        rec, self.recording = self.recording, None
+        if rec is not None:
+            rec.stop()
+        self.a_record.setChecked(False)
+        self.show_recording()
+        return rec
+
+    def show_recording(self):
+        if self.recording is None:
+            self.rec_label.setText("")
+        else:
+            s = int(time.monotonic() - self.recording_since)
+            self.rec_label.setText(f"● REC {s // 60}:{s % 60:02d}")
+
+    def on_frame(self, frame):
+        rec = self.recording
+        if rec is not None:
+            rec.add(frame)
+            if rec.full():              # (minutes of a screen that never
+                # stands still)  The file dialog: not from in here
+                QtCore.QTimer.singleShot(0, self.recording_full)
+
+    def recording_full(self):
+        if self.recording is not None and self.recording.full():
+            self.log.add("The recording is as long as one gets "
+                         f"({fe_record.LIMIT} pictures): it ends here.", "info")
+            self.set_recording(False)
+
+    def save_recording(self, rec, path):
+        """Written by a thread of its own: a long one takes its time"""
+        self.statusBar().showMessage(f"Writing {path} …")
+
+        def write():
+            try:
+                frames, seconds, size = rec.save(path, scale=4, bg=LIT_BG,
+                                                 fg=LIT_FG)
+                done = (path, f"{frames} picture{'s' if frames != 1 else ''}, "
+                              f"{seconds:.1f} s, {max(1, size // 1024)} KB", "")
+            except (OSError, ValueError) as e:
+                done = (path, "", str(e))
+            try:
+                self.recorded.emit(*done)
+            except RuntimeError:
+                pass                    # the window has closed meanwhile
+
+        threading.Thread(target=write, name="recording").start()
+
+    def on_recorded(self, path, what, error):
+        if error:
+            self.on_failed(f"could not save the recording: {error}")
+        else:
+            self.statusBar().showMessage(f"Saved {path} ({what})", 8000)
+            self.log.add(f"Recorded the screen: {path} ({what})", "info")
 
     def open_terminal(self):
         cmd = [sys.executable, str(self.launcher), "-d", self.name, "cli"]

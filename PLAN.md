@@ -207,7 +207,12 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         gdb's where an app starts and where a crash begins; `--serve PORT` for an
         IDE; `scripts/gdb_check.py` (BRINGUP_LOG 79)
   - ☐ gdb with a firmware tree's ELF and its `.extapps`; from an IDE (VS Code)
-- ☐ A recording of the screen (GIF) from the launcher and the window
+- ☑ A recording of the screen as an animated GIF: `./flipperemu record OUT.gif`
+      (a client of the front-panel link, for a device without a window) and
+      Device > Record the screen in the window; `scripts/fe_record.py` writes the
+      GIF itself (two colours, only the rectangle that changed, the time each
+      picture was shown for); checked by `smoke_test.py` (Pillow reads it) and
+      `gui_check.py` (Qt's reader does)
 - ☐ Pause and continue, from the launcher and the window
 
 ## M6: research tooling ☐

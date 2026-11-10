@@ -8,7 +8,8 @@
 Boots a throwaway device with `flipperemu run`, which opens the window: here
 off-screen (QT_QPA_PLATFORM=offscreen) and silent (--audio none), so nothing
 shows on the desktop.  Then it checks the front-panel link (frames, the
-backlight), clicks buttons with the mouse, opens the firmware's log with a
+backlight), clicks buttons with the mouse, records the screen as a GIF
+(Device > Record the screen), opens the firmware's log with a
 click on the GPIO pins and sets the firmware's log level from it, copies a
 file to its card, drops an app on the window (which installs and starts it),
 does that again with F5 and closes the app, drops the same app as if it were
@@ -132,6 +133,42 @@ class Driver:
     def tile(self, kind):
         return self.win.tiles[kind].line1.full
 
+    def recording(self):
+        """Device > Record the screen (its file dialog left out), and what
+        Qt's own GIF reader makes of the file"""
+        w = self.win
+        w.a_record.trigger()            # as the menu and Ctrl+Shift+R do
+        self.spin(0.4)
+        started = w.recording is not None and "REC" in w.rec_label.text()
+        self.click("ok")
+        self.spin(1.0)
+        self.click("back")
+        self.spin(1.0)
+        rec = w.stop_recording()
+        path = self.out / "window-recording.gif"
+        done = []
+        w.recorded.connect(lambda *told: done.append(told))
+        if rec is not None and rec.shots:
+            w.save_recording(rec, str(path))
+            self.until(lambda: done, 30)
+        pictures, ms = [], 0
+        reader = QtGui.QImageReader(str(path))
+        while path.is_file():
+            picture = reader.read()
+            if picture.isNull():
+                break
+            pictures.append(picture.copy())
+            ms += reader.nextImageDelay()
+        seconds = rec.seconds() if rec else 0
+        check("recording: Device > Record the screen, two clicks: a GIF of "
+              f"the LCD ({len(pictures)} pictures, {ms / 1000:.1f} s)",
+              started and not w.a_record.isChecked() and not w.rec_label.text()
+              and bool(done) and not done[0][2]
+              and path.read_bytes()[:6] == b"GIF89a" and len(pictures) > 2
+              and pictures[0].size() == QtCore.QSize(512, 256)
+              and any(q != pictures[0] for q in pictures[1:])
+              and abs(ms / 1000 - seconds) < 0.1 and seconds > 2)
+
     def console(self):
         return self.win.log.text.toPlainText()
 
@@ -231,6 +268,7 @@ class Driver:
         self.click("back")
         self.spin(1.0)
         self.shot("on")
+        self.recording()
 
         # what the firmware logs: a click on the GPIO pins, where a real one
         # has its UART

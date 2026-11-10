@@ -927,6 +927,29 @@ All three are small, self-contained, and suitable for sending upstream.
     - The same sources built in another folder are not rebuilt by ufbt (its build
       folder is one for all), so the debug ELF keeps the first folder's paths.
       The check names its breakpoint by the file's name alone.
+80. **The screen as a GIF, from the link the window has.** `./flipperemu record`
+    and the window's Device > Record the screen write what the LCD showed as an
+    animated GIF (`scripts/fe_record.py`).
+    - The pictures are the front-panel link's `lcd` lines. The monitor's
+      `screendump` would have been a poll, a PNG each time, and no time of the
+      change. The panel sends a picture when it has changed (it looks every 16 ms
+      of the host's clock, and waits for a frame the firmware is still sending), so
+      the recording is the screen as it was seen, with the time on the host.
+    - The link serves one program. So there are two ways in: the launcher's command
+      is a client of the link for a device without a window, and the window records
+      from the frames it gets anyway. With the window open the launcher gets no
+      hello, and says after two seconds whose the recording is to make.
+    - The GIF is written without a library (Pillow is wanted by `shot` for a PNG
+      and by the smoke test, and the window does not need it): two colours, LZW
+      with 2-bit codes to start with, each LCD pixel four wide. A picture after the first is the rectangle
+      that changed, left in place ("do not dispose"). Times are in slots of 2/100 s:
+      viewers play a delay under that as 1/10 s. A still longer than a GIF's 16-bit
+      delay (655 s) goes on as one-pixel pictures. Pillow and Qt's reader both give
+      back the pictures bit for bit, and the length to the slot.
+    - Numbers: the example app with four key presses, 7 s, is 6.4 kB (2.9 kB the
+      first picture, under 1 kB a step); five seconds through the main menu with
+      its animated icons, 35 kB. A full-screen picture of noise takes 14 ms to
+      compress, so the window writes the file in a thread of its own.
 
 ## Things that were right the first time (and why)
 

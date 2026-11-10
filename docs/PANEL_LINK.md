@@ -16,6 +16,12 @@ A second program that connects while one has the link is accepted by the kernel,
 QEMU only reads from it, and says hello, once the first has gone. The window shows that
 as "Busy" and waits.
 
+`scripts/fe_record.py` is a small second program of that kind, and one to start from:
+`./flipperemu record out.gif` connects, says hello, keeps each `lcd` line with the time
+it came, and writes them as an animated GIF. It gives up after two seconds without the
+emulator's hello, which means another program (the window) has the link. The window
+records from the frames it gets anyway (Device > Record the screen).
+
 ## Lines
 
 As on the [radio links](RADIO_LINK.md): a message is one line of ASCII text, ended by
