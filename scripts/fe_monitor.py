@@ -32,7 +32,9 @@ class Monitor:
             except BlockingIOError:     # others wait for it already
                 if time.time() > end:
                     self.s.close()
-                    raise
+                    raise ConnectionError(
+                        f"{path}: the monitor is busy; another client has it "
+                        "(it takes one at a time)") from None
                 time.sleep(0.05)
         if "(qemu)" not in self._read():
             self.s.close()

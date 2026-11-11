@@ -278,6 +278,20 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         emulator in the background itself: back when the emulator is up, or with
         what went wrong; a firmware file that is not there, or is none, is one line
         and no traceback, for `run` and `flash` alike (BRINGUP_LOG 98)
+- ◐ The GPIO header
+  - ☑ `./flipperemu gpio` (2026-11-11): what the firmware has each pin as and its
+        level, as a table and as one word; a pin held high or low from outside
+        (over a reset too), or let go of; `--wait` for a level; in `status`. The
+        machine's property `header`, on the L4x5 GPIO model's outside connections;
+        `scripts/gpio_check.py`, with the firmware's `gpio` CLI command on the
+        other side (BRINGUP_LOG 100)
+  - ☐ The window's pins: lit by their level, and a click to hold one
+  - ☐ A record of what a pin did (`gpio watch`, a VCD file for a pulse `--wait`
+        is too slow for)
+  - ☐ What a peripheral puts on a pin: LPUART1 on 15 and 16 as a serial port, PWM,
+        SPI and I2C devices on the header; a voltage for the ADC
+  - ☐ An interrupt on a held pin and an open-drain output (untried: they need an
+        app of the check's own)
 - ☑ A recording of the screen as an animated GIF: `./flipperemu record OUT.gif`
       (a client of the front-panel link, for a device without a window) and
       Device > Record the screen in the window; `scripts/fe_record.py` writes the

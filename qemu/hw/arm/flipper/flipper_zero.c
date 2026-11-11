@@ -10,6 +10,9 @@
  *   Buttons: Up PB10, Down PC6, Left PB11, Right PB12, Back PC13 (active low,
  *            pull-up) and OK PH3 (active high, pull-down)
  *   Vibro PA8, speaker PB8 (TIM16 CH1), USART1 log console PB6/PB7
+ *   GPIO header: 2 PA7, 3 PA6, 4 PA4, 5 PB3, 6 PB2, 7 PC3, 10 PA14 (SWCLK),
+ *            12 PA13 (SWDIO), 13 PB6 (TX), 14 PB7 (RX), 15 PC1, 16 PC0,
+ *            17 PB14 (iButton); /machine "header" shows them and holds them
  *
  * Usage:
  *   qemu-system-arm -M flipper-zero -kernel firmware.elf \
@@ -53,6 +56,8 @@
 
 #define TYPE_FLIPPER_ZERO MACHINE_TYPE_NAME("flipper-zero")
 OBJECT_DECLARE_SIMPLE_TYPE(FlipperZeroState, FLIPPER_ZERO)
+
+#define HDR_PINS 13                 /* the GPIO header's signal pins */
 
 /*
  * The microSD slot when no card is in it.  Nothing drives MISO then, and the
@@ -123,6 +128,7 @@ struct FlipperZeroState {
     uint32_t halt_at;            /* where, when it last looked (0: it has not) */
     bool halt_rest;              /* ... and the CPU rests because of it */
     bool halt_said;
+    uint8_t hdr_hold[HDR_PINS];  /* what the outside holds on a header pin */
     Notifier exit_notifier;
 };
 
@@ -475,10 +481,179 @@ static void flipper_sd_cs(void *opaque, int n, int level)
     flipper_sd_select(s);
 }
 
+/* ------------------------------------------------------- the GPIO header */
+
+/*
+ * The header's signal pins by their number on it (1 is +5V, 9 is 3V3; 8, 11
+ * and 18 are GND).  The outside may hold those that nothing of the emulator
+ * is on: not the log's UART (13, 14), and not the iButton pin (17), which
+ * has its own keys and readers (flipper_ibutton.c).
+ */
+static const struct {
+    uint8_t number;
+    char port;
+    uint8_t pin;
+    bool holds;
+} header[HDR_PINS] = {
+    { 2, 'A', 7, true },   { 3, 'A', 6, true },   { 4, 'A', 4, true },
+    { 5, 'B', 3, true },   { 6, 'B', 2, true },   { 7, 'C', 3, true },
+    { 10, 'A', 14, true }, { 12, 'A', 13, true }, { 13, 'B', 6, false },
+    { 14, 'B', 7, false }, { 15, 'C', 1, true },  { 16, 'C', 0, true },
+    { 17, 'B', 14, false },
+};
+
+enum { HDR_FREE, HDR_LOW, HDR_HIGH };
+
+static Stm32l4x5GpioState *header_port(FlipperZeroState *s, int i)
+{
+    return &s->soc.gpio[header[i].port - 'A'];
+}
+
+/* Does the firmware drive the pin both ways (a push-pull output)?  Then
+ * what the outside holds does not show; on hardware the two would fight. */
+static bool header_driven(FlipperZeroState *s, int i)
+{
+    Stm32l4x5GpioState *g = header_port(s, i);
+
+    return extract32(g->moder, 2 * header[i].pin, 2) == 1 &&
+           !extract32(g->otyper, header[i].pin, 1);
+}
+
+/*
+ * What the outside holds, put on the pins of a port (-1: of all).  QEMU's
+ * GPIO model lets go of a pin when the firmware makes it a push-pull
+ * output, and a port's reset lets go of all: so this is done again after a
+ * write to MODER, and after a reset.
+ */
+static void flipper_header_held(FlipperZeroState *s, int port)
+{
+    for (int i = 0; i < HDR_PINS; i++) {
+        if (s->hdr_hold[i] != HDR_FREE && !header_driven(s, i) &&
+            (port < 0 || port == header[i].port - 'A')) {
+            qemu_set_irq(soc_in(s, header[i].port, header[i].pin),
+                         s->hdr_hold[i] == HDR_HIGH);
+        }
+    }
+}
+
+/* a pin's level: '0', '1', 'z' (nothing holds it: it floats) or '?' (a
+ * peripheral's pin, whose signal is not kept as a level) */
+static char header_level(FlipperZeroState *s, int i)
+{
+    Stm32l4x5GpioState *g = header_port(s, i);
+    int pin = header[i].pin, mode = extract32(g->moder, 2 * pin, 2);
+    int pull = extract32(g->pupdr, 2 * pin, 2);
+    bool odr = extract32(g->odr, pin, 1);
+
+    if (mode == 1 && (!extract32(g->otyper, pin, 1) || !odr)) {
+        return '0' + odr;               /* the firmware's own drive */
+    }
+    if (!extract32(g->disconnected_pins, pin, 1)) {
+        return '0' + extract32(g->pins_connected_high, pin, 1);
+    }
+    if (mode == 2) {
+        return '?';
+    }
+    return pull == 1 ? '1' : pull == 2 ? '0' : 'z';
+}
+
+/* "NUMBER:PIN:MODE:PULL:LEVEL:HELD" for each pin: MODE in, out, od (an
+ * open-drain output), afN, afNod or analog; PULL up, down or none; LEVEL as
+ * above; HELD high, low, free, or - for a pin that is not for holding */
+static char *flipper_get_header(Object *obj, Error **errp)
+{
+    static const char *const pulls[] = { "none", "up", "down", "none" };
+    static const char *const holds[] = { "free", "low", "high" };
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+    GString *out = g_string_new(NULL);
+
+    for (int i = 0; i < HDR_PINS; i++) {
+        Stm32l4x5GpioState *g = header_port(s, i);
+        int pin = header[i].pin, mode = extract32(g->moder, 2 * pin, 2);
+        bool od = extract32(g->otyper, pin, 1);
+
+        g_string_append_printf(out, "%s%d:P%c%d:", i ? " " : "",
+                               header[i].number, header[i].port, pin);
+        if (mode == 2) {
+            g_string_append_printf(out, "af%d%s",
+                                   extract32(pin < 8 ? g->afrl : g->afrh,
+                                             4 * (pin & 7), 4),
+                                   od ? "od" : "");
+        } else {
+            g_string_append(out, mode == 0 ? "in" : mode == 3 ? "analog" :
+                                 od ? "od" : "out");
+        }
+        g_string_append_printf(out, ":%s:%c:%s",
+                               pulls[extract32(g->pupdr, 2 * pin, 2)],
+                               header_level(s, i),
+                               header[i].holds ? holds[s->hdr_hold[i]] : "-");
+    }
+    return g_string_free(out, false);
+}
+
+/* "PA7=1", "PA7=0" or "PA7=z" (let go of it); several, with blanks or
+ * commas between them */
+static void flipper_set_header(Object *obj, const char *value, Error **errp)
+{
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+    g_auto(GStrv) words = g_strsplit_set(value, " ,", -1);
+    uint8_t hold[HDR_PINS];
+
+    memcpy(hold, s->hdr_hold, sizeof(hold));
+    for (char **w = words; *w; w++) {
+        char port, level;
+        int pin, used = 0, i;
+
+        if (!**w) {
+            continue;
+        }
+        if (sscanf(*w, "P%c%d=%c%n", &port, &pin, &level, &used) != 3 ||
+            (*w)[used] || !strchr("01z", level)) {
+            error_setg(errp, "header: expected PIN=0, PIN=1 or PIN=z (as in "
+                       "PA7=1), not '%s'", *w);
+            return;
+        }
+        for (i = 0; i < HDR_PINS; i++) {
+            if (header[i].port == port && header[i].pin == pin) {
+                break;
+            }
+        }
+        if (i == HDR_PINS) {
+            error_setg(errp, "header: no pin P%c%d on the GPIO header (it "
+                       "has PA7 PA6 PA4 PB3 PB2 PC3 PA14 PA13 PC1 PC0 to "
+                       "hold)", port, pin);
+            return;
+        }
+        if (!header[i].holds) {
+            error_setg(errp, "header: P%c%d is not a pin to hold: %s", port,
+                       pin, header[i].pin == 14 ?
+                       "the iButton pin has its own keys and readers" :
+                       "the firmware's log is on that UART");
+            return;
+        }
+        hold[i] = level == 'z' ? HDR_FREE : level == '1' ? HDR_HIGH : HDR_LOW;
+    }
+    for (int i = 0; i < HDR_PINS; i++) {
+        bool was = s->hdr_hold[i] != HDR_FREE;
+
+        s->hdr_hold[i] = hold[i];
+        if (was && hold[i] == HDR_FREE &&
+            phase_check(PHASE_MACHINE_INITIALIZED)) {
+            object_property_set_uint(OBJECT(header_port(s, i)),
+                                     "disconnected-pins",
+                                     1u << header[i].pin, &error_abort);
+        }
+    }
+    if (phase_check(PHASE_MACHINE_INITIALIZED)) {
+        flipper_header_held(s, -1);
+    }
+}
+
 /* External levels the board holds on MCU pins. A GPIO port reset releases
  * external drivers, so these are re-applied after every system reset. */
 static void flipper_drive_pins(FlipperZeroState *s)
 {
+    flipper_header_held(s, -1);         /* the header: as the outside has it */
     flipper_sd_detect(s);
     qemu_set_irq(soc_in(s, 'C', 2), 0);     /* SPI2 MISO idle low */
     qemu_set_irq(soc_in(s, 'B', 4), 0);     /* SPI1 MISO: CC1101 CHIP_RDYn */
@@ -516,6 +691,9 @@ static void flipper_out_written(void *opaque, int port, hwaddr reg,
     FlipperZeroState *s = opaque;
     const uint32_t bit = 1u << 14, *tim = s->soc.tim1.regs;
 
+    if (reg == 0x00) {                  /* MODER: a header pin may be an */
+        flipper_header_held(s, port);   /* input again, for what holds it */
+    }
     if (port != 1 || (reg == 0x18 && !(data & (bit | bit << 16))) ||
         (reg == 0x28 && !(data & bit))) {
         return;                         /* another pin's BSRR/BRR write */
@@ -1080,6 +1258,11 @@ static void flipper_zero_instance_init(Object *obj)
     object_property_set_description(obj, "usb-cable",
         "The USB cable is plugged in from the start (default on); off: plug "
         "it later with /machine/soc/usb attached");
+    object_property_add_str(obj, "header", flipper_get_header,
+                            flipper_set_header);
+    object_property_set_description(obj, "header",
+        "The GPIO header's pins as the firmware has them, and what the "
+        "outside holds on them: set PA7=1, PA7=0 or PA7=z (let go)");
     object_property_add_bool(obj, "sd-card", flipper_get_sd_card,
                              flipper_set_sd_card);
     object_property_set_description(obj, "sd-card",

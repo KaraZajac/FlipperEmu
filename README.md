@@ -41,6 +41,8 @@ same five, off-screen.
 `scripts/update_check.py` (an update package written to the card of a running device
 and installed there, and the updater's error screen) passes on the same five, from the
 official firmware to Unleashed, and from the release to the dev build.
+`scripts/gpio_check.py` (the GPIO header: a pin the firmware drives seen from outside,
+a pin held from outside read by the firmware) passes on the same five.
 `scripts/ufbt_check.py` (ufbt 0.2.6 building `examples/hello`, launching it there, and
 `ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's symbols, that
 app's and a stock app's, and its debug configuration for VS Code used the way that
@@ -266,7 +268,8 @@ instead, and `--headless` no window at all.
 - **The infrared window** in the upper left face: click it for the Infrared menu, to
   point a remote at it. It glows when the Flipper transmits.
 - **The GPIO pins** along the top: click them for the firmware log, which on a real
-  Flipper comes out of two of them.
+  Flipper comes out of two of them. (What the firmware does with the others, and a
+  wire held to one: `./flipperemu gpio`, [below](#the-gpio-header).)
 - **The lights and sounds** show on the body: the LED glows, the body shakes when the
   motor runs, and a speaker sign shows a tone (it plays through `--audio`).
 - **The bench** under it has a tile for each of USB, the microSD card, the battery, NFC,
@@ -372,6 +375,7 @@ it runs: once with the wait given up, once to the end.
 | `battery [PERCENT] [--voltage MV] [--temperature C] [--current MA]` | its battery (no argument: show it) |
 | `sd eject` \| `sd insert` | pull its microSD card out, push it back in |
 | `sound off` \| `sound on` | mute its speaker, and back |
+| `gpio` \| `gpio PIN` \| `gpio PIN high\|low\|free` \| `gpio PIN --wait high\|low` | its GPIO header: what the firmware has the pins as; one pin's level; a pin held from outside, or let go of; wait for a level |
 | `reset` | reboot it, as holding Left + Back does |
 | `pause` \| `continue` | time stands still on it (screen, timers, radios), and goes on from there |
 | `run --usbip [PORT]` | export the USB device over USB/IP (then `sudo scripts/usbip_attach.py`) |
@@ -1283,6 +1287,64 @@ With `--usb` (the default) the virtual cable is plugged in, so the Flipper shows
 charging. As on hardware, a Flipper on USB never enters deep sleep: expect about a
 quarter of a host core while idle, against 5 % with `--usb none` or the cable pulled
 (`./flipperemu usb unplug`), and 7 % for a firmware that has halted.
+
+### The GPIO header
+
+The pins along the top. `gpio` shows what the firmware has each of them as, and holds
+one high or low from outside, as a wire to 3V3 or to GND would:
+
+```sh
+./flipperemu gpio                   # the pins: what the firmware has them as, and levels
+./flipperemu gpio PA7               # one pin's level, as a word (high, low, floating)
+./flipperemu gpio PA6 high          # hold it high from outside (low; free: let go of it)
+./flipperemu gpio free              # let go of all
+./flipperemu gpio PA7 --wait high   # until it is high (--timeout S, then exit status 1)
+```
+
+```
+$ ./flipperemu gpio
+[flipper] the GPIO header (1 is +5V, 9 is 3V3; 8, 11 and 18 are GND)
+   2  PA7   output                         high
+   3  PA6   input                          low       held low from outside
+   4  PA4   analog                         floating
+   5  PB3   analog                         floating
+   6  PB2   analog                         floating
+   7  PC3   analog                         floating
+  10  PA14  analog                         floating  SWC on the case
+  12  PA13  analog                         floating  SIO on the case
+  13  PB6   alternate function 7, pull-up  unknown   the firmware's log is on this UART (its TX)
+  14  PB7   input, pull-up                 high      the firmware's log is on this UART (its RX)
+  15  PC1   analog                         floating
+  16  PC0   analog                         floating
+  17  PB14  analog                         high      the iButton pin (`ibutton` holds a key to it)
+```
+
+A pin goes by the MCU's name (`PA7`), by what the case says beside it (`A7`, `C0`,
+`SWC`) or by its number on the header (`2`). `status` has the header in one line (the
+pins that are outputs, and those held), and `status --json` all of it.
+
+- What is held stays so over a reset of the firmware, as a wire would, and is gone with
+  the emulator (`stop`).
+- A pin that the firmware drives both ways (a push-pull output) keeps the firmware's
+  level, where on a Flipper the two would fight. `gpio` says so, and the pin has what
+  is held as soon as the firmware makes it an input.
+- `floating` is a pin that nothing drives, holds or pulls. `unknown` is a pin a
+  peripheral has (an alternate function): what a UART, a timer's PWM or SPI puts on a
+  pin is not a level the emulator keeps, so it is not on the header yet.
+- A held pin is a level, not a voltage: the ADC is not there to read it.
+- The log's UART (13, 14) and the iButton pin (17) are read here, and not held: they
+  have `log` and `ibutton`.
+- `--wait` looks at the pin twenty times a second: a shorter pulse can pass unseen.
+
+Underneath it is the machine's property `header`: read, a word for each pin
+(`2:PA7:out:none:1:free`: number, pin, mode, pull, level, what is held); written,
+`PA6=1`, `PA6=0` or `PA6=z`.
+
+`scripts/gpio_check.py FIRMWARE` checks it with the firmware's own `gpio` CLI command
+on the other side of the pins: 38 checks, on the official 1.5.1, the official dev
+build, Momentum, Unleashed and RogueMaster. Not tried: an interrupt an app has on a
+held pin (the buttons' come the same way), and a pin that an app has as an open-drain
+output.
 
 ### The secure enclave
 

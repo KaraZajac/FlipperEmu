@@ -1636,6 +1636,46 @@ big lock, entry 92).
       pause, and a detach and exit after which the CLI answers and the app has
       logged its line.
 
+100. **The GPIO header had pins, and nothing on them.** An app that reads a pin or
+    drives one could not be tried: the header was a picture. `./flipperemu gpio`
+    shows what the firmware has each pin as and its level, and holds a pin high or
+    low from outside. What it rests on, and what was found:
+    - QEMU's L4x5 GPIO model, which the WB55 uses, has the outside of a pin already:
+      a line that is connected high or low, or not connected, and a refusal (with a
+      guest-error line) to connect one that the firmware drives push-pull. The
+      machine's property `header` is a table of the header's pins over that: read, it
+      has each pin's mode from MODER, OTYPER and PUPDR, and its level from what
+      drives it (the firmware's ODR for an output, else the outside connection,
+      else the pull); written (`PA6=1`, `=0`, `=z`), it remembers what is held and
+      puts it on the line.
+    - The model disconnects a pin when the firmware makes it a push-pull output,
+      and all of them at a reset. A wire would still be there after both. So what is
+      held is kept by the machine and put on again: after a reset, and (through the
+      tap the SoC has on every port's MODER, there for the 1-Wire pin) when the
+      firmware changes a pin's mode. A pin held high under an output that is low
+      shows low, and high when it is an input again.
+    - All of that is read from the model's state, and not through the address
+      space: a read of IDR there runs the 1-Wire pin's hook, which is not for a
+      monitor to call.
+    - The first trial of the property failed at every step, with "the monitor did
+      not answer" and then a traceback: the trial's script kept the monitor open
+      while it started the launcher, and the monitor takes one client at a time.
+      Two things came of it. `gpio --wait` opens the monitor for each look and
+      closes it, so a test can send a command while it waits (the check has one
+      that does). And a monitor that stays busy is one line now, and no traceback.
+    - A level is `floating` for a pin that nothing drives, holds or pulls, and
+      `unknown` for a pin in an alternate function: the emulated peripherals talk
+      to their devices directly, and put no levels on pins. That is the header's
+      next gap (a UART on 15 and 16, PWM), with the ADC, which reads nothing.
+    - PB6/PB7 (the log's UART) and PB14 (the iButton pin) are in the table and
+      cannot be held: the first two have a character device on them, and the third
+      a 1-Wire model with timing of its own that a held level would break.
+    - `scripts/gpio_check.py` uses the firmware's own `gpio mode`, `gpio set` and
+      `gpio read` in its CLI as the other side, so it needs no app: 38 checks, on
+      the official 1.5.1, the official dev build, Momentum, Unleashed and
+      RogueMaster. Without an app it cannot have an interrupt on a pin or an
+      open-drain output; both are untried.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

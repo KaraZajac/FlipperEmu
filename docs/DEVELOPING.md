@@ -211,6 +211,48 @@ backlight fades over an eighth of a second, and a blink is 10 ms of light in eve
 
 A recording (`record`) is of the screen, without the lights. The window shows both.
 
+## The pins of the GPIO header
+
+An app that reads a pin needs something on the pin, and an app that drives one needs
+somebody to look. `gpio` is both:
+
+```
+$ ../../flipperemu gpio
+[flipper] the GPIO header (1 is +5V, 9 is 3V3; 8, 11 and 18 are GND)
+   2  PA7   output                         high
+   3  PA6   input                          floating
+   4  PA4   analog                         floating
+…
+$ ../../flipperemu gpio PA6 high
+[flipper] PA6 (pin 3 of the header): held high from outside; it is high (the firmware has it as: input)
+$ ../../flipperemu gpio PA7
+high
+```
+
+The first column is the pin's number on the header, the third what the firmware has
+the pin as (what your app's `furi_hal_gpio_init` made of it), the fourth its level.
+A pin is named as the MCU has it (`PA7`), as the case has it (`A7`) or by that number.
+
+- **Your app drives a pin:** `gpio PA7` prints `high`, `low`, `floating` or `unknown`
+  and nothing else, for a script; `gpio PA7 --wait high --timeout 5` waits for it and
+  fails after the five seconds, with what the pin was instead. It looks twenty times a
+  second, so it is for a level that stays, not for a pulse.
+- **Your app reads a pin:** `gpio PA6 high` and `gpio PA6 low` hold it from outside as
+  a wire to 3V3 or to GND would, and `gpio PA6 free` lets go (`gpio free`: of all).
+  The firmware's own `gpio read PA6` in the CLI is a quick look from the inside.
+- A reset of the firmware leaves what is held, as it would leave a wire. A pin your
+  app drives as a push-pull output keeps the app's level while it does (`gpio` says
+  that something is held to it, and that it does not show).
+- What a peripheral puts on a pin (a UART, PWM, SPI, I2C) is `unknown`: only the levels
+  of plain inputs and outputs are on the header so far. The ADC reads nothing.
+
+In a test script (see below) that is two lines:
+
+```sh
+fe gpio PA6 low                       # the "button" on the header is down
+fe gpio PA7 --wait high --timeout 5   # ... and the app lit its LED
+```
+
 ## A test that runs by itself
 
 A test of an app is the loop above with nobody at the keys: a Flipper, the app on it,
@@ -745,6 +787,15 @@ At its end it runs `examples/hello/test.sh` as it is, and wants it to pass and t
 leave no Flipper running. It passes on the official 1.5.1 with ufbt 0.2.6 and its SDK
 (31 checks). Without `ufbt`, or with an SDK for another API than the firmware's, it
 checks nothing and its exit status is 77.
+
+`scripts/gpio_check.py FIRMWARE` has the firmware's own `gpio` command in the CLI
+on the other side of the pins: the header after a start, a pin the firmware makes an
+output and sets (as a table, as a word, by its three names, in `status`, and a
+`--wait` that returns when the firmware sets it), a pin held high and low and let go
+of with the firmware's `gpio read` for each, a pin held while the firmware drives it,
+what is held over a reset, and what is refused. It passes on the official 1.5.1, the
+official dev build, Momentum, Unleashed and RogueMaster (38 checks). It has no app of
+its own: an interrupt on a held pin and an open-drain output were not tried.
 
 `scripts/gdb_check.py FIRMWARE` does what the gdb section shows, with gdb in batch
 mode: a backtrace of the firmware with functions and lines, the breakpoint in the
