@@ -7,7 +7,8 @@
     scripts/i2c_check.py firmware/momentum-mntm-012/flipper-z-f7-update-mntm-012.tgz
 
 A `run --i2c` that is said wrongly is refused in words before anything is
-done.  Then a throwaway device starts with a temperature sensor at 0x48 (at
+done, a type that QEMU has not among them, and `run --i2c help` lists those
+it has.  Then a throwaway device starts with a temperature sensor at 0x48 (at
 23.5 degrees) and an EEPROM at 0x50: `i2c` names them with their values, the
 EEPROM's contents are a file of the device, all bits 1.  The firmware's own
 scan of the bus (its CLI's `i2c`) finds the two and nothing else, and the
@@ -20,23 +21,37 @@ Where the firmware's JS has an i2c module (Momentum, Unleashed, RogueMaster;
 the official firmware's has none, and that part is skipped), the firmware runs
 examples/i2c/sensor.js: it reads the temperature that was set, and again
 after another was; the EEPROM counts its runs, in the device's file as soon
-as written, and on after a reset.  After a stop an EEPROM of another size is
-refused while the file is there, and a start with the EEPROM alone finds its
-contents kept, and no sensor.  Exit status 0 = pass.
+as written, and on after a reset.
+
+Where `ufbt` is on the PATH with an SDK for the firmware that is given (the
+official release, as ufbt comes; skipped otherwise), the same from an app in
+C, examples/i2c/sensor.c: built, put on the Flipper and started by
+`./flipperemu ufbt launch`, it logs the run that the EEPROM counts and the
+temperature, and logs another when the world outside has one; and the
+example's own test.sh passes on a Flipper of its own.
+
+After a stop an EEPROM of another size is refused while the file is there,
+and a start with the EEPROM alone finds its contents kept, and no sensor.
+Exit status 0 = pass.
 """
 import argparse
 import json
 import os
+import pathlib
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 from files_check import ROOT, Bench, CRASH, check, results
 from uart_check import fe, start
+from ufbt_check import log_tail, logged, tool
 
-SENSOR = ROOT / "examples" / "i2c" / "sensor.js"
+EXAMPLE = ROOT / "examples" / "i2c"
+SENSOR = EXAMPLE / "sensor.js"
+APP = "/ext/apps/Examples/fe_sensor.fap"
 WRONG = (
     ("tmp105", "TYPE@ADDRESS", "a device without an address"),
     ("tmp105@72", "as 0x48", "an address that is not in hex"),
@@ -44,6 +59,8 @@ WRONG = (
     ("tmp105@0x48,bus=i2c1", "not to be set", "a bus of one's own choice"),
     ("tmp105@0x48,temperature=warm", "in °C", "a temperature that is none"),
     ("eeprom@0x50,rom-size=0", "1 to 1048576", "an EEPROM of no bytes"),
+    ("lm75@0x48", "QEMU has no I2C device 'lm75'.  It has: ",
+     "a type that QEMU has not"),
 )
 skipped = []
 
@@ -99,6 +116,16 @@ def wrong_checks(name):
               r.returncode == 1 and words in r.stderr
               and not (ROOT / "devices" / name).exists(),
               f"{r.returncode}\n{r.stdout}{r.stderr}")
+    r = subprocess.run(run + ["--i2c", "help"], capture_output=True, text=True,
+                       timeout=60, stdin=subprocess.DEVNULL)
+    check("`run --i2c help`: the types there are, each with a word on what "
+          "it is, and no device made",
+          r.returncode == 0 and re.search(r"^  tmp105 +a temperature sensor",
+                                          r.stdout, re.M)
+          and re.search(r"^  at24c-eeprom +an EEPROM.*`eeprom`", r.stdout,
+                        re.M)
+          and not (ROOT / "devices" / name).exists(),
+          f"{r.returncode}\n{r.stdout}{r.stderr}")
 
 
 def bus_checks(b):
@@ -211,8 +238,82 @@ def script_checks(b, timeout):
     return 3
 
 
-def again_checks(b, timeout, runs):
-    """A stop, and a start with the EEPROM alone"""
+def app_checks(b, firmware, runs):
+    """The firmware reads the sensor and writes the EEPROM from an app in C,
+    which ufbt builds.  -> the runs the EEPROM has counted then; None: no
+    ufbt, or its SDK is for another firmware"""
+    label = "an app in C reads the sensor and counts in the EEPROM"
+    if not shutil.which("ufbt"):
+        skip(label, "no `ufbt` on the PATH (`pipx install ufbt` gets it)")
+        return None
+    rom = b.dir / "i2c-50.bin"
+    work = pathlib.Path(tempfile.mkdtemp(prefix="fe-i2c-"))
+    own = b.name + "-t"
+    try:
+        folder = work / "fe_sensor"
+        folder.mkdir()
+        for name in ("application.fam", "sensor.c"):
+            shutil.copy(EXAMPLE / name, folder)
+        code, text = tool(b, folder)
+        fap = folder / "dist" / "fe_sensor.fap"
+        if code or not fap.is_file():
+            check("`ufbt` builds the example's app", False, text[-1500:])
+            return None
+        code, out, err, _ = fe(b, "app", "--no-start", "--to",
+                               "/ext/apps/fe-check", fap)
+        fe(b, "rm", "-r", "/ext/apps/fe-check")
+        if "which is this firmware's" not in out:
+            skip(label, "ufbt's SDK is not for this firmware: "
+                 + " ".join((out + err).split())[:200])
+            return None
+
+        now = (runs or 0) + 1
+        fe(b, "i2c", "0x48", "temperature", "21.25")
+        code, text = tool(b, folder, "launch")
+        check("`ufbt launch`: the app is built, put on the Flipper and "
+              "started; it logs the run that the EEPROM counts, and the "
+              "temperature that was set",
+              code == 0 and logged(b, f"[FeSensor] started, run number {now} "
+                                      "by the EEPROM at 0x50")
+              and logged(b, "[FeSensor] 21.25 C at 0x48"),
+              text[-1500:] + log_tail(b))
+        code, out, err, _ = fe(b, "wait", "--timeout", 10, "--log",
+                               r"FeSensor.* -0\.50 C at 0x48", "--", "i2c",
+                               "0x48", "temperature", "-0.5")
+        check("another temperature from outside while it runs, just below "
+              "zero: its next reading has it, within the second",
+              code == 0 and "-0.50 C" in out, out + err + log_tail(b))
+        code, out, err, _ = fe(b, "app", "--close")
+        check("closed: it says so in the log, and the EEPROM's file has the "
+              "count", code == 0 and logged(b, "[FeSensor] left")
+              and rom.read_bytes()[:2] == bytes([now, 255]),
+              out + err + log_tail(b) + rom.read_bytes()[:16].hex(" "))
+
+        began = time.time()
+        try:
+            r = subprocess.run(["./test.sh", os.path.abspath(firmware), own],
+                               cwd=EXAMPLE, capture_output=True, text=True,
+                               timeout=600, stdin=subprocess.DEVNULL)
+            code, text = r.returncode, (r.stdout + r.stderr).replace("\r", "\n")
+        except subprocess.TimeoutExpired as e:
+            code, text = None, str(e)
+        check("the example's own test (examples/i2c/test.sh) on a Flipper of "
+              f"its own: it passes ({time.time() - began:.0f} s)",
+              code == 0 and "the app reads what the sensor has" in text
+              and text.count("its screen is as in screens/") == 2,
+              text[-3000:])
+        return now
+    finally:
+        subprocess.run([sys.executable, str(ROOT / "flipperemu"), "-d", own,
+                        "stop"], capture_output=True)
+        shutil.rmtree(str(b.dir) + "-t", ignore_errors=True)
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def again_checks(b, timeout, runs, script, app):
+    """A stop, and a start with the EEPROM alone.  `runs`: what the EEPROM
+    has counted (None: nothing wrote to it); script, app: what there is to
+    read it with"""
     rom = b.dir / "i2c-50.bin"
     b.stop()
     kept = rom.read_bytes() if rom.exists() else b""
@@ -237,11 +338,23 @@ def again_checks(b, timeout, runs):
         check("the EEPROM's contents are as they were",
               rom.read_bytes() == kept and len(kept) == 256, kept[:16].hex(" "))
         return
-    (t, n), said = sensor(b)
-    check("the script finds no sensor, and the EEPROM kept its count over "
-          "the stop", t is None and "no sensor at 0x48" in said
-          and n == runs + 1 and rom.read_bytes()[:2] == bytes([runs + 1, 255]),
-          said + rom.read_bytes()[:16].hex(" "))
+    if script:
+        runs += 1
+        (t, n), said = sensor(b)
+        check("the script finds no sensor, and the EEPROM kept its count "
+              "over the stop", t is None and "no sensor at 0x48" in said
+              and n == runs and rom.read_bytes()[:2] == bytes([runs, 255]),
+              said + rom.read_bytes()[:16].hex(" "))
+    if app:
+        runs += 1
+        code, out, err, _ = fe(b, "app", APP)
+        check("the app, started from the card, finds no sensor, and the "
+              "EEPROM kept its count over the stop",
+              code == 0 and logged(b, "[FeSensor] no sensor at 0x48")
+              and logged(b, f"[FeSensor] started, run number {runs} by")
+              and rom.read_bytes()[:2] == bytes([runs, 255]),
+              out + err + log_tail(b) + rom.read_bytes()[:16].hex(" "))
+        fe(b, "app", "--close")
 
 
 def main():
@@ -271,7 +384,9 @@ def main():
             bus_checks(b)
             value_checks(b)
             runs = script_checks(b, args.timeout)
-            again_checks(b, args.timeout, runs)
+            ran = app_checks(b, args.firmware, runs)
+            again_checks(b, args.timeout, ran or runs, runs is not None,
+                         ran is not None)
             ok, said = b.answers()
             check("the CLI still answers", ok, said)
             log = b.uart_text(every=True)

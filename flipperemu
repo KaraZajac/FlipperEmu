@@ -560,11 +560,85 @@ def new_log(dev: Device, serial):
 # said when the user did not
 I2C_NAMES = {"eeprom": "at24c-eeprom", "at24c": "at24c-eeprom"}
 I2C_NEEDS = {"at24c-eeprom": {"rom-size": "256"}}
+# ... and what the ones are of which QEMU's list has the name alone
+I2C_WHAT = {
+    "at24c-eeprom": "an EEPROM, of 256 bytes or rom-size=BYTES",
+    "axp209_pmu": "a power management chip",
+    "axp221_pmu": "a power management chip",
+    "bq25896": "a battery charger (the Flipper has one on its inner bus)",
+    "bq27220": "a battery gauge (the Flipper has one on its inner bus)",
+    "dps310": "a pressure and temperature sensor",
+    "ds1338": "a clock",
+    "emc1413": "a temperature sensor of three channels",
+    "emc1414": "a temperature sensor of four channels",
+    "i2c-ddc": "a monitor's DDC, with its EDID",
+    "i2c-echo": "a device for tests, which says back what it was sent",
+    "lp5562": "an LED driver of four channels (the Flipper has one on its "
+              "inner bus)",
+    "lsm303dlhc_mag": "a magnetometer",
+    "m41t80": "a clock",
+    "pca9535": "a port expander of 16 pins",
+    "pca9552": "an LED driver of 16 outputs",
+    "pca9554": "a port expander of 8 pins",
+    "rs5c372": "a clock",
+    "sii9022": "an HDMI transmitter",
+    "ssd0303": "an OLED display's controller, 96x16",
+    "tmp105": "a temperature sensor, with the registers of an LM75 or TMP75",
+    "tmp421": "a temperature sensor, itself and one remote channel",
+    "tmp422": "a temperature sensor, itself and two remote channels",
+    "tmp423": "a temperature sensor, itself and three remote channels",
+    "tpm-tis-i2c": "a TPM",
+    "wm8750": "an audio codec",
+}
 
 
 # What every device on a bus has, and is not a value of its own
 I2C_EVERY = ("type", "parent_bus", "realized", "hotplugged", "hotpluggable",
              "address")
+
+
+def i2c_types():
+    """The I2C devices that this build of QEMU has: [(its name there, what
+    QEMU says it is, or '')]; none: QEMU did not say"""
+    try:
+        said = subprocess.run([str(QEMU), "-device", "help"],
+                              capture_output=True, text=True, timeout=30,
+                              stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return sorted(re.findall(
+        r'^name "([^"]+)", bus i2c-bus(?:, desc "([^"]*)")?', said, re.M))
+
+
+def i2c_help():
+    """`run --i2c help`: what there is to put on the header's bus"""
+    types = i2c_types()
+    if not types:
+        sys.exit(f"flipperemu: {QEMU} did not list its devices (`-device "
+                 "help`)")
+    short = {}
+    for name, kind in I2C_NAMES.items():
+        short.setdefault(kind, []).append(name)
+    print("QEMU's I2C devices, each a TYPE for `run --i2c TYPE@ADDRESS` (the "
+          "bus of pins 15 and 16):")
+    wide = max(len(name) for name, _ in types)
+    for name, what in types:
+        also = " or ".join(f"`{x}`" for x in short.get(name, ()))
+        said = (what or I2C_WHAT.get(name, ""),
+                also and f"{also} for short")
+        print(f"  {name:<{wide}}  {'; '.join(x for x in said if x)}".rstrip())
+    return 0
+
+
+def i2c_known(specs):
+    """Refuses a type that this build of QEMU has not, with those it has"""
+    parsed = i2c_parse(specs)
+    types = [name for name, _ in i2c_types()] if parsed else []
+    for kind, address, _, _ in parsed:
+        if types and kind not in types:
+            sys.exit(f"--i2c {kind}@0x{address:02x}: QEMU has no I2C device "
+                     f"'{kind}'.  It has: {', '.join(types)} (`run --i2c "
+                     "help` says what they are)")
 
 
 def i2c_degrees(name):
@@ -579,8 +653,7 @@ def i2c_parse(specs):
     """`run --i2c TYPE@ADDRESS[,PROPERTY=VALUE...]`, once for each device on
     the header's I2C bus (pins 15 and 16) -> [(type, address, {property:
     value} for QEMU's -device, {property: value} to set once it runs)].  The
-    type is a QEMU I2C device's; QEMU says so itself when it has none of
-    that name."""
+    type is a QEMU I2C device's: i2c_known refuses one that it has not."""
     out, seen = [], {}
     for spec in specs or ():
         head, *props = spec.split(",")
@@ -885,7 +958,10 @@ def cmd_run(args):
         sys.exit(f"QEMU not built yet: run scripts/setup_qemu.sh ({QEMU})")
     dev = Device(args.device)
     detached = os.environ.pop(DETACHED, None)
+    if "help" in (args.i2c or ()):
+        return i2c_help()
     i2c_args(args.i2c)          # (a wrong one is said before anything is done)
+    i2c_known(args.i2c)
     for address, path, size in i2c_roms(dev, args.i2c):
         if path.exists() and path.stat().st_size != size:
             sys.exit(f"--i2c: the EEPROM at 0x{address:02x} is to have "
@@ -4557,9 +4633,9 @@ def main():
                         "eeprom@0x50,rom-size=4096 a larger one).  Once for "
                         "each device.  The type is one of QEMU's I2C devices, "
                         "with its properties after a comma (a temperature is "
-                        "in °C: tmp105@0x48,temperature=23.5); `i2c` "
-                        "says what is on the bus, with the devices' values, "
-                        "and sets one while it runs")
+                        "in °C: tmp105@0x48,temperature=23.5): `--i2c help` "
+                        "lists them.  `i2c` says what is on the bus, with "
+                        "the devices' values, and sets one while it runs")
     p.add_argument("--log-level", metavar="LEVEL",
                    choices=("default", "none", "error", "warn", "info", "debug",
                             "trace"),

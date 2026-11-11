@@ -50,9 +50,11 @@ its time) passes on the same five.
 port's pty, and over TCP; the firmware's expansion service answers a module that the
 launcher plays) passes on the same five.
 `scripts/i2c_check.py` (the I2C bus of the header: a temperature sensor and an EEPROM
-put there with `run --i2c`, found by the firmware's scan, read and written by a script,
-set from outside, the EEPROM's contents kept in a file) passes on the same five; on the
-two official ones without the script, since their JavaScript has no `i2c` module.
+put there with `run --i2c`, found by the firmware's scan, read and written by a script
+and by an app in C, set from outside, the EEPROM's contents kept in a file) passes on
+the same five. The script's part runs on Momentum, Unleashed and RogueMaster, whose
+JavaScript has an `i2c` module, and the app's part on the official 1.5.1, which the
+SDK of the ufbt here is for.
 `scripts/ufbt_check.py` (ufbt 0.2.6 building `examples/hello`, launching it there, and
 `ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's symbols, that
 app's and a stock app's, and its debug configuration for VS Code used the way that
@@ -399,7 +401,7 @@ it runs: once with the wait given up, once to the end.
 | `gpio record OUT.vcd` \| `gpio record stop` \| `gpio watch [PIN,PIN]` | every change of a pin's level with its time: into a file a logic analyzer's program opens, or printed as it happens |
 | `uart` \| `uart send TEXT [--expect TEXT]` \| `uart wait TEXT` \| `uart term` | the serial port on pins 15 and 16 of its header: where it goes; send to the app that has it open, and wait for its answer; wait for what the app sends; a terminal on it. `--port usart`: the one on pins 13 and 14 |
 | `expansion [--rpc] [--baud N] [--for S] [--port P]` | be an expansion module on its header, to the firmware's expansion service: the call, the baud rate, heartbeats, an RPC session; every frame printed |
-| `run --i2c TYPE@ADDRESS[,NAME=VALUE]` | start with a device on the I2C bus of its header (pins 15 and 16): `--i2c tmp105@0x48,temperature=23.5`, `--i2c eeprom@0x50`; once for each device |
+| `run --i2c TYPE@ADDRESS[,NAME=VALUE]` | start with a device on the I2C bus of its header (pins 15 and 16): `--i2c tmp105@0x48,temperature=23.5`, `--i2c eeprom@0x50`; once for each device. `run --i2c help` lists the types |
 | `i2c` \| `i2c ADDRESS` \| `i2c ADDRESS NAME` \| `i2c ADDRESS NAME VALUE` | that bus: its devices with their values, and what the firmware called; one device; one value, bare; set a value while the firmware runs |
 | `reset` | reboot it, as holding Left + Back does |
 | `pause` \| `continue` | time stands still on it (screen, timers, radios), and goes on from there |
@@ -1802,19 +1804,42 @@ $ ./flipperemu i2c
 [flipper]   0x50  at24c-eeprom  address-size 1, kept in /home/you/FlipperEmu/devices/flipper/i2c-50.bin, rom-size 256, writable on
 ```
 
+The official firmware's JavaScript has no such module, and there it is an app in C.
+`examples/i2c/sensor.c` reads the sensor once a second, shows the value on the screen
+and counts its runs in the EEPROM. With the official 1.5.1 and the same two devices:
+
+```
+$ cd examples/i2c
+$ ../../flipperemu ufbt launch
+…
+[INFO] Launching app: /ext/apps/Examples/fe_sensor.fap
+$ ../../flipperemu log -g FeSensor
+12876 [I][FeSensor] started, run number 1 by the EEPROM at 0x50
+12882 [I][FeSensor] 23.50 C at 0x48
+$ ../../flipperemu wait --log 'FeSensor.*-7\.50 C' -- i2c 0x48 temperature -7.5
+[flipper] tmp105 at 0x48: temperature -7.5 °C
+22889 [I][FeSensor] -7.50 C at 0x48
+```
+
+`examples/i2c/test.sh FIRMWARE` is that as a test that runs by itself: a Flipper with
+the two devices, the app built and started, the sensor set from outside, and the
+app's screen compared with a file after each
+([docs/DEVELOPING.md](docs/DEVELOPING.md#a-sensor-on-the-headers-i2c-bus)).
+
 - **A device** is `TYPE@ADDRESS`: one of QEMU's I2C devices by QEMU's name for it, and
   its address in hex, the seven bits of it, from 0x08 to 0x77. One `--i2c` for each,
   one device to an address. `eeprom` is short for `at24c-eeprom`. After a comma come
   the device's own settings as `NAME=VALUE` (`--i2c eeprom@0x50,rom-size=4096`). A
   form that is wrong is refused in words, before anything is flashed.
-- **Which there are:** `build/qemu/qemu-system-arm -device help | grep i2c-bus` lists
-  them. Among them are temperature sensors (`tmp105`, with the registers of an LM75
-  or a TMP75; `tmp421`, `tmp422`, `tmp423`; `emc1413`), the EEPROM, clocks (`ds1338`,
-  `m41t80`, `rs5c372`), port expanders and an LED driver (`pca9535`, `pca9554`,
-  `pca9552`), a pressure sensor (`dps310`), a magnetometer (`lsm303dlhc_mag`) and a
-  small OLED (`ssd0303`). Tried here are the TMP105 and the EEPROM, which the check
-  has, and a TMP421's values by hand. The others are QEMU's models as they come, each
-  as complete as QEMU has it.
+- **Which there are:** `./flipperemu run --i2c help` lists them, each with a few
+  words on what it is. Among them are temperature sensors (`tmp105`, with the
+  registers of an LM75 or a TMP75; `tmp421`, `tmp422`, `tmp423`; `emc1413`), the
+  EEPROM, clocks (`ds1338`, `m41t80`, `rs5c372`), port expanders and an LED driver
+  (`pca9535`, `pca9554`, `pca9552`), a pressure sensor (`dps310`), a magnetometer
+  (`lsm303dlhc_mag`) and a small OLED (`ssd0303`). Tried here are the TMP105 and
+  the EEPROM, which the check has, and a TMP421's values by hand. The others are
+  QEMU's models as they come, each as complete as QEMU has it. A type that QEMU
+  has not is refused with the names of those it has, before anything is flashed.
 - **`i2c`** has a line for the bus and one for each device with what can be set on it
   (QEMU's properties of the device). A temperature is in °C. `i2c ADDRESS NAME`
   prints the one value and nothing else, and `i2c ADDRESS NAME VALUE` sets it, at
@@ -1844,7 +1869,8 @@ Not there:
 
 - The official firmware's JavaScript has no `i2c` module (1.5.1 and the dev build
   alike): there the CLI's scan finds the devices, and an app in C talks to them.
-  This tree has no C example for the bus yet.
+- `examples/i2c/sensor.c` ran on the official 1.5.1 alone, the firmware that the SDK
+  of the ufbt here is for. It was not built for the other four.
 - A device cannot be put on the bus, or taken off it, while the emulator runs.
 - The two lines are no levels: pins 15 and 16 read `unknown` on the header while the
   firmware talks, and a record of the pins has no bits of a transfer. A transfer
@@ -1853,9 +1879,10 @@ Not there:
   also when the app forgot to set the pins up, where a real Flipper would be silent.
 - A record of the transfers themselves (what was written to whom, what was read).
 
-`scripts/i2c_check.py FIRMWARE` checks all of it with the firmware's scan and that
-script: 35 checks on Momentum, Unleashed and RogueMaster; on the official 1.5.1 and the
-official dev build 31, with the script's part skipped.
+`scripts/i2c_check.py FIRMWARE` checks all of it with the firmware's scan, that script
+and that app: 37 checks on Momentum, Unleashed and RogueMaster, with the app's part
+skipped (ufbt's SDK is for another firmware); 37 on the official 1.5.1, with the
+script's part skipped; 33 on the official dev build, with both skipped.
 
 An EEPROM's file needs one fix to QEMU's model (`qemu/patches/0009`,
 docs/BRINGUP_LOG.md, 110): it wanted the file's length in whole sectors of 512 bytes
@@ -2016,7 +2043,7 @@ docs/PANEL_LINK.md     the protocol between the emulator and the window
 docs/DEVELOPING.md     writing an app or a firmware with it: ufbt, fbt, gdb, the loop
 examples/hello/        an app to try that with
 examples/uart/         a script for the serial port on pins 15 and 16
-examples/i2c/          a script for a sensor and an EEPROM on the header's I2C bus
+examples/i2c/          a script and an app for a sensor and an EEPROM on the I2C bus
 flipperemu             launcher / device manager
 qemu/hw/arm/flipper/   the QEMU machine + STM32WB55 SoC + board devices (C)
 qemu/patches/          fixes to upstream QEMU (SysTick, SD over SPI, open-drain GPIO,

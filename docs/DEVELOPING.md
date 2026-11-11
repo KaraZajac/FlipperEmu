@@ -361,10 +361,10 @@ $ ../../flipperemu i2c
 
 - **The device** is one of QEMU's I2C devices by its name there, at its address in
   hex (seven bits): a `tmp105` or `tmp421` temperature sensor, an `eeprom`, a
-  `ds1338` clock, a `pca9554` port expander and some more (the README's "I2C devices
-  on pins 15 and 16" has how to list them). Your chip may not be among them. One
-  with the same registers can stand in, and what the app does when nothing answers
-  is there in any case: an address with no device is a NACK, as on the wire.
+  `ds1338` clock, a `pca9554` port expander and some more (`run --i2c help` lists
+  them, with a few words on each). Your chip may not be among them. One with the
+  same registers can stand in, and what the app does when nothing answers is there
+  in any case: an address with no device is a NACK, as on the wire.
 - **Did the app reach it?** The first line of `i2c` counts the addresses that the
   firmware called and those that answered, and has the last one. The `furi_hal_i2c`
   functions take an address as it is on the wire, shifted left by one: `0x48 << 1`.
@@ -384,13 +384,79 @@ $ ../../flipperemu i2c
   `examples/i2c/sensor.js` reads the sensor and counts its runs in the EEPROM. The
   official firmware's JavaScript has no such module, so there it is an app in C.
 
-What ran here is the firmware's own scan (the CLI's `i2c`) on five firmwares, and
-that script on the three that have the module. No app in C was built against the
-bus yet. Three limits matter for an app. Nothing checks the pins: I2C3 answers here
-also when the app did not set pins 15 and 16 up for it, where a Flipper would be
-silent. A transfer takes no time, at any bus speed, and no device stretches the
-clock. And the two lines are not on the header as levels: a record of the pins has
-no bits of a transfer.
+`examples/i2c/sensor.c` is that app. It sets the TMP105 to 12 bits, reads its
+temperature once a second and shows it, and counts its runs in the EEPROM's first
+byte. It has the bus for the length of a transfer and no longer:
+
+```c
+furi_hal_i2c_acquire(bus);                      // &furi_hal_i2c_handle_external
+if(furi_hal_i2c_tx(bus, SENSOR, setup, sizeof(setup), WAIT) &&
+   furi_hal_i2c_trx(bus, SENSOR, &temperature, 1, raw, sizeof(raw), WAIT)) {
+    hundredths = (int16_t)(raw[0] << 8 | raw[1]) * 100 / 256;
+}
+furi_hal_i2c_release(bus);
+```
+
+`SENSOR` is `0x48 << 1`. A transfer that nobody answers comes back false within
+`WAIT` milliseconds, and the app then says "does not answer" where the value was:
+start the Flipper with `--i2c eeprom@0x50` alone to see that.
+
+```
+$ cd examples/i2c
+$ ../../flipperemu ufbt launch
+…
+[INFO] Launching app: /ext/apps/Examples/fe_sensor.fap
+$ ../../flipperemu log -g FeSensor
+12876 [I][FeSensor] started, run number 1 by the EEPROM at 0x50
+12882 [I][FeSensor] 23.50 C at 0x48
+```
+
+`examples/i2c/test.sh` is its test, of the kind that the next section goes through
+with `examples/hello`. The board is part of the test: the Flipper it starts has the
+two devices, and one of its steps is the weather.
+
+```sh
+fe() { ../../flipperemu -d "${device:-sensor-test}" "$@"; }
+
+fe run --detach --headless --audio none -f "$1" \
+    --i2c tmp105@0x48,temperature=23.5 --i2c eeprom@0x50
+trap 'fe stop' EXIT
+
+fe wait                                           # the firmware is up
+fe wait --log 'FeSensor.*started, run number [0-9]' -- ufbt launch
+fe wait --log 'FeSensor.* 23\.50 C'               # what the sensor started with
+fe wait --screen screens/warm.txt
+fe wait --log 'FeSensor.* -7\.50 C' -- i2c 0x48 temperature -7.5
+fe wait --screen screens/cold.txt                 # ... and the screen follows
+fe wait --log 'FeSensor.*left' -- press back
+echo "test.sh: the app reads what the sensor has"
+```
+
+```
+$ ./test.sh ../../firmware/official-1.5.1/flipper-z-f7-update-1.5.1.tgz
+…                                      (the emulator's lines as it starts, and ufbt's)
+4485 [I][FeSensor] started, run number 2 by the EEPROM at 0x50
+4489 [I][FeSensor] 23.50 C at 0x48
+[sensor-test] its screen is as in screens/warm.txt (0.1 s)
+[sensor-test] tmp105 at 0x48: temperature -7.5 °C
+6492 [I][FeSensor] -7.50 C at 0x48
+[sensor-test] its screen is as in screens/cold.txt (0.1 s)
+7726 [I][FeSensor] left
+test.sh: the app reads what the sensor has
+[sensor-test] stopped
+```
+
+It was the second run on that device, and the EEPROM had counted the first: its
+file stays with `devices/sensor-test`. `rm -r devices/sensor-test` is a new chip.
+
+What ran here is the firmware's own scan (the CLI's `i2c`) on five firmwares, that
+script on the three that have the module, and this app on the official 1.5.1. The
+app was not built for the other four: each wants its own SDK (see "The SDK has to
+be the firmware's"), and the ufbt here has the one of 1.5.1. Three limits matter
+for an app. Nothing checks the pins: I2C3 answers here also when the app did not
+set pins 15 and 16 up for it, where a Flipper would be silent. A transfer takes no
+time, at any bus speed, and no device stretches the clock. And the two lines are
+not on the header as levels: a record of the pins has no bits of a transfer.
 
 In a test script:
 
@@ -997,7 +1063,8 @@ build, Momentum, Unleashed and RogueMaster (79 checks). It has no app in C.
 
 `scripts/i2c_check.py FIRMWARE` starts a device with a TMP105 at 0x48 and an EEPROM
 at 0x50. Before that, the forms of `--i2c` that are refused, each in words and with
-no device left behind. Then: `i2c` lists both, with the temperature that was given
+no device left behind (a type that QEMU has not among them), and `run --i2c help`
+with its list. Then: `i2c` lists both, with the temperature that was given
 at the start and the EEPROM's file, which is new and 0xFF throughout; the
 firmware's scan finds the two addresses and no other, and the bus's line has its
 128 calls, two of them answered and the last one not; `gpio`, `status` and `status
@@ -1005,12 +1072,17 @@ firmware's scan finds the two addresses and no other, and the bus's line has its
 the value left as it was; `examples/i2c/sensor.js` reads the temperature that was
 set and counts one in the EEPROM, reads another after that was set from outside,
 the file has the count, and after a reset of the firmware the temperature is still
-as set and the count goes on; a `run` with another `rom-size` is refused and the
-file is as it was; and a start with the EEPROM alone has no sensor in the scan or
-in the script, and the count from before. 35 checks on Momentum, Unleashed and
-RogueMaster. On the official 1.5.1 and the official dev build it is 31, with the
-script's part skipped: their JavaScript has no `i2c` module, so only the scan
-talks on the bus there. It has no app in C.
+as set and the count goes on; `examples/i2c/sensor.c`, built and started by `ufbt
+launch`, logs the run that the EEPROM counts and the temperature that was set, has
+another one within a second of its being set from outside, and leaves the count in
+the file when it is closed; `examples/i2c/test.sh` passes on a Flipper of its own;
+a `run` with another `rom-size` is refused and the file is as it was; and a start
+with the EEPROM alone has no sensor in the scan, in the script or in the app, and
+the count from before. 37 checks on Momentum, Unleashed and RogueMaster, with the
+app's part skipped: the SDK of the ufbt here is for the official 1.5.1. On that
+one it is 37 as well, with the script's part skipped, since the official
+JavaScript has no `i2c` module. On the official dev build it is 33, with both
+skipped: only the scan talks on the bus there.
 
 `scripts/gdb_check.py FIRMWARE` does what the gdb section shows, with gdb in batch
 mode: a backtrace of the firmware with functions and lines, the breakpoint in the

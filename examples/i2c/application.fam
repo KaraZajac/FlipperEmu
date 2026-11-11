@@ -1,0 +1,11 @@
+# The header's I2C bus from an app: see docs/DEVELOPING.md
+App(
+    appid="fe_sensor",
+    name="Sensor on I2C",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="fe_sensor_app",
+    stack_size=2 * 1024,
+    fap_category="Examples",
+    fap_version="1.0",
+    fap_description="Reads a TMP105 on pins 15 and 16 once a second",
+)

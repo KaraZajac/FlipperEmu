@@ -2087,6 +2087,39 @@ big lock, entry 92).
     - `scripts/i2c_check.py`: 35 checks on Momentum, Unleashed and RogueMaster, 31
       and one skipped on the official 1.5.1 and the official dev build;
       `gpio_check.py` is 55 (54 before), on the five.
+111. **An app in C on the header's I2C bus; `run --i2c help`.** The official
+    firmware's JavaScript has no `i2c` module, so on it nothing but the CLI's scan
+    had talked on the bus.
+    - `examples/i2c/sensor.c` does in C what `sensor.js` does: the TMP105's
+      configuration written for 12 bits, its temperature read once a second
+      (`furi_hal_i2c_tx`, `furi_hal_i2c_trx` on `furi_hal_i2c_handle_external`),
+      the EEPROM's first byte read, counted up and written back. Built by ufbt
+      for the official 1.5.1 it ran as written: 23.50 at the start, -7.50 within
+      a second of `i2c 0x48 temperature -7.5`, run number 1, then 2.
+    - Nothing in the model had to change for it. The bus's line counted its
+      calls: `the firmware called 36 addresses, all answered`.
+    - Without a sensor (a start with the EEPROM alone) a transfer comes back
+      false and the app says "does not answer"; the count goes on.
+    - `examples/i2c/test.sh` is the app's test on a Flipper of its own, with the
+      two devices given to `run` and the temperature set between two looks at
+      the screen (`screens/warm.txt`, `screens/cold.txt`).
+    - A type that QEMU has not was found late. With `--i2c nosuchchip@0x48` the
+      firmware was flashed and the card made, and then QEMU ended with
+      `'nosuchchip' is not a valid device model name`. An `lm75` goes the same
+      way: QEMU's name for those registers is `tmp105`. The launcher asks the
+      QEMU it starts for its I2C devices (`-device help`, those of `i2c-bus`) and
+      refuses the type before anything is done, with their names.
+    - `run --i2c help` prints that list. QEMU describes a third of them; for the
+      others the launcher has a few words each (`tmp105`: a temperature sensor,
+      with the registers of an LM75 or TMP75).
+    - Seen and left: QEMU's TMP105 takes a temperature in steps of its own, and
+      `i2c 0x48 temperature 0.0625` reads back as 0.058; the app shows 0.00.
+    - The app was built for the official 1.5.1 alone, the SDK that the ufbt here
+      has. On the other four the check skips it, in words: `ufbt's SDK is not
+      for this firmware`.
+    - `scripts/i2c_check.py`: 37 checks and one skipped on the official 1.5.1
+      (the script), on Momentum, Unleashed and RogueMaster (the app); 33 and two
+      skipped on the official dev build.
 
 ## Things that were right the first time (and why)
 

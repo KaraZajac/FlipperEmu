@@ -355,9 +355,14 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         EEPROM's contents are a file of the device (QEMU patch 0009); the bus is in
         `gpio` and `status` (machine property `header-i2c`); `examples/i2c`;
         `scripts/i2c_check.py` is 35 checks, `gpio_check.py` 55 (BRINGUP_LOG 110)
-  - ☐ More on that bus: a C app built with ufbt as the example for the official
-        firmware (its JS has no `i2c` module); the bus in the window's GPIO menu;
-        a record of the transfers (who was called, what was written and read)
+  - ☑ An app in C on that bus (2026-11-11): `examples/i2c/sensor.c`, built with
+        ufbt for the official firmware (its JS has no `i2c` module), with its own
+        `test.sh`; `run --i2c help` lists the types, and one that QEMU has not is
+        refused before anything is flashed; `scripts/i2c_check.py` is 37 checks
+        (BRINGUP_LOG 111)
+  - ☐ More on that bus: the bus in the window's GPIO menu; a record of the
+        transfers (who was called, what was written and read); the C app on the
+        other firmwares, each with its own SDK
   - ☐ What other peripherals put on a pin: PWM, SPI devices on the header; a
         voltage for the ADC
   - ☐ An interrupt on a held pin and an open-drain output (untried: they need an
