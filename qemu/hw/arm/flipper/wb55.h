@@ -385,12 +385,16 @@ struct WB55DwtState {
     uint32_t comp[16];
     bool stamped;                /* the next CYCCNT read gives stamp_ns's count */
     int64_t stamp_ns;
+    int64_t read_ns;             /* when CYCCNT was last read */
 };
 /* The next read of CYCCNT returns its value at virtual time "when", as if
  * the CPU read it then: an ISR that times edges in software reads the
  * edge's own time, as on silicon where it runs within a fraction of a
  * microsecond, not the emulated interrupt's latency. */
 void wb55_dwt_stamp_next(WB55DwtState *s, int64_t when);
+/* The virtual time of the last read of CYCCNT: where a busy-wait of the
+ * firmware's ended, when the register write after it came late. */
+int64_t wb55_dwt_last_read(WB55DwtState *s);
 
 #define TYPE_WB55_DBGMCU "stm32wb55-dbgmcu"
 OBJECT_DECLARE_SIMPLE_TYPE(WB55DbgmcuState, WB55_DBGMCU)

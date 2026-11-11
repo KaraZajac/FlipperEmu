@@ -12,7 +12,9 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 #include "qemu/osdep.h"
+#include "qemu/atomic.h"
 #include "qemu/log.h"
+#include "qemu/main-loop.h"
 #include "qemu/guest-random.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-clock.h"
@@ -98,8 +100,34 @@ static uint64_t dwt_cycles(WB55DwtState *s)
 
 void wb55_dwt_stamp_next(WB55DwtState *s, int64_t when)
 {
-    s->stamped = true;
     s->stamp_ns = when;
+    qatomic_set(&s->stamped, true);
+}
+
+int64_t wb55_dwt_last_read(WB55DwtState *s)
+{
+    return qatomic_read(&s->read_ns);
+}
+
+/*
+ * CYCCNT is read without the big lock (see wb55_dwt_init), and that is the
+ * vCPU's thread: what it reads here changes only in that thread (a write of
+ * the firmware's to this block or to RCC) or while it stands still (a
+ * reset).  The stamp is another device's, set under the lock.
+ */
+static uint32_t dwt_read_cyccnt(WB55DwtState *s)
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    qatomic_set(&s->read_ns, now);
+    if (qatomic_read(&s->stamped)) {
+        BQL_LOCK_GUARD();
+        if (s->stamped) {
+            s->stamped = false;
+            return (uint32_t)dwt_cycles_at(s, s->stamp_ns);
+        }
+    }
+    return (uint32_t)dwt_cycles_at(s, now);
 }
 
 static void dwt_rebase(WB55DwtState *s)
@@ -124,11 +152,7 @@ static uint64_t wb55_dwt_read(void *opaque, hwaddr addr, unsigned size)
     case 0x000:
         return s->ctrl | 0x40000000;    /* NUMCOMP = 4 */
     case 0x004:
-        if (s->stamped) {
-            s->stamped = false;
-            return (uint32_t)dwt_cycles_at(s, s->stamp_ns);
-        }
-        return (uint32_t)dwt_cycles(s);
+        return dwt_read_cyccnt(s);
     }
     if (addr >= 0x020 && addr < 0x060) {
         return s->comp[(addr - 0x020) / 4];
@@ -173,6 +197,7 @@ static void wb55_dwt_reset_hold(Object *obj, ResetType type)
 
     s->ctrl = 0;
     s->stamped = false;
+    s->read_ns = 0;
     s->base_cycles = 0;
     s->base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     memset(s->comp, 0, sizeof(s->comp));
@@ -183,6 +208,13 @@ static void wb55_dwt_init(Object *obj)
     WB55DwtState *s = WB55_DWT(obj);
 
     memory_region_init_io(&s->mmio, obj, &wb55_dwt_ops, s, "dwt", 0x1000);
+    /*
+     * furi_delay_us() reads CYCCNT in a loop, and each read took the big
+     * lock: when the main loop wanted it for a timer, the vCPU's thread
+     * slept until it had it back, 20 to 50 us, and a 9 us wait had lasted
+     * that long.  Reads need no lock (qemu/patches/0005).
+     */
+    memory_region_enable_lockless_io(&s->mmio);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mmio);
     s->clk = qdev_init_clock_in(DEVICE(obj), "clk", dwt_clk_cb, s,
                                 ClockPreUpdate);

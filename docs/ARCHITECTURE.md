@@ -2,8 +2,9 @@
 
 FlipperEmu is QEMU 11.1.3 plus an overlay directory, `qemu/hw/arm/flipper/`, which
 `scripts/setup_qemu.sh` symlinks into the QEMU tree as `hw/arm/flipper` and hooks into the
-arm build with one `subdir()` and one Kconfig `source`. Three small fixes to upstream QEMU
-live in `qemu/patches/` (see BRINGUP_LOG.md). Nothing else in QEMU is modified.
+arm build with one `subdir()` and one Kconfig `source`. Five small patches to upstream
+QEMU live in `qemu/patches/` (its README lists them; BRINGUP_LOG.md has how each was
+found). Nothing else in QEMU is modified.
 
 Ground rule: **the firmware source is the specification.** Every behaviour below that is
 more than "register reads back" is there because a specific firmware function depends on
@@ -55,7 +56,10 @@ enable bit, so clock bring-up never stalls.
 
 `DWT->CYCCNT` counts HCLK cycles of QEMU virtual time. It's essential because
 `furi_delay_us()` busy-waits on it, even before the scheduler starts (`main()` waits
-100 ms to sample the buttons).
+100 ms to sample the buttons). A read of it does not take QEMU's big lock
+(`qemu/patches/0005`; the DWT block asks for lockless I/O): with the lock, each read of a
+wait could sleep 20 to 50 µs while the main loop held it, and a 9 µs wait lasted 60. The
+block remembers when CYCCNT was last read, which is where a wait of the firmware's ended.
 
 Idle: FreeRTOS tickless idle arms **LPTIM1** one-shot (CMP = n-4, ARR = n-1) and executes
 WFI with PRIMASK=1. Afterwards it reads CNT and stops the timer with an RCC bus reset
@@ -620,6 +624,11 @@ not the pin level, which its own pulls would mask, with virtual times:
 - Every other low is a slot. The master writes a 1 as a 9 µs low and a 0 as 64 µs (1 and
   8 µs in overdrive). An emulated master's lows only ever stretch: overdrive's 1 µs takes
   2–4 µs. So the threshold sits just under a 0's time (56 µs, 7 µs), not at the midpoint.
+- A slot's low is timed from the master's falling edge to its last read of CYCCNT, the
+  end of its wait, and not to the write of GPIOB that ends the low. That write takes
+  QEMU's big lock, and when the main loop has it, the vCPU's thread sleeps 20 to 50 µs
+  for it: a 1 would be a 0, a READ ROM another command. (A reset is told by the time
+  that passed: a firmware may sleep through one.)
 - To send a 0, the slave pulls the line low at the master's falling edge. On silicon it
   lets go after a fixed time, well after the master samples. Here the host can preempt
   the vCPU while virtual time runs on, so the sample can land past any fixed time. So the

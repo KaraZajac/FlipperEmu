@@ -42,7 +42,14 @@ and installed there, and the updater's error screen) passes on the same five, fr
 official firmware to Unleashed, and from the release to the dev build.
 `scripts/ufbt_check.py` (ufbt 0.2.6 building `examples/hello`, launching it there, and
 `ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's symbols, that
-app's and a stock app's) pass on the official one.
+app's and a stock app's) pass on the official one. The release candidate **1.5.1-rc**
+passes all of these (the ufbt check was not run on it).
+
+Older official releases run the smoke test as well: **1.4.3** passes all of it;
+**1.3.4**, **1.1.2** and **0.99.1** pass all but the five NFC steps, which are skipped
+(they use the `nfc` command's shell, new in 1.4). **1.0.1** and **0.105.0** do the
+same, except that `ikey read` finds a Metakom iButton key there only in about two
+tries of three (open, see PLAN.md).
 
 | | |
 |:-:|:-:|
@@ -1356,7 +1363,8 @@ docs/DEVELOPING.md     writing an app or a firmware with it: ufbt, fbt, gdb, the
 examples/hello/        an app to try that with
 flipperemu             launcher / device manager
 qemu/hw/arm/flipper/   the QEMU machine + STM32WB55 SoC + board devices (C)
-qemu/patches/          fixes to upstream QEMU (SysTick, ssi-sd, SD SPI state)
+qemu/patches/          fixes to upstream QEMU (SysTick, SD over SPI, open-drain GPIO,
+                       register reads without the big lock)
 scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_monitor.py,
                        fe_cli.py, fe_files.py (files on the card), fe_apps.py
                        (apps and the loader), fe_ir.py,

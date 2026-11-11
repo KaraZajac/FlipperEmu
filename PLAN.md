@@ -57,8 +57,13 @@ NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
 - ◐ Firmware matrix: official 1.5.1, the official dev build 3060cee9 (a debug build;
       BRINGUP_LOG 87), Momentum mntm-012, Unleashed unlshd-094 and RogueMaster
       RM1024-1347 (2026-11-10, BRINGUP_LOG 86) pass `scripts/smoke_test.py` (now
-      including a warm reboot) and the files, app, window, enclave and update checks;
-      run them on a schedule
+      including a warm reboot) and the files, app, window, enclave and update checks,
+      and so does the release candidate 1.5.1-rc; run them on a schedule
+  - ◐ Older official releases, the smoke test only (2026-11-10, BRINGUP_LOG 92):
+        1.4.3 passes all 28 steps; 1.3.4, 1.1.2 and 0.99.1 pass 23, the five NFC
+        steps skipped (no `nfc` shell before 1.4)
+  - ☐ 1.0.1 and 0.105.0 fail one step: `ikey read` finds a Metakom key in 8 to 10
+        tries of 15 (1.5.1: 15 of 15, with the same code in the firmware)
 
 ## M4: senses ◐
 - ☑ Speaker: TIM16 CH1 PWM → QEMU audio (desktop driver or `--audio wav:FILE`); tones
@@ -117,6 +122,12 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       resumed after host-stall dropouts, overlap-checked); Cyfral/Metakom captured
       at the TIM1 ISR's own writes, decoded and replayed (`ibutton --reader`,
       `ibutton_check.py`; BRINGUP_LOG 45-49)
+- ☑ 1-Wire timing (2026-11-10): `DWT->CYCCNT` is read without QEMU's big lock
+      (`qemu/patches/0005`) and a slot's low is timed to the master's last read of
+      it. `ikey read` of a DS1990A: 40 of 40 on 0.105.0 and on 1.0.1, where one
+      read in 13 and one in 40 had printed `Dallas FFFFFFFFFFFFFFFF` (BRINGUP_LOG 92)
+  - ☐ A Cyfral emulation's capture cut short (138 levels, once in 56 runs); the
+        capture's log line now says how it ended
 
 ## M7: real radios ☐
 - ☑ Sub-GHz receive from an SDR (2026-11-09): the CC1101's link socket announces the
@@ -262,8 +273,9 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
 - ☐ Snapshot workflow (`savevm` on qcow2 images; boot once, jump straight to an app)
 - ☐ TCG plugin for coverage/trace of firmware or a single FAP
 - ☐ Fuzzing harness (AFL++/libafl QEMU mode) for parsers in the firmware
-- ☐ Upstream the four QEMU patches (0004: open-drain GPIO lines, 2026-11-08); consider
-      upstreaming the machine
+- ☐ Upstream the five QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:
+      register reads without the big lock under TCG, 2026-11-10); consider upstreaming
+      the machine
 
 ## Non-goals (for now)
 - Running ST's radio stack on an emulated CPU2 (closed, encrypted binary)

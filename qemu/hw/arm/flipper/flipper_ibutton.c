@@ -17,6 +17,12 @@
  * at overdrive speed).  The master busy-waits at least that long, and an
  * emulated one only ever takes longer (overdrive's 1 us low takes 2-4), so
  * the threshold sits just under the 0's time: a 1 may stretch that far.
+ * The low is timed to the end of the master's wait, its last read of
+ * CYCCNT, and not to the write of GPIOB after it: that write needs the big
+ * lock, and when the main loop has it, the vCPU's thread sleeps 20 to 50 us
+ * for it.  (CYCCNT took the lock too, at every read of the wait: a 1 in a
+ * hundred was a 0 then, a READ ROM another command, the key silent, and the
+ * firmware read a ROM of FFs.  It is read without the lock now.)
  *
  * To send a 0 the slave pulls the line low at once.  On silicon it lets go
  * after a fixed time, and the master samples well before that.  Here
@@ -439,6 +445,12 @@ static void ow_fall(FlipperIbuttonState *s, int64_t now)
 static void ow_rise(FlipperIbuttonState *s, int64_t now)
 {
     int64_t low = now - s->fall_ns;
+    int64_t waited = s->dwt ? wb55_dwt_last_read(s->dwt) : 0;
+    int64_t slot = low;                 /* up to where the master's wait ended */
+
+    if (waited >= s->fall_ns && waited < now) {
+        slot = waited - s->fall_ns;
+    }
 
     if (low >= OW_RESET_NS || (s->od && low >= OW_OD_RESET_NS)) {
         if (s->pulling) {               /* that was no slot: drop the hold */
@@ -453,7 +465,7 @@ static void ow_rise(FlipperIbuttonState *s, int64_t now)
         return;
     }
     if (s->state != OW_IDLE && !s->pulling) {
-        ow_slot(s, low < (s->od ? OW_OD_BIT_NS : OW_BIT_NS));
+        ow_slot(s, slot < (s->od ? OW_OD_BIT_NS : OW_BIT_NS));
     }                                   /* holding a 0: over once it is sampled */
 }
 
@@ -807,7 +819,7 @@ static void rd_finish(FlipperIbuttonState *s, const char *why)
 #define CAP_IDLE_NS  (1000 * SCALE_MS)  /* no new level: the capture ends */
 #define CAP_MAX      4096
 
-static void cap_write(FlipperIbuttonState *s)
+static void cap_write(FlipperIbuttonState *s, const char *ended)
 {
     g_autoptr(GString) f = g_string_new(NULL);
     g_autoptr(GError) err = NULL;
@@ -837,7 +849,8 @@ static void cap_write(FlipperIbuttonState *s)
             }
         }
         if (g_file_set_contents(path, f->str, f->len, &err)) {
-            info_report("flipper-zero: iButton emulation, %u levels -> %s", n, path);
+            info_report("flipper-zero: iButton emulation, %u levels (%s) -> %s",
+                        n, ended, path);
             g_free(s->tx_last);
             s->tx_last = g_steal_pointer(&path);
         } else {
@@ -847,16 +860,14 @@ static void cap_write(FlipperIbuttonState *s)
 }
 
 /* the emulation stopped: write what was captured, unless it was written
- * full.  The idle timer is only a fallback: a host stall of the vCPU runs
- * the virtual clock on with no level set, and should not cut a capture. */
-static void cap_timer(void *opaque)
+ * full.  The log says which way it ended: a capture too short to hold a
+ * frame twice is the firmware's stop, or a second with no level. */
+static void cap_end(FlipperIbuttonState *s, const char *ended)
 {
-    FlipperIbuttonState *s = opaque;
-
     timer_del(s->cap_timer);
     if (s->cap) {
         if (!s->cap_done) {
-            cap_write(s);
+            cap_write(s, ended);
         }
         g_array_free(s->cap, true);
         s->cap = NULL;
@@ -864,11 +875,18 @@ static void cap_timer(void *opaque)
     }
 }
 
+/* The idle timer is only a fallback: a host stall of the vCPU runs the
+ * virtual clock on with no level set, and should not cut a capture. */
+static void cap_timer(void *opaque)
+{
+    cap_end(opaque, "no level for a second");
+}
+
 /* the firmware let go of PB14 (no longer an output): an emulation ended */
 void flipper_ibutton_released(FlipperIbuttonState *s)
 {
     if (s->cap) {
-        cap_timer(s);
+        cap_end(s, "the firmware stopped");
     }
 }
 
@@ -886,7 +904,7 @@ void flipper_ibutton_emulated(FlipperIbuttonState *s, bool high, int64_t ns)
     if (!s->cap_done && us > 0) {
         g_array_append_val(s->cap, (int32_t){ high ? us : -us });
         if (s->cap->len == CAP_MAX) {   /* full: written now, though the key */
-            cap_write(s);               /* emulates on (the rest repeats it) */
+            cap_write(s, "full");       /* emulates on (the rest repeats it) */
             s->cap_done = true;
         }
     }

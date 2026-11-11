@@ -1,0 +1,35 @@
+From: FlipperEmu
+Subject: [PATCH] accel/tcg: read a lockless-I/O region without the BQL
+
+memory_region_enable_lockless_io() marks a region whose device does its
+own locking, so that an access needs no BQL: prepare_mmio_access() leaves
+the lock alone for it. That is the path of a KVM vCPU. TCG's MMIO helpers
+take the BQL themselves, for every region, before they dispatch, so under
+TCG such a region is locked all the same.
+
+Leave the lock alone for a load of up to 8 bytes from such a region.
+Stores and 16-byte loads still take it.
+
+Seen with the Flipper Zero model: the firmware's microsecond delay is a
+busy loop on DWT->CYCCNT, a few dozen reads in 9 us. With the BQL taken at
+each, a main loop that wanted the lock for a timer got it only once the
+vCPU's thread went to sleep for it, and that thread then woke 20 to 50 us
+later: a 9 us pulse on a pin lasted 60 us. On 1-Wire that turns a 1 into a
+0; about one iButton read in twenty read a ROM of FFs.
+
+Signed-off-by: FlipperEmu
+---
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -1977,6 +1977,11 @@
+     section = io_prepare(&mr_offset, cpu, full, addr, ra);
+     mr = section->mr;
+ 
++    if (mr->lockless_io) {
++        /* the device does its own locking, as when a KVM vCPU reads it */
++        return int_ld_mmio_beN(cpu, full, ret_be, addr, size, mmu_idx,
++                               type, ra, mr, mr_offset);
++    }
+     BQL_LOCK_GUARD();
+     return int_ld_mmio_beN(cpu, full, ret_be, addr, size, mmu_idx,
+                            type, ra, mr, mr_offset);

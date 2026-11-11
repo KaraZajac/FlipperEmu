@@ -1,9 +1,11 @@
 # Fixes to upstream QEMU
 
 `scripts/setup_qemu.sh` applies these to the QEMU 11.1.3 source tree once (it checks
-whether each patch is already applied). Each patch header explains the bug, how it
-showed up with the Flipper firmware, and the fix. All are small and self-contained,
-written to be suitable for upstream submission.
+whether each patch is already applied, so a later run adds only the new ones, then
+builds). Each patch header explains the bug, how it showed up with the Flipper firmware,
+and the fix. All are small and self-contained, written to be suitable for upstream
+submission. 0005 is less a bug than a limit: the machine builds and runs without it, and
+its 1-Wire timing is then as it was (about one iButton read in twenty goes wrong).
 
 | patch | QEMU file | bug |
 |---|---|---|
@@ -11,6 +13,7 @@ written to be suitable for upstream submission.
 | 0002 | `hw/sd/ssi-sd.c` | after a response the model eats one byte, swallowing the next command when the host clocks its padding with CS high |
 | 0003 | `hw/sd/sd.c` | SPI mode only reached transfer state via CMD9/CMD10; data commands right after ACMD41 were rejected |
 | 0004 | `hw/gpio/stm32l4x5_gpio.c` | a device on an open-drain line could pull it low but never let it go: an external high was refused, disconnected on the next MODER/OTYPER write, and read as floating |
+| 0005 | `accel/tcg/cputlb.c` | TCG takes the big lock for every device register access, also where the region asked for lockless I/O: a guest that busy-waits on a counter register sleeps 20 to 50 µs on the lock whenever the main loop has it |
 
 **Licence:** these patches modify QEMU's own source files, which are GPL-2.0-or-later,
 so the patches are GPL-2.0-or-later too, unlike the rest of this repository (BSD-3-Clause).

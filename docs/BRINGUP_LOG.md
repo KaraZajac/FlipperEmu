@@ -65,7 +65,9 @@ registers` through the monitor to histogram PC and IPSR, and QEMU trace points
    **0003-sd-spi-mode-enter-transfer-state-after-ACMD41.patch**: report idle until
    power-up, then accept data commands.
 
-All three are small, self-contained, and suitable for sending upstream.
+All three are small, self-contained, and suitable for sending upstream. Two more came
+later: 0004 (open-drain GPIO lines, entry 40) and 0005 (a register read without the
+big lock, entry 92).
 
 ## USB (M2)
 
@@ -1321,6 +1323,44 @@ All three are small, self-contained, and suitable for sending upstream.
       stops at `snake_game.c:323`. The gdb check has that case (22 of 22 on 1.5.1,
       its own app's symbols through the same links), and skips it where no
       `appsymbols/` is.
+
+92. **One `ikey read` in twenty printed `Dallas FFFFFFFFFFFFFFFF`.** Seen when older
+    releases ran the smoke test for the first time: they print what a read gave
+    without a look at its CRC (0.105.0: 3 of 40 reads of a DS1990A, 1.0.1: 1 of 40).
+    Newer ones read again, so there it had only cost time.
+    - The firmware times a 1-Wire bit with `furi_delay_us()`, a busy loop on
+      `DWT->CYCCNT`. Under TCG every access to a device register takes QEMU's big
+      lock, and whenever the main loop wants that lock (about a thousand times a
+      second) the vCPU thread sleeps 20 to 57 µs on it. A 9 µs low is then 60 µs
+      long, the key (a low under 56 µs is a 1) takes a 0, READ ROM (0x33) is another
+      command, and the key says nothing: all ones.
+    - A probe in the key printed both times of each long low: `low 57 us, to the
+      last CYCCNT read 10 us` (the delay had ended in time, the pin write behind it
+      waited) and `low 91 us, to the last CYCCNT read 65 us` (a read of the counter
+      itself waited).
+    - Timing the low by the vCPU thread's CPU time made it worse and was taken out.
+    - The fix has two parts. CYCCNT is read without the big lock: the DWT asks for
+      lockless I/O, and `qemu/patches/0005` has TCG keep to that for a load (it took
+      the lock regardless). The read takes the lock only when an edge's time waits
+      for it (entry 43). And the key times a slot's low from the fall to the
+      master's last read of CYCCNT, where that lies inside the low: the busy loop's
+      own end, not the pin write after it. A reset is still told by the time that
+      passed, since a firmware may sleep through one.
+    - After it: 40 of 40 on 0.105.0 and 40 of 40 on 1.0.1; the six current firmwares
+      pass the smoke test as before. An existing checkout runs `scripts/setup_qemu.sh`
+      once more (it applies 0005 and builds). Without the patch the machine builds
+      and runs, with the timing it had.
+    - What is left: a host that takes the vCPU thread off its core inside a 9 µs low,
+      and a pin write that waits 290 µs or more (taken as a reset). Both rare.
+    - Seen once in 56 runs while checking this: a Cyfral emulation's capture of 138
+      levels, not 4096. Not found; the capture's log line now says how it ended
+      (`full`, `the firmware stopped`, `no level for a second`).
+    - The older releases themselves (smoke test): 1.4.3 passes all 28 steps; 1.3.4,
+      1.1.2 and 0.99.1 pass 23, the five NFC steps skipped (they use the `nfc`
+      command's shell, which releases before 1.4 do not have). 1.0.1 and 0.105.0 fail
+      one of the 23: reading a Metakom key. `ikey read` finds it there in 8 of 15
+      tries of 10 s (10 of 15 with the emulator as it was before this entry, so not
+      from the fix), and in 15 of 15 on 1.5.1, whose code for it is the same. Open.
 
 ## Things that were right the first time (and why)
 
