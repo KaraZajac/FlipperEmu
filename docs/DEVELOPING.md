@@ -370,15 +370,17 @@ Then `./flipperemu log -f` for what the firmware says, at the level you set
   `./flipperemu run --update PACKAGE` on one that does not.
 - **`./flipperemu update` takes a minute or more.** That is the firmware's updater,
   which works with no USB and starts the Flipper a few times: a minute and a half for
-  the official firmware, two minutes for Unleashed, four for Momentum. The package
+  the official firmware, two minutes for Unleashed, four for Momentum, seven and a
+  half for RogueMaster. The package
   itself is on the card within seconds, with the card out of its slot for that
   moment.
 - **`update --cli` and `fbt flash_usb` take minutes more.** They send the package
   through the firmware's CLI, which takes some 20 KB/s, on a real Flipper too, and a
-  release's package is 2.5 to 12 MB. A second `update --cli` with the same package
+  release's package is 2.5 to 26 MB. A second `update --cli` with the same package
   sends only what changed.
 - **No log after an update.** The updater sets the firmware's log level when it is
-  done: the official one to the default, Momentum's and Unleashed's to none. That is
+  done: the official one to the default, Momentum's, Unleashed's and RogueMaster's
+  to none. That is
   the firmware's doing, and a real Flipper has it too. `update` says so when the level
   is another than before; `./flipperemu log --set-level info` and `./flipperemu reset`
   bring the log back, and `status` shows the level.
@@ -472,8 +474,8 @@ firmware back. That part runs with the firmware's log level at none: the launche
 to lend the updater a level to see its error, and to give none back. And the
 refusals: a folder and a file that are no package, a pulled USB cable, a card that is
 out of its slot, a device that does not run. 29 checks; it passes on the official
-1.5.1, Momentum and Unleashed with their own packages (3, 6 and 4 minutes), and from
-the official firmware to Unleashed with `--package`.
+1.5.1, Momentum, Unleashed and RogueMaster with their own packages (3, 6, 4 and 10
+minutes), and from the official firmware to Unleashed with `--package`.
 `ufbt_check.py` has the real `ufbt flash_usb` go through the wrapper (29 checks now).
 
 By hand: the official self-update script sending a package without a radio stack

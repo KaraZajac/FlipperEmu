@@ -31,13 +31,13 @@ secure enclave, IR receive and transmit,
 Sub-GHz receive and transmit, 125 kHz RFID read, emulate and T5577 write, iButton read
 and emulate, NFC read (NTAG215, MIFARE Classic 1K) and emulate, USB/IP export, warm
 reboot, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed
-unlshd-094**. The window passes `scripts/gui_check.py` (clicked buttons, a recording
-of the screen, Pause, the firmware log and its level, the backlight fading in, a file
-copied to the card, an app dropped on it, the LED blinking while NFC reads, the bench,
-switching off and on, the Left + Back reboot, installing firmware) on the same three,
-off-screen. `scripts/update_check.py` (an update package written to the card of a
-running device and installed there, and the updater's error screen) passes on the
-same three, and from the official firmware to Unleashed.
+unlshd-094** and **RogueMaster RM1024-1347**. The window passes `scripts/gui_check.py`
+(clicked buttons, a recording of the screen, Pause, the firmware log and its level, the
+backlight fading in, a file copied to the card, an app dropped on it, the LED blinking
+while NFC reads, the bench, switching off and on, the Left + Back reboot, installing
+firmware) on the same four, off-screen. `scripts/update_check.py` (an update package
+written to the card of a running device and installed there, and the updater's error
+screen) passes on the same four, and from the official firmware to Unleashed.
 `scripts/ufbt_check.py` (ufbt 0.2.6 building `examples/hello`, launching it there, and
 `ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's and that app's
 symbols) pass on the official one.
@@ -510,7 +510,9 @@ launcher then says that there is no prompt, and that this may be why.
 
 `scripts/files_check.py FIRMWARE` checks all of this on a throwaway device: a folder
 copied there and back through the firmware and through the image, each reading what the
-other wrote, `push --card`, and then the interruptions above.
+other wrote, `push --card`, and then the interruptions above. It passes on the four
+firmwares; RogueMaster's is the one whose storage service has the newer wording of its
+errors ("file/dir doesn't exist", where 1.5.1 says "file/dir not exist").
 
 ### Apps
 
@@ -560,8 +562,8 @@ dist/my_app.fap -> /ext/apps/Tools/my_app.fap (26916 bytes)
   exit status is 1. `./flipperemu log -f` in another terminal shows all of it.
 - **When the loader refuses** (no such app, an app for another API), its reason is
   printed, exit status 1.
-- **When the firmware asks first.** Momentum and Unleashed put a question on the
-  Flipper's screen for an app built for another API ("App Too New ... Continue
+- **When the firmware asks first.** Momentum, Unleashed and RogueMaster put a question
+  on the Flipper's screen for an app built for another API ("App Too New ... Continue
   anyways?") and start nothing until a button is pressed. `app` says after eight
   seconds that the Flipper may be asking, and goes on waiting: answer in the window, or
   with `./flipperemu press right` from another terminal. A question nobody answered in
@@ -576,7 +578,7 @@ behind F5, with its lines in the console.
 
 `scripts/app_check.py FIRMWARE` checks this on a throwaway device with an app the
 firmware brought along, and with the firmware's NFC app closed in the middle of a
-read, for the crash: 25 checks on each of the three firmwares.
+read, for the crash: 25 checks on each of the four firmwares.
 
 ### ufbt and fbt
 
@@ -701,9 +703,9 @@ $ ./flipperemu -d mine update firmware/official-1.5.1/flipper-z-f7-update-1.5.1.
 
 The package is on the card within seconds, whatever its size. The rest is the
 firmware's updater: a minute and a half for the official firmware, two minutes for
-Unleashed, four for Momentum. What the firmware has open on the card at that moment
-it loses, as with a real card that is pulled, and it starts anew for the update
-anyway.
+Unleashed, four for Momentum, seven and a half for RogueMaster with its 25 MB of
+resources. What the firmware has open on the card at that moment it loses, as with a
+real card that is pulled, and it starts anew for the update anyway.
 
 `update --cli` leaves the card where it is and sends the files one by one through the
 firmware's CLI, as the firmware's own tools send them to a real Flipper. The CLI takes
@@ -719,15 +721,15 @@ look at what the updater does with it: it stops, the launcher says so within sec
 and a held Back (`press --hold 1500 back`) starts the firmware that is there.
 
 An updater decides on the firmware's log level when it is done, on a real Flipper too:
-the official one sets the default, Momentum's and Unleashed's set none, and the log is
-silent from then on. `update` says when the level is another than before, with the
+the official one sets the default, the other three set none, and the log is silent
+from then on. `update` says when the level is another than before, with the
 command that sets it again (`log --set-level`). If the level hides the updater's steps
 when you start, it gets `info` for as long as it works, so that an error on its screen
 is seen.
 
 `scripts/update_check.py FIRMWARE [--package PKG]` checks all of that on a throwaway
-device (29 checks: the official firmware, Momentum and Unleashed with their own
-packages, and the official one updated to Unleashed).
+device (29 checks: the official firmware, Momentum, Unleashed and RogueMaster with
+their own packages, and the official one updated to Unleashed).
 
 | | |
 |:-:|:-:|

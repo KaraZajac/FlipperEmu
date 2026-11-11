@@ -1163,6 +1163,30 @@ All three are small, self-contained, and suitable for sending upstream.
       Official to Unleashed: 118 s, 114 the updater. Momentum with its own: 222 s,
       218 the updater. `ufbt flash_usb` through the wrapper: 83 s.
 
+86. **A fourth firmware, and words that changed.** RogueMaster (RM1024-1347,
+    `rm-420`, API 88.23: a firmware.dfu of 828 KB and 25 MB of resources) started on
+    the first try, to its desktop and its CLI, and passed the smoke test as Unleashed
+    does: its `subghz tx` at the CLI "failed to start", which that check skips.
+    - The files check then failed 20 of its 55, all through the firmware: "Storage
+      error: file/dir doesn't exist". Firmware 1.5.1 says "file/dir not exist" there
+      and "file/dir already exist"; the firmware after it says "file/dir doesn't
+      exist" and "file/dir already exists", and RogueMaster is built on that. The
+      launcher went by those words to know that a file is not there yet (which is no
+      error for a push). `StorageError` takes both wordings for the same reason now.
+      The next official release would have had the same failure.
+    - That was behind the two failures of the window check (a file copied to the
+      card; a `.fap` that is not on the card yet) and the four of the update check
+      (a file pushed before the update; `update --cli`) as well.
+    - An app for another API: RogueMaster asks on the screen like Momentum and
+      Unleashed ("App Too New ... Continue anyways?"), and `app` waits and cancels as
+      it does there.
+    - `update` with its own package: 448 s, 444 of them the updater, most of that the
+      25 MB of resources unpacked to the card. Its updater leaves the log level at
+      none, as Unleashed's and Momentum's do.
+    - On RogueMaster: smoke test 27 and one skipped, files 55, app 25, window 30,
+      enclave 35, update 29 (ten minutes). Files again on the official firmware after
+      the change: 55.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

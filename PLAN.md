@@ -54,9 +54,10 @@ NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
       The radio stage is blanked, because a FUS-only CPU2 cannot install a stack.
 - ☐ XIP app loaders (custom firmwares that program FAP code into internal flash and
       execute it there)
-- ◐ Firmware matrix: official 1.5.1, Momentum mntm-012, Unleashed unlshd-094 pass
-      `scripts/smoke_test.py` (now including a warm reboot); add RogueMaster and run it
-      on a schedule
+- ◐ Firmware matrix: official 1.5.1, Momentum mntm-012, Unleashed unlshd-094 and
+      RogueMaster RM1024-1347 (2026-11-10, BRINGUP_LOG 86) pass `scripts/smoke_test.py`
+      (now including a warm reboot) and the files, app, window, enclave and update
+      checks; run them on a schedule
 
 ## M4: senses ◐
 - ☑ Speaker: TIM16 CH1 PWM → QEMU audio (desktop driver or `--audio wav:FILE`); tones

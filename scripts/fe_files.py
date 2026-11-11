@@ -70,8 +70,14 @@ class StorageError(FilesError):
         "file is already open": "an app on the Flipper has that file open",
         "internal error": "the SD card gave an error",
     }
+    # the same two in the words of firmware after 1.5.1 (RogueMaster's has them)
+    SAME = {
+        "file/dir doesn't exist": "file/dir not exist",
+        "file/dir already exists": "file/dir already exist",
+    }
 
     def __init__(self, reason, path=None):
+        reason = self.SAME.get(reason, reason)
         self.reason = reason
         words = self.WORDS.get(reason, reason)
         super().__init__(f"{path}: {words}" if path else words)
