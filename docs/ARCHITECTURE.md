@@ -1015,8 +1015,8 @@ ufbt is not run at all, and `update` sends the package without the stage (BRINGU
   so the log is kept whatever `--serial` connects the port to. (The chardev is a hub
   of two, as LPUART1's below: `uart-user`, what `--serial` said, and `uart-own`, the
   socket `devices/NAME/usart.sock` for `flipperemu uart --port usart`. The firmware
-  logs with the receiver off, so what comes in is dropped until an app opens the
-  port.) How much the firmware
+  logs with the receiver off, so what comes in is not read until an app opens the
+  port: its start bit is a pulse on pin 14, as below.) How much the firmware
   logs is the low nibble of RTC BKP1R (`FuriLogLevel`; 0 is its default, info), which
   it reads once, when it starts. The machine property `log-level` is that nibble by
   name: `-M flipper-zero,log-level=debug` sets it before the first instruction, and
@@ -1057,14 +1057,30 @@ ufbt is not run at all, and `update` sends the package without the stage (BRINGU
   overrun (the next byte waits in the backend), framing and parity errors. The
   machine connects `dma-rx` only where the device has it, so a QEMU tree without the
   patch gives a machine that runs.
+- **A start bit on the RX pin**: `qemu/patches/0008` gives the UART model one more
+  line, `rx-unheard`, pulsed for a byte that comes while the receiver is off (or the
+  whole port is). The firmware's expansion service waits that way for a module: RE
+  clear, the RX pin an input with a pull-up and an EXTI interrupt on its fall.
+  `flipper_rx_unheard()` in `flipper_zero.c` puts the byte's start bit on the pin:
+  it drives PB7 (USART1) or PC0 (LPUART1) low through the GPIO model's input, as a
+  hold from outside does, and a timer on the virtual clock lets go a bit's time at
+  9600 baud later (104 µs), back to what was held there, or to nothing. Both edges
+  go into the pins' record. A pin the firmware has as an output is left alone, and a
+  machine reset ends a pulse. Only the start bit is on the pin, not the byte's data
+  bits: the firmware's handshake needs the edge alone, and takes the port (at 9600
+  baud, with the receiver on) before it reads anything. Connected only where the
+  device has the line, as `dma-rx`.
 - **The ports by name**: the machine property `header-serial` (read only) is the two
   ports as the firmware has them at that moment, a word for each.
-  `USART1:13:14:230215:8N1:on:off` is the name, the TX and the RX pin by their
+  `USART1:13:14:230215:8N1:on:edge` is the name, the TX and the RX pin by their
   numbers on the header, the baud rate that BRR and PRESC give (0 while UE is
   clear), the frame (M0 and M1, PCE and PS, STOP), whether the transmitter is on
   (TE), and who is told of a byte that comes in: `irq` (RXNEIE), `dma` (DMAR), `off`
-  (RE is clear: the byte is dropped) or `unread` (RE is set and neither of the two:
-  the byte waits). `flipper_zero.c` makes it from the UART model's registers when it
+  (RE is clear: the byte is dropped), `edge` (RE is clear, or the port is off, and
+  the RX pin is an input whose EXTI line is this port's, with the falling edge and
+  the interrupt on: the byte's start bit is a call) or `unread` (RE is set and
+  neither of the two: the byte waits). `flipper_zero.c` makes it from the UART
+  model's registers, and for `edge` from the GPIO, SYSCFG and EXTI models', when it
   is asked, with PRESC read through the bus, so that it builds on a QEMU tree whose
   model has no such register. `scripts/fe_header.py` turns it into words
   (`parse_serial`, `port_text`: a rate within half a percent of a usual one is said

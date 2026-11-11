@@ -1975,6 +1975,40 @@ big lock, entry 92).
       understood.
     - `scripts/uart_check.py`: 68 checks (64 before); `scripts/gpio_check.py`: 54
       (53); `scripts/gui_check.py`: 47 (45), on the five firmwares.
+108. **A byte as a module's call (QEMU patch 0008).** The firmware's expansion
+    service was never woken here. It waits for a module with the log port's
+    receiver off and an interrupt on the fall of pin 14 (entry 107), and a module
+    says that it is there by pulling that pin low for a moment. What `uart send`
+    wrote to the port went to the UART model, which dropped it, its receiver being
+    off, and the pin never moved.
+    - QEMU's model now says when that happens: patch 0008 gives it a line,
+      `rx-unheard`, pulsed for each byte that comes while the receiver is off.
+    - The machine puts the byte's start bit on the pin: PB7 or PC0 low through the
+      GPIO model's input, and a timer on the virtual clock that lets go a bit's
+      time at 9600 baud later, back to what was held there or to nothing. The
+      pins' record has both edges. A pin the firmware drives is left alone.
+    - The firmware does the rest on its own: the EXTI interrupt, its expansion
+      worker takes the port from the log, sets 9600 baud, sends its heartbeat
+      (`01 01`), waits 250 ms for a module's baud rate, gives the port back and
+      waits again. In a record of it pin 14 is low for 137 µs, the port's own
+      (`x`) 1.1 ms after that, and let go 254 ms later.
+    - `header-serial` has a fifth word for who hears, `edge`: the receiver off
+      (or the whole port) and the RX pin an input whose EXTI line is on this
+      port, with the falling edge and the interrupt on. `gpio`, `status`, `uart`
+      and the window say it as `its receiver is off, and the firmware waits for a
+      call on pin 14 (an interrupt on its fall, as for an expansion module)`, and
+      `uart send` says after such a byte what the firmware took it as, where it
+      said before that nobody had heard it.
+    - With Listen UART at LPUART in the firmware's settings the same goes for pin
+      16, with LPUART1 off, and the heartbeat comes out of pin 15 (by hand, on
+      the official 1.5.1).
+    - Only the start bit is on the pin. A byte's data bits are not, with the
+      receiver on or off: the handshake needs the edge alone, and the firmware
+      has the port open before it reads anything.
+    - Not there: the module's side of the protocol as a tool (the baud rate,
+      heartbeats, an RPC session over the port).
+    - `scripts/uart_check.py`: 73 checks (68 before), on the five firmwares;
+      `gpio_check.py` (54) and `gui_check.py` (47) want the new words.
 
 ## Things that were right the first time (and why)
 

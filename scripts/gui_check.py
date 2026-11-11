@@ -329,9 +329,10 @@ class Driver:
         first = ports.get("USART1", "")
         check("pins: the two serial ports as the firmware has them, in the "
               "GPIO menu as `gpio` has them, and on pin 13: the log's, which "
-              "does not listen, and one that is off",
-              re.match(r"Pins 13 and 14 \(USART1\): \d+ baud, 8N1; what comes "
-                       r"in is dropped", first)
+              "waits for a call, and one that is off",
+              re.match(r"Pins 13 and 14 \(USART1\): \d+ baud, 8N1; its "
+                       r"receiver is off, and the firmware waits for a call "
+                       r"on pin 14", first)
               and first.split(": ", 1)[1] in said
               and ports.get("LPUART1") == "Pins 15 and 16 (LPUART1): off "
                                           "(nothing has opened it)"

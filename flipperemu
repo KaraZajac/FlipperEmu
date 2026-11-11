@@ -2231,8 +2231,10 @@ def uart_state(dev, port):
 
 
 def uart_deaf(state):
-    """Why the firmware hears nothing on a port, or None: it does, or the
-    emulator cannot tell"""
+    """Why the firmware hears nothing on a port, or None: it does (if only
+    a call, on a pin that it waits at), or the emulator cannot tell"""
+    if state and state["hears"] == "edge":
+        return None
     if state and not state["on"]:
         return f"nothing in the firmware has the port open ({state['name']} is off)"
     if state and state["hears"] == "off":
@@ -2445,6 +2447,7 @@ def cmd_uart(args):
         except OSError:
             start = 0
         deaf = uart_deaf(states.get(chip))
+        called = states.get(chip, {}).get("hears") == "edge"
         if not uart_put(line, data, args.seconds):
             state = uart_state(dev, port)
             print(f"[{dev.name}] pins {pins}: "
@@ -2460,6 +2463,13 @@ def cmd_uart(args):
         if deaf and deaf == uart_deaf(uart_state(dev, port)):
             print(f"[{dev.name}] pins {pins}: {deaf}: that was sent, and "
                   "nobody heard it", file=sys.stderr)
+        # (the firmware's expansion service waits so: the start bit of the
+        # first byte is the short low level a module calls it with)
+        if called:
+            print(f"[{dev.name}] pins {pins}: {chip}'s receiver was off, and "
+                  f"the firmware waited for a call on pin {states[chip]['rx']}"
+                  ": it took that as one, as from an expansion module, and "
+                  "read none of it as text", file=sys.stderr)
         if want is None:
             return 0
         seen, came = uart_seen(dev, port, start, want, args.seconds, line)

@@ -16,7 +16,7 @@ level with its time, a VCD file as logic analyzers' programs read (Record).
 Four of the pins are two serial ports.  The machine's `header-serial` has them
 as the firmware has set them up, "NAME:TX:RX:BAUD:FRAME:SENDS:HEARS":
 
-    USART1:13:14:230215:8N1:on:off LPUART1:15:16:0:8N1:off:off
+    USART1:13:14:230215:8N1:on:edge LPUART1:15:16:0:8N1:off:off
 
 Copyright (c) 2026, Kara Zajac
 SPDX-License-Identifier: BSD-3-Clause
@@ -81,11 +81,13 @@ def parse_serial(text):
     half a percent, or else what the divider gives, which is "divider"), its
     "frame" (8N1), does it send ("sends"), and who takes what comes in
     ("hears": irq, dma; off: nobody, the receiver is off and a byte is
-    dropped; unread: nobody, the receiver is on and a byte waits)."""
+    dropped; edge: the same, but an interrupt waits for the RX pin to fall,
+    and a byte's start bit is that: so the firmware waits for an expansion
+    module; unread: nobody, the receiver is on and a byte waits)."""
     ports = []
     for word in text.split():
         name, tx, rx, baud, frame, sends, hears = word.split(":")
-        if hears not in ("off", "irq", "dma", "unread"):
+        if hears not in ("off", "edge", "irq", "dma", "unread"):
             raise ValueError(word)
         divider = int(baud)
         near = min(RATES, key=lambda r: abs(r - divider))
@@ -101,13 +103,21 @@ def port_name(port, first="p"):
     return f"{first}ins {port['tx']} and {port['rx']} ({port['name']})"
 
 
+def port_calls(port):
+    """What a port that waits for a call is said to do"""
+    return (f"the firmware waits for a call on pin {port['rx']} (an "
+            "interrupt on its fall, as for an expansion module)")
+
+
 def port_text(port):
     """How the firmware has a serial port, in words"""
     if not port["on"]:
-        return "off (nothing has opened it)"
+        return ("off (nothing has opened it)"
+                + ("; " + port_calls(port) if port["hears"] == "edge" else ""))
     return (f"{port['baud']} baud, {port['frame']}; "
             + ("" if port["sends"] else "its transmitter is off; ")
             + {"off": "what comes in is dropped (its receiver is off)",
+               "edge": "its receiver is off, and " + port_calls(port),
                "irq": "what comes in is read (by interrupt)",
                "dma": "what comes in is read (by DMA)",
                "unread": "what comes in waits to be read (its receiver is "

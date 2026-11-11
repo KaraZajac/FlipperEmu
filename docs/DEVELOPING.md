@@ -882,10 +882,11 @@ the two changes the firmware makes while it watches and leaves no record behind;
 record goes on over a reset; a record of pin 17 while the firmware reads a DS1990A
 has the reset pulse and, right after it, the key's presence pulse; and a record the
 emulator was stopped under is whole. Beneath the pins it wants the two serial ports
-as the firmware starts with them: the log's with a baud rate and its receiver off,
-the other one off. It passes on the official 1.5.1, the official dev build,
-Momentum, Unleashed and RogueMaster (54 checks). It has no app of its own: an
-interrupt on a held pin and an open-drain output were not tried. The window's pins
+as the firmware starts with them: the log's with a baud rate, its receiver off and
+a call waited for on pin 14, the other one off. It passes on the official 1.5.1,
+the official dev build, Momentum, Unleashed and RogueMaster (54 checks). It has no
+app of its own: an interrupt on a held pin and an open-drain output were not tried.
+The window's pins
 are in `scripts/gui_check.py`: a click on pin 2 and Hold it high (the window has it
 high with a wire on it, and the launcher's `gpio PA7` from outside says `high`),
 pin 3 held low, the GPIO menu's lines, Let go of all pins, the clicks on 13 and 17
@@ -914,9 +915,14 @@ serial port's bytes out of pin 13, a short line and 600 bytes into pin 14 at the
 host, the CLI back after Back and Exit. All along, what the firmware has each port
 as: both in `uart` after a start, the note of a send that nobody heard, the
 script's port at 115200 baud and read by interrupt in `gpio` and in `status
---json`, 1200 baud when the script asks for that, and the bridge's read by DMA. It
-passes on the official 1.5.1, the official dev build, Momentum, Unleashed and
-RogueMaster (68 checks). It has no app in C.
+--json`, 1200 baud when the script asks for that, and the bridge's read by DMA. And
+a module's call, right after the start: the log's port waits for one, a byte sent
+there is answered with the expansion service's heartbeat (`01 01`) and `uart send`
+says what the firmware took it as, a record of the pins has pin 14 low for the time
+of a start bit and then as the port's, a byte to the other port (off, nobody
+waiting) is a start bit on pin 16 and no more, and the firmware waits again and
+answers a second call. It passes on the official 1.5.1, the official dev build,
+Momentum, Unleashed and RogueMaster (73 checks). It has no app in C.
 
 `scripts/gdb_check.py FIRMWARE` does what the gdb section shows, with gdb in batch
 mode: a backtrace of the firmware with functions and lines, the breakpoint in the

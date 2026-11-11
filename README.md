@@ -1341,7 +1341,7 @@ $ ./flipperemu gpio
   16  PC0   analog                         floating
   17  PB14  analog                         high      the iButton pin (`ibutton` holds a key to it)
 its serial ports, as the firmware has them (`uart` sends and reads there)
-  pins 13 and 14 (USART1)   230400 baud, 8N1; what comes in is dropped (its receiver is off)
+  pins 13 and 14 (USART1)   230400 baud, 8N1; its receiver is off, and the firmware waits for a call on pin 14 (an interrupt on its fall, as for an expansion module)
   pins 15 and 16 (LPUART1)  off (nothing has opened it)
 ```
 
@@ -1351,12 +1351,13 @@ pins that are outputs, and those held), and `status --json` all of it.
 
 Beneath the pins are the header's two serial ports as the firmware has them at that
 moment: off, or the baud rate and the frame it set, and what becomes of a byte that
-comes in. It is read (by interrupt or by DMA), it is dropped (the receiver is off, as
-the log's port has it until an app opens that port), or it waits to be read (the
-receiver is on, with no interrupt and no DMA for it). `status` has the same two
-lines. An app with the wrong baud rate, or one that opened the other port than the
-one your wire is on, shows here without a look at its source. More on the ports
-[below](#the-serial-port-on-pins-15-and-16).
+comes in. It is read (by interrupt or by DMA), it is dropped (the receiver is off),
+it is a call (the receiver is off and the firmware waits for the RX pin to fall, as
+it does on the log's port for an expansion module, until an app opens that port), or
+it waits to be read (the receiver is on, with no interrupt and no DMA for it).
+`status` has the same two lines. An app with the wrong baud rate, or one that opened
+the other port than the one your wire is on, shows here without a look at its
+source. More on the ports [below](#the-serial-port-on-pins-15-and-16).
 
 In the window the pins of the drawn Flipper are the same thing by hand. A pin is lit
 amber while it is high and blue while it is low. A click on one has a menu to hold it
@@ -1512,16 +1513,22 @@ $ ./flipperemu uart
 - `off (nothing has opened it)` is LPUART1 until an app asks for it, and again when
   the app has closed it. An app that should have the port and does not is seen here
   first.
-- `what comes in is dropped (its receiver is off)` is the log's port, USART1, as the
-  firmware starts: it only sends there.
+- `its receiver is off, and the firmware waits for a call on pin 14` is the log's
+  port, USART1, as the firmware starts. It sends its log there, and its expansion
+  service has an interrupt on the fall of pin 14, which is how a module says that it
+  is there. A byte sent to the port then is that call, and is not read as text
+  (below, at "A module's call").
+- `what comes in is dropped (its receiver is off)` is a port that only sends, with
+  nothing waiting at its RX pin either: a driver of your own may have one so.
 - `what comes in waits to be read` is the same port while an app has the other one
-  open: the firmware then switches USART1's receiver on (its expansion service,
-  which watched pin 14 for a module, has stepped aside) and reads nothing from it.
+  open, or with Listen UART at None (Settings, Expansion Modules): the firmware
+  then switches USART1's receiver on (its expansion service, which watched pin 14
+  for a module, has stepped aside) and reads nothing from it.
   The first byte sent there is taken and never read, the next ones wait. (A driver
   of your own that polls its port has the port this way too, and does read.)
 - In `status --json` it is `serial`: for each port `name`, `tx`, `rx`, `on`, `baud`,
   `divider` (the rate as the register has it), `frame`, `sends` and `hears` (`off`,
-  `irq`, `dma` or `unread`).
+  `edge`, `irq`, `dma` or `unread`; `edge` is the call that is waited for).
 
 What a wire does, and this does too: what is sent while no app has the port open is
 lost. `uart send` takes it, exits 0, and says so on stderr:
@@ -1543,7 +1550,8 @@ for these two:
 ```
 
 - Until an app opens that port the firmware logs on it (it is the log of
-  `flipperemu log`), with only its transmitter on: what is sent then is lost.
+  `flipperemu log`), with only its transmitter on. What is sent then is not read:
+  its first byte is a module's call (below).
 - What an app sends is in `devices/NAME/uart.log`, among the log's lines, as a
   serial adapter on the two pins would have it. When the app closes the port the
   log is back. `uart term --port usart` shows both as they come.
@@ -1582,6 +1590,43 @@ $ ./flipperemu press back left                      # "Exit USB-UART?": Exit
 While the bridge is on, the CLI is not there: `cli`, `push` and what else goes
 through it wait until Back and Exit have given the port back.
 
+**A module's call.** An expansion module says that it is there by pulling pin 14 low
+for a moment, and the firmware's expansion service waits for that with an interrupt
+on the pin's fall, the port's receiver off. A byte's start bit is such a pulse. So
+while `gpio` says `the firmware waits for a call on pin 14`, one byte sent to the
+port is the call:
+
+```
+$ ./flipperemu uart send --port usart --hex 00 --expect "\x01\x01"
+[flipper] pins 13 and 14: USART1's receiver was off, and the firmware waited for a call on pin 14: it took that as one, as from an expansion module, and read none of it as text
+```
+
+The firmware stops its log, opens the port at 9600 baud and sends its heartbeat, the
+two bytes `01 01`. A module would answer with the baud rate it wants. When nothing
+comes for 250 ms the firmware closes the port, the log is back, and it waits for the
+next call.
+
+- The pin itself moves: low for about a bit's time at 9600 baud, then let go. A
+  record of the pins (`gpio record`) has it (137 µs in one that was looked at), and
+  after it pin 14 as the port's own (`x`) for the quarter of a second in which the
+  firmware listens.
+- A byte to a port whose receiver is off is that pulse on its RX pin, whatever the
+  firmware makes of it. With nobody waiting, it is in the record and nowhere else,
+  and `uart send` says that nobody heard it.
+- A key pressed in the terminal that `run` was started in is such a byte too, as that
+  terminal is the port's other end unless `--serial` says otherwise: the log stops
+  for that quarter of a second, and two bytes that are no text come out.
+- With Listen UART at LPUART (Settings, Expansion Modules) the firmware waits on pin
+  16 instead, with LPUART1 off: `off (nothing has opened it); the firmware waits for
+  a call on pin 16`. The heartbeat then comes out of pin 15.
+- What a module says after the heartbeat (a baud rate, then commands, each within
+  250 ms: `documentation/ExpansionModules.md` in the firmware's tree) no tool here
+  speaks yet. A program of yours on the port's pty can: one was answered there, its
+  baud rate confirmed and its heartbeats returned (a run with `--serial pty`). The
+  first byte after the pty is opened may be late (a quarter of a second in one
+  trial, more than half a second in another), as QEMU looks for a newly opened pty
+  at intervals. A second after the opening a byte was answered within 3 ms.
+
 What it does not do yet:
 
 - Sending is not paced: what the firmware sends is there at once, at any baud rate.
@@ -1598,17 +1643,17 @@ What it does not do yet:
   and closed at once (`echo hi > lpuart.tty`) waits for the next program that opens
   it. `uart send` and a TCP port have neither.
 - What is typed before `uart term` has printed its first line is lost.
-- A pulse on pin 14 does not start the firmware's expansion-module handshake: the
-  pin itself is not driven by what is sent (`gpio` shows it as the firmware left
-  it).
+- A byte that a receiver takes does not move the RX pin: `gpio` and a record of the
+  pins have that pin as the port's (`unknown`, `x`), not bit by bit. Only the start
+  bit of a byte that came while the receiver was off is on the pin.
 
 Underneath, each port is a QEMU chardev hub of two: the pty, TCP port or terminal
 for your program, and a socket (`devices/NAME/lpuart.sock`, `usart.sock`) for `uart
 send` and `uart term`, which is why the two do not take the port from each other.
 
 `scripts/uart_check.py FIRMWARE` checks both ports with that script on the Flipper's
-side, and the bridge: 68 checks, on the official 1.5.1, the official dev build,
-Momentum, Unleashed and RogueMaster.
+side, the bridge, and a module's call: 73 checks, on the official 1.5.1, the
+official dev build, Momentum, Unleashed and RogueMaster.
 
 Two bugs were in the way, and both are fixed (docs/BRINGUP_LOG.md, 104). After every
 deep sleep the firmware switches its two UARTs back on, also one that no app has: on
@@ -1618,10 +1663,13 @@ afterwards hung in its set-up. And QEMU wrote a byte twice into a port's log fil
 when the program on the port was slow to read (`qemu/patches/0006`).
 
 The baud rate, the idle line and reception by DMA are an addition to QEMU's UART
-model (`qemu/patches/0007`, docs/BRINGUP_LOG.md, 106). **A QEMU tree that was set up
-before these two patches came (2026-11-11) wants `scripts/setup_qemu.sh` once more.**
-Without 0007 the machine still runs, with the port as it was: about 1000 bytes a
-second at any baud rate, and a bridge that sends and does not hear.
+model (`qemu/patches/0007`, docs/BRINGUP_LOG.md, 106), and the call is one more
+(`qemu/patches/0008`, 108): the model tells the board of a byte that came while its
+receiver was off. **A QEMU tree that was set up before these three patches came
+(2026-11-11) wants `scripts/setup_qemu.sh` once more.** Without 0007 the machine
+still runs, with the port as it was: about 1000 bytes a second at any baud rate, and
+a bridge that sends and does not hear. Without 0008 it runs too, and no byte is a
+call.
 
 ### The secure enclave
 
@@ -1780,7 +1828,7 @@ flipperemu             launcher / device manager
 qemu/hw/arm/flipper/   the QEMU machine + STM32WB55 SoC + board devices (C)
 qemu/patches/          fixes to upstream QEMU (SysTick, SD over SPI, open-drain GPIO,
                        register reads without the big lock, a chardev's log file,
-                       the UART's reception)
+                       the UART's reception, a byte that no receiver took)
 scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_monitor.py,
                        fe_cli.py, fe_files.py (files on the card), fe_apps.py
                        (apps and the loader), fe_ir.py,

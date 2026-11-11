@@ -131,6 +131,8 @@ struct FlipperZeroState {
     bool halt_rest;              /* ... and the CPU rests because of it */
     bool halt_said;
     uint8_t hdr_hold[HDR_PINS];  /* what the outside holds on a header pin */
+    QEMUTimer *hdr_rx_end[2];    /* a start bit on a serial port's RX pin */
+    bool hdr_rx_low[2];
     FILE *hdr_rec;               /* the record of the header's levels (VCD) */
     char *hdr_rec_path;
     char hdr_rec_last[HDR_PINS]; /* ... each pin's level as it has it */
@@ -528,6 +530,29 @@ static bool header_driven(FlipperZeroState *s, int i)
            !extract32(g->otyper, header[i].pin, 1);
 }
 
+static int header_index(int number)
+{
+    for (int i = 0; i < HDR_PINS; i++) {
+        if (header[i].number == number) {
+            return i;
+        }
+    }
+    g_assert_not_reached();
+}
+
+/* Does the firmware wait for a header pin to fall?  An input, whose EXTI
+ * line is the pin's port's, with the falling edge and the interrupt on. */
+static bool header_waits_fall(FlipperZeroState *s, int i)
+{
+    int pin = header[i].pin;
+
+    return extract32(header_port(s, i)->moder, 2 * pin, 2) == 0 &&
+           extract32(s->soc.syscfg.exticr[pin / 4], 4 * (pin % 4), 3) ==
+               header[i].port - 'A' &&
+           extract32(s->soc.exti.ftsr[0], pin, 1) &&
+           extract32(s->soc.exti.imr[0], pin, 1);
+}
+
 /*
  * What the outside holds, put on the pins of a port (-1: of all).  QEMU's
  * GPIO model lets go of a pin when the firmware makes it a push-pull
@@ -751,10 +776,13 @@ static char *flipper_get_header(Object *obj, Error **errp)
  * "NAME:TX:RX:BAUD:FRAME:SENDS:HEARS": TX and RX its pins by their numbers on
  * the header; BAUD what its divider gives, 0 while the port is off; FRAME as
  * in 8N1; SENDS on or off; HEARS off, irq or dma (who is told of a byte), or
- * unread: the receiver is on and nobody is told, so a byte waits.
+ * unread: the receiver is on and nobody is told, so a byte waits; or edge:
+ * the receiver is off, and an interrupt waits for the RX pin to fall, which
+ * is how the firmware waits for an expansion module's call.
  */
-static void serial_port(GString *out, const char *name, hwaddr base,
-                        Stm32l4x5UsartBaseState *u, bool lp, int tx, int rx)
+static void serial_port(FlipperZeroState *s, GString *out, const char *name,
+                        hwaddr base, Stm32l4x5UsartBaseState *u, bool lp,
+                        int tx, int rx)
 {
     static const uint16_t prescaler[16] = {
         1, 2, 4, 6, 8, 10, 12, 16, 32, 64, 128, 256, 256, 256, 256, 256
@@ -789,7 +817,9 @@ static void serial_port(GString *out, const char *name, hwaddr base,
                            extract32(u->cr1, 9, 1) ? 'O' : 'E',
                            stop[extract32(u->cr2, 12, 2)],
                            on && extract32(u->cr1, 3, 1) ? "on" : "off",
-                           !on || !extract32(u->cr1, 2, 1) ? "off" :
+                           !on || !extract32(u->cr1, 2, 1) ?
+                           (header_waits_fall(s, header_index(rx)) ?
+                            "edge" : "off") :
                            extract32(u->cr3, 6, 1) ? "dma" :
                            extract32(u->cr1, 5, 1) ? "irq" : "unread");
 }
@@ -799,8 +829,8 @@ static char *flipper_get_header_serial(Object *obj, Error **errp)
     FlipperZeroState *s = FLIPPER_ZERO(obj);
     GString *out = g_string_new(NULL);
 
-    serial_port(out, "USART1", 0x40013800, &s->soc.usart1, false, 13, 14);
-    serial_port(out, "LPUART1", 0x40008000, &s->soc.lpuart1, true, 15, 16);
+    serial_port(s, out, "USART1", 0x40013800, &s->soc.usart1, false, 13, 14);
+    serial_port(s, out, "LPUART1", 0x40008000, &s->soc.lpuart1, true, 15, 16);
     return g_string_free(out, false);
 }
 
@@ -863,10 +893,70 @@ static void flipper_set_header(Object *obj, const char *value, Error **errp)
     }
 }
 
+/*
+ * A character came to a serial port of the header while its receiver was
+ * off (the UART's "rx-unheard", qemu/patches/0008).  The UART drops it, but
+ * on a wire its start bit is on the RX pin all the same, and that is where
+ * the firmware waits for an expansion module: with the receiver off, and an
+ * interrupt on the pin's falling edge.  So the pin goes low from outside
+ * for a bit time at 9600 baud (the speed such a module begins at), and is
+ * then let go, or given back to what the outside holds on it.
+ */
+#define HDR_RX_PULSE_NS (NANOSECONDS_PER_SECOND / 9600)
+
+static const uint8_t hdr_rx_pin[2] = { 14, 16 };    /* USART1, LPUART1 */
+
+static void flipper_rx_pulse_end(FlipperZeroState *s, int n)
+{
+    int i = header_index(hdr_rx_pin[n]);
+
+    if (!s->hdr_rx_low[n]) {
+        return;
+    }
+    s->hdr_rx_low[n] = false;
+    if (s->hdr_hold[i] == HDR_FREE) {
+        object_property_set_uint(OBJECT(header_port(s, i)),
+                                 "disconnected-pins", 1u << header[i].pin,
+                                 &error_abort);
+    } else {
+        flipper_header_held(s, header[i].port - 'A');
+    }
+    flipper_header_look(s, header[i].port - 'A');
+}
+
+static void flipper_usart_pulse_end(void *opaque)
+{
+    flipper_rx_pulse_end(opaque, 0);
+}
+
+static void flipper_lpuart_pulse_end(void *opaque)
+{
+    flipper_rx_pulse_end(opaque, 1);
+}
+
+static void flipper_rx_unheard(void *opaque, int n, int level)
+{
+    FlipperZeroState *s = opaque;
+    int i = header_index(hdr_rx_pin[n]);
+
+    if (!level || header_driven(s, i)) {    /* (an output: it would fight) */
+        return;
+    }
+    s->hdr_rx_low[n] = true;
+    qemu_set_irq(soc_in(s, header[i].port, header[i].pin), 0);
+    flipper_header_look(s, header[i].port - 'A');
+    timer_mod(s->hdr_rx_end[n],
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + HDR_RX_PULSE_NS);
+}
+
 /* External levels the board holds on MCU pins. A GPIO port reset releases
  * external drivers, so these are re-applied after every system reset. */
 static void flipper_drive_pins(FlipperZeroState *s)
 {
+    for (int n = 0; n < 2; n++) {       /* (a start bit: the reset ended it) */
+        timer_del(s->hdr_rx_end[n]);
+        s->hdr_rx_low[n] = false;
+    }
     flipper_header_held(s, -1);         /* the header: as the outside has it */
     flipper_sd_detect(s);
     qemu_set_irq(soc_in(s, 'C', 2), 0);     /* SPI2 MISO idle low */
@@ -1289,6 +1379,19 @@ static void flipper_zero_init(MachineState *machine)
     }
     armv7m_load_kernel(s->soc.armv7m.cpu, machine->kernel_filename,
                        WB55_FLASH_BASE, WB55_FLASH_SIZE);
+
+    s->hdr_rx_end[0] = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                    flipper_usart_pulse_end, s);
+    s->hdr_rx_end[1] = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                    flipper_lpuart_pulse_end, s);
+    for (int n = 0; n < 2; n++) {
+        dev = DEVICE(n ? &s->soc.lpuart1 : &s->soc.usart1);
+        /* (a line of qemu/patches/0008: a tree without it still runs) */
+        if (object_property_find(OBJECT(dev), "rx-unheard[0]")) {
+            qdev_connect_gpio_out_named(dev, "rx-unheard", 0,
+                qemu_allocate_irq(flipper_rx_unheard, s, n));
+        }
+    }
 
     s->halt_watch = timer_new_ns(QEMU_CLOCK_VIRTUAL, flipper_halt_watch, s);
     timer_mod(s->halt_watch,

@@ -8,7 +8,10 @@ submission. 0005 is less a bug than a limit: the machine builds and runs without
 its 1-Wire timing is then as it was (about one iButton read in twenty goes wrong).
 0007 is an addition more than a fix: without it the machine runs, and its serial ports
 receive as they did (a byte a millisecond at any baud rate, nothing by DMA).
-A source tree that was set up before a patch came (0006 and 0007: 2026-11-11) gets it
+0008 is an addition too: without it the machine runs, and a byte that comes while a
+port's receiver is off is dropped and no more (no start bit on the RX pin, so the
+firmware's expansion service never sees a module call).
+A source tree that was set up before a patch came (0006 to 0008: 2026-11-11) gets it
 from one more run of that script.
 
 | patch | QEMU file | bug |
@@ -20,6 +23,7 @@ from one more run of that script.
 | 0005 | `accel/tcg/cputlb.c` | TCG takes the big lock for every device register access, also where the region asked for lockless I/O: a guest that busy-waits on a counter register sleeps 20 to 50 µs on the lock whenever the main loop has it |
 | 0006 | `chardev/char.c` | a chardev with a `logfile` logged a byte at once when its backend could not take it yet (EAGAIN), and again when it was written: every byte that had to wait was in the log twice |
 | 0007 | `hw/char/stm32l4x5_usart.c` | reception lacked what a driver uses: no request to a DMA channel (and no byte-wide register access for it), no IDLE flag, no PRESC register, the LPUART's baud rate by the USART's formula, and bytes taken at the main loop's pace instead of the baud rate |
+| 0008 | `hw/char/stm32l4x5_usart.c` | a byte that came while the receiver was off was dropped without a word: on hardware its start bit is still a falling edge on the RX pin, which a board may wait for with an interrupt. A line `rx-unheard` tells the board |
 
 **Licence:** these patches modify QEMU's own source files, which are GPL-2.0-or-later,
 so the patches are GPL-2.0-or-later too, unlike the rest of this repository (BSD-3-Clause).

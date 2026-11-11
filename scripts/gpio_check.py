@@ -93,9 +93,11 @@ def start_checks(b):
                        row(out, "PB7"))
           and "iButton" in row(out, "PB14"), out)
     check("... beneath them the two serial ports as the firmware has them: "
-          "the log's, which sends and does not listen, and one that is off",
-          re.search(r"\n  pins 13 and 14 \(USART1\) +\d+ baud, 8N1; what "
-                    r"comes in is dropped \(its receiver is off\)\n"
+          "the log's, which sends and waits for a call, and one that is off",
+          re.search(r"\n  pins 13 and 14 \(USART1\) +\d+ baud, 8N1; its "
+                    r"receiver is off, and the firmware waits for a call on "
+                    r"pin 14 \(an interrupt on its fall, as for an expansion "
+                    r"module\)\n"
                     r"  pins 15 and 16 \(LPUART1\) +off \(nothing has opened "
                     r"it\)\n$", out), out)
     code, out, err, took = fe(b, "gpio", "PA7")

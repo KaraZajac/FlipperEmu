@@ -18,8 +18,12 @@ status 1 after the time given.  The pins say what they are in `gpio`.  A
 program on the port's pty is answered too, and hears what `uart send` gets;
 `uart term` on a terminal of its own, with a second `uart` refused meanwhile.
 The script again, and after a reset.  Then pins 13 and 14, where the firmware
-logs: `uart wait --port usart` reads the log, what is sent while the firmware
-only logs is lost, and the same script on that port is answered the same way
+logs: `uart wait --port usart` reads the log.  The firmware waits there for
+an expansion module, with the port's receiver off and an interrupt on pin 14's
+fall, and says so; a byte sent then is a module's call: pin 14 is low for a
+bit in the pins' record, the firmware answers with its heartbeat at 9600 baud,
+and waits again when no module goes on; a byte to the port that is off is a
+start bit on pin 16.  The same script on that port is answered the same way
 (a line, 900 characters, `uart term`, the two ports not in each other's way),
 with the firmware's log back on the pins when the script has closed the port.
 The port's speed: for a script at 1200 baud 240 bytes take the two seconds
@@ -48,6 +52,7 @@ import time
 import tty
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import fe_header  # noqa: E402
 from files_check import ROOT, Bench, CRASH, check, results  # noqa: E402
 
 ECHO = ROOT / "examples" / "uart" / "echo.js"
@@ -153,11 +158,13 @@ def open_checks(b):
           and f"pins 15 and 16 (LPUART1): {os.readlink(link)}" in lines[0]
           and "pins 13 and 14 (USART1): a file" in lines[2], out + err)
     check("... and how the firmware has them: the one off, the other at its "
-          "log's speed, and deaf", len(lines) == 4
+          "log's speed, its receiver off", len(lines) == 4
           and lines[1].endswith("the firmware has it as: off (nothing has "
                                 "opened it)")
-          and re.search(r"has it as: \d+ baud, 8N1; what comes in is dropped "
-                        r"\(its receiver is off\)$", lines[3]), out + err)
+          and re.search(r"has it as: \d+ baud, 8N1; its receiver is off, and "
+                        r"the firmware waits for a call on pin 14 \(an "
+                        r"interrupt on its fall, as for an expansion "
+                        r"module\)$", lines[3]), out + err)
     code, out, err, took = fe(b, "uart", "send", "stale\\n")
     check("a line sent while no app has the port open: taken (and lost, as "
           "with nothing wired), exit 0, and told that nobody heard it",
@@ -339,6 +346,75 @@ def close_checks(b, p):
           f"{tx}\n{rx}\n{err}")
 
 
+def port_state(b, name):
+    """A serial port of the header, as `status --json` has it"""
+    code, out, err, took = fe(b, "status", "--json")
+    try:
+        return next(p for p in json.loads(out)["serial"] if p["name"] == name)
+    except (ValueError, KeyError, TypeError, StopIteration):
+        return {}
+
+
+def start_bit(path, pin):
+    """A pin in a record of the header: (the ns it was low for, before it
+    was again what it had been: None if it never was; its levels after
+    that)"""
+    try:
+        record, changes = fe_header.read_record(path)
+    except (OSError, ValueError):
+        return None, []
+    mine = [(ns, level, before) for ns, p, level, before in changes if p == pin]
+    for i, (ns, level, before) in enumerate(mine[:-1]):
+        if level == "low" and mine[i + 1][1] == before:
+            return mine[i + 1][0] - ns, [c[1] for c in mine[i + 1:]]
+    return None, [c[1] for c in mine]
+
+
+def call_checks(b):
+    """The RX pins while nothing reads them.  A byte that comes in is a
+    start bit on the pin all the same, and the firmware's expansion service,
+    which waits for pin 14 to fall, takes it as a module's call."""
+    usart = port_state(b, "USART1")
+    code, out, err, took = fe(b, "gpio")
+    check("the firmware waits for an expansion module on pin 14 (USART1's "
+          "receiver off, an interrupt on the pin's fall): `status --json` "
+          "and `gpio` say so",
+          (usart.get("hears"), usart.get("baud")) == ("edge", 230400)
+          and "the firmware waits for a call on pin 14" in out,
+          f"{usart}\n{out}{err}")
+    vcd = b.dir / "call.vcd"
+    fe(b, "gpio", "record", vcd)
+    code, out, err, took = fe(b, "uart", "send", "--port", "usart", "--hex",
+                              "00", "--expect", "\\x01\\x01")
+    check("a byte sent there is such a call: the firmware answers with its "
+          "heartbeat (01 01), and `uart send` says what the byte was taken as",
+          code == 0 and "\x01\x01" in out and "it took that as one, as from "
+          "an expansion module" in err, f"{code} {out!r} {err}")
+    c2, o2, e2, _ = fe(b, "uart", "send", "x")
+    time.sleep(1.0)                     # (a module has 250 ms to go on)
+    fe(b, "gpio", "record", "stop")
+    low, then = start_bit(vcd, "PB7")
+    check("... in the pins' record: pin 14 low for about a bit at 9600 baud "
+          "(104 µs), the port's while the firmware talks, and high again "
+          "when no module went on",
+          low and 50_000 <= low <= 1_000_000 and "unknown" in then
+          and then[-1] == "high", f"{low} ns, then {then}")
+    low, then = start_bit(vcd, "PC0")
+    check("... and a byte to the port that is off is a start bit on pin 16 "
+          "all the same: low, and let go; nobody heard it, as `uart send` "
+          "says", c2 == 0 and "nobody heard it" in e2
+          and low and 50_000 <= low <= 1_000_000,
+          f"{c2} {e2}{low} ns, then {then}")
+    usart = port_state(b, "USART1")
+    code, out, err, took = fe(b, "uart", "send", "--port", "usart", "--hex",
+                              "00", "--expect", "\\x01\\x01")
+    check("the firmware waits again, at its log's speed, and answers a "
+          "second call",
+          (usart.get("hears"), usart.get("baud")) == ("edge", 230400)
+          and code == 0 and "\x01\x01" in out, f"{usart}\n{code} {out!r} {err}")
+    time.sleep(0.6)
+
+
 def usart_checks(b):
     """Pins 13 and 14 (USART1): the firmware logs there, until an app opens
     the port"""
@@ -347,9 +423,12 @@ def usart_checks(b):
                               "Startup complete")
     check("the log port (pins 13 and 14): `uart wait --port usart` reads it",
           code == 0 and "Startup complete" in out, f"{code} {out[-300:]!r} {err}")
+    call_checks(b)
     code, out, err, took = fe(b, "uart", "send", "--port", "usart", "stale\\n")
-    check("a line sent there while the firmware only logs: taken (and lost), "
-          "exit 0", code == 0 and took < 5, f"{code} in {took:.1f} s\n{out}{err}")
+    check("a line sent there while the firmware only logs: taken, exit 0, "
+          "and no text that anything read (a call, as `uart send` says)",
+          code == 0 and took < 5 and "read none of it as text" in err,
+          f"{code} in {took:.1f} s\n{out}{err}")
     local = b.dir / "echo13.js"
     local.write_text(ECHO.read_text().replace('"lpuart"', '"usart"'))
     code, out, err, took = fe(b, "push", local, "/ext")

@@ -317,8 +317,15 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         `uart term --port usart`. The firmware logs there with the receiver off,
         so what is sent before an app has the port is lost, as on LPUART1;
         `scripts/uart_check.py` is 54 checks now (BRINGUP_LOG 105)
-  - ☐ The pin itself: a start bit on pin 14 as an edge the firmware's expansion
-        service can see (it waits for a pulse there before it opens the port)
+  - ☑ The pin itself (2026-11-11, QEMU patch 0008): a byte that comes while a
+        port's receiver is off is a start bit on its RX pin (pin 14 or 16, low for
+        a bit's time at 9600 baud, in the pins' record too). The firmware's
+        expansion service takes it as a module's call and answers with its
+        heartbeat; `gpio`, `status`, `uart` and the window say that it waits for
+        one (`header-serial`: `edge`), and `uart send` what it took the byte as;
+        `uart_check.py` is 73 checks (BRINGUP_LOG 108)
+  - ☐ The module's side of the expansion protocol as a tool: the call, the baud
+        rate, heartbeats, an RPC session over the port
   - ☑ The UART model's reception (2026-11-11, QEMU patch 0007): the request to
         the DMA controller, the IDLE flag, bytes at the baud rate (BRR and the
         PRESC register, the LPUART's own formula), `qemu_chr_fe_accept_input()`

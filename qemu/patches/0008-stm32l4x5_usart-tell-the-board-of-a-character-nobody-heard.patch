@@ -1,0 +1,54 @@
+From: FlipperEmu
+Subject: [PATCH] stm32l4x5_usart: tell the board of a character nobody heard
+
+While the receiver is off (UE or RE clear) the model takes a character
+from its backend and drops it, as the hardware does not sample its RX
+pin then. The pin has had the character's start bit all the same, and a
+guest may watch that pin as a GPIO while it keeps the UART's receiver
+off: to wake up on the first edge, or to be called by what is wired to
+it. The model had no way to tell a board that anything had come.
+
+The device has a GPIO output "rx-unheard" now, pulsed once for each
+character that came while the receiver was off. A board that models the
+RX pin can put a start bit on it; a board that does not connect the line
+behaves as before.
+
+Seen with the Flipper Zero firmware: it waits for an expansion module
+with the receiver of the module's UART off and an interrupt on the
+falling edge of its RX pin, and the module begins with a short low level
+there. Nothing sent to the port could reach that interrupt.
+
+Signed-off-by: FlipperEmu
+---
+--- a/hw/char/stm32l4x5_usart.c
++++ b/hw/char/stm32l4x5_usart.c
+@@ -353,6 +353,11 @@
+     if (!usart_rx_enabled(s)) {
+         trace_stm32l4x5_usart_receiver_not_enabled(
+             FIELD_EX32(s->cr1, CR1, UE), FIELD_EX32(s->cr1, CR1, RE));
++        /*
++         * The UART drops it, but its start bit was on the RX pin all the
++         * same: for a board whose guest watches that pin as a GPIO.
++         */
++        qemu_irq_pulse(s->rx_unheard);
+         return;
+     }
+ 
+@@ -695,6 +700,7 @@
+ 
+     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
+     qdev_init_gpio_out_named(DEVICE(obj), &s->dma_rx, "dma-rx", 1);
++    qdev_init_gpio_out_named(DEVICE(obj), &s->rx_unheard, "rx-unheard", 1);
+     timer_init_ns(&s->rx_timer, QEMU_CLOCK_VIRTUAL, usart_rx_timer, s);
+     timer_init_ns(&s->idle_timer, QEMU_CLOCK_VIRTUAL, usart_idle_timer, s);
+ 
+--- a/include/hw/char/stm32l4x5_usart.h
++++ b/include/hw/char/stm32l4x5_usart.h
+@@ -58,6 +58,7 @@
+     CharFrontend chr;
+     qemu_irq irq;
+     qemu_irq dma_rx;        /* a character waits, and the DMA is to take it */
++    qemu_irq rx_unheard;    /* a character came while the receiver was off */
+     guint watch_tag;
+ 
+     /* Reception at the line's speed, and the idle line after it */
