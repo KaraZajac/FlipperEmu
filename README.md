@@ -277,7 +277,9 @@ instead, and `--headless` no window at all.
   its antenna. Files dropped on the window go where they belong.
 - **Apps**: drop a `.fap` on the window (or Apps > Install and start an app, Ctrl+O).
   It is copied to the card and started, and the app that ran is closed first. **F5**
-  does that again with the same file: build, F5, look. The console has what
+  does that again with the same file: build, F5, look. With Apps > Start it again
+  when its file changes there is no F5 either: the window looks at the file twice a
+  second, and a new build is on the Flipper as soon as it is written. The console has what
   [`./flipperemu app`](#apps) says: what the file was built for, where it went, what
   the firmware logged about the start. Apps > Close the app that runs; Apps > List its
   apps.
@@ -341,7 +343,8 @@ LCD, the lights and the buttons, and the QOM properties the bench shows. Any oth
 program can use it too. `scripts/gui_check.py FIRMWARE` checks the window off-screen: it
 boots a throwaway device, clicks its buttons, records its screen, pauses it, reads the
 firmware's log and sets its level, counts the steps of the backlight's fade, copies a
-file to its card, drops an app on it and starts it again with F5, watches the LED blink
+file to its card, drops an app on it, starts it again with F5 and once more by putting
+a new file in its place, watches the LED blink
 while NFC reads, switches it off and on, reboots it, has an app crash the firmware,
 loses the emulator and finds it again after that, and updates it twice with the package
 it runs: once with the wait given up, once to the end.

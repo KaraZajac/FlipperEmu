@@ -68,6 +68,7 @@ PACKAGES = (".tgz", ".tar.gz", ".tar", ".fuf")
 UPDATES = "Update packages (*.tgz *.tar.gz *.tar *.fuf)"
 APPS = "Flipper apps (*.fap)"
 APP_WAIT_S = 45             # a question about an app on its screen: this long
+WATCH_MS = 500              # a watched app's file is looked at this often
 SCALES = (2, 3, 4, 5, 6)
 POWER_ON_MS = 1500          # hold Back this long, and an off Flipper starts
 RESET_MS = 3000             # Left + Back held this long: it reboots
@@ -96,8 +97,9 @@ Device menu.</p>
 <p>Files dropped on the window go where they belong: .nfc and Proxmark3
 .json cards, .rfid tags, .ibtn keys, .sub captures, .ir remotes, and
 firmware. An app (<b>.fap</b>) is copied to its card and started, and
-<b>F5</b> does that again with the same file, after a new build. Anything
-else dropped is copied to its microSD card, into a folder you name.</p>
+<b>F5</b> does that again with the same file, after a new build (by itself
+with Apps &gt; Start it again when its file changes). Anything else dropped
+is copied to its microSD card, into a folder you name.</p>
 <p>An <b>update package</b> (a .tgz, or the update.fuf of an unpacked one)
 goes the way it goes to a real Flipper: onto its card, where the firmware's
 own updater installs it (Device &gt; Update with a package), and <b>F6</b>
@@ -197,6 +199,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.say_fault = False          # a crash on its screen is news here
         self.fault_old = None           # one its screen said before an update
         self.updating = None            # a package, while its updater works
+        self.app_file = None            # the .fap that F5 starts
+        self.app_stamp = None           # ... as it was when it was started
+        self.app_seen = None            # ... as it was at the last look
         self.recording = None           # a fe_record.Recording, while one runs
         self.recording_since = 0.0
         self.sd_none = (session is not None and session.args.no_sd) or \
@@ -240,6 +245,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.poll = QtCore.QTimer(self, interval=250)
         self.poll.timeout.connect(self.tick)
         self.poll.start()
+        self.watch_timer = QtCore.QTimer(self, interval=WATCH_MS)
+        self.watch_timer.timeout.connect(self.watch_app)
+        self.set_app_watch(self.a_app_watch.isChecked())
 
         self.set_state("starting" if session else "connecting")
         self.refresh_tiles()
@@ -387,6 +395,11 @@ class MainWindow(QtWidgets.QMainWindow):
                            "the app that runs, and start this one")
         self.a_app_again = A(m, "Install and start it again", self.app_again,
                              "F5", tip="The same file again: after a new build")
+        self.a_app_watch = A(m, "Start it again when its file changes",
+                             self.set_app_watch, checkable=True,
+                             tip="The F5 after each build, by itself: the "
+                                 "window looks at the file twice a second")
+        self.a_app_watch.setChecked(self.settings.get("app_watch", False))
         self.recent_menu(m, "app")
         m.addSeparator()
         A(m, "Close the app that runs", self.close_app, live=True,
@@ -1801,6 +1814,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def start_app(self, path, remember=True):
         """Copy a .fap to the card and start it (the launcher's `app`)"""
+        self.app_file = os.path.abspath(path)
+        self.app_stamp = self.app_seen = self.stamp(path)
         if remember:
             self.remember("app", path)
             self.update_actions()
@@ -1825,6 +1840,51 @@ class MainWindow(QtWidgets.QMainWindow):
         paths = self.recent("app")
         if paths:
             self.start_app(paths[0], remember=False)
+
+    @staticmethod
+    def stamp(path):
+        """a file as it is now; None while a build has it away, or empty"""
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size) if st.st_size else None
+
+    def set_app_watch(self, on):
+        """Apps > Start it again when its file changes: the F5 after each
+        build, by itself"""
+        self.settings.set("app_watch", bool(on))
+        if not on:
+            self.watch_timer.stop()
+            return
+        if not self.app_file:
+            paths = self.recent("app")
+            self.app_file = paths[0] if paths else None
+        # as it is now: what changes from here on is a new build
+        self.app_stamp = self.app_seen = \
+            self.stamp(self.app_file) if self.app_file else None
+        self.watch_timer.start()
+
+    def watch_app(self):
+        """A look at the app's file.  A build writes it in pieces, or puts a
+        new file in its place: it is taken when two looks found the same."""
+        if not self.app_file:
+            return
+        now = self.stamp(self.app_file)
+        if now is None or now == self.app_stamp or now != self.app_seen:
+            self.app_seen = now         # (still being written, perhaps)
+            return
+        if self.runner.current or self.runner.queue:
+            return                      # after what the launcher does now
+        name = short(self.app_file)
+        if not self.is_live():
+            self.app_stamp = now
+            self.statusBar().showMessage(
+                f"{name} changed, and no Flipper runs here to start it on: "
+                "F5 does that later", 8000)
+            return
+        self.log.add(f"{name} changed: it is installed and started again.")
+        self.start_app(self.app_file, remember=False)
 
     def close_app(self):
         self.command("app", "--close", then=self.app_done)

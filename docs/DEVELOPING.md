@@ -119,7 +119,9 @@ Two more ways to the same place, without ufbt in between:
   and it closes an app that does not take the loader's request by pressing its Back
   button.
 - In the window, a `.fap` dropped on the Flipper is started, and F5 does it again
-  after the next build.
+  after the next build. With Apps > Start it again when its file changes, the build
+  is all there is to do: `ufbt` in the editor's terminal, and the new app runs on
+  the Flipper a second later.
 
 ## A GIF of your app
 

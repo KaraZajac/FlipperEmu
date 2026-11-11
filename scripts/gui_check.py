@@ -542,6 +542,22 @@ class Driver:
         self.settle()
         check("apps: F5 closes it and starts the same file again",
               again and f'"{runs()[0]}" closed' in self.console())
+        # Apps > Start it again when its file changes: a build puts a new
+        # file in the old one's place, and the window does the F5
+        w.a_app_watch.trigger()
+        self.spin(1.5)
+        calm = len(runs()) == 2 and w.watch_timer.isActive()
+        built = fap.with_suffix(".new")
+        built.write_bytes(fap.read_bytes())
+        os.replace(built, fap)
+        seen = self.until(lambda: len(runs()) >= 3, 90)
+        self.settle()
+        w.a_app_watch.trigger()
+        check("apps: with Apps > Start it again when its file changes, a new "
+              "build of the file is installed and started by itself",
+              calm and seen and "gpio.fap changed" in self.console()
+              and not w.watch_timer.isActive(),
+              f"nothing before the build: {calm}, started: {seen}")
         w.close_app()
         w.command("app")
         self.settle()

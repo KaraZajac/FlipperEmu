@@ -214,6 +214,9 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         it again after a build, an Apps menu; files and folders to the card from the
         microSD menu and by dropping them, also while it is off; the launcher's
         lines come into the console as they are printed
+  - ☑ Apps > Start it again when its file changes (2026-11-11): the window looks at
+        the `.fap` twice a second and does the F5 itself when a build has written it
+        (two looks that find the same, so that a half-written file is not taken)
 - ◐ The firmware's own tools against an emulated Flipper, and a page on the
       developer's loop
   - ☑ `./flipperemu ufbt …` and `fbt …` (2026-11-10): the tool as it is, with the
