@@ -7,6 +7,8 @@ would be: the build tools you already use, pointed at it.
 - [A GIF of your app](#a-gif-of-your-app)
 - [Pause it](#pause-it)
 - [The LED and the backlight](#the-led-and-the-backlight)
+- [The pins of the GPIO header](#the-pins-of-the-gpio-header)
+- [A serial port on the header](#a-serial-port-on-the-header)
 - [A test that runs by itself](#a-test-that-runs-by-itself)
 - [Why `./flipperemu ufbt`, and not `ufbt` alone](#why-flipperemu-ufbt-and-not-ufbt-alone)
 - [The SDK has to be the firmware's](#the-sdk-has-to-be-the-firmwares)
@@ -244,7 +246,8 @@ A pin is named as the MCU has it (`PA7`), as the case has it (`A7`) or by that n
   app drives as a push-pull output keeps the app's level while it does (`gpio` says
   that something is held to it, and that it does not show).
 - What a peripheral puts on a pin (a UART, PWM, SPI, I2C) is `unknown`: only the levels
-  of plain inputs and outputs are on the header so far. The ADC reads nothing.
+  of plain inputs and outputs are on the header so far. The ADC reads nothing. (The
+  bytes of the UART on pins 15 and 16 are there, as bytes: the next section.)
 - **What your app did to a pin, edge by edge:** `gpio record pins.vcd` has the
   emulator write every change of a pin's level to a file, with its time, until `gpio
   record stop`; a pulse too short for `--wait` is in it. The file is a VCD, which
@@ -265,6 +268,49 @@ In a test script (see below) that is two lines:
 ```sh
 fe gpio PA6 low                       # the "button" on the header is down
 fe gpio PA7 --wait high --timeout 5   # ... and the app lit its LED
+```
+
+## A serial port on the header
+
+An app for a GPS receiver, an ESP32 board or a serial adapter opens LPUART1, pins 15
+(TX) and 16 (RX) of the header: `furi_hal_serial_control_acquire(FuriHalSerialIdLpuart)`,
+`furi_hal_serial_init`, `furi_hal_serial_tx`, and `furi_hal_serial_async_rx_start` for
+what comes in. `uart` is what is wired there:
+
+```
+$ ../../flipperemu uart wait "ready" --for 10
+ready
+$ ../../flipperemu uart send "hello\n" --expect "you said: hello"
+you said: hello
+```
+
+- `uart send TEXT` writes to the app (`\r`, `\n`, `\xNN` as in C; `--hex "55 aa"` for
+  bytes), and is back when the firmware has taken it. With `--expect TEXT` it then
+  waits for that in the app's answer and prints what came; after five seconds
+  (`--for S`) it fails, with what came instead.
+- `uart wait TEXT` waits for what the app sends by itself. It reads on from where
+  the wait before it found its text, so a script that looks late misses nothing.
+- `uart term` is a terminal on the port, to try a protocol by hand (Ctrl-] leaves).
+- The program that will talk to the real board can talk to this one: the port is
+  also a pty, `devices/NAME/lpuart.tty`, and that program and `uart send` can be on
+  it at once. `run --lpuart tcp:PORT` makes it a TCP port instead.
+- What the app sent is in `devices/NAME/lpuart.log`, whether or not anything
+  listened. What is sent to an app that has not opened the port is lost, as it is
+  on a wire.
+
+The example needs no build: `examples/uart/echo.js` is a script for the firmware's
+`js` command that opens the port and answers every line (the README's "The serial
+port on pins 15 and 16" has the session). What ran here is that script, on five
+firmwares; the JavaScript `serial` module is the calls above. Two limits matter for
+an app: reception by DMA is not there yet (`furi_hal_serial_dma_rx_start`, which the
+firmware's USB-UART bridge uses), and the baud rate means nothing, so a wrong one
+is not found here.
+
+In a test script:
+
+```sh
+fe uart wait "ready" --for 10                    # the app has opened the port
+fe uart send "AT+VERSION\r\n" --expect "OK"      # ... and answers
 ```
 
 ## A test that runs by itself
@@ -823,6 +869,20 @@ says `high`), pin 3 held low, the GPIO menu's lines, Let go of all pins, the
 clicks on 13 and 17 that hold nothing (the firmware log, the iButton menu), and a
 record begun from the GPIO menu: the status bar counts a pin held and let go of, and
 the file read back after End the record has both changes.
+
+`scripts/uart_check.py FIRMWARE` has `examples/uart/echo.js` on the Flipper's side
+of pins 15 and 16: where `uart` says the ports go; a line sent while no app has the
+port open; the port opened after the firmware has slept, and the script's first
+line; a line answered, in under a second; `--hex` and the codes for what cannot be
+typed; 900 characters back in their order; what was found once not found again; an
+answer that does not come; the two pins in `gpio` while the port is open and after;
+a program on the pty answered, with `uart send` beside it; `uart term` in a terminal
+of its own, and a second `uart` told who has the pins; the port closed, opened
+again, and opened after a reset; pins 13 and 14 read with `uart wait --port usart`;
+what is refused; a run with `--lpuart none`, and one with `--lpuart tcp:PORT` and a
+TCP client. It passes on the official 1.5.1, the official dev build, Momentum,
+Unleashed and RogueMaster (38 checks). It has no app in C, and nothing that
+receives by DMA.
 
 `scripts/gdb_check.py FIRMWARE` does what the gdb section shows, with gdb in batch
 mode: a backtrace of the firmware with functions and lines, the breakpoint in the

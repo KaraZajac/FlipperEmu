@@ -64,7 +64,7 @@ class PortBusy(ConnectionError):
     """Another command of ours has the USB serial port"""
 
 
-def take_port(lock, wait=10.0):
+def take_port(lock, wait=10.0, what="its USB serial port is"):
     """Lock the file that whoever talks on a device's USB serial port holds
     locked.  It is waited for for `wait` seconds (a command of a few lines is
     over sooner), then it is PortBusy.  -> the open file, for leave_port().
@@ -81,7 +81,7 @@ def take_port(lock, wait=10.0):
                 f.seek(0)
                 who = f.read().strip()
                 f.close()
-                raise PortBusy("its USB serial port is in use"
+                raise PortBusy(f"{what} in use"
                                + (f" by {who}" if who else "")
                                + ": one at a time") from None
             time.sleep(0.1)
@@ -282,7 +282,9 @@ class FlipperCli:
         out = ANSI.sub(b"", out).decode(errors="replace")
         return found, out.replace("\r\n", "\n")
 
-    def interactive(self):
+    def interactive(self, newline=b"\r"):
+        """A terminal on it, until Ctrl-].  newline: what a typed line feed
+        becomes (the CLI wants a carriage return); None: nothing else"""
         import termios
         import tty
         stdin = sys.stdin.fileno()
@@ -304,7 +306,8 @@ class FlipperCli:
                     data = os.read(stdin, 1024)
                     if not data or b"\x1d" in data:        # Ctrl-]
                         break
-                    self.write(data.replace(b"\n", b"\r"))
+                    self.write(data.replace(b"\n", newline) if newline
+                               else data)
         finally:
             if old:
                 termios.tcsetattr(stdin, termios.TCSADRAIN, old)

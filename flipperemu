@@ -25,6 +25,8 @@ you flash stays flashed, settings and files persist across runs.
                                              the pins as; hold one from outside
   ./flipperemu gpio record OUT.vcd | gpio watch
                                              every change of its pins, with its time
+  ./flipperemu uart | uart term | uart send "AT\r\n" --expect OK
+                                             the serial port on its pins 15 and 16
   ./flipperemu reset                         reboot it, as Left + Back do on a real one
   ./flipperemu pause | continue              time stands still on it, and goes on
   ./flipperemu flash fw.dfu                  just program the flash
@@ -183,6 +185,12 @@ class Device:
         self.enclave = self.dir / "enclave.keys"    # the secure enclave's keys
         self.usb_sock = self.dir / "usb.sock"   # --usb unix
         self.usb_tty = self.dir / "usb.tty"     # --usb pty: symlink to the pty
+        # the serial port on pins 15 and 16 (LPUART1): --lpuart pty, symlink
+        # to the pty; and what the firmware sent there, this run
+        self.lpuart_tty = self.dir / "lpuart.tty"
+        self.lpuart_log = self.dir / "lpuart.log"
+        self.lpuart_sock = self.dir / "lpuart.sock"     # `uart send`, `uart term`
+        self.usart_tty = self.dir / "usart.tty"     # --serial pty: the same
         self.subghz_sock = self.dir / "subghz.sock"     # a radio bridge (fe_sdr.py)
         self.nfc_sock = self.dir / "nfc.sock"           # a card on the link (fe_nfc_link.py)
         self.panel_sock = self.dir / "panel.sock"       # its face: the window (fe_gui.py)
@@ -449,6 +457,47 @@ def chardev_path(path):
     return str(path).replace(",", ",,")
 
 
+def tcp_backend(option, value):
+    """tcp:PORT or tcp:HOST:PORT as a -chardev backend that listens there"""
+    host, _, port = value[4:].rpartition(":")
+    if not port.isdigit() or not 0 < int(port) < 65536:
+        sys.exit(f"{option}: expected tcp:PORT or tcp:HOST:PORT, not {value!r}")
+    # the firmware listens on it too (for an expansion module): this
+    # computer only, unless asked
+    return (f"socket,host={host.strip('[]') or '127.0.0.1'},port={port},"
+            "server=on,wait=off")
+
+
+def lpuart_args(dev: Device, where):
+    """LPUART1: the serial port on pins 15 (TX) and 16 (RX) of a real one,
+    for what is wired there (a module, a GPS, another computer).  It is the
+    machine's second serial port, so this goes after serial_args().  What
+    the firmware sends on it is kept in the device's lpuart.log, whether or
+    not anything listens.
+
+    The port has two ends (QEMU's hub of two): the one asked for, for a
+    program of the user's, and a socket for `flipperemu uart`.  A pty alone
+    would not do for that: QEMU looks once a second whether somebody opened
+    it, and what is written to it and not read yet stays in it for whoever
+    opens it next."""
+    if where == "none":
+        return []
+    if where == "pty":
+        backend = "pty"
+    elif where.startswith("tcp:"):
+        backend = tcp_backend("--lpuart", where)
+    else:
+        sys.exit(f"--lpuart: expected pty, tcp:PORT, tcp:HOST:PORT or none, "
+                 f"not {where!r}")
+    name, _, options = backend.partition(",")
+    return ["-chardev", f"{name},id=lpuart-user" + (f",{options}" if options else ""),
+            "-chardev", f"socket,id=lpuart-own,"
+                        f"path={chardev_path(dev.lpuart_sock)},server=on,wait=off",
+            "-chardev", "hub,id=lpuart,chardevs.0=lpuart-user,chardevs.1=lpuart-own,"
+                        f"logfile={chardev_path(dev.lpuart_log)},logappend=on",
+            "-serial", "chardev:lpuart"]
+
+
 def serial_args(dev: Device, serial):
     """USART1: the firmware's log, and pins 13 and 14 of a real one.  Whatever
     it is connected to, what the firmware writes to it is kept in the
@@ -457,13 +506,7 @@ def serial_args(dev: Device, serial):
     if serial in ("stdio", "pty", "null"):
         backend = serial
     elif serial.startswith("tcp:"):
-        host, _, port = serial[4:].rpartition(":")
-        if not port.isdigit() or not 0 < int(port) < 65536:
-            sys.exit(f"--serial: expected tcp:PORT or tcp:HOST:PORT, not {serial!r}")
-        # the firmware listens on it too (for an expansion module): this
-        # computer only, unless asked
-        backend = (f"socket,host={host.strip('[]') or '127.0.0.1'},port={port},"
-                   "server=on,wait=off")
+        backend = tcp_backend("--serial", serial)
     elif serial.startswith("file:"):
         path = pathlib.Path(serial[5:])
         backend = f"file,path={chardev_path(path)},append=on"
@@ -485,6 +528,12 @@ def new_log(dev: Device, serial):
             os.replace(dev.uart, dev.uart_old)
     except OSError:
         pass
+    for old in (dev.lpuart_log,         # (what was sent on pins 15 and 16)
+                uart_mark_file(dev, "lpuart"), uart_mark_file(dev, "usart")):
+        try:
+            old.unlink()
+        except OSError:
+            pass
     if serial.startswith("file:"):
         path = pathlib.Path(serial[5:])
         try:
@@ -558,6 +607,7 @@ def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
     else:                               # none, or the window is ours
         cmd += ["-display", "none"]
     cmd += serial_args(dev, args.serial)
+    cmd += lpuart_args(dev, args.lpuart)
     if args.gdb or args.wait_gdb:
         cmd += ["-gdb", f"tcp:127.0.0.1:{args.gdb_port}"]
     if args.wait_gdb:
@@ -711,7 +761,8 @@ class Session:
             args.unplugged = unplugged
         if gauge is not None:
             self.gauge = dict(gauge)
-        for stale in (dev.monitor, dev.usb_tty, dev.panel_sock, dev.held_file,
+        for stale in (dev.monitor, dev.usb_tty, dev.lpuart_tty, dev.usart_tty,
+                      dev.lpuart_sock, dev.panel_sock, dev.held_file,
                       dev.gdb_sock):
             try:
                 stale.unlink()
@@ -721,7 +772,7 @@ class Session:
         manifest, label = self.update
         self.update = (None, None)          # an update is started once
         args.log_level = None               # ... and its log level set once
-        if args.usb == "pty" or manifest:
+        if "pty" in (args.usb, args.lpuart, args.serial) or manifest:
             threading.Thread(target=usb_helpers,
                              args=(dev, self.proc, args.usb, manifest, label),
                              daemon=True).start()
@@ -733,7 +784,9 @@ class Session:
 
     def tidy(self):
         """Behind a QEMU that is gone: what only meant something while it ran"""
-        for stale in (self.dev.usb_tty, self.dev.held_file):
+        for stale in (self.dev.usb_tty, self.dev.lpuart_tty,
+                      self.dev.usart_tty, self.dev.lpuart_sock,
+                      self.dev.held_file):
             try:
                 stale.unlink()
             except FileNotFoundError:
@@ -774,21 +827,35 @@ def start_update(cli, manifest):
 
 
 def usb_helpers(dev: Device, proc, usb_mode, manifest, label=None):
-    """Link devices/<name>/usb.tty to QEMU's pty for the USB serial port, and
+    """Link devices/<name>/usb.tty to QEMU's pty for the USB serial port
+    (and lpuart.tty, usart.tty to those of the header's serial ports), and
     start a staged update through the firmware's CLI (as qFlipper does)."""
     from fe_cli import FlipperCli, usb_endpoint
-    ep = None
+    from fe_monitor import Monitor
+    ep, pins = None, {}
     for _ in range(100):
         if proc.poll() is not None:
             return
         if dev.monitor.exists():
             try:
-                ep = usb_endpoint(dev.monitor)
+                m = Monitor(str(dev.monitor))
+                try:
+                    ep = usb_endpoint(m)
+                    pins = {port: usb_endpoint(m, UART_PORTS[port][0])
+                            for port in UART_PORTS}
+                finally:
+                    m.close()
             except OSError:
-                ep = None
-            if ep:
+                ep, pins = None, {}
+            if ep or any(pins.values()):
                 break
         time.sleep(0.1)
+    for port, at in pins.items():
+        if at and at[0] == "pty":
+            link = uart_link(dev, port)
+            link.symlink_to(at[1])
+            print(f"[{dev.name}] serial port on pins {UART_PORTS[port][1]} "
+                  f"({UART_PORTS[port][2]}): {at[1]} -> {link}", flush=True)
     if not ep:
         return
     if ep[0] == "pty":
@@ -2108,6 +2175,224 @@ def open_cli(dev, prompt=True, timeout=15.0):
             cli.close()
             sys.exit(f"[{dev.name}] {e}")
     return cli
+
+
+# The serial ports of the GPIO header: (the chardev's name, its pins, what
+# the chip calls it)
+UART_PORTS = {"lpuart": ("lpuart-user", "15 and 16", "LPUART1"),
+              "usart": ("uart", "13 and 14", "USART1")}
+
+
+def uart_link(dev, port):
+    return dev.lpuart_tty if port == "lpuart" else dev.usart_tty
+
+
+def uart_log(dev, port):
+    """The file that has what the firmware sent on that port, this run"""
+    return dev.lpuart_log if port == "lpuart" else dev.uart
+
+
+def uart_where(dev, port, at):
+    """Where a serial port of the header goes, in words"""
+    if not at:
+        return ("nowhere (started with --lpuart none)" if port == "lpuart"
+                else "as QEMU was told with --serial")
+    kind, where = at
+    if kind == "pty":
+        link = uart_link(dev, port)
+        return f"{where}" + (f" (also {link})" if link.is_symlink() else "")
+    if kind == "tcp":
+        return f"TCP port {where[1]} of {where[0]}"
+    return {"stdio": "the terminal it was started in", "file": "a file",
+            "null": "nowhere"}.get(kind, kind)
+
+
+UART_ESCAPES = {b"r": b"\r", b"n": b"\n", b"t": b"\t", b"0": b"\0",
+                b"e": b"\x1b", b"\\": b"\\"}
+
+
+def uart_bytes(text, as_hex=False):
+    """What `uart send` writes: text, with \\r \\n \\t \\0 \\e \\xNN \\\\ for
+    what cannot be typed (any other \\ stays as it is), or bytes in hex"""
+    if as_hex:
+        try:
+            return bytes.fromhex(text)
+        except ValueError:
+            sys.exit(f"uart: {text!r} is not bytes in hex (as in: 0d 0a ff)")
+
+    def one(m):
+        code = m.group(1)
+        return (bytes([int(code[1:], 16)]) if code[:1] == b"x"
+                else UART_ESCAPES[code])
+    return re.sub(rb"\\(x[0-9a-fA-F]{2}|[rnt0e\\])", one, text.encode())
+
+
+def uart_mark_file(dev, port):
+    return dev.dir / f"{port}.mark"
+
+
+def uart_mark(dev, port):
+    """How far `uart wait` and `uart send --expect` have read in what the
+    firmware sent this run: what one of them found is not found again, so a
+    "ready" from an earlier turn of a loop does not answer the next wait"""
+    try:
+        mark = int(uart_mark_file(dev, port).read_text())
+        return mark if 0 <= mark <= uart_log(dev, port).stat().st_size else 0
+    except (OSError, ValueError):
+        return 0
+
+
+def uart_drop(line):
+    """Read away what the firmware sent to our end of a port: it is in the
+    port's log, and unread it holds the firmware's sending up (a few hundred
+    bytes fill a socket that is written a byte at a time)"""
+    import select
+    try:
+        while select.select([line.fd], [], [], 0)[0] and line.sock.recv(65536):
+            pass
+    except OSError:
+        pass
+
+
+def uart_put(line, data, seconds):
+    """Send on our end of a port, and stay until the emulator has taken all
+    of it: it takes a byte when the firmware has read the one before, and
+    what it has not taken when our end closes is lost.  -> whether it took
+    all of it in that time"""
+    import fcntl
+    import select
+    import termios
+    end = time.monotonic() + seconds
+    sent = 0
+    line.sock.setblocking(False)
+    while time.monotonic() < end:
+        uart_drop(line)
+        if sent < len(data):
+            if select.select([], [line.fd], [], 0.01)[1]:
+                try:
+                    sent += line.sock.send(data[sent:sent + 4096])
+                except BlockingIOError:
+                    pass
+        elif struct.unpack("i", fcntl.ioctl(line.fd, termios.TIOCOUTQ,
+                                            bytes(4)))[0]:
+            time.sleep(0.002)               # (unread by the emulator)
+        else:
+            return True
+    return False
+
+
+def uart_seen(dev, port, start, want, seconds, line=None):
+    """Wait for bytes in what the firmware sent (the port's log, from
+    `start` on): (whether they came, all that came). When they came, the
+    mark moves behind them."""
+    end = time.monotonic() + seconds
+    while True:
+        if line:
+            uart_drop(line)
+        try:
+            with open(uart_log(dev, port), "rb") as f:
+                f.seek(start)
+                data = f.read()
+        except FileNotFoundError:
+            data = b""
+        at = data.find(want)
+        if at >= 0:
+            try:
+                uart_mark_file(dev, port).write_text(
+                    f"{start + at + len(want)}\n")
+            except OSError:
+                pass
+            return True, data
+        if time.monotonic() >= end:
+            return False, data
+        time.sleep(0.02)
+
+
+def cmd_uart(args):
+    from fe_cli import FlipperCli, PortBusy, leave_port, take_port, usb_endpoint
+    dev = Device(args.device)
+    m = open_monitor(dev)
+    try:
+        ports = {port: usb_endpoint(m, UART_PORTS[port][0]) for port in UART_PORTS}
+        own = usb_endpoint(m, "lpuart-own")
+    finally:
+        m.close()
+    if not args.action:
+        for port in ("lpuart", "usart"):
+            _, pins, chip = UART_PORTS[port]
+            log = uart_log(dev, port)
+            print(f"[{dev.name}] pins {pins} ({chip}): "
+                  f"{uart_where(dev, port, ports[port])}"
+                  + (f"; what the firmware sent there: {log}"
+                     if log.exists() else ""))
+        return 0
+    port, at = args.port, ports[args.port]
+    _, pins, chip = UART_PORTS[port]
+    log = uart_log(dev, port)
+    if args.seconds <= 0:
+        sys.exit("uart: --for is more than 0 seconds")
+    if args.action == "wait":
+        if not args.text:
+            sys.exit("uart wait: for what?  uart wait \"ready\"")
+        want = uart_bytes(" ".join(args.text), args.hex)
+        seen, came = uart_seen(dev, port, uart_mark(dev, port), want,
+                               args.seconds)
+        text = came.decode(errors="replace")
+        print(text, end="" if text.endswith("\n") or not text else "\n")
+        if not seen:
+            print(f"[{dev.name}] pins {pins}: {' '.join(args.text)!r} did not "
+                  f"come in {args.seconds:g} s", file=sys.stderr)
+        return 0 if seen else 1
+    if port != "lpuart":
+        sys.exit(f"[{dev.name}] pins {pins} ({chip}): `uart {args.action}` is "
+                 "for pins 15 and 16 so far.  A run with --serial pty or "
+                 "tcp:PORT gives a program of yours these two; `uart wait "
+                 "--port usart` reads what the firmware sent on them.")
+    if not own:
+        sys.exit(f"[{dev.name}] pins {pins} ({chip}) go nowhere: `uart "
+                 f"{args.action}` needs a run without --lpuart none")
+    if args.action == "term" and args.text:
+        sys.exit("uart term takes no more words")
+    if args.action == "send" and not args.text:
+        sys.exit("uart send: what?  uart send \"hello\\r\\n\"")
+    try:
+        lock = take_port(dev.dir / "lpuart.lock", 5.0, f"pins {pins} are")
+    except PortBusy as e:
+        sys.exit(f"[{dev.name}] {e}")
+    line = None
+    try:
+        try:
+            line = FlipperCli(own)
+        except OSError as e:
+            sys.exit(f"[{dev.name}] pins {pins}: {e}")
+        if args.action == "term":
+            print(f"[{dev.name}] pins {pins} ({chip}); Ctrl-] quits")
+            line.interactive(newline=None)
+            return 0
+        data = uart_bytes(" ".join(args.text), args.hex)
+        want = uart_bytes(args.expect) if args.expect else None
+        try:
+            start = log.stat().st_size
+        except OSError:
+            start = 0
+        if not uart_put(line, data, max(args.seconds, 1 + len(data) / 400)):
+            print(f"[{dev.name}] pins {pins}: the firmware has the port open, "
+                  "but did not read all of that: the rest is lost",
+                  file=sys.stderr)
+            return 1
+        if want is None:
+            return 0
+        seen, came = uart_seen(dev, port, start, want, args.seconds, line)
+        text = came.decode(errors="replace")
+        print(text, end="" if text.endswith("\n") or not text else "\n")
+        if not seen:
+            print(f"[{dev.name}] pins {pins}: {args.expect!r} did not come in "
+                  f"{args.seconds:g} s", file=sys.stderr)
+        return 0 if seen else 1
+    finally:
+        if line:
+            line.close()
+        leave_port(lock)
 
 
 def cmd_cli(args):
@@ -3701,6 +3986,14 @@ def main():
                         "file:PATH, pty, tcp:PORT (on this computer; "
                         "tcp:HOST:PORT for another address of it), null. "
                         "Whichever it is, `flipperemu log` has the log too")
+    p.add_argument("--lpuart", default="pty", metavar="WHERE",
+                   help="LPUART1, the serial port on pins 15 (TX) and 16 (RX) "
+                        "of the GPIO header: pty (default; linked as "
+                        "devices/<name>/lpuart.tty), tcp:PORT (tcp:HOST:PORT), "
+                        "none.  `flipperemu uart` says where it is and talks "
+                        "on it, whichever of these (but none) it is.  (With "
+                        "--serial pty, pins 13 and 14 have a pty too: "
+                        "usart.tty)")
     p.add_argument("--log-level", metavar="LEVEL",
                    choices=("default", "none", "error", "warn", "info", "debug",
                             "trace"),
@@ -3801,6 +4094,36 @@ def main():
     p.add_argument("--timeout", type=float, default=10.0, metavar="S",
                    help="... for so many seconds (default 10)")
     p.set_defaults(func=cmd_gpio)
+
+    p = sub.add_parser(
+        "uart", help="the serial port on pins 15 and 16 of a running device's "
+        "GPIO header: where it is, a terminal on it, bytes sent to it",
+        description="The serial port on pins 15 (TX) and 16 (RX) of a running "
+        "device's GPIO header (LPUART1), which an app opens for what is wired "
+        "there.  Nothing: where the header's serial ports are.  `term`: a "
+        "terminal on it.  `send TEXT`: write to it (\\r, \\n, \\xNN as in C; "
+        "--hex: bytes in hex), and with --expect TEXT wait for an answer.  "
+        "`wait TEXT`: until the firmware has sent that.  What the firmware "
+        "sends is kept in devices/<name>/lpuart.log whether or not anything "
+        "listens; `wait` and --expect read it there, each from where the one "
+        "before found its text.  What is sent while no app has the port open "
+        "is lost, as with nothing wired.  A program of yours has the port "
+        "too, at the same time: its pty (devices/<name>/lpuart.tty), or the "
+        "TCP port of --lpuart tcp:PORT.")
+    p.add_argument("action", nargs="?", choices=("term", "send", "wait"))
+    p.add_argument("text", nargs="*", help="send, wait: the text (or bytes)")
+    p.add_argument("--port", choices=("lpuart", "usart"), default="lpuart",
+                   help="usart: pins 13 and 14 instead (USART1, where the "
+                        "firmware logs by default): `wait` only, so far")
+    p.add_argument("--hex", action="store_true",
+                   help="the text is bytes in hex: 0d 0a ff")
+    p.add_argument("--expect", metavar="TEXT",
+                   help="send: then wait until the firmware has sent this "
+                        "(exit status 1: it did not, in time), and print "
+                        "what it sent")
+    p.add_argument("--for", dest="seconds", type=float, default=5.0, metavar="S",
+                   help="wait, --expect: for so many seconds (default 5)")
+    p.set_defaults(func=cmd_uart)
 
     p = sub.add_parser("reset", help="reboot a running device, as holding Left + "
                        "Back does on a real one")

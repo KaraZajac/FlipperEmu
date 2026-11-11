@@ -460,11 +460,13 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
     qdev_connect_clock_in(dev, "clk", hclk);
     soc_map(SYS_BUS_DEVICE(dev), 0x40013800, errp);
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, NVIC(WB55_IRQ_USART1));
+    wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_APB2RSTR, 14, dev);
     dev = DEVICE(&s->lpuart1);
     qdev_prop_set_chr(dev, "chardev", serial_hd(1));
     qdev_connect_clock_in(dev, "clk", hclk);
     soc_map(SYS_BUS_DEVICE(dev), 0x40008000, errp);
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, NVIC(WB55_IRQ_LPUART1));
+    wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_APB1RSTR2, 0, dev);
 
     /* ---- USB FS device (+ built-in host): registers, packet memory */
     sbd = SYS_BUS_DEVICE(&s->usb);

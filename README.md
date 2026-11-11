@@ -45,6 +45,9 @@ official firmware to Unleashed, and from the release to the dev build.
 `scripts/gpio_check.py` (the GPIO header: a pin the firmware drives seen from outside,
 a pin held from outside read by the firmware, a record of every change of a pin with
 its time) passes on the same five.
+`scripts/uart_check.py` (the serial port on pins 15 and 16 of the header: an app that
+opens it is answered from the launcher, from a program on the port's pty, and over
+TCP) passes on the same five.
 `scripts/ufbt_check.py` (ufbt 0.2.6 building `examples/hello`, launching it there, and
 `ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's symbols, that
 app's and a stock app's, and its debug configuration for VS Code used the way that
@@ -388,6 +391,7 @@ it runs: once with the wait given up, once to the end.
 | `sound off` \| `sound on` | mute its speaker, and back |
 | `gpio` \| `gpio PIN` \| `gpio PIN high\|low\|free` \| `gpio PIN --wait high\|low` | its GPIO header: what the firmware has the pins as; one pin's level; a pin held from outside, or let go of; wait for a level |
 | `gpio record OUT.vcd` \| `gpio record stop` \| `gpio watch [PIN,PIN]` | every change of a pin's level with its time: into a file a logic analyzer's program opens, or printed as it happens |
+| `uart` \| `uart send TEXT [--expect TEXT]` \| `uart wait TEXT` \| `uart term` | the serial port on pins 15 and 16 of its header: where it goes; send to the app that has it open, and wait for its answer; wait for what the app sends; a terminal on it |
 | `reset` | reboot it, as holding Left + Back does |
 | `pause` \| `continue` | time stands still on it (screen, timers, radios), and goes on from there |
 | `run --usbip [PORT]` | export the USB device over USB/IP (then `sudo scripts/usbip_attach.py`) |
@@ -430,7 +434,9 @@ it runs: once with the wait given up, once to the end.
 the log is also kept in `devices/NAME/uart.log`. `--audio` takes `auto` (default),
 `wav:FILE`, a QEMU audio driver or `none`.
 `--usb` (the USB serial port) takes `pty` (default), `unix`
-(`devices/NAME/usb.sock`), `tcp:PORT` or `none` (cable unplugged). Anything after `--` is
+(`devices/NAME/usb.sock`), `tcp:PORT` or `none` (cable unplugged). `--lpuart` (the
+serial port on pins 15 and 16 of the header) takes `pty` (default), `tcp:PORT` or
+`none` (nothing wired). Anything after `--` is
 passed straight to QEMU, e.g. `-- -icount shift=auto` for deterministic timing, or
 `-- -d in_asm,cpu -D trace.log`.
 
@@ -1424,6 +1430,94 @@ build, Momentum, Unleashed and RogueMaster. Not tried: an interrupt an app has o
 held pin (the buttons' come the same way), and a pin that an app has as an open-drain
 output.
 
+### The serial port on pins 15 and 16
+
+Pins 15 and 16 of the header (C1 and C0 on the case) are LPUART1, the serial port an
+app gets when it asks for one: `FuriHalSerialIdLpuart` in C, `serial.setup("lpuart",
+115200)` in JavaScript. On a real Flipper a serial adapter, a GPS receiver or an ESP32
+board is wired there. Here the other end of the wire is on your computer:
+
+```sh
+./flipperemu uart                             # where the header's serial ports go
+./flipperemu uart send "AT\r\n" --expect OK   # send, and wait for the answer
+./flipperemu uart send "go\n"                 # send only
+./flipperemu uart wait "ready"                # until the app has sent this
+./flipperemu uart send --hex "55 aa 01"       # bytes
+./flipperemu uart term                        # a terminal on it (Ctrl-] leaves)
+```
+
+`examples/uart/echo.js` is an app for the Flipper's side: it opens the port, says
+`ready`, and answers every line until one is `bye`.
+
+```
+$ ./flipperemu push examples/uart/echo.js /ext
+$ ./flipperemu cli "js /ext/echo.js" &
+$ ./flipperemu uart wait ready
+ready
+$ ./flipperemu uart send "hello\n" --expect "you said: hello"
+you said: hello
+$ ./flipperemu uart send "bye\n" --expect closing
+closing
+```
+
+- `uart send` writes the text as it is. `\r`, `\n`, `\t`, `\0`, `\e`, `\xNN` and `\\`
+  stand for what cannot be typed, and with `--hex` the text is bytes in hex. It is
+  back when the firmware has taken all of it.
+- `--expect TEXT` then waits until the firmware has sent that text, prints what it
+  sent up to there, and exits 0. When it does not come in five seconds (`--for S`)
+  it prints what did come, says so, and exits 1: a line of a test script for each
+  exchange. `uart wait TEXT` is the same without sending.
+- `uart wait` reads on from where the wait or the `--expect` before it found its
+  text: an answer is not found twice, and what the app sent before the script
+  looked is not missed. `--expect` looks at what came after its own send.
+- A program of yours has the port at the same time. `devices/NAME/lpuart.tty` is a
+  pty for it (picocom, pyserial, a program that talks to the real hardware); with
+  `run --lpuart tcp:PORT` it is a TCP port instead, and with `--lpuart none`
+  nothing is wired. `uart send` works beside that program, and both hear what the
+  firmware sends.
+- What the firmware sent in this run is in `devices/NAME/lpuart.log`, whether or not
+  anything listened.
+- `gpio` has the two pins as `alternate function 8` while an app has the port open,
+  and as what they were before when it has closed it.
+
+What a wire does, and this does too: what is sent while no app has the port open is
+lost (`uart send` takes it and exits 0).
+
+What it does not do yet:
+
+- The baud rate is not modelled. The firmware receives about 1000 bytes a second
+  whatever the app asked for, and an app with the wrong rate is understood here.
+- Reception by DMA. An app that takes its bytes one by one (the JavaScript `serial`
+  module, `furi_hal_serial_async_rx_start`) hears everything; the firmware's USB-UART
+  bridge, which receives by DMA, sends and does not hear.
+- A program that has the pty or the TCP port open and does not read holds up the
+  firmware's sending, once the buffer between them is full (a few hundred bytes).
+- The pty has a pty's ways: QEMU looks once a second whether a program has opened
+  it, so that program's first line can take that long; and what is written to it
+  and closed at once (`echo hi > lpuart.tty`) waits for the next program that opens
+  it. `uart send` and a TCP port have neither.
+- What is typed before `uart term` has printed its first line is lost.
+- Pins 13 and 14 (USART1, where the firmware logs): `uart` says where they go, and
+  `uart wait --port usart TEXT` reads what the firmware sent there; `send` and
+  `term` are for 15 and 16 so far. A run with `--serial pty` (then
+  `devices/NAME/usart.tty`) or `--serial tcp:PORT` gives a program both directions.
+
+Underneath, the port is a QEMU chardev hub of two: the pty or TCP port for your
+program, and a socket (`devices/NAME/lpuart.sock`) for `uart send` and `uart term`,
+which is why the two do not take the port from each other.
+
+`scripts/uart_check.py FIRMWARE` checks it with that script on the Flipper's side: 38
+checks, on the official 1.5.1, the official dev build, Momentum, Unleashed and
+RogueMaster.
+
+Two bugs were in the way, and both are fixed (docs/BRINGUP_LOG.md, 104). After every
+deep sleep the firmware switches its two UARTs back on, also one that no app has: on
+a real Flipper that write does nothing, because the clock controller holds the
+peripheral in reset, and here it took, so that the app which opened the port
+afterwards hung in its set-up. And QEMU wrote a byte twice into a port's log file
+when the program on the port was slow to read (`qemu/patches/0006`; **a QEMU tree
+built before 2026-11-11 wants `scripts/setup_qemu.sh` once more**).
+
 ### The secure enclave
 
 A Flipper keeps its keys where its firmware cannot read them: in the key store of ST's
@@ -1557,6 +1651,9 @@ build/qemu/qemu-system-arm -M flipper-zero,name=Qemu,nvram=nv.bin,usb-serial=usb
 # or simply: -M flipper-zero -kernel firmware.elf   (volatile flash, no USB)
 ```
 
+The first `-serial` is USART1 (the firmware's log, pins 13 and 14), a second one
+LPUART1 (pins 15 and 16).
+
 Machine options: `name=` (OTP device name, ≤8 chars), `lcd-scale=`, `region=` (OTP
 region), `legacy-sleep=on|off` (default off: STOP2), `nvram=`, `usb-serial=` (chardev id for the USB port;
 plugs the cable in), `audiodev=` (the speaker's `-audiodev` id). `-global
@@ -1568,15 +1665,16 @@ stm32wb55-usb.debug=on` traces the USB host.
 RESEARCH.md            prior-art survey (who else has done this, and how)
 PLAN.md                roadmap
 docs/ARCHITECTURE.md   how the machine is modelled, device by device
-docs/BRINGUP_LOG.md    every bug found on the way (incl. 3 QEMU fixes and the USB races)
+docs/BRINGUP_LOG.md    every bug found on the way (incl. the QEMU fixes and the USB races)
 docs/RADIO_LINK.md     the protocol between an emulated radio and a real one
 docs/PANEL_LINK.md     the protocol between the emulator and the window
 docs/DEVELOPING.md     writing an app or a firmware with it: ufbt, fbt, gdb, the loop
 examples/hello/        an app to try that with
+examples/uart/         a script for the serial port on pins 15 and 16
 flipperemu             launcher / device manager
 qemu/hw/arm/flipper/   the QEMU machine + STM32WB55 SoC + board devices (C)
 qemu/patches/          fixes to upstream QEMU (SysTick, SD over SPI, open-drain GPIO,
-                       register reads without the big lock)
+                       register reads without the big lock, a chardev's log file)
 scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_monitor.py,
                        fe_cli.py, fe_files.py (files on the card), fe_apps.py
                        (apps and the loader), fe_ir.py,

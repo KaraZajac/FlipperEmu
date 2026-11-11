@@ -304,8 +304,22 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         and the file with its count of changes in the status bar, from a watch of
         `header-record`; three more checks in `gui_check.py` (BRINGUP_LOG 103)
   - ☐ The file opened once in GTKWave or PulseView (neither is installed here)
-  - ☐ What a peripheral puts on a pin: LPUART1 on 15 and 16 as a serial port, PWM,
-        SPI and I2C devices on the header; a voltage for the ADC
+  - ☑ The serial port on pins 15 and 16 (2026-11-11): LPUART1 on a chardev hub, a
+        pty or TCP port for the user's program (`run --lpuart`) and a socket for
+        the launcher; `./flipperemu uart`, `uart send TEXT [--expect TEXT]`, `uart
+        wait TEXT`, `uart term`; `examples/uart/echo.js`; `scripts/uart_check.py`,
+        38 checks on the five firmwares. Under it: the clock controller resets a
+        peripheral on both edges of its reset bit (an app that opened the port
+        after a deep sleep hung), and QEMU patch 0006 (a chardev's log file had a
+        byte twice when its backend was busy) (BRINGUP_LOG 104)
+  - ☐ The same for pins 13 and 14: `uart send` and `uart term` on USART1 (`uart`
+        says where it goes, and `uart wait --port usart` reads its log)
+  - ☐ The UART model: reception by DMA and the IDLE flag (the firmware's USB-UART
+        bridge sends and does not hear), bytes paced by the baud rate (about 1000
+        a second now, at any), `qemu_chr_fe_accept_input()` after a read
+  - ☐ The port by name in `gpio`, in `status` and in the window's GPIO menu
+  - ☐ What other peripherals put on a pin: PWM, SPI and I2C devices on the header;
+        a voltage for the ADC
   - ☐ An interrupt on a held pin and an open-drain output (untried: they need an
         app of the check's own)
 - ☑ A recording of the screen as an animated GIF: `./flipperemu record OUT.gif`

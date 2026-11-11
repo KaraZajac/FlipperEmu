@@ -1775,6 +1775,82 @@ big lock, entry 92).
       changes of PA7 and nothing left that says a record runs. The file dialog is
       not in them: the check hands the file over where the dialog would.
 
+104. **The serial port on pins 15 and 16, and the two bugs under it.** LPUART1 was in
+    the machine from the first day, as QEMU's own model with nothing on its other
+    end. `run` now gives it one (`--lpuart pty`, the default, `tcp:PORT` or `none`),
+    and `./flipperemu uart` says where it is, sends to it, waits for what the
+    firmware sends, and is a terminal on it. The first app that opened the port hung.
+    - **An app that opened the port never came back from it.** `serial.setup("lpuart",
+      115200)` in a script, and the script's thread sat in
+      `furi_hal_serial_init_lpuart()` for good, in the loop that waits for TEACK and
+      REACK. Read over the monitor, CR1 had UE and nothing else: no TE, no RE, so
+      the model never raised either flag. The firmware had written TE and RE; the
+      LL driver's `LL_LPUART_Init()` had not, because it configures only a
+      peripheral that is off, and returns an error nobody reads when UE is set
+      already. UE was set by the firmware itself: before every deep sleep
+      `furi_hal_serial_control_suspend()` switches both UARTs off, and after it
+      `furi_hal_serial_resume()` switches on each one that is not marked enabled,
+      whether or not anybody has opened it. On a real Flipper that write goes
+      nowhere: the bus clock of a UART nobody has is off, and `furi_hal_bus`
+      holds it in reset besides (the RSTR bit stays set from the last
+      `furi_hal_bus_disable()` to the next enable). Here the registers of a
+      peripheral in reset took writes. So the port worked in a firmware that had
+      not slept yet, a second after the start, and hung in one that had.
+    - The fix is in the clock controller's model: a peripheral with a reset line is
+      reset on both edges of its RSTR bit, when the firmware asserts it and again
+      when it lets go, which throws away what was written between. (Refusing the
+      writes would be the same and need a gate in every model.) USART1 and LPUART1
+      got reset lines; they had none. The LPTIM, SPI, I2C, USB, timer, ADC and AES
+      models, which had theirs, are now reset twice where they were reset once.
+    - **Where the other end is.** A pty alone was the first try, as for the USB
+      serial port, and it is wrong for a launcher command that sends one line and
+      leaves: QEMU looks only once a second whether a pty has been opened, what is
+      written to a pty and closed stays in it for whoever opens it next (a later
+      `uart send` got the line before), and the kernel does not say how much of
+      what was written the other side has read (TIOCOUTQ is 0 at once). A socket
+      has none of that, and a program that wants a serial port cannot open one. So
+      the port is a chardev hub (`chardev/char-hub.c`, in QEMU since 10.0) of
+      both: the pty or TCP port for the user's program, a unix socket for the
+      launcher. What the firmware sends goes to both, what either sends goes to the
+      firmware.
+    - Three things the socket taught. Closing it right after the write loses what
+      QEMU had not read yet, so `uart send` stays until the socket's queue is empty
+      (SIOCOUTQ), which also tells it that the firmware has taken everything: the
+      model takes a byte only when the firmware has read the one before. A client
+      that is connected and does not read stops the firmware's sending after some
+      277 bytes: the model writes a byte at a time, each costs the socket 768 bytes
+      of its buffer, and a full buffer is a firmware that waits in its TX loop. So
+      the launcher's end reads whatever it is doing. And the firmware gets about a
+      byte a millisecond, at any baud rate: the model does not tell the chardev
+      that the firmware has read a byte (no `qemu_chr_fe_accept_input()`), so the
+      next one comes at the main loop's next turn.
+    - **A character twice, every 277.** The check sends a line of 900 characters and
+      wants it back in order, from the port's log file, where `uart wait` and
+      `--expect` read. It came back 903 long: `rstuuvwxyz`. The socket's stream was
+      right, and a trace of the model showed each byte sent once. The log is
+      written by QEMU's `qemu_chr_write_buffer()`, which logs what the backend took,
+      and logs the whole buffer when the backend reported an error and took
+      nothing, "assuming this method won't be invoked again". EAGAIN is such an
+      error, and the caller does come again with the same byte, which is then
+      logged a second time. Every byte that had to wait for room in the socket was
+      in the file twice. `qemu/patches/0006` leaves EAGAIN out of that branch. It
+      was not this port's alone: `uart.log` of a run with `--serial pty` or
+      `tcp:PORT` had the same, whenever the program on the port fell behind.
+    - `uart wait` and `--expect` read the log file and not the socket, so that what
+      the firmware sent while no command was running is not lost to them. A mark
+      beside the log (`lpuart.mark`) has how far the last one read.
+    - `scripts/uart_check.py` (38 checks, on all five firmwares) has
+      `examples/uart/echo.js` on the Flipper's side: the port opened after the
+      firmware has slept (the hang), a line answered in under a second, the codes
+      and `--hex`, the 900 characters, what is not found twice, a program on the
+      pty at the same time and one on a TCP port, `uart term` in a terminal of its
+      own, the port closed and opened again and after a reset, `--lpuart none`. One
+      check failed for a reason of its own: it typed into `uart term` before the
+      terminal was raw, and setting a terminal raw throws away what is waiting.
+    - Not there: reception by DMA (the firmware's USB-UART bridge does not hear),
+      the IDLE flag, a baud rate that means something, `send` and `term` for
+      pins 13 and 14.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

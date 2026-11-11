@@ -6,6 +6,8 @@ builds). Each patch header explains the bug, how it showed up with the Flipper f
 and the fix. All are small and self-contained, written to be suitable for upstream
 submission. 0005 is less a bug than a limit: the machine builds and runs without it, and
 its 1-Wire timing is then as it was (about one iButton read in twenty goes wrong).
+A source tree that was set up before a patch came (0006: 2026-11-11) gets it from one
+more run of that script.
 
 | patch | QEMU file | bug |
 |---|---|---|
@@ -14,6 +16,7 @@ its 1-Wire timing is then as it was (about one iButton read in twenty goes wrong
 | 0003 | `hw/sd/sd.c` | SPI mode only reached transfer state via CMD9/CMD10; data commands right after ACMD41 were rejected |
 | 0004 | `hw/gpio/stm32l4x5_gpio.c` | a device on an open-drain line could pull it low but never let it go: an external high was refused, disconnected on the next MODER/OTYPER write, and read as floating |
 | 0005 | `accel/tcg/cputlb.c` | TCG takes the big lock for every device register access, also where the region asked for lockless I/O: a guest that busy-waits on a counter register sleeps 20 to 50 µs on the lock whenever the main loop has it |
+| 0006 | `chardev/char.c` | a chardev with a `logfile` logged a byte at once when its backend could not take it yet (EAGAIN), and again when it was written: every byte that had to wait was in the log twice |
 
 **Licence:** these patches modify QEMU's own source files, which are GPL-2.0-or-later,
 so the patches are GPL-2.0-or-later too, unlike the rest of this repository (BSD-3-Clause).

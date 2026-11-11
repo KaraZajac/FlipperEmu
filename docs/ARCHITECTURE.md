@@ -68,6 +68,13 @@ bus resets therefore reset the peripheral device itself, *not* its child buses: 
 firmware pulses `I2C1RST`/`SPI2RST` around transactions, and resetting what hangs off
 those buses would wipe the LED driver, the display RAM and the SD card.
 
+The device is reset on both edges of its RSTR bit. A peripheral that is held in reset
+takes no writes on silicon, and the models' registers stay writable, so the second
+reset, at the release, throws away what was written meanwhile. The firmware does
+write: `furi_hal_serial_resume()` sets UE in both UARTs after every deep sleep, also
+in one nobody has opened, and the LL driver then configures nothing when an app opens
+the port (BRINGUP_LOG 104).
+
 New devices use the firmware's default Sleep Method, **STOP2**. Before stopping, CPU1 asks
 CPU2 (`SHCI_C2_SetSystemClock`) to move SYSCLK from PLL to HSE, and back to PLL after
 waking. The CPU2 model performs that switch on the RCC. It's the one radio-stack command
@@ -1013,6 +1020,21 @@ ufbt is not run at all, and `update` sends the package without the stage (BRINGU
   firmware's own Settings wrote. `scripts/fe_log.py` reads the log for `flipperemu
   log` and for the window: lines, levels, the colours the firmware left on, and where
   it started again (a timestamp that goes back).
+- **The serial port on pins 15 and 16**: LPUART1, QEMU's second serial port, which an
+  app opens (`FuriHalSerialIdLpuart`). The launcher makes its chardev a hub
+  (`chardev/char-hub.c`) of two: `lpuart-user`, a pty or a TCP port for the user's
+  program, and `lpuart-own`, a unix socket (`devices/NAME/lpuart.sock`) for
+  `flipperemu uart send` and `uart term`. What the firmware sends goes to both and
+  into the hub's `logfile` (`devices/NAME/lpuart.log`), where `uart wait` and
+  `--expect` read it; what either end sends goes to the firmware. The launcher has
+  an end of its own because a pty serves it badly: QEMU looks once a second whether
+  one is open, a pty keeps what was written for its next opener, and it does not
+  say how much the other side has read. The socket does (SIOCOUTQ), so `uart send`
+  stays until QEMU has read everything, which is when the firmware has: the model
+  takes a byte only with RXNE clear. Its end is read all the while, because a
+  connected end that is not read stops the firmware's sending after a few hundred
+  bytes. The model is the stock L4x5 one: no IDLE flag, no DMA request, no pacing by
+  the baud rate.
 
 ## The front panel (`flipper_panel.c`, `scripts/fe_gui*.py`)
 
@@ -1169,6 +1191,8 @@ the emulated field.
 | `enclave.keys` | the FUS's key store on CPU2: the secure enclave's keys (text, one key per line) |
 | `held.json` | (while it runs) the names of what the launcher held to it, for `status` and the window |
 | `uart.log`, `uart.log.1` | what a serial adapter on pins 13 and 14 would have recorded: the firmware's log of this run, and of the one before |
+| `lpuart.log` | what a serial adapter on pins 15 and 16 would have recorded: what an app sent on LPUART1 in this run |
+| `lpuart.tty`, `lpuart.sock`, `lpuart.mark` | (while it runs) that port's pty for a program of the user's, the launcher's own end of it, and how far `uart wait` has read the log |
 | `firmware.elf` | symbols for gdb (copied when flashing an ELF) |
 | `gdb.sock`, `gdb.init` | (once `./flipperemu gdb` was run) QEMU's gdb stub, and what gdb was told: the ELF, the stub, `scripts/fe_gdb.py` |
 | `gdb-apps/` | (with the stock apps' symbols beside the firmware's ELF) links to the apps' debug ELFs, the stock ones and what was built: the one folder the firmware's gdb script looks in |

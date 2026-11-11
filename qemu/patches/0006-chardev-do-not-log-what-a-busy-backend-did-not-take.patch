@@ -1,0 +1,39 @@
+From: FlipperEmu
+Subject: [PATCH] chardev: do not log what a busy backend did not take
+
+qemu_chr_write_buffer() logs what the backend wrote. When the backend
+wrote nothing and returned an error, it logs the whole buffer, on the
+ground that a fatal error means the caller will not come again with it.
+EAGAIN is not such an error: a front end that gets it sets up a watch and
+writes the same bytes again when the backend can take them, and they are
+logged then. So every EAGAIN put its bytes into the log file twice.
+
+Log the buffer on an error only when the error is not EAGAIN.
+
+Seen with the Flipper Zero model: its serial port on LPUART1 is a hub of a
+pty and a socket, with a log file. When the program at the socket did not
+read for a moment and the socket's buffer filled (after 277 characters,
+since the UART model writes them one at a time), the UART waited, as it
+should, the program got each character once, and the log file had the one
+that waited twice.
+
+Signed-off-by: FlipperEmu
+---
+--- a/chardev/char.c
++++ b/chardev/char.c
+@@ -179,11 +179,13 @@
+          * method, thus we'll log the remainder at that time.
+          */
+         qemu_chr_write_log(s, buf, *offset);
+-    } else if (res < 0) {
++    } else if (res < 0 && errno != EAGAIN) {
+         /*
+          * If a fatal error was reported by the backend,
+          * assume this method won't be invoked again with
+-         * this buffer, so log it all right away.
++         * this buffer, so log it all right away. (EAGAIN is
++         * none: the caller comes again with the same bytes,
++         * and they are logged when they are written.)
+          */
+         qemu_chr_write_log(s, buf, len);
+     }

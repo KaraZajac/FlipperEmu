@@ -5,7 +5,8 @@
  * furi_hal_clock.c), asserts that a bus clock is disabled before enabling it
  * (furi_hal_bus.c), and stops its tickless-idle timer by pulsing
  * APB1RSTR1.LPTIM1RST (furi_hal_idle_timer.h), so the reset lines are wired to
- * real device resets.
+ * real device resets. It also writes to peripherals it holds in reset (see
+ * the bus reset registers below).
  *
  * Copyright (c) 2026, Kara Zajac
  * SPDX-License-Identifier: BSD-3-Clause
@@ -226,10 +227,19 @@ static void wb55_rcc_write(void *opaque, hwaddr addr, uint64_t val64,
     case WB55_RCC_APB1RSTR1 / 4:
     case WB55_RCC_APB1RSTR2 / 4:
     case WB55_RCC_APB2RSTR / 4: {
-        uint32_t rising = val & ~old;
+        /*
+         * Reset on both edges of the bit. A peripheral that is held in reset
+         * takes no writes; here its registers stay writable, so the release
+         * throws away what was written meanwhile. The firmware does write:
+         * furi_hal_serial_resume() sets UE in LPUART1 after every deep
+         * sleep, in use or not, and LL_LPUART_Init() configures nothing
+         * when it finds UE set.
+         */
+        uint32_t changed = val ^ old;
         s->regs[idx] = val;
         for (int i = 0; i < s->nhooks; i++) {
-            if (s->hooks[i].off == addr && (rising & (1u << s->hooks[i].bit))) {
+            if (s->hooks[i].off == addr &&
+                (changed & (1u << s->hooks[i].bit))) {
                 wb55_rcc_local_reset(s->hooks[i].dev);
             }
         }
