@@ -245,6 +245,14 @@ A pin is named as the MCU has it (`PA7`), as the case has it (`A7`) or by that n
   that something is held to it, and that it does not show).
 - What a peripheral puts on a pin (a UART, PWM, SPI, I2C) is `unknown`: only the levels
   of plain inputs and outputs are on the header so far. The ADC reads nothing.
+- **What your app did to a pin, edge by edge:** `gpio record pins.vcd` has the
+  emulator write every change of a pin's level to a file, with its time, until `gpio
+  record stop`; a pulse too short for `--wait` is in it. The file is a VCD, which
+  GTKWave and PulseView show as a logic analyzer's capture. `gpio watch PA7` prints
+  the changes as they happen instead (`--for 5`: for five seconds), each with how long
+  the pin had the level before. The times are the emulator's clock: right for the
+  order of things and for milliseconds, some microseconds off for a pulse that short
+  (the README has what was measured).
 - **By hand, in the window:** the pins on top of the drawn Flipper light with their
   level (amber for high, blue for low), so an app that drives one is seen driving it.
   A click on a pin holds it high or low, or lets go of it; the GPIO menu has the list.
@@ -797,8 +805,15 @@ on the other side of the pins: the header after a start, a pin the firmware make
 output and sets (as a table, as a word, by its three names, in `status`, and a
 `--wait` that returns when the firmware sets it), a pin held high and low and let go
 of with the firmware's `gpio read` for each, a pin held while the firmware drives it,
-what is held over a reset, and what is refused. It passes on the official 1.5.1, the
-official dev build, Momentum, Unleashed and RogueMaster (38 checks). It has no app of
+what is held over a reset, and what is refused. Then the record: what the firmware
+does to PA7 and what is held to PA6 are in the file in their order, each with a later
+time; a second record is refused while one runs; `gpio record stop` says the number
+of changes that the file has, and nothing is written after it; `gpio watch` prints
+the two changes the firmware makes while it watches and leaves no record behind; a
+record goes on over a reset; a record of pin 17 while the firmware reads a DS1990A
+has the reset pulse and, right after it, the key's presence pulse; and a record the
+emulator was stopped under is whole. It passes on the official 1.5.1, the
+official dev build, Momentum, Unleashed and RogueMaster (53 checks). It has no app of
 its own: an interrupt on a held pin and an open-drain output were not tried. The
 window's pins are in `scripts/gui_check.py`: a click on pin 2 and Hold it high (the
 window has it high with a wire on it, and the launcher's `gpio PA7` from outside

@@ -10,6 +10,9 @@ for each of those, "NUMBER:PIN:MODE:PULL:LEVEL:HELD":
 and takes "PA6=1", "PA6=0" and "PA6=z" to hold a pin from outside, as a wire
 to 3V3 or to GND would, and to let go of it.
 
+The machine's `header-record` is a file that gets every change of a pin's
+level with its time, a VCD file as logic analyzers' programs read (Record).
+
 Copyright (c) 2026, Kara Zajac
 SPDX-License-Identifier: BSD-3-Clause
 """
@@ -64,6 +67,73 @@ def overruled(p):
     """Is something held to a pin that the firmware drives both ways?  On
     hardware the two would fight; here the firmware's level is the pin's."""
     return bool(p["held"]) and p["mode"] == "output" and not p["open_drain"]
+
+
+LEVELS = {"0": "low", "1": "high", "z": "floating", "x": "unknown"}
+
+
+class Record:
+    """A record of the header's levels (a VCD file the machine writes), read
+    a line at a time, so also while it grows.  Its times are ns of the
+    Flipper's own time, from where the record began."""
+
+    def __init__(self):
+        self.pins = {}          # the file's sign for a pin: the pin (PA7)
+        self.levels = {}        # a pin's level, as far as was read
+        self.ns = 0             # the time of what was read last
+        self.changes = 0        # changes of a level since it began
+        self.begins = False     # reading the levels it began with
+
+    def feed(self, line):
+        """A line of the file.  A change of a level: (ns, pin, level, the
+        level before); any other line: None.  ValueError: no line of such a
+        file."""
+        line = line.strip()
+        if line.startswith("$var "):
+            words = line.split()        # $var wire 1 a PA7 $end
+            if len(words) != 6:
+                raise ValueError(line)
+            self.pins[words[3]] = words[4]
+        elif line.startswith("$dumpvars"):
+            self.begins = True
+        elif line == "$end":
+            self.begins = False
+        elif line.startswith("#"):
+            ns = int(line[1:])
+            if ns < self.ns:
+                raise ValueError(f"{line}: back in time, from {self.ns}")
+            self.ns = ns
+        elif line[:1] in LEVELS and line[1:] in self.pins:
+            pin, level = self.pins[line[1:]], LEVELS[line[0]]
+            before, self.levels[pin] = self.levels.get(pin), level
+            if not self.begins:
+                self.changes += 1
+                return self.ns, pin, level, before
+        elif line and not line.startswith("$"):
+            raise ValueError(line)
+        return None
+
+
+def read_record(path):
+    """A whole record: (the Record as it ended, its changes)"""
+    record, changes = Record(), []
+    with open(path, encoding="ascii") as f:
+        for line in f:
+            change = record.feed(line)
+            if change:
+                changes.append(change)
+    return record, changes
+
+
+def span(ns):
+    """A length of time in words: 850 ns, 33.0 µs, 1.20 ms, 2.500 s"""
+    if ns < 1000:
+        return f"{ns} ns"
+    if ns < 1000000:
+        return f"{ns / 1e3:.1f} µs"
+    if ns < 1000000000:
+        return f"{ns / 1e6:.2f} ms"
+    return f"{ns / 1e9:.3f} s"
 
 
 def summary(pins):

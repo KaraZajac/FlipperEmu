@@ -291,8 +291,16 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         watches the property `header` over the front-panel link, and holds a pin
         with the launcher's `gpio`; `scripts/fe_header.py` reads the property for
         both; six more checks in `gui_check.py` (BRINGUP_LOG 101)
-  - ☐ A record of what a pin did (`gpio watch`, a VCD file for a pulse `--wait`
-        is too slow for)
+  - ☑ A record of what a pin did (2026-11-11): `gpio record FILE.vcd` until
+        `gpio record stop`, every change of a level with its time, written by the
+        machine (property `header-record`) where a level can change: the
+        firmware's write to a GPIO register, a hold from outside, a reset, and
+        the iButton model's side of pin 17; `gpio watch [PIN,PIN] [--for S]`
+        prints the changes as they happen, from the file; fifteen more checks in
+        `gpio_check.py` (BRINGUP_LOG 102). Times are the emulator's clock, some
+        microseconds off for the shortest pulses (measured there)
+  - ☐ The record in the window (a line in the GPIO menu), and the file opened
+        once in GTKWave or PulseView (neither is installed here)
   - ☐ What a peripheral puts on a pin: LPUART1 on 15 and 16 as a serial port, PWM,
         SPI and I2C devices on the header; a voltage for the ADC
   - ☐ An interrupt on a held pin and an open-drain output (untried: they need an

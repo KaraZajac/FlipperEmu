@@ -23,6 +23,8 @@ you flash stays flashed, settings and files persist across runs.
   ./flipperemu sound off | on                its speaker
   ./flipperemu gpio | gpio PA7 low           its GPIO header: what the firmware has
                                              the pins as; hold one from outside
+  ./flipperemu gpio record OUT.vcd | gpio watch
+                                             every change of its pins, with its time
   ./flipperemu reset                         reboot it, as Left + Back do on a real one
   ./flipperemu pause | continue              time stands still on it, and goes on
   ./flipperemu flash fw.dfu                  just program the flash
@@ -1327,10 +1329,158 @@ def header_pin(pins, word):
              f": {names} (or as on the case: A7, C0; or its number there)")
 
 
+def header_record(m):
+    """The record of the header's pins that runs: (changes, ns, the file).
+    None: none runs.  False: an emulator that cannot record."""
+    text = qom_get(m, "/machine", "header-record")
+    if not isinstance(text, str):
+        return False
+    if not text:
+        return None
+    changes, ns, path = text.split(" ", 2)
+    return int(changes), int(ns), path
+
+
+def set_header_record(m, value):
+    err = m.cmd(f"qom-set /machine header-record {value}").strip()
+    if err:
+        sys.exit("gpio: " + re.sub(r"^Error: (header-record: )?", "", err))
+
+
+def changes_text(n):
+    return ("no change" if not n else "1 change" if n == 1
+            else f"{n} changes") + " of a pin's level"
+
+
+RECORD_OLD = ("this emulator cannot record its GPIO header: it was started "
+              "before it could (`stop`, and `run` again)")
+
+
+def gpio_record(dev, what):
+    """gpio record FILE: every change of a header pin's level with its time,
+    into a VCD file.  gpio record stop: the end of that.  gpio record: does
+    one run?"""
+    if what and "\n" in what:
+        sys.exit("gpio: a file's name in one line")
+    m = open_monitor(dev)
+    try:
+        was = header_record(m)
+        if was is False:
+            sys.exit(f"[{dev.name}] {RECORD_OLD}")
+        if what is None:
+            print(f"[{dev.name}] " + (
+                f"recording the GPIO header's pins to {was[2]}: "
+                f"{changes_text(was[0])} in {was[1] / 1e9:.1f} s so far "
+                "(`gpio record stop` ends it)" if was else
+                "the GPIO header's pins are not being recorded "
+                "(gpio record FILE.vcd)"))
+            return 0
+        if what.lower() == "stop":
+            if not was:
+                sys.exit("gpio: nothing is being recorded "
+                         "(gpio record FILE.vcd)")
+            set_header_record(m, "off")
+            print(f"[{dev.name}] the record is {was[2]}: "
+                  f"{changes_text(was[0])} in {was[1] / 1e9:.1f} s of the "
+                  "Flipper's time (a VCD file, as GTKWave and PulseView open)")
+            return 0
+        if was:
+            sys.exit(f"gpio: it records to {was[2]} already (`gpio record "
+                     "stop` ends that)")
+        set_header_record(m, os.path.abspath(what))
+        print(f"[{dev.name}] recording the GPIO header's pins to {what}: "
+              "every change of a level, with its time (`gpio record stop` "
+              "ends it)")
+        return 0
+    finally:
+        m.close()
+
+
+def gpio_watch(dev, pins, words, seconds):
+    """gpio watch [PIN,PIN...]: the header's changes as they happen.  They
+    are read from the record: its own, in the device's directory, unless one
+    runs already."""
+    want = [header_pin(pins, w)["pin"]
+            for w in re.split(r"[,\s]+", words or "") if w]
+    m = open_monitor(dev)
+    try:
+        was = header_record(m)
+        if was is False:
+            sys.exit(f"[{dev.name}] {RECORD_OLD}")
+        path = pathlib.Path(was[2]) if was else dev.dir / "gpio-watch.vcd"
+        if not was:
+            set_header_record(m, path)
+    finally:
+        m.close()
+    t0 = was[1] if was else 0           # the record's time as the watch begins
+    print(f"[{dev.name}] " + (", ".join(want) if want else "the GPIO header's "
+                              "pins") + " as " + ("they change" if len(want) != 1
+                                                 else "it changes")
+          + (f", for {seconds:g} s" if seconds else "; Ctrl+C ends it")
+          + (f" (from the record that runs: {path})" if was else ""),
+          flush=True)
+    record, since, shown, rest, idle = fe_header.Record(), {}, 0, "", 0.0
+    began = time.time()
+    try:
+        with open(path, encoding="ascii") as f:
+            while True:
+                text = f.read()
+                if text:
+                    *lines, rest = (rest + text).split("\n")
+                    for line in lines:
+                        change = record.feed(line)
+                        if not change:
+                            continue
+                        ns, pin, level, before = change
+                        if ns >= t0 and (not want or pin in want):
+                            print(f"{(ns - t0) / 1e9:12.6f}  {pin:5} {level}"
+                                  + (f"  ({before} for "
+                                     f"{fe_header.span(ns - since[pin])})"
+                                     if pin in since else ""), flush=True)
+                            shown += 1
+                        since[pin] = ns
+                    idle = 0.0
+                    continue
+                if seconds and time.time() - began >= seconds:
+                    break
+                time.sleep(0.05)
+                idle += 0.05
+                if idle >= 1.0:
+                    idle = 0.0
+                    if not dev.running():
+                        print(f"[{dev.name}] it stopped", flush=True)
+                        break
+    except KeyboardInterrupt:
+        print()
+    finally:
+        if not was:
+            try:
+                m = open_monitor(dev)
+                try:
+                    if header_record(m):
+                        m.cmd("qom-set /machine header-record off")
+                finally:
+                    m.close()
+            except (SystemExit, OSError):
+                pass                    # the emulator is gone, and its record
+            path.unlink(missing_ok=True)
+    print(f"[{dev.name}] {changes_text(shown)} in {time.time() - began:.1f} s")
+    return 0
+
+
 def cmd_gpio(args):
     dev = Device(args.device)
     levels = {"high": "1", "1": "1", "low": "0", "0": "0", "free": "z"}
-    level = args.level.lower() if args.level else None
+    word = (args.pin or "").lower()
+    if word not in ("record", "watch") or args.wait:
+        level = args.level.lower() if args.level else None
+    else:
+        level = None
+    if args.seconds is not None and (word != "watch" or args.seconds <= 0):
+        sys.exit("gpio: --for goes with watch, and is more than 0 seconds: "
+                 "gpio watch PA7 --for 5")
+    if word == "record" and not args.wait:
+        return gpio_record(dev, args.level)
     if level is not None and level not in levels:
         sys.exit(f"gpio: {args.level!r}: a pin is held high or low, or let "
                  "go of (free)")
@@ -1364,6 +1514,8 @@ def cmd_gpio(args):
             sys.exit("gpio: " + re.sub(r"^Error: (header: )?", "", err))
 
     pins = now()
+    if word == "watch" and not args.wait:
+        return gpio_watch(dev, pins, args.level, args.seconds)
     if args.pin and args.pin.lower() == "free" and level is None:
         held = [p for p in pins if p["held"]]
         if held:
@@ -3631,12 +3783,20 @@ def main():
         "pin: its level, as one word (high, low, floating, unknown).  A pin "
         "and a level: held there from outside, as a wire to 3V3 or GND would, "
         "until `free`; a reset of the firmware leaves it held.  A pin the "
-        "firmware drives as an output keeps the firmware's level.")
+        "firmware drives as an output keeps the firmware's level.  "
+        "`record FILE.vcd`: every change of a pin's level with its time, into "
+        "a VCD file (GTKWave, PulseView), until `record stop`; `record`: "
+        "does one run.  `watch [PIN,PIN...]`: the changes as they happen.")
     p.add_argument("pin", nargs="?",
                    help="PA7, or as on the case (A7, C0, SWC), or its number on "
-                        "the header (2); `free` alone: let go of all")
+                        "the header (2); `free` alone: let go of all; `record` "
+                        "and `watch`: see above")
     p.add_argument("level", nargs="?", metavar="high|low|free",
-                   help="hold the pin there from outside; free: let go of it")
+                   help="hold the pin there from outside; free: let go of it "
+                        "(after `record`: the file, or `stop`; after `watch`: "
+                        "the pins to watch, with commas between them)")
+    p.add_argument("--for", dest="seconds", type=float, metavar="S",
+                   help="watch: for so many seconds (not given: until Ctrl+C)")
     p.add_argument("--wait", choices=("high", "low"), metavar="high|low",
                    help="wait until the pin is there (exit status 1: it was "
                         "not, in time).  It is looked at 20 times a second: a "

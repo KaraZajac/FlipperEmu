@@ -12,7 +12,8 @@
  *   Vibro PA8, speaker PB8 (TIM16 CH1), USART1 log console PB6/PB7
  *   GPIO header: 2 PA7, 3 PA6, 4 PA4, 5 PB3, 6 PB2, 7 PC3, 10 PA14 (SWCLK),
  *            12 PA13 (SWDIO), 13 PB6 (TX), 14 PB7 (RX), 15 PC1, 16 PC0,
- *            17 PB14 (iButton); /machine "header" shows them and holds them
+ *            17 PB14 (iButton); /machine "header" shows them and holds them,
+ *            "header-record" writes every change of their levels to a file
  *
  * Usage:
  *   qemu-system-arm -M flipper-zero -kernel firmware.elf \
@@ -129,6 +130,13 @@ struct FlipperZeroState {
     bool halt_rest;              /* ... and the CPU rests because of it */
     bool halt_said;
     uint8_t hdr_hold[HDR_PINS];  /* what the outside holds on a header pin */
+    FILE *hdr_rec;               /* the record of the header's levels (VCD) */
+    char *hdr_rec_path;
+    char hdr_rec_last[HDR_PINS]; /* ... each pin's level as it has it */
+    int64_t hdr_rec_t0;          /* ... when it began (virtual clock, ns) */
+    int64_t hdr_rec_at;          /* ... and the last time written to it */
+    uint64_t hdr_rec_changes;
+    QEMUTimer *hdr_rec_flush;    /* what was recorded reaches the file */
     Notifier exit_notifier;
 };
 
@@ -557,6 +565,152 @@ static char header_level(FlipperZeroState *s, int i)
     return pull == 1 ? '1' : pull == 2 ? '0' : 'z';
 }
 
+/*
+ * The record: every change of a header pin's level with its time, as a VCD
+ * file, which GTKWave, PulseView and sigrok read.  Times are the virtual
+ * clock's, in ns from where the record began.  A level is 0, 1, z (nothing
+ * drives the pin) or x (a peripheral's pin).  Looked at where a level can
+ * change: after the firmware's write to a GPIO register, after a reset,
+ * when the outside holds a pin or lets go of it, and when an iButton key or
+ * reader of the emulator's pulls pin 17 or lets go of it.
+ */
+#define HDR_REC_FLUSH_MS 50
+
+static void flipper_header_look(FlipperZeroState *s, int port)
+{
+    int64_t now;
+    bool stamped = false;
+
+    if (!s->hdr_rec) {
+        return;
+    }
+    now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->hdr_rec_t0;
+    if (now <= s->hdr_rec_at) {         /* two looks in one tick of the */
+        now = s->hdr_rec_at + 1;        /* clock: both are in the record */
+    }
+    for (int i = 0; i < HDR_PINS; i++) {
+        char level;
+
+        if (port >= 0 && port != header[i].port - 'A') {
+            continue;
+        }
+        level = header_level(s, i);
+        if (level == s->hdr_rec_last[i]) {
+            continue;
+        }
+        if (!stamped) {
+            fprintf(s->hdr_rec, "#%" PRId64 "\n", now);
+            s->hdr_rec_at = now;
+            stamped = true;
+        }
+        fprintf(s->hdr_rec, "%c%c\n", level == '?' ? 'x' : level, 'a' + i);
+        s->hdr_rec_last[i] = level;
+        s->hdr_rec_changes++;
+    }
+}
+
+static void flipper_header_rec_flush(void *opaque)
+{
+    FlipperZeroState *s = opaque;
+
+    if (s->hdr_rec) {
+        fflush(s->hdr_rec);
+        timer_mod(s->hdr_rec_flush,
+                  qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + HDR_REC_FLUSH_MS);
+    }
+}
+
+static void flipper_header_rec_stop(FlipperZeroState *s)
+{
+    int64_t now;
+
+    if (!s->hdr_rec) {
+        return;
+    }
+    /* its end, so that the last level has a length */
+    now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->hdr_rec_t0;
+    if (now > s->hdr_rec_at) {
+        fprintf(s->hdr_rec, "#%" PRId64 "\n", now);
+    }
+    fclose(s->hdr_rec);
+    s->hdr_rec = NULL;
+    timer_del(s->hdr_rec_flush);
+}
+
+/* "CHANGES NS PATH" while it records (changes written, ns since it began,
+ * the file), and nothing while it does not */
+static char *flipper_get_header_record(Object *obj, Error **errp)
+{
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+
+    if (!s->hdr_rec) {
+        return g_strdup("");
+    }
+    return g_strdup_printf("%" PRIu64 " %" PRId64 " %s", s->hdr_rec_changes,
+                           qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) -
+                           s->hdr_rec_t0, s->hdr_rec_path);
+}
+
+/* a file to record to, with its whole path; off: the record ends */
+static void flipper_set_header_record(Object *obj, const char *value,
+                                      Error **errp)
+{
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+    FILE *f;
+
+    if (!strcmp(value, "off")) {
+        flipper_header_rec_stop(s);
+        return;
+    }
+    if (s->hdr_rec) {
+        error_setg(errp, "header-record: it records to %s already (set it "
+                   "to off to end that)", s->hdr_rec_path);
+        return;
+    }
+    if (value[0] != '/') {
+        error_setg(errp, "header-record: a file with its whole path, or "
+                   "off");
+        return;
+    }
+    if (!phase_check(PHASE_MACHINE_INITIALIZED)) {
+        error_setg(errp, "header-record: set it on a machine that runs");
+        return;
+    }
+    f = fopen(value, "w");
+    if (!f) {
+        error_setg_errno(errp, errno, "header-record: cannot write %s",
+                         value);
+        return;
+    }
+    g_free(s->hdr_rec_path);
+    s->hdr_rec_path = g_strdup(value);
+    s->hdr_rec = f;
+    s->hdr_rec_t0 = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    s->hdr_rec_at = 0;
+    s->hdr_rec_changes = 0;
+    fprintf(f, "$version FlipperEmu, the GPIO header of a Flipper Zero $end\n"
+               "$comment x: a peripheral has the pin; z: nothing drives it "
+               "$end\n$timescale 1 ns $end\n$scope module header $end\n");
+    for (int i = 0; i < HDR_PINS; i++) {
+        fprintf(f, "$var wire 1 %c P%c%d $end\n", 'a' + i, header[i].port,
+                header[i].pin);
+    }
+    fprintf(f, "$upscope $end\n$enddefinitions $end\n#0\n$dumpvars\n");
+    for (int i = 0; i < HDR_PINS; i++) {
+        s->hdr_rec_last[i] = header_level(s, i);
+        fprintf(f, "%c%c\n", s->hdr_rec_last[i] == '?' ? 'x' :
+                s->hdr_rec_last[i], 'a' + i);
+    }
+    fprintf(f, "$end\n");
+    fflush(f);
+    if (!s->hdr_rec_flush) {
+        s->hdr_rec_flush = timer_new_ms(QEMU_CLOCK_REALTIME,
+                                        flipper_header_rec_flush, s);
+    }
+    timer_mod(s->hdr_rec_flush,
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + HDR_REC_FLUSH_MS);
+}
+
 /* "NUMBER:PIN:MODE:PULL:LEVEL:HELD" for each pin: MODE in, out, od (an
  * open-drain output), afN, afNod or analog; PULL up, down or none; LEVEL as
  * above; HELD high, low, free, or - for a pin that is not for holding */
@@ -646,6 +800,7 @@ static void flipper_set_header(Object *obj, const char *value, Error **errp)
     }
     if (phase_check(PHASE_MACHINE_INITIALIZED)) {
         flipper_header_held(s, -1);
+        flipper_header_look(s, -1);
     }
 }
 
@@ -665,9 +820,20 @@ static void flipper_drive_pins(FlipperZeroState *s)
         qemu_set_irq(soc_in(s, buttons[b].port, buttons[b].pin),
                      buttons[b].active_high ? down : !down);
     }
+    flipper_header_look(s, -1);             /* the header's record */
 }
 
 /* a read of GPIOB's IDR: the firmware sampled PB14, the iButton line */
+/* The iButton pin as a key or a reader of the emulator's has it: low, or
+ * let go.  It is a pin of the header (17), so its record has that too. */
+static void flipper_ibutton_pull(void *opaque, int n, int level)
+{
+    FlipperZeroState *s = opaque;
+
+    qemu_set_irq(soc_in(s, 'B', 14), level);
+    flipper_header_look(s, 1);
+}
+
 static void flipper_idr_read(void *opaque, int port)
 {
     FlipperZeroState *s = opaque;
@@ -683,8 +849,10 @@ static bool flipper_pb14_output(FlipperZeroState *s)
     return ((s->soc.gpio[1].moder >> 28) & 3) == 1;
 }
 
-/* a write to GPIOB's MODER/ODR/BSRR/BRR that may concern PB14: what the
- * firmware drives on the iButton line now (low, or released) */
+/* a write to a GPIO register that a pin's level may change with.  For the
+ * header: what is held shows again, and the record has the change.  For
+ * GPIOB's MODER/ODR/BSRR/BRR that may concern PB14: what the firmware
+ * drives on the iButton line now (low, or released) */
 static void flipper_out_written(void *opaque, int port, hwaddr reg,
                                 uint32_t data)
 {
@@ -693,6 +861,10 @@ static void flipper_out_written(void *opaque, int port, hwaddr reg,
 
     if (reg == 0x00) {                  /* MODER: a header pin may be an */
         flipper_header_held(s, port);   /* input again, for what holds it */
+    }
+    flipper_header_look(s, port);
+    if (reg == 0x04 || reg == 0x0c) {
+        return;                         /* OTYPER, PUPDR: the header's only */
     }
     if (port != 1 || (reg == 0x18 && !(data & (bit | bit << 16))) ||
         (reg == 0x28 && !(data & bit))) {
@@ -1042,7 +1214,8 @@ static void flipper_zero_init(MachineState *machine)
     s->ibutton->dwt = &s->soc.dwt;
     object_property_add_child(OBJECT(machine), "ibutton", OBJECT(dev));
     qdev_realize_and_unref(dev, NULL, &error_fatal);
-    qdev_connect_gpio_out_named(dev, "pull", 0, soc_in(s, 'B', 14));
+    qdev_connect_gpio_out_named(dev, "pull", 0,
+                                qemu_allocate_irq(flipper_ibutton_pull, s, 0));
     s->soc.idr_read = flipper_idr_read;
     s->soc.out_written = flipper_out_written;
     s->soc.gpio_hook_opaque = s;
@@ -1263,6 +1436,11 @@ static void flipper_zero_instance_init(Object *obj)
     object_property_set_description(obj, "header",
         "The GPIO header's pins as the firmware has them, and what the "
         "outside holds on them: set PA7=1, PA7=0 or PA7=z (let go)");
+    object_property_add_str(obj, "header-record", flipper_get_header_record,
+                            flipper_set_header_record);
+    object_property_set_description(obj, "header-record",
+        "A VCD file that gets every change of a header pin's level with its "
+        "time (off: the record ends).  Read: changes, ns, the file");
     object_property_add_bool(obj, "sd-card", flipper_get_sd_card,
                              flipper_set_sd_card);
     object_property_set_description(obj, "sd-card",

@@ -654,8 +654,8 @@ struct WB55SocState {
     qemu_irq gpio_out[WB55_PINS];    /* pin levels for board devices */
     /* board hooks for bit-banged buses, from an overlay on each GPIO port
      * that passes every access through: the CPU read IDR (its value
-     * already taken: it has sampled the pins), or wrote MODER, ODR, BSRR
-     * or BRR (what it drives may have changed) */
+     * already taken: it has sampled the pins), or wrote MODER, OTYPER,
+     * PUPDR, ODR, BSRR or BRR (a pin's level may have changed) */
     void (*idr_read)(void *opaque, int port);
     void (*out_written)(void *opaque, int port, hwaddr reg, uint32_t data);
     void *gpio_hook_opaque;

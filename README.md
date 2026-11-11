@@ -43,7 +43,8 @@ same five, off-screen.
 and installed there, and the updater's error screen) passes on the same five, from the
 official firmware to Unleashed, and from the release to the dev build.
 `scripts/gpio_check.py` (the GPIO header: a pin the firmware drives seen from outside,
-a pin held from outside read by the firmware) passes on the same five.
+a pin held from outside read by the firmware, a record of every change of a pin with
+its time) passes on the same five.
 `scripts/ufbt_check.py` (ufbt 0.2.6 building `examples/hello`, launching it there, and
 `ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's symbols, that
 app's and a stock app's, and its debug configuration for VS Code used the way that
@@ -382,6 +383,7 @@ it runs: once with the wait given up, once to the end.
 | `sd eject` \| `sd insert` | pull its microSD card out, push it back in |
 | `sound off` \| `sound on` | mute its speaker, and back |
 | `gpio` \| `gpio PIN` \| `gpio PIN high\|low\|free` \| `gpio PIN --wait high\|low` | its GPIO header: what the firmware has the pins as; one pin's level; a pin held from outside, or let go of; wait for a level |
+| `gpio record OUT.vcd` \| `gpio record stop` \| `gpio watch [PIN,PIN]` | every change of a pin's level with its time: into a file a logic analyzer's program opens, or printed as it happens |
 | `reset` | reboot it, as holding Left + Back does |
 | `pause` \| `continue` | time stands still on it (screen, timers, radios), and goes on from there |
 | `run --usbip [PORT]` | export the USB device over USB/IP (then `sudo scripts/usbip_attach.py`) |
@@ -1306,6 +1308,9 @@ one high or low from outside, as a wire to 3V3 or to GND would:
 ./flipperemu gpio PA6 high          # hold it high from outside (low; free: let go of it)
 ./flipperemu gpio free              # let go of all
 ./flipperemu gpio PA7 --wait high   # until it is high (--timeout S, then exit status 1)
+./flipperemu gpio record pins.vcd   # every change of a level, with its time, into a file
+./flipperemu gpio record stop       # ... until this (`gpio record`: does one run?)
+./flipperemu gpio watch PA7,PA6     # the changes as they happen (--for S; else to Ctrl+C)
 ```
 
 ```
@@ -1349,12 +1354,64 @@ times a second, so a pin that blinks faster than that shows only some of its bli
   have `log` and `ibutton`.
 - `--wait` looks at the pin twenty times a second: a shorter pulse can pass unseen.
 
+#### A record of what the pins did
+
+`--wait` and the window look at a pin some times a second. `gpio record` is what a
+logic analyzer on the header would be: the emulator itself writes every change of a
+pin's level to a file, with the Flipper's time of it, at the moment the firmware
+writes the register (or the pin is held, or let go of, or the firmware is reset).
+Nothing is too short for it.
+
+```
+$ ./flipperemu gpio record pins.vcd
+[flipper] recording the GPIO header's pins to pins.vcd: every change of a level, with its time (`gpio record stop` ends it)
+$ ./flipperemu gpio record stop
+[flipper] the record is /home/you/pins.vcd: 552 changes of a pin's level in 1.3 s of the Flipper's time (a VCD file, as GTKWave and PulseView open)
+```
+
+`gpio watch` prints the changes as they happen, of all pins or of those named, each
+with the Flipper's time since the watch began and how long the pin had the level
+before:
+
+```
+$ ./flipperemu gpio watch PA7,PA6 --for 5
+[flipper] PA7, PA6 as they change, for 5 s
+    1.843678  PA7   low
+    1.854337  PA7   high  (low for 10.66 ms)
+    2.204200  PA6   low
+    2.508627  PA6   floating  (low for 304.43 ms)
+[flipper] 4 changes of a pin's level in 5.0 s
+```
+
+- The file is a VCD (value change dump), the text format that GTKWave and PulseView
+  read: thirteen signals named as the pins (`PA7`), times in nanoseconds from where
+  the record began, `z` for a pin that floats and `x` for one a peripheral has. It
+  was read back here by the project's own reader (`scripts/fe_header.py`) only:
+  neither program is installed where this was built. PulseView's import may want
+  its `downsample` option for a time unit this fine.
+- A record goes on over a reset of the firmware, and ends with `gpio record stop` or
+  with the emulator; the file is whole either way. One record runs at a time. `gpio
+  watch` reads the record that runs, or keeps one of its own while it watches.
+- Pin 17, the iButton pin, has both sides in it: what the firmware drives, and what
+  a key held to it with `ibutton` answers. A record of `ikey read` is the whole
+  1-Wire exchange: the reset pulse, the key's presence pulse, every bit.
+- The times are the emulator's clock at the firmware's write, and that clock is not
+  exact to the cycle. Measured on 1-Wire, where the firmware times its pulses in
+  microseconds: a reset pulse of 480 µs is 493 to 516 µs in the record, a 60 µs low
+  64 to 72 µs, a 6 µs low 8 to 16 µs, and on a busy host some of those 30 to 50 µs.
+  So the record is right about the order of things, about who had the line, and
+  about milliseconds; a pulse of a few microseconds is there, with a length that is
+  some microseconds off.
+- A busy pin makes a big file: an iButton check of 37 s wrote 367 702 changes, 5.7 MB.
+
 Underneath it is the machine's property `header`: read, a word for each pin
 (`2:PA7:out:none:1:free`: number, pin, mode, pull, level, what is held); written,
-`PA6=1`, `PA6=0` or `PA6=z`.
+`PA6=1`, `PA6=0` or `PA6=z`. The record is the property `header-record`: written, a
+file with its whole path, or `off`; read, the changes and nanoseconds so far and the
+file.
 
 `scripts/gpio_check.py FIRMWARE` checks it with the firmware's own `gpio` CLI command
-on the other side of the pins: 38 checks, on the official 1.5.1, the official dev
+on the other side of the pins: 53 checks, on the official 1.5.1, the official dev
 build, Momentum, Unleashed and RogueMaster. Not tried: an interrupt an app has on a
 held pin (the buttons' come the same way), and a pin that an app has as an open-drain
 output.

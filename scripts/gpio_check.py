@@ -14,9 +14,14 @@ a level returns when the firmware sets it (and with exit status 1 when it
 does not).  Then the other way: PA6 an input, held high and low from outside
 and let go of, and the firmware's `gpio read` says so.  A pin held while the
 firmware drives it keeps the firmware's level, and has what is held when it
-is an input again.  What is held stays so over a reset of the firmware.  Last
-what is refused: the pins with their own use, power pins, pins that are not
-there, levels that are none.  Exit status 0 = pass.
+is an input again.  What is held stays so over a reset of the firmware.  Then
+the record (`gpio record FILE.vcd`): what the firmware does to PA7 and what
+is held to PA6 are in the file in their order, each with its time, also over
+a reset; `gpio watch` prints changes as they happen; a record of pin 17 while
+the firmware reads a 1-Wire key has both sides of the line.  Last what is
+refused: the pins with their own use, power pins, pins that are not there,
+levels that are none.  At the end the emulator is stopped while it records,
+and the file has what was recorded.  Exit status 0 = pass.
 """
 import argparse
 import json
@@ -29,18 +34,19 @@ import sys
 import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import fe_header  # noqa: E402
 from files_check import ROOT, Bench, CRASH, check, results  # noqa: E402
 
 SIGNALS = "PA7 PA6 PA4 PB3 PB2 PC3 PA14 PA13 PB6 PB7 PC1 PC0 PB14".split()
 
 
-def fe(b, *args, timeout=600):
+def fe(b, *args, timeout=600, cwd=None):
     """A launcher command: (exit status, what it printed, what it said on
     stderr, the seconds it took)"""
     t0 = time.time()
     r = subprocess.run([sys.executable, str(ROOT / "flipperemu"), "-d", b.name,
                         *map(str, args)], capture_output=True, timeout=timeout,
-                       encoding="utf-8", errors="replace",
+                       encoding="utf-8", errors="replace", cwd=cwd,
                        stdin=subprocess.DEVNULL)
     return r.returncode, r.stdout, r.stderr, time.time() - t0
 
@@ -216,6 +222,142 @@ def fight_checks(b):
           out + err)
 
 
+def recorded(path):
+    """A record: (its changes, what was wrong with the file)"""
+    try:
+        record, changes = fe_header.read_record(path)
+    except (OSError, ValueError) as e:
+        return [], f"{type(e).__name__}: {e}"
+    return changes, ""
+
+
+def of(changes, pin):
+    return [level for ns, p, level, before in changes if p == pin]
+
+
+def record_checks(b):
+    """Nothing is held; the firmware has PA7 and PA6 as inputs"""
+    vcd, other = b.dir / "pins.vcd", b.dir / "other.vcd"
+    code, out, err, took = fe(b, "gpio", "record")
+    code2, out2, err2, took = fe(b, "gpio", "record", "stop")
+    check("`gpio record` with no record running: says so, exit 0; `gpio "
+          "record stop`: exit 1 and one line",
+          code == 0 and "not being recorded" in out and code2 == 1
+          and not out2 and len(err2.strip().splitlines()) == 1
+          and "nothing is being recorded" in err2, out + err + out2 + err2)
+
+    code, out, err, took = fe(b, "gpio", "record", "pins.vcd", cwd=b.dir)
+    code2, out2, err2, took = fe(b, "gpio", "record")
+    head = vcd.read_text() if vcd.exists() else ""
+    check("`gpio record pins.vcd`: a VCD file where the command was given, "
+          "with the thirteen pins and the levels they begin with; `gpio "
+          "record` says that it runs",
+          code == 0 and code2 == 0 and str(vcd) in out2
+          and "no change" in out2 and "$timescale 1 ns $end" in head
+          and all(f" {p} $end\n" in head for p in SIGNALS)
+          and head.count("$var wire 1 ") == 13 and "#0\n$dumpvars\n" in head
+          and head.rstrip().endswith("$end") and not recorded(vcd)[1],
+          out + err + out2 + err2 + head + recorded(vcd)[1])
+
+    said = firmware(b, "gpio mode PA7 1", "gpio set PA7 1", "gpio set PA7 0",
+                    "gpio set PA7 1")
+    fe(b, "gpio", "PA6", "high")
+    fe(b, "gpio", "PA6", "free")
+    code, out, err, took = fe(b, "gpio", "record", other)
+    check("a second record while one runs: exit 1, one line with the file "
+          "of the first, and no second file",
+          code == 1 and not out and len(err.strip().splitlines()) == 1
+          and str(vcd) in err and "already" in err and not other.exists(),
+          out + err)
+    time.sleep(0.3)
+    growing, wrong = recorded(vcd)      # what reached the file as it runs
+    code, out, err, took = fe(b, "gpio", "record", "stop")
+    changes, wrong2 = recorded(vcd)
+    times = [c[0] for c in changes]
+    check("what the firmware did to PA7 is in it in its order (an output: "
+          "low; then set 1, 0, 1), and was there while the record ran",
+          not wrong and not wrong2 and of(changes, "PA7")
+          == ["low", "high", "low", "high"] and of(growing, "PA7")
+          == of(changes, "PA7"), said + wrong + wrong2 + repr(changes))
+    check("... what was held to PA6 too (high, let go of: floating); every "
+          "change has its own time, later than the one before",
+          of(changes, "PA6") == ["high", "floating"]
+          and all(a < z for a, z in zip(times, times[1:]))
+          and 0 < times[-1] < 120e9, repr(changes))
+    text = vcd.read_text() if vcd.exists() else ""
+    last = text.rstrip().splitlines()[-1] if text.strip() else ""
+    check("`gpio record stop`: says the file and how many changes are in "
+          f"it ({len(changes)}); the file ends with the time it ended at",
+          code == 0 and str(vcd) in out and changes
+          and f"{len(changes)} changes of a pin's level" in out
+          and re.fullmatch(r"#\d+", last) and int(last[1:]) > times[-1],
+          out + err + last)
+    size = vcd.stat().st_size if vcd.exists() else 0
+    firmware(b, "gpio set PA7 0")
+    time.sleep(0.3)
+    code, out, err, took = fe(b, "gpio", "record")
+    check("... and nothing is written to it after that",
+          size and vcd.stat().st_size == size and "not being recorded" in out,
+          out + err)
+
+    # as it happens: PA7 is an output and low
+    watch = b.bg("gpio", "watch", "A7", "--for", 6)
+    time.sleep(2.0)
+    said = firmware(b, "gpio set PA7 1", "gpio set PA7 0")
+    try:
+        out = watch.communicate(timeout=60)[0]
+    except subprocess.TimeoutExpired:
+        watch.kill()
+        out = "(still watching)" + watch.communicate()[0]
+    lines = [" ".join(line.split()[1:]) for line in out.splitlines()
+             if re.match(r"\s*\d+\.\d{6}\s", line)]
+    code, out2, err2, took = fe(b, "gpio", "record")
+    check("`gpio watch A7 --for 6`: the two changes the firmware makes "
+          "meanwhile, a line each, the second with how long PA7 was high; "
+          "it ends by itself and leaves no record running, and no file",
+          watch.returncode == 0 and len(lines) == 2
+          and lines[0] == "PA7 high" and lines[1].startswith("PA7 low (high "
+                                                             "for ")
+          and "2 changes of a pin's level" in out
+          and "not being recorded" in out2
+          and not (b.dir / "gpio-watch.vcd").exists(), out + said + out2)
+
+    # pin 17, the iButton pin, has two sides: the firmware's, and a key's
+    ow = b.dir / "ow.vcd"
+    fe(b, "ibutton", "ds1990", "01", "A1", "B2", "C3", "D4", "E5", "F6")
+    fe(b, "gpio", "record", ow)
+    said = firmware(b, "ikey read")
+    fe(b, "gpio", "record", "stop")
+    fe(b, "ibutton", "none")
+    changes, wrong = recorded(ow)
+    line = [(ns, level) for ns, pin, level, before in changes if pin == "PB14"]
+    lows = [(a, z - a) for (a, level), (z, after) in zip(line, line[1:])
+            if level == "low"]
+    us = [round(length / 1000) for at, length in lows]
+    check("a record while the firmware reads a 1-Wire key (`ikey read`): "
+          "pin 17 has the firmware's reset pulse (480 us; here "
+          f"{us[0] if us else '-'}), right after it the key's own answer, "
+          f"its presence pulse ({us[1] if us[1:] else '-'} us), then the "
+          "slots of the command and of the ROM's 64 bits; the line is high "
+          "at the end",
+          "Dallas 01A1B2C3D4E5F68F" in said and not wrong and len(lows) >= 74
+          and 400 <= us[0] <= 2000 and 30 <= us[1] <= 1100
+          and lows[1][0] - (lows[0][0] + lows[0][1]) < 200000
+          and line[-1][1] == "high", said + wrong + repr(us[:90]))
+
+    # over a reset: the record goes on, and has what the reset did to a pin
+    fe(b, "gpio", "record", vcd)
+    code, out, err, took = fe(b, "reset")
+    code2, out2, err2, took = fe(b, "wait", "--timeout", b.timeout)
+    code3, out3, err3, took = fe(b, "gpio", "record", "stop")
+    changes, wrong = recorded(vcd)
+    check("a record over a reset of the firmware: it goes on, and PA7, an "
+          "output before, is in it as let go of (floating)",
+          code == 0 and code2 == 0 and code3 == 0 and not wrong
+          and of(changes, "PA7")[-1:] == ["floating"],
+          out + err + out2 + err2 + out3 + err3 + wrong + repr(changes))
+
+
 def refused_checks(b):
     def refused(label, words, *args):
         code, out, err, took = fe(b, "gpio", *args)
@@ -234,6 +376,14 @@ def refused_checks(b):
     refused("--wait and a level to hold together", ["--wait"], "PA6", "high",
             "--wait", "high")
     refused("--wait without a pin", ["--wait"], "--wait", "high")
+    refused("a record to a file that cannot be written",
+            ["cannot write", "/nowhere/pins.vcd"], "record", "/nowhere/pins.vcd")
+    refused("--for without watch", ["--for", "watch"], "PA6", "--for", "3")
+    refused("watch of a pin that is not there", ["'PD3'", "PA7"],
+            "watch", "PD3")
+    code, out, err, took = fe(b, "gpio", "record")
+    check("... and none of those left a record running",
+          code == 0 and "not being recorded" in out, out + err)
     st = status(b)
     check("... and none of that held anything",
           st and not any(p.get("held") for p in st.values()), st)
@@ -268,6 +418,7 @@ def main():
             output_checks(b)
             input_checks(b)
             fight_checks(b)
+            record_checks(b)
             refused_checks(b)
             ok, said = b.answers()
             check("the CLI still answers", ok, said)
@@ -275,6 +426,16 @@ def main():
             crash = CRASH.search(log)
             check("no crash in the firmware's log", not crash,
                   crash and log[max(0, crash.start() - 300):crash.end() + 300])
+            vcd = b.dir / "last.vcd"
+            fe(b, "gpio", "record", vcd)
+            fe(b, "gpio", "PA6", "high")
+            b.stop()
+            code, out, err, took = fe(b, "stop")
+            changes, wrong = recorded(vcd)
+            check("the emulator stopped while it records: the file has what "
+                  "was recorded (PA6 held high)",
+                  not wrong and of(changes, "PA6") == ["high"],
+                  out + err + wrong + repr(changes))
     finally:
         b.stop()
         fe(b, "stop")

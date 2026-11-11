@@ -1709,6 +1709,55 @@ big lock, entry 92).
       held low and the GPIO menu's lines, Let go of all pins, and the clicks on
       13 and 17. Off-screen, like the rest of the window's checks.
 
+102. **A record of what a pin did.** `gpio PA7 --wait high` looks twenty times a
+    second and the window ten times: an app that pulses a pin for a millisecond was
+    never seen doing it. `gpio record FILE.vcd` writes every change of a header
+    pin's level with its time, and `gpio watch` prints them as they happen.
+    - The machine writes the file itself (property `header-record`). It looks at
+      the header's levels where one can change: after the firmware's write to a
+      GPIO register (the SoC's tap had MODER, ODR, BSRR and BRR for the 1-Wire pin;
+      OTYPER and PUPDR are new, for an open-drain pin and a pull), after a hold from
+      outside, and after a reset. A pin whose level is as before writes nothing.
+    - The file is a VCD: a `$var` for each of the thirteen pins, the levels at the
+      start in `$dumpvars`, then `#ns` and a line for each pin that changed. `z` is
+      a floating pin, `x` one that a peripheral has. Two looks in one tick of the
+      clock get two times, a nanosecond apart, so every change has its own.
+    - The property takes `off` to end a record, and not an empty value: HMP's
+      `qom-set` cannot send one. It wants the file's whole path, since the emulator's
+      directory is not the caller's; the launcher makes it one.
+    - The file is flushed every 50 ms of real time. So `gpio watch` reads the file
+      as it grows, and needs no second channel; the monitor has one client at a
+      time and stays free meanwhile. A watch with no record running keeps its own
+      in the device's directory and removes it afterwards.
+    - Pin 17 had only the firmware's half at first. The iButton model's line was
+      wired to the GPIO port directly, so a key's presence pulse and its 0 bits
+      changed the pin and no look followed. It goes through the machine now
+      (`flipper_ibutton_pull`), which looks. A record of `ikey read` with a DS1990A
+      on the contact: 552 changes, the reset pulse low for 508 µs, 3 µs later the
+      key's presence pulse for 102 µs, then the slots. `scripts/ibutton_check.py`
+      passes with that wiring (18 of 18), and the same with a record running, which
+      took 367 702 changes in 37 s (5.7 MB) and read back whole.
+    - How exact are the times? They are the virtual clock's at the write, and the
+      1-Wire model's notes say what is wrong with that: the write needs the big
+      lock and comes 20 to 50 µs late when the main loop has it. The model times a
+      slot by the firmware's last read of CYCCNT instead. Tried the same for the
+      record (a change the firmware makes stamped with that read, when it was
+      shortly before): the lengths of the lows of three reads were spread as
+      before, since a late write is time that passes for the firmware too, and the
+      other stamp only moves it to the next edge. Taken out again. What was
+      measured stays in the README: 480 µs is 493 to 516, 60 µs is 64 to 72, 6 µs
+      is 8 to 16, and on a busy host some of the short ones 30 to 50.
+    - No program that reads VCD is installed here, and no library either. The file
+      follows the format's text (IEEE 1364, the four-state dump) and is read back
+      by `fe_header.Record`, which the checks use; GTKWave and PulseView have not
+      seen one.
+    - `gpio_check.py` has fifteen more checks (53, on all five firmwares): none
+      running, a record's header, a second one refused, the firmware's four changes
+      of PA7 and the hold of PA6 in their order with rising times, `stop` and what
+      it says, nothing written after it, `gpio watch`, 1-Wire on pin 17, a record
+      over a reset, three refusals that leave nothing running, and the file whole
+      after the emulator stopped under it.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
