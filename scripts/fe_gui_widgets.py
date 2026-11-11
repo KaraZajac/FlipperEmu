@@ -27,6 +27,8 @@ import fe_log
 
 COMMAND_MS = 90_000                 # no command of the launcher takes this long
 COPY_MS = 30 * 60_000               # ... but one that copies files to the card
+UPDATE_MS = 17 * 60_000             # ... or waits for the firmware's updater
+INTERRUPT_MS = 3000                 # an interrupted command has this long to end
 LAST_LINE_MS = 1500                 # a command's newest line: shown after this
 
 
@@ -40,6 +42,7 @@ def launcher_process(parent, launcher, name, args):
     p.setProcessChannelMode(QtCore.QProcess.MergedChannels)
     env = QtCore.QProcessEnvironment.systemEnvironment()
     env.insert("PYTHONUNBUFFERED", "1")
+    env.insert("FLIPPEREMU_INTERRUPT", "1")     # SIGINT ends it, as Ctrl-C does
     p.setProcessEnvironment(env)
     p.setProgram(sys.executable)
     p.setArguments([str(launcher), "-d", name, *map(str, args)])
@@ -158,6 +161,19 @@ class Runner(QtCore.QObject):
             self.output.emit(f"{self.current[0]}: no answer for "
                              f"{self.limit // 1000} s; stopped it")
             self.proc.kill()
+
+    def interrupt(self):
+        """End the command that runs as Ctrl-C ends it in a terminal: it says
+        what it leaves behind.  One that does not listen is stopped."""
+        p = self.proc
+        if not p or not p.processId():
+            return
+        try:
+            os.kill(p.processId(), signal.SIGINT)
+        except OSError:
+            return
+        QtCore.QTimer.singleShot(
+            INTERRUPT_MS, lambda: p.kill() if p is self.proc else None)
 
     def stop(self):
         self.queue.clear()

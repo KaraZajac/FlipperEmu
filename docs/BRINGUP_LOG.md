@@ -1440,6 +1440,50 @@ big lock, entry 92).
     - With no cable the 5 % is the firmware's own work: the vCPU is awake in 4.6 % of
       the samples, drawing the desktop's animation and reading the fuel gauge.
 
+95. **The window could not send an update.** A firmware developer's loop is "build a
+    package, send it, look", and in the window it ended in a terminal: Install
+    firmware is the programmer's way (off, flash, on), and only the window that
+    started the emulator has it. Now Device > Update with a package runs the
+    launcher's `update`, F6 does it again with the same package, and a dropped
+    package is updated with (where Install can be done too, the window asks which).
+    Three things came up on the way.
+    - The launcher's commands take turns, since the emulator's monitor takes one
+      client at a time, and `update` keeps its turn for as long as the updater works:
+      a minute and a half at least. A Reboot chosen meanwhile would have come when
+      the update was over. So the window says "updating", greys what would wait
+      (Reboot, Install, the card, the apps) and says why where a click cannot be
+      greyed (the cable, the card's slot). Power off stays for the window that owns
+      the emulator.
+    - Stop waiting is Ctrl-C for the launcher: `update` then says that the update
+      goes on on the Flipper, and gives a log level back that it had lent. Under the
+      window's check that would have done nothing. The check runs from a script in
+      the background, and a shell without job control starts such a command with
+      SIGINT ignored (a test script printed it so); an ignored signal stays ignored
+      in every child, and Python installs its Ctrl-C handler only where the signal is
+      not ignored. The window ends a command that does not listen the hard way after
+      three seconds, and the lent log level would have stayed. So the window sets
+      `FLIPPEREMU_INTERRUPT` for the launcher it starts, and the launcher takes
+      Python's handler back when it finds SIGINT ignored. A window started from a
+      script's background would have met the same.
+    - After "updated in 91 s: it runs 1.5.1" the window said "The firmware started
+      again after a crash: its screen says "furi_check failed"": the crash of the
+      check's step before. The fault register (entry 88) outlives the updater's
+      restarts, and the crash screen is up again after them, so the line was true,
+      and read as if the new firmware had crashed. The window now asks `status`
+      before the update: a crash that its screen says then is no news when the
+      updater is done, until that screen is left or another crash is on it.
+    - Momentum's updater leaves the firmware's log level at none (entry 84), and
+      the check's next step, which reads the log to see the firmware start, saw
+      nothing. The launcher says what the updater left and names its own command for
+      it; the window adds where that is in the window (the "Firmware level" button of
+      the firmware log), and the check sets the level back there.
+    - `scripts/gui_check.py` updates the Flipper twice with the package it runs:
+      once with the wait given up after "updater started" (the updater has to finish
+      by itself), once to the end with F6, and sets the log level again that the
+      updater left. 35 checks pass on official 1.5.1, Momentum and Unleashed, and 35
+      on the official debug build: its updater leaves the level as it was, so that
+      step is not taken there, and the halt after a crash is one more.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

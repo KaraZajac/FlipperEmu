@@ -64,6 +64,8 @@ FILES = {
     "subghz": ("Sub-GHz captures", "Sub-GHz captures (*.sub)", "subghz-tx"),
 }
 FIRMWARE = "Firmware (*.tgz *.tar.gz *.tar *.dfu *.elf *.bin)"
+PACKAGES = (".tgz", ".tar.gz", ".tar", ".fuf")
+UPDATES = "Update packages (*.tgz *.tar.gz *.tar *.fuf)"
 APPS = "Flipper apps (*.fap)"
 APP_WAIT_S = 45             # a question about an app on its screen: this long
 SCALES = (2, 3, 4, 5, 6)
@@ -95,7 +97,11 @@ Device menu.</p>
 .json cards, .rfid tags, .ibtn keys, .sub captures, .ir remotes, and
 firmware. An app (<b>.fap</b>) is copied to its card and started, and
 <b>F5</b> does that again with the same file, after a new build. Anything
-else dropped is copied to its microSD card, into a folder you name.</p>"""
+else dropped is copied to its microSD card, into a folder you name.</p>
+<p>An <b>update package</b> (a .tgz, or the update.fuf of an unpacked one)
+goes the way it goes to a real Flipper: onto its card, where the firmware's
+own updater installs it (Device &gt; Update with a package), and <b>F6</b>
+does that again with the same package, after a new build.</p>"""
 
 
 def config_path():
@@ -189,6 +195,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.halt_asked = False         # `status` is on its way to say
         self.crash_said = False         # the log had this crash's report
         self.say_fault = False          # a crash on its screen is news here
+        self.fault_old = None           # one its screen said before an update
+        self.updating = None            # a package, while its updater works
         self.recording = None           # a fe_record.Recording, while one runs
         self.recording_since = 0.0
         self.sd_none = (session is not None and session.args.no_sd) or \
@@ -329,6 +337,14 @@ class MainWindow(QtWidgets.QMainWindow):
                            tip="Program its flash with a firmware (an update "
                                "package, .dfu, .elf or .bin); its files stay")
         self.a_install.setVisible(owner)
+        self.a_update = A(m, "Update with a package…", self.update_clicked,
+                          tip="As qFlipper updates a real Flipper: the "
+                              "package is written to its microSD card, and "
+                              "the firmware's own updater installs it; its "
+                              "settings and files stay")
+        self.a_update_again = A(m, "Update with it again", self.update_again,
+                                "F6", tip="The same package again: after a "
+                                          "new build")
         A(m, "Save the screen…", self.save_screen, "Ctrl+S")
         A(m, "Save a picture of the Flipper…", self.save_picture)
         A(m, "Copy the screen", self.copy_screen, "Ctrl+Shift+C")
@@ -665,6 +681,8 @@ class MainWindow(QtWidgets.QMainWindow):
                  "connecting", "busy": "running (in another window)",
                  "off": "off", "lost": "not running", "installing":
                  "installing firmware"}.get(self.state, self.state)
+        if self.state == "on" and self.updating:
+            words = "updating"
         if self.state == "on" and self.halted:
             words = "halted"
         if self.state == "on" and self.stopped:
@@ -703,7 +721,11 @@ class MainWindow(QtWidgets.QMainWindow):
         return self.state in ("on", "busy")
 
     def update_actions(self):
-        live = self.is_live()
+        # while its updater works, the launcher waits for it, and the
+        # launcher's commands take turns: what would only queue up is not
+        # offered
+        updating = bool(self.updating)
+        live = self.is_live() and not updating
         for a in self.live:
             a.setEnabled(live)
         for m in self.live_menus:
@@ -711,7 +733,16 @@ class MainWindow(QtWidgets.QMainWindow):
         owner = self.session is not None
         self.a_on.setVisible(owner)
         self.a_on.setEnabled(owner and self.state == "off")
-        self.a_install.setEnabled(owner and self.state in ("on", "off", "busy"))
+        self.a_off.setEnabled(self.is_live() and (owner or not updating))
+        self.a_install.setEnabled(owner and not updating
+                                  and self.state in ("on", "off", "busy"))
+        again = self.recent("update")
+        self.a_update.setText("Stop waiting for its updater" if updating
+                              else "Update with a package…")
+        self.a_update.setEnabled(self.is_live() or updating)
+        self.a_update_again.setEnabled(live and bool(again))
+        self.a_update_again.setText(f"Update with {short(again[0])} again"
+                                    if again else "Update with it again")
         self.a_nfc_stop.setEnabled("nfc" in self.links)
         self.a_sdr_stop.setEnabled("subghz" in self.links)
         self.a_ir_again.setEnabled(live and bool(self.last_ir))
@@ -719,9 +750,9 @@ class MainWindow(QtWidgets.QMainWindow):
         for cable, a in self.a_cable.items():
             a.setEnabled(live or (owner and self.state == "off"))
         self.a_terminal.setEnabled(live and self.cable == "computer")
-        self.menu_sd.setEnabled(self.can_copy())
+        self.menu_sd.setEnabled(self.can_copy() and not updating)
         again = self.recent("app")
-        self.a_app.setEnabled(self.can_copy())
+        self.a_app.setEnabled(self.can_copy() and not updating)
         self.a_app_again.setEnabled(live and bool(again))
         self.a_app_again.setText(f"Install and start {short(again[0])} again"
                                  if again else "Install and start it again")
@@ -735,6 +766,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # it may have halted before this window found it, or show a crash
         self.say_fault = True
         self.crash_said = False
+        self.fault_old = None
         self.halt_timer.start(HALT_ASK_MS)
         for args in self.after_hello:
             self.command(*args, quiet=True)
@@ -1209,11 +1241,16 @@ class MainWindow(QtWidgets.QMainWindow):
             try:
                 st = json.loads(text)
                 halted, fault = st["halted"], st.get("fault")
+                if fault != self.fault_old:
+                    self.fault_old = None   # that screen was left since
             except (ValueError, KeyError, TypeError, AttributeError):
                 halted = fault = None
             if not (halted and self.is_live()):
                 self.set_halted(False)
-                if fault and say and self.is_live():
+                # (a crash that its screen said before an update is still on
+                # it after the updater's restarts: no news)
+                if fault and say and fault != self.fault_old \
+                        and self.is_live():
                     told = ("The firmware started again after a crash: its "
                             f'screen says "{fault}"')
                     self.log.add(f"{told}.  Any button on the Flipper leaves "
@@ -1234,8 +1271,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     60000)
             self.set_halted(True)
             self.halt_timer.start(HALT_AGAIN_MS)
-        if self.closing:
-            return
+        if self.closing or self.updating:
+            return                      # (asked again when the updater is done)
         if self.is_live():
             self.halt_asked = True
             self.command("status", "--json", then=done, quiet=True)
@@ -1414,7 +1451,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if cable != "unplugged":
                 self.power_on(cable)
             return
-        if not self.is_live() or cable == self.cable:
+        if not self.is_live() or cable == self.cable or self.waits():
             self.tiles_due.start()
             return
         self.command("usb", {"computer": "plug", "charger": "charger",
@@ -1425,7 +1462,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_sd_click(self):
         inserted = self.P("/machine", "sd-card")
-        if self.is_live() and not self.sd_none:
+        if self.is_live() and not self.sd_none and not self.waits():
             self.set_sd(not inserted)
 
     def set_sd(self, insert):
@@ -1573,15 +1610,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.settings.set("dir/firmware", os.path.dirname(path))
             self.install(path)
 
-    def install(self, path):
+    def install(self, path, ask=True):
         if not self.session:
             return
-        ok = QtWidgets.QMessageBox.question(
+        ok = not ask or QtWidgets.QMessageBox.question(
             self, "Install firmware",
             f"Install {short(path)} on {self.name}?\n\nIt is switched off, "
             "its flash programmed, and it is switched on again. The files on "
-            "its microSD card stay.")
-        if ok != QtWidgets.QMessageBox.Yes:
+            "its microSD card stay.") == QtWidgets.QMessageBox.Yes
+        if not ok:
             return
         self.installing = path
         if self.state == "off":
@@ -1603,6 +1640,150 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 self.show_log()
         self.command("flash", path, then=done)
+
+    # ------------------------------------------------------------ updates
+
+    def update_clicked(self):
+        if self.updating:
+            self.stop_update()
+        else:
+            self.ask_update()
+
+    def ask_update(self):
+        start = self.settings.get("dir/update", self.settings.get(
+            "dir/firmware", os.path.expanduser("~")))
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Update with a package", start, f"{UPDATES};;All files (*)")
+        if path:
+            self.update_with(path)
+
+    def update_with(self, path, ask=True, remember=True):
+        """Have the firmware's own updater install a package, as on a real
+        Flipper: the launcher's `update`, which waits until it is back"""
+        if self.updating:
+            return self.on_failed("its updater works already")
+        if not self.is_live():
+            return self.on_failed(
+                f"{short(path)}: it is the firmware that updates itself, and "
+                "no Flipper runs here just now"
+                + (" (Device > Install firmware programs the flash of one "
+                   "that is off)" if self.session else ""))
+        ok = not ask or QtWidgets.QMessageBox.question(
+            self, "Update with a package",
+            f"Update {self.name} with {short(path)}?\n\nThe package is "
+            "written to its microSD card, and the firmware's own updater "
+            "installs it, as on a real Flipper. It starts a few times, for a "
+            "minute or two, and its screen shows how far it is. Its settings "
+            "and files stay.") == QtWidgets.QMessageBox.Yes
+        if not ok:
+            return
+        if remember:
+            self.remember("update", path)
+        self.updating = path
+        self.show_state()
+        self.update_actions()
+        self.statusBar().showMessage(
+            f"Updating with {short(path)}: its screen shows how far it is")
+        # a crash that its screen says now is still on it when the updater
+        # is done, and is no news then
+        def before(code, text):
+            try:
+                self.fault_old = json.loads(text).get("fault")
+            except (ValueError, AttributeError):
+                self.fault_old = None
+        self.command("status", "--json", then=before, quiet=True)
+        self.command("update", path, then=self.update_done, limit=W.UPDATE_MS)
+
+    def update_done(self, code, text):
+        self.updating = None
+        self.show_state()
+        self.update_actions()
+        lines = text.splitlines()
+        if code:
+            self.show_log()             # what the launcher said of it
+        else:
+            said = [line for line in lines if line.startswith("updated in")]
+            self.statusBar().showMessage((said or lines or ["Updated"])[-1],
+                                         15000)
+            if "left the firmware's log level" in text:
+                # (the launcher names its own command for that)
+                self.log.add('Here that is the "Firmware level" button of '
+                             "the firmware log (Ctrl+Shift+L).")
+        self.halt_timer.start(0)        # (not asked while the updater worked)
+
+    def update_again(self):
+        paths = self.recent("update")
+        if paths:                       # (asked about when it was chosen)
+            self.update_with(paths[0], ask=False, remember=False)
+
+    def waits(self):
+        """Its updater works, and the launcher waits for it: the launcher's
+        commands take turns, so one more would act when that is over.  Said
+        in its place."""
+        if self.updating:
+            self.statusBar().showMessage(
+                "Its updater works: that waits until it is done (or Device > "
+                "Stop waiting for its updater)", 6000)
+        return bool(self.updating)
+
+    def stop_update(self):
+        """No longer wait for its updater, which goes on on the Flipper"""
+        now = self.runner.current
+        if self.updating and now and now[0] == "update":
+            self.runner.interrupt()
+        elif self.updating:             # (its turn has not come yet)
+            QtCore.QTimer.singleShot(300, self.stop_update)
+
+    def ask_how(self, path):
+        """An update package for a Flipper that runs in this window can go
+        two ways: "update", "install", or None"""
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Question)
+        box.setWindowTitle("Firmware")
+        box.setText(f"{short(path)} is an update package. How shall "
+                    f"{self.name} get it?")
+        box.setInformativeText(
+            "Update: it goes to the microSD card, and the firmware's own "
+            "updater installs it, as on a real Flipper. Settings and files "
+            "stay.\n\nInstall: the Flipper is switched off, its flash "
+            "programmed, and it is switched on again, as with a programmer. "
+            "The files on its card stay.")
+        update = box.addButton("Update", QtWidgets.QMessageBox.AcceptRole)
+        install = box.addButton("Install",
+                                QtWidgets.QMessageBox.DestructiveRole)
+        box.addButton(QtWidgets.QMessageBox.Cancel)
+        box.exec()
+        hit = box.clickedButton()
+        return "update" if hit is update else \
+            "install" if hit is install else None
+
+    def dropped_firmware(self, path):
+        """Firmware dropped on the window: a package can go to the updater of
+        a Flipper that runs, anything into the flash of this window's own"""
+        lower = path.lower()
+        can_update = (lower.endswith(PACKAGES) and self.is_live()
+                      and not self.updating)
+        can_install = (self.session is not None and not self.updating
+                       and not lower.endswith(".fuf"))
+        if can_update and can_install:
+            how = self.ask_how(path)
+            if how == "update":
+                self.update_with(path, ask=False)
+            elif how == "install":
+                self.install(path, ask=False)
+        elif can_update:
+            self.update_with(path)
+        elif can_install:
+            self.install(path)
+        elif self.updating:
+            self.on_failed(f"{short(path)}: its updater works already")
+        elif lower.endswith(PACKAGES):
+            self.on_failed(f"{short(path)}: it is the firmware that updates "
+                           "itself, and no Flipper runs here just now")
+        else:
+            self.on_failed(f"{short(path)}: programming the flash needs the "
+                           "window of `flipperemu run`; an update package "
+                           "(.tgz) goes to a Flipper that runs from here too")
 
     # ------------------------------------------------------------ apps, files
 
@@ -1887,7 +2068,7 @@ class MainWindow(QtWidgets.QMainWindow):
                           (".sub", "subghz")):
             if p.endswith(ext):
                 return kind
-        if p.endswith((".tgz", ".tar.gz", ".tar", ".dfu", ".elf", ".bin")):
+        if p.endswith((*PACKAGES, ".dfu", ".elf", ".bin")):
             return "firmware"
         if p.endswith(".fap"):
             return "app"
@@ -1907,12 +2088,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 others.append(path)
             elif kind == "app":
                 self.start_app(path)
-            elif kind == "firmware":
-                if self.session:
-                    self.install(path)
-                else:
-                    self.on_failed("installing firmware needs the window of "
-                                   "`flipperemu run`")
+            elif kind == "firmware":    # (asked when the drop is over)
+                QtCore.QTimer.singleShot(
+                    0, lambda p=path: self.dropped_firmware(p))
             elif kind == "ir":
                 self.use_file(kind, path)
             elif kind and self.is_live():

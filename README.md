@@ -36,7 +36,8 @@ build, as `./fbt` makes them), **Momentum mntm-012**, **Unleashed unlshd-094** a
 a recording of the screen, Pause, the firmware log and its level, the backlight fading
 in, a file copied to the card, an app dropped on it, the LED blinking while NFC reads,
 the bench, switching off and on, the Left + Back reboot, a crash and what the firmware
-does after it, installing firmware) on the same five, off-screen.
+does after it, an update through the firmware's updater, installing firmware) on the
+same five, off-screen.
 `scripts/update_check.py` (an update package written to the card of a running device
 and installed there, and the updater's error screen) passes on the same five, from the
 official firmware to Unleashed, and from the release to the dev build.
@@ -280,6 +281,16 @@ instead, and `--headless` no window at all.
   [`./flipperemu app`](#apps) says: what the file was built for, where it went, what
   the firmware logged about the start. Apps > Close the app that runs; Apps > List its
   apps.
+- **A new firmware**: Device > Update with a package (or the package dropped on the
+  window) has the firmware's own updater install a `.tgz` update package, as on a real
+  Flipper: its settings and files stay. The window says "updating" until the Flipper is
+  back, and the console has what [`./flipperemu update`](#updating-like-qflipper-does)
+  says, with what runs at the end. **F6** does it again with the same package: build,
+  F6, look. Device > Stop waiting for its updater leaves the updater to itself. An
+  updater that leaves the firmware's log level changed (Momentum's and Unleashed's
+  leave it at none, as on a real Flipper) is named, with where the level is set.
+  Device > Install firmware is the programmer's way: off, the flash programmed, on
+  again. A package that is dropped on a window that can do both asks which.
 - **Files to the card**: Device > microSD card > Copy files to it (Ctrl+Shift+O) or
   Copy a folder to it, also in the menu of the card's slot and of its tile. You name
   the folder on the card; left empty for files that have a place of their own, each
@@ -297,8 +308,7 @@ instead, and `--headless` no window at all.
   crash screen says, and so does one whose firmware started again with no report of
   the crash in its log.
 - **View**: zoom from 2× to 6×, a white, black or Catppuccin Mocha body, the LCD's pixel
-  grid. Device > Save the screen saves the LCD as a PNG; Install firmware flashes another
-  one and starts it.
+  grid. Device > Save the screen saves the LCD as a PNG.
 - **Device > Record the screen** (Ctrl+Shift+R) records what the LCD shows from then
   on, with a red "● REC" and the time in the status bar. Choose it again to end it: the
   window asks where to save the animated GIF. `./flipperemu record` does the same for
@@ -333,7 +343,8 @@ boots a throwaway device, clicks its buttons, records its screen, pauses it, rea
 firmware's log and sets its level, counts the steps of the backlight's fade, copies a
 file to its card, drops an app on it and starts it again with F5, watches the LED blink
 while NFC reads, switches it off and on, reboots it, has an app crash the firmware,
-and loses the emulator and finds it again after that.
+loses the emulator and finds it again after that, and updates it twice with the package
+it runs: once with the wait given up, once to the end.
 
 ## The `flipperemu` tool
 
@@ -741,6 +752,9 @@ $ ./flipperemu -d mine update firmware/official-1.5.1/flipper-z-f7-update-1.5.1.
 [mine] updater started: the Flipper starts a few times, without USB, until it is done
 [mine] updated in 80 s: it runs 1.5.1 (commit 9e810dc3, built 15-10-2026)
 ```
+
+In [the window](#the-window) this is Device > Update with a package, and F6 for the
+same package again.
 
 The package is on the card within seconds, whatever its size. The rest is the
 firmware's updater: a minute and a half for the official firmware, two minutes for

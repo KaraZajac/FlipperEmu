@@ -3302,6 +3302,11 @@ def main():
     argv, tool_args = split_tool(sys.argv[1:])
     args = ap.parse_args(argv)
     args.tool_args = tool_args
+    if os.environ.get("FLIPPEREMU_INTERRUPT") \
+            and signal.getsignal(signal.SIGINT) == signal.SIG_IGN:
+        # the window ends a command of ours as Ctrl-C would.  Started in the
+        # background of a script, it has SIGINT ignored, and so would we
+        signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
         return args.func(args) or 0
     except (ConnectionError, TimeoutError) as e:    # e.g. the monitor is busy

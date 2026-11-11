@@ -415,7 +415,8 @@ folder on your PATH.)
 as for ufbt, and the same targets refused. `fbt launch APPSRC=my_app`, `fbt cli` and
 `fbt flash_usb` talk to the emulated Flipper. `fbt flash_usb_full` is refused: its
 package has a radio stack in it. `./fbt updater_package` builds that package, and
-`flipperemu update` installs it without the stage.
+`flipperemu update` installs it without the stage. In the window that is Device >
+Update with a package, and F6 after each build from then on.
 
 What `./fbt` builds is a debug build (the `D` of `f7-firmware-D`) unless you give it
 `DEBUG=0`. A debug build does not start again after a crash: it

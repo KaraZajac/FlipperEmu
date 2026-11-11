@@ -238,6 +238,12 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         waited for both times (Momentum's 12 MB: 4 s, where the CLI took thirteen
         minutes); `update --cli` is the way through the CLI; `push --card` is the
         same move for files (BRINGUP_LOG 85)
+  - ☑ The window sends an update (2026-11-11): Device > Update with a package, F6
+        for the same package after the next build, a dropped package (Update or
+        Install is asked where both can be done); "updating" while the launcher
+        waits, with what would wait behind it greyed; Stop waiting ends the wait as
+        Ctrl-C does; a crash that its screen said before the update is not told
+        again after it (BRINGUP_LOG 95)
   - ☑ Debugging an app: `./flipperemu gdb` on a device that runs. The stub on
         demand, on a socket in the device's folder; the toolchain's gdb; the firmware's
         ELF, found by what the flash holds; the apps' symbols through the SDK's

@@ -24,9 +24,11 @@ of the switched-off Flipper, switches
 it on again (Back held: the tag is there again), switches it off the hard way
 and on again by plugging USB in, reboots it with Left + Back, lets an app
 crash the firmware (said in the console; a debug build halts then, which is
-said too, and Reboot starts it), installs the firmware again from the Device
-menu, and closes the window (which stops the emulator).  Exit status 0 =
-pass. Pictures are kept in --out.
+said too, and Reboot starts it), updates it with its own package (Device >
+Update with a package: once left to itself half-way, once waited for),
+installs the firmware again from the Device menu, and closes the window
+(which stops the emulator).  Exit status 0 = pass. Pictures are kept in
+--out.
 """
 import argparse
 import importlib.machinery
@@ -401,6 +403,103 @@ class Driver:
         self.settle()
         self.spin(2)
 
+    def update(self):
+        """Device > Update with a package, with the package it runs: the
+        firmware's own updater installs it, and the window waits for it"""
+        w = self.win
+        if not self.firmware.endswith(fe_gui.PACKAGES):
+            print("  SKIP  update: the firmware is no update package",
+                  flush=True)
+            return
+
+        def usb():
+            return w.props.get(("/machine/soc/usb", "device")) or ""
+
+        def said(mark):
+            return self.console()[mark:]
+
+        # An updater leaves the firmware's log level as it likes, as on a
+        # real Flipper (the official one: default; Momentum's and Unleashed's:
+        # none, and then the log has nothing of the next start)
+        level = lambda: w.props.get(("/machine", "log-level"))
+        was = level()
+
+        def set_back():
+            """the level as it was, with the firmware log's button"""
+            self.seen = self.boots()
+            w.fwlog.level_actions[was].trigger()
+            again = (self.until(lambda: "CDC ACM" not in usb(), 20)
+                     and self.until(lambda: "CDC ACM" in usb(), self.timeout))
+            self.settle()
+            return again and self.booted()
+
+        # once with the wait given up: the updater goes on by itself
+        self.settle()
+        mark = len(self.console())
+        w.update_with(self.firmware)
+        self.spin(0.2)
+        waits = w.state_label.text() == "updating" \
+            and "Stop waiting" in w.a_update.text() \
+            and not w.a_reboot.isEnabled() and not w.a_install.isEnabled()
+        started = self.until(lambda: "updater started" in said(mark)
+                             or not w.updating, 120)
+        self.shot("updating")
+        w.a_update.trigger()
+        left = self.until(lambda: not w.updating, 10)
+        self.spin(0.5)
+        check("update: the window waits for the updater, and Stop waiting "
+              "leaves it to itself",
+              waits and started and left and "no longer waiting" in said(mark)
+              and w.a_reboot.isEnabled()
+              and "Update with" in w.a_update_again.text()
+              and w.state_label.text() != "updating", said(mark)[-600:])
+        gone = self.until(lambda: "CDC ACM" not in usb(), 60)
+        back = gone and self.until(lambda: "CDC ACM" in usb(), 400)
+        self.settle()
+        self.spin(2)
+        if level() != was:              # (nobody waited to say so)
+            set_back()
+            self.spin(2)
+        self.seen = self.boots()
+
+        # and once to its end, with F6: the same package again
+        mark = len(self.console())
+        w.a_update_again.trigger()
+        self.spin(0.2)
+        began = bool(w.updating)
+        done = began and self.until(lambda: not w.updating, 600)
+        self.settle()
+        self.spin(1)
+        text = self.uart.read_text(errors="replace")
+        check("update: Device > Update with a package: the firmware's own "
+              "updater installed it, and the Flipper is back (a crash that "
+              "its screen said before is no news after it)",
+              back and done and "updated in" in said(mark)
+              and "updated in" in w.statusBar().currentMessage()
+              and "started again after a crash" not in said(mark)
+              and w.state == "on" and "CDC ACM" in usb()
+              and self.boots() > self.seen and w.a_reboot.isEnabled()
+              and not CRASH.search(text.split("Startup complete")[-1]),
+              said(mark)[-600:])
+        self.seen = self.boots()
+        self.shot("updated")
+
+        left = level()
+        if left == was:
+            return
+        told = "left the firmware's log level" in said(mark) \
+            and '"Firmware level" button' in said(mark) \
+            and left in w.fwlog.level_button.text()
+        again = set_back()
+        check(f"update: its updater left the firmware's log level at {left}: "
+              "the window says so and where it is set, and the firmware log "
+              f"sets it to {was} again",
+              told and again and level() == was,
+              f"told: {told}, started again: {again}, the level: {level()}, "
+              f"the button: {w.fwlog.level_button.text()!r}; the console:\n"
+              f"{said(mark)[-600:]}")
+        self.spin(2)
+
     def drop(self, path):
         """a file dragged from a file manager and let go over the window"""
         mime = QtCore.QMimeData()
@@ -614,9 +713,11 @@ class Driver:
 
         self.crash()
 
-        # Device > Install firmware: off, flashed, on again
         QtWidgets.QMessageBox.question = \
             lambda *a, **k: QtWidgets.QMessageBox.Yes
+        self.update()
+
+        # Device > Install firmware: off, flashed, on again
         w.install(self.firmware)
         went = self.until(lambda: w.state in ("off", "installing"), 20)
         back = went and self.until(lambda: w.state == "on", 120) and self.booted()
