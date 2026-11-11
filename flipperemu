@@ -1619,13 +1619,31 @@ def cmd_push(args):
     remote = sources.pop() if CARD_PATH.match(sources[-1]) else None
     if not sources:
         sys.exit(f"push: what is to go to {remote}? (push LOCAL... [REMOTE])")
+    # --card, for a device that runs: its card out of the slot for the write
+    by_hand = args.card and dev.running()
+    if by_hand and remote and fe_files.clean(remote).startswith("/int"):
+        sys.exit("push --card: /int is in the Flipper's own flash and not on "
+                 "its card.  Without --card the files go there through the "
+                 "firmware")
+    if by_hand:                 # no card pulled for what is not there
+        for s in sources:
+            if not os.path.exists(s):
+                raise fe_files.FilesError(f"{s}: no such file or folder")
     files, close = open_card(dev)
     try:
         with held_interrupt("stopping after this piece") as stop:
-            copied, same = fe_files.push(files, sources, remote,
-                                         force=args.force,
-                                         progress=transfer_progress(),
-                                         stop=stop)
+            if by_hand:
+                with card_out(dev, files.cli, "the files are",
+                              "Without --card they go through the firmware, "
+                              "with the card where it is") as image:
+                    copied, same = fe_files.push(image, sources, remote,
+                                                 force=args.force, stop=stop)
+                files = image
+            else:
+                copied, same = fe_files.push(files, sources, remote,
+                                             force=args.force,
+                                             progress=transfer_progress(),
+                                             stop=stop)
     finally:
         close()
     print(copied_text(dev, files, copied, same))
@@ -1657,8 +1675,9 @@ class card_out:
     both times, at its CLI: until it has let go of the card, and until it has
     it again.  What it had open on the card it loses, as on a real Flipper."""
 
-    def __init__(self, dev, cli, how):
-        self.dev, self.cli, self.how = dev, cli, how    # how: the other way
+    def __init__(self, dev, cli, what, how):
+        self.dev, self.cli = dev, cli
+        self.what, self.how = what, how     # "the files are"; the other way
 
     def slot(self, card_in=None):
         """Is the card in its slot?  With an argument: put there, or taken
@@ -1696,6 +1715,8 @@ class card_out:
             sys.exit(f"[{name}] its firmware has no card that it can use "
                      f"(`./flipperemu -d {name} cli \"storage info /ext\"`)")
         image = fe_files.ImageFiles(self.dev.sd)
+        print(f"[{name}] its card is out of the slot for a moment: "
+              f"{self.what} written to its image", flush=True)
         self.slot(False)
         if not self.wait(False, 10.0):
             self.slot(True)
@@ -1706,11 +1727,19 @@ class card_out:
 
     def __exit__(self, kind, *_):
         self.slot(True)
-        if kind is None and not self.wait(True, 30.0):
-            sys.exit(f"[{self.dev.name}] the card is in its slot again, but "
-                     "the firmware does not take it: `./flipperemu -d "
-                     f"{self.dev.name} reset` starts the firmware anew.  "
-                     + self.how)
+        if kind is None:
+            if not self.wait(True, 30.0):
+                sys.exit(f"[{self.dev.name}] the card is in its slot again, "
+                         "but the firmware does not take it: `./flipperemu "
+                         f"-d {self.dev.name} reset` starts the firmware "
+                         "anew.  " + self.how)
+            print(f"[{self.dev.name}] the card is in again, and the firmware "
+                  "has it", flush=True)
+        elif issubclass(kind, Exception):
+            try:                # the error is said; the card is the firmware's
+                self.wait(True, 10.0)       # again when this command is back
+            except Exception:
+                pass
         return False
 
 
@@ -1813,17 +1842,12 @@ def send_update(dev, pkg, keep_radio=False, wait=True, timeout=900.0,
                                   progress=transfer_progress(), stop=stop,
                                   say=say)
                 else:
-                    print(f"[{dev.name}] its card is out of the slot for a "
-                          "moment: the package is written to its image",
-                          flush=True)
-                    with card_out(dev, files.cli,
+                    with card_out(dev, files.cli, "the package is",
                                   "`update --cli` sends the package through "
                                   "the Flipper's CLI, with the card where it "
                                   "is") as image:
                         fe_files.push(image, [pdir], "/ext/update/",
                                       stop=stop, say=say)
-                    print(f"[{dev.name}] the card is in again, and the "
-                          "firmware has it", flush=True)
             log = fe_log.Log(dev.uart, tail=4096)
             log.poll()                  # from here on: what the updater logs
             was = firmware_log_level(dev)
@@ -2821,10 +2845,11 @@ def main():
 
     p = sub.add_parser(
         "push", help="copy files and folders to the SD card",
-        usage="flipperemu push [-f] LOCAL... [REMOTE]",
+        usage="flipperemu push [-f] [--card] LOCAL... [REMOTE]",
         description="Copy files and folders to the SD card.  REMOTE (/ext/...) "
-        "is the folder to put them in, made if it is not there; for one file "
-        "it can also be the file's new name.  Without REMOTE a file goes "
+        "is the folder to put them in, made if it is not there.  One file to "
+        "a REMOTE that is no folder there gets that as its new name: with a "
+        "/ at its end it is a folder all the same.  Without REMOTE a file goes "
         "where its kind lives: .sub to /ext/subghz, .ir to /ext/infrared, "
         ".nfc to /ext/nfc, .rfid to /ext/lfrfid, .ibtn to /ext/ibutton, .js "
         "to /ext/apps/Scripts, .fmf to /ext/music_player, and a .fap over the "
@@ -2833,6 +2858,13 @@ def main():
     p.add_argument("paths", nargs="+", metavar="LOCAL... [REMOTE]")
     p.add_argument("-f", "--force", action="store_true",
                    help="copy what is there unchanged too")
+    p.add_argument("--card", action="store_true",
+                   help="for a lot of bytes and a device that runs: its card "
+                        "is out of the slot for the moment in which they are "
+                        "written to its image (megabytes in a second, where "
+                        "the firmware's CLI takes 20 KB/s; what the firmware "
+                        "has open on the card it loses, as with a real card "
+                        "that is pulled)")
     p.set_defaults(func=cmd_push)
 
     p = sub.add_parser(

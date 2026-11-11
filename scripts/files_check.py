@@ -9,7 +9,9 @@ Boots a throwaway device and copies a folder to its SD card through the
 firmware (the `storage` commands of its CLI), lists it, copies it back and
 compares.  Then it stops the device and does the same in the card's image
 (mtools), which has to show what the firmware wrote; starts it again, and the
-firmware has to show what was written into the image.  Also: what is said
+firmware has to show what was written into the image; and `push --card`
+writes into the image of a device that runs, with its card out of the slot
+for that moment.  Also: what is said
 when a path is wrong, when two commands want the USB serial port, and when
 the cable is unplugged; and what is left when it goes wrong in the middle: a
 transfer interrupted, a command killed, the card pulled out.  Exit status
@@ -202,6 +204,55 @@ def file_checks(b, src, out, way):
           text)
 
 
+def card_checks(b, src, big, out):
+    """`push --card` on a device that runs: its card out of the slot for the
+    write, and the firmware has what was written"""
+    start = time.time()
+    code, text = b.fe("push", "--card", src / "tree", big, "/ext/fe-card/")
+    took = time.time() - start
+    check("push --card on a device that runs: its card out of the slot, a "
+          f"folder and 800 KB written to its image, and in again ({took:.1f} s)",
+          code == 0 and "out of the slot for a moment" in text
+          and "the card is in again" in text and "8 copied" in text
+          and "(in the card's image)" in text and took < 20, text)
+    shutil.rmtree(out, ignore_errors=True)
+    code, text = b.fe("pull", "/ext/fe-card/tree", out)
+    check("... the firmware reads the same bytes from it",
+          code == 0 and same_tree(src / "tree", out / "tree"), text)
+    code, text = b.fe("push", src / "tree", big, "/ext/fe-card/")
+    check("... and a push through the firmware finds all of it unchanged",
+          code == 0 and "0 copied, 8 unchanged" in text
+          and "(through the firmware)" in text, text)
+    code, text = b.fe("push", "--card", big, "/int/")
+    code2, text2 = b.fe("ls", "/ext/fe-card")
+    check("push --card to /int: refused, and the card stays where it is",
+          code == 1 and "not on its card" in text and code2 == 0, text + text2)
+    code, text = b.fe("push", "--card", out / "nothing.bin", "/ext/fe-card/")
+    code2, text2 = b.fe("ls", "/ext/fe-card")
+    check("push --card of a file that is not there: said so, with the card "
+          "left in its slot", code == 1 and "no such file or folder" in text
+          and "out of the slot" not in text and code2 == 0, text + text2)
+    code, text = b.fe("push", "--card", big, "/ext/fe-card/tree/big.bin/x.bin")
+    code2, text2 = b.fe("ls", "/ext/fe-card")
+    check("push --card into what is a file there: said so, and the card is "
+          "the firmware's again when the command is back",
+          code == 1 and "is a file on the Flipper" in text and code2 == 0,
+          text + text2)
+    b.fe("sd", "eject")
+    time.sleep(2)
+    code, text = b.fe("push", "--card", big, "/ext/fe-card/")
+    b.fe("sd", "insert")
+    end = time.time() + 15
+    while True:
+        code2, text2 = b.fe("rm", "-r", "/ext/fe-card")
+        if code2 == 0 or time.time() > end:
+            break
+        time.sleep(0.5)
+    check("push --card with the card out already: said so, with `sd insert`, "
+          "and it is left out", code == 1 and "not in the slot" in text
+          and "sd insert" in text and code2 == 0, text + text2)
+
+
 def rough_checks(b, big, out):
     """It goes wrong in the middle.  /ext/fe-rough/big.bin is on the card."""
     def ended(p, sig, after):
@@ -373,6 +424,7 @@ def main():
             code2, text2 = b.fe("ls", "/ext/fe-check")
             check("through the firmware: rm -r", code == 0 and code2 == 1,
                   text + text2)
+            card_checks(b, src, big, out)
             rough_checks(b, big, work)
         check("no crash in the firmware's log",
               not CRASH.search(b.uart_text(every=True)))

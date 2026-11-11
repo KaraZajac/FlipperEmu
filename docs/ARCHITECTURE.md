@@ -789,6 +789,13 @@ and `write_chunk` / `read_chunks` for the bytes). When it is stopped, nothing ha
 image open, and mtools reads and writes it directly. Both are the same six operations
 behind one interface, and `scripts/files_check.py` holds them to the same results.
 
+`push --card` and `update` write the image of a device that runs, and keep to that
+rule by taking the card from the firmware first (`card_out` in the launcher). With the
+card out of its slot the firmware has unmounted it, and it mounts the card anew when
+it is in again, so the FAT it has in memory is never older than the image. The
+launcher waits for both at the CLI (`storage info /ext`), and leaves a card alone
+that was out already.
+
 A file goes to the firmware in pieces of 1024 bytes, each announced by its own
 `storage write_chunk PATH N` and sent when the firmware answers `Ready`. The firmware
 reads a piece whole before it writes it, so when a write fails (a full card, a card

@@ -60,6 +60,8 @@ symbols) pass on the official one.
   `/ext/.int`, dolphin animations load from the card, and `.fap` apps launch.
 - Files to and from the card with `./flipperemu ls`, `push`, `pull`, `rm` and `mkdir`:
   through the firmware when the device runs, in the card's image when it does not.
+  `push --card` writes megabytes to a running device's card in a second or two: the
+  card is out of its slot for that moment.
 - An app from your build directory onto the Flipper and started in one command,
   `./flipperemu app my_app.fap`: what it was built for, the app that runs closed
   first, and what the firmware logged about the start.
@@ -337,7 +339,7 @@ while NFC reads, switches it off and on, and reboots it.
 | `run --usbip [PORT]` | export the USB device over USB/IP (then `sudo scripts/usbip_attach.py`) |
 | `cli ["CMD" …]` | the device's CLI over USB: interactive, or run commands and print their output |
 | `ls [-R] [PATH]` | what is on the SD card (`/ext` when no path is given); `-R`: and in every folder under it |
-| `push [-f] LOCAL… [REMOTE]` \| `pull [-f] REMOTE… [LOCAL]` | copy files and folders to the card, and from it |
+| `push [-f] [--card] LOCAL… [REMOTE]` \| `pull [-f] REMOTE… [LOCAL]` | copy files and folders to the card, and from it (`--card`: a running device's card is out of its slot for the write, which is quick for megabytes) |
 | `rm [-r] [-f] PATH…` \| `mkdir PATH…` | remove files and folders on the card; make folders |
 | `app FILE.fap [ARGS]` \| `app NAME [ARGS]` \| `app /ext/….fap [ARGS]` | put an app on the card and start it; start one of the firmware's own, or one on the card |
 | `app` \| `app --close` \| `app --list` | which app runs; close it; the apps the firmware has and the ones on the card |
@@ -425,9 +427,11 @@ alt="The firmware log in the window, with the firmware's level at debug"></p>
 ```sh
 ./flipperemu ls /ext/apps/Games                   # sizes and names, folders first
 ./flipperemu ls -R /ext/subghz                    # ... and what is in the folders under it
-./flipperemu push my_app.fap /ext/apps/Tools      # a file into a folder (made if it is not there)
+./flipperemu push my_app.fap /ext/apps/Tools      # a file into a folder that is there
+./flipperemu push my_app.fap /ext/apps/Mine/      # ... and with the / into one that is made
 ./flipperemu push gate.sub tv.ir                  # no folder named: each to where its kind lives
 ./flipperemu push assets /ext/apps_data/my_app    # a folder and all in it: .../my_app/assets
+./flipperemu push --card dumps /ext/nfc           # megabytes: the card is out for a moment
 ./flipperemu pull /ext/nfc backup                 # a folder from the card: backup/nfc
 ./flipperemu pull /ext/subghz/gate.sub .          # one file
 ./flipperemu rm -r /ext/apps_data/my_app
@@ -438,8 +442,8 @@ A device that runs is reached through its firmware: the `storage` commands of it
 on the USB serial port, as `fbt`'s scripts do it on a real Flipper. The firmware sees
 each file as it arrives, and nothing has to be restarted. That moves some tens of
 kilobytes a second. For a stopped device the same commands read and write the card's
-image (`devices/NAME/sd.img`) with mtools, which takes megabytes in a moment: to copy a
-lot, stop the device first. The last line of a copy says which way it went:
+image (`devices/NAME/sd.img`) with mtools, which takes megabytes in a moment. The last
+line of a copy says which way it went:
 
 ```
 $ ./flipperemu push assets /ext/apps_data/my_app
@@ -448,8 +452,27 @@ assets/levels.bin = /ext/apps_data/my_app/assets/levels.bin (unchanged)
 [default] 1 copied, 1 unchanged (through the firmware)
 ```
 
+To copy a lot to a device that runs, `push --card` does what you would do with a real
+Flipper: the card comes out of its slot, the files are written to its image, and the
+card goes in again. The launcher waits for the firmware both times. 3 MB take two
+seconds or so that way, and two and a half minutes through the firmware:
+
+```
+$ ./flipperemu push --card big.bin /ext/apps_data/my_app/
+[default] its card is out of the slot for a moment: the files are written to its image
+big.bin -> /ext/apps_data/my_app/big.bin (3000000 bytes)
+[default] the card is in again, and the firmware has it
+[default] 1 copied (in the card's image)
+```
+
+What the firmware has open on the card at that moment it loses, as with a real card
+that is pulled. So it is not the way for a file that an app on the Flipper is working
+with.
+
 A file that is there already with the same bytes is left alone (`-f` copies it all the
-same), and what was written is read back as an MD5 and compared. With no folder named,
+same), and what was written is read back as an MD5 and compared. One file to a name
+that is no folder on the card gets that name: `push a.sub /ext/subghz/b.sub`. With a
+`/` at its end the name is a folder, made if it is not there. With no folder named,
 `push` puts `.sub` in `/ext/subghz`, `.ir` in `/ext/infrared`, `.nfc` in `/ext/nfc`,
 `.rfid` in `/ext/lfrfid`, `.ibtn` in `/ext/ibutton`, `.js` in `/ext/apps/Scripts` and
 `.fmf` in `/ext/music_player`; a `.fap` goes over the app of that name under
@@ -487,7 +510,7 @@ launcher then says that there is no prompt, and that this may be why.
 
 `scripts/files_check.py FIRMWARE` checks all of this on a throwaway device: a folder
 copied there and back through the firmware and through the image, each reading what the
-other wrote, and then the interruptions above.
+other wrote, `push --card`, and then the interruptions above.
 
 ### Apps
 

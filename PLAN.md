@@ -212,7 +212,8 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         20 KB/s (2026-11-10): `update` takes the card out of its slot, writes the
         package to the card's image and puts the card in again, with the firmware
         waited for both times (Momentum's 12 MB: 4 s, where the CLI took thirteen
-        minutes); `update --cli` is the way through the CLI (BRINGUP_LOG 85)
+        minutes); `update --cli` is the way through the CLI; `push --card` is the
+        same move for files (BRINGUP_LOG 85)
   - ☑ Debugging an app: `./flipperemu gdb` on a device that runs. The stub on
         demand, on a socket in the device's folder; the toolchain's gdb; the firmware's
         ELF, found by what the flash holds; the apps' symbols through the SDK's

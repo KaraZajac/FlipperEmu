@@ -1149,6 +1149,12 @@ All three are small, self-contained, and suitable for sending upstream.
       run, with the radio stage kept. The files that mtools wrote are "unchanged"
       to the firmware's md5 there, and only `radio.bin` and the manifest are sent:
       the two ways, compared by the firmware.
+    - `push --card` is the same move for files: 3 MB in 2 s, where the firmware's
+      CLI takes two and a half minutes. What can be refused is refused before the
+      card moves (a destination in `/int`, a file that is not there). An error
+      after that, such as a file where a folder is wanted, leaves with the card in
+      again and the firmware waited for, so that the next command finds a card.
+      `files_check.py` has seven checks for it, 55 in all.
     - Two checks that were started in the same second shared one device. A
       throwaway device was named after its check and the time in seconds. All
       eight checks have their process ID in that name now.
