@@ -17,7 +17,10 @@ runs, with functions and lines; a breakpoint in the app's entry, set before
 the app is on the Flipper, which `ufbt launch` runs into; a breakpoint on a
 line of it, and a variable of it printed there; its crash, where gdb stops
 and says what the firmware says of it; and after each of these the firmware
-runs on, and the debug flag the firmware has for a probe is off.  Then the
+runs on, and the debug flag the firmware has for a probe is off.  Then a
+breakpoint in a stock app, by its name: where the update server's symbols of
+the stock apps are beside the firmware (scripts/fetch_firmware.py puts them
+there; skipped without them).  Then the
 stub on a TCP port, a second gdb turned away, what `status` and `continue`
 say of a firmware a gdb has stopped, a gdb that dies with the
 firmware stopped, and a device that does not run.  Exit status 0 = pass.
@@ -42,6 +45,7 @@ from ufbt_check import APP, SKIPPED, log_tail, logged, tool   # noqa: E402
 # (the flag the firmware has for a debug probe: see scripts/fe_gdb.py)
 FLAG = 'printf "debug flag %d\\n", furi_hal_debug_gdb_session_active'
 OFF = "debug flag 0"
+STOCK = "/ext/apps/Games/snake_game.fap"    # a stock app that needs nothing
 
 
 def batch(commands):
@@ -197,6 +201,26 @@ def gdb_checks(b, work, folder):
           "[CRASH]" in b.uart_text()
           and b.uart_text().count("Startup complete") == 2 and ok,
           text + log_tail(b))
+
+    # ---- a stock app: its symbols are the update server's, beside the firmware
+    symbols = pathlib.Path(b.firmware).resolve().parent / "appsymbols"
+    if not (symbols / "snake_game_d.elf").is_file():
+        print("  SKIP  a stock app under gdb: no appsymbols/ beside the "
+              "firmware (scripts/fetch_firmware.py puts it there)", flush=True)
+    else:
+        g = Gdb(b, work, "break snake_game_app", "continue", "bt 2", FLAG)
+        waiting = g.wait(running=True)
+        code, text = b.fe("app", STOCK)
+        code2, said = g.end()
+        check("a stock app, its symbols from the update server beside the "
+              "firmware: a breakpoint in it by name, and its lines",
+              waiting and code2 == 0
+              and "Breakpoint 1, snake_game_app (" in said
+              and "snake_game.c:" in said and OFF in said, said + text)
+        code2, text2 = b.fe("app", "--close")
+        check("gdb gone: the stock app runs on, and closes",
+              code == 0 and "runs" in text and code2 == 0 and "closed" in text2,
+              text + text2)
 
     # ---- the stub on a TCP port, for an IDE
     port = free_port()

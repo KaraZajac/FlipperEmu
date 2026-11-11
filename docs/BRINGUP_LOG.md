@@ -1295,6 +1295,33 @@ All three are small, self-contained, and suitable for sending upstream.
     - The gdb check wants the release wording on 1.5.1 (20 of 20). It builds its
       app with ufbt's SDK, which is the release's: it does not run on the dev build.
 
+91. **A crash in a stock app had no app in its backtrace.** NFC, Sub-GHz and the
+    rest are apps on the card. The firmware's gdb script looked for `nfc_d.elf` in
+    ufbt's build folder, said "Failed to load debug info", and the backtrace had
+    no name or line of the app. The update server has the files: `appsymbols_tgz`
+    in its directory, one archive of `*_d.elf` for each build and channel.
+    (`debugapps_tgz` beside it is something else: the apps of the debug category,
+    as FAPs.)
+    - `scripts/fetch_firmware.py` fetches that archive with the rest and unpacks its
+      `.elf` files, by their names alone, into `appsymbols/` beside the firmware's
+      ELF.
+    - `gdb` now finds an ELF beside the package the device was flashed from (by what
+      the flash holds, as before), so a device run from the fetched package has the
+      firmware's symbols without `--elf`, on the dev channel's builds too, where
+      ufbt's SDK has nothing that fits.
+    - The firmware's script takes one folder and there are two now: the stock apps'
+      and what was built. It is given `devices/NAME/gdb-apps/`, links to the files of
+      both, made again where an app starts and before the script reads: an app may
+      have been built while gdb waits at `continue`. What was built wins over a
+      stock app of the same name; the script checks the CRC the app carries either
+      way, and says so when the file is of another build.
+    - Results. On the dev build with no flags: the NFC crash's backtrace has
+      `nfc_app_free` at `applications/main/nfc/nfc_app.c:143` and `nfc_app` at
+      `nfc_app.c:536`. On 1.5.1: `break snake_game_app` before the game is started
+      stops at `snake_game.c:323`. The gdb check has that case (22 of 22 on 1.5.1,
+      its own app's symbols through the same links), and skips it where no
+      `appsymbols/` is.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

@@ -5,8 +5,8 @@
 The launcher's command file (devices/NAME/gdb.init) sets FLIPPEREMU_GDB and
 sources this:
 
-    python FLIPPEREMU_GDB = {"fapscript": "…/flipperapps.py", "apps": "DIR",
-                             "name": "the device's"}
+    python FLIPPEREMU_GDB = {"fapscript": "…/flipperapps.py", "apps": ["DIR"],
+                             "links": "DIR", "name": "the device's"}
     source …/scripts/fe_gdb.py
 
 What it is for.  The firmware has a flag that says a debugger is there
@@ -26,6 +26,8 @@ at those two places:
   does without a debugger: a release build restarts, and a debug build (what
   `./fbt` builds unless told otherwise) halts and waits.  This says which.
 """
+import os
+
 import gdb
 
 FLAG = "furi_hal_debug_gdb_session_active"
@@ -79,16 +81,49 @@ def restarts():
         return None
 
 
+class Links:
+    """The firmware's script looks for an app's debug ELF in one folder, and
+    there can be two: the stock apps', from the update server, and what was
+    built here.  So it is given a folder of links to the files of both, made
+    again as each app starts: one may have been built since.  Where two have
+    a file of one name, the later folder's is the one."""
+
+    def __init__(self, folder, sources):
+        self.folder, self.sources = folder, sources
+
+    def refresh(self):
+        want = {}
+        for source in self.sources:
+            try:
+                names = os.listdir(source)
+            except OSError:
+                continue                # not there: nothing was built yet
+            for name in names:
+                if name.endswith(".elf"):
+                    want[name] = os.path.join(source, name)
+        os.makedirs(self.folder, exist_ok=True)
+        for name in os.listdir(self.folder):
+            path = os.path.join(self.folder, name)
+            if os.path.islink(path) and os.readlink(path) != want.get(name):
+                os.unlink(path)
+        for name, target in want.items():
+            path = os.path.join(self.folder, name)
+            if not os.path.lexists(path):
+                os.symlink(target, path)
+
+
 class AppStart(gdb.Breakpoint):
     """Where the loader has an app in memory and is about to start it.  Not a
     stop: the app's symbols are read, and the firmware goes on."""
 
-    def __init__(self, sync):
+    def __init__(self, sync, before=None):
         super().__init__(APP_START, internal=True)
-        self.sync = sync
+        self.sync, self.before = sync, before
 
     def stop(self):
         try:
+            if self.before:
+                self.before()
             self.sync(None)
         except Exception as e:      # the firmware's script, whichever it is:
             # an error that got out of here would be a stop of the firmware
@@ -97,7 +132,7 @@ class AppStart(gdb.Breakpoint):
 
 
 class FlipperEmu:
-    def __init__(self, fapscript, apps, name=""):
+    def __init__(self, fapscript, apps, links="", name=""):
         self.at_app_start = self.at_crash = None
         self.name = name
         if address(FLAG) is None:
@@ -105,8 +140,8 @@ class FlipperEmu:
                 "no symbols of apps")
             return
         flag_off()
-        if fapscript and address(APP_START) is not None:
-            self.apps(fapscript, apps)
+        if fapscript and apps and address(APP_START) is not None:
+            self.apps(fapscript, apps, links)
         where = address(CRASH)
         if where is not None:
             self.at_crash = gdb.Breakpoint(f"*{where:#x}", internal=True)
@@ -114,7 +149,7 @@ class FlipperEmu:
             self.restarts = restarts()
             gdb.events.stop.connect(self.stopped)
 
-    def apps(self, fapscript, apps):
+    def apps(self, fapscript, apps, links):
         import __main__
         try:
             gdb.execute(f"source {fapscript}")
@@ -126,12 +161,21 @@ class FlipperEmu:
         # has not run in between)
         helper.set_debug_mode = flag_off
         flag_off()
+        root, before = apps[-1], None
+        if len(apps) > 1 and links:
+            try:
+                before = Links(links, apps).refresh
+                before()
+                root = links
+            except OSError as e:
+                before = None
+                say(f"no symbols of the stock apps: {e}")
         try:
-            gdb.execute(f"fap-set-debug-elf-root {apps}")
+            gdb.execute(f"fap-set-debug-elf-root {root}")
         except gdb.error as e:
             say(f"no symbols of apps: {e}")
             return
-        self.at_app_start = AppStart(helper.handle_stop)
+        self.at_app_start = AppStart(helper.handle_stop, before)
 
     def stopped(self, event):
         if (isinstance(event, gdb.BreakpointEvent)
@@ -148,4 +192,4 @@ class FlipperEmu:
 
 
 FLIPPEREMU = FlipperEmu(**globals().get("FLIPPEREMU_GDB",
-                                        {"fapscript": "", "apps": ""}))
+                                        {"fapscript": "", "apps": []}))

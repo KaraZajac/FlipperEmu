@@ -41,8 +41,8 @@ does after it, installing firmware) on the same five, off-screen.
 and installed there, and the updater's error screen) passes on the same five, from the
 official firmware to Unleashed, and from the release to the dev build.
 `scripts/ufbt_check.py` (ufbt 0.2.6 building `examples/hello`, launching it there, and
-`ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's and that app's
-symbols) pass on the official one.
+`ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's symbols, that
+app's and a stock app's) pass on the official one.
 
 | | |
 |:-:|:-:|
@@ -1295,11 +1295,13 @@ folder, and starts gdb on it with what it finds:
 
 - the firmware toolchain's gdb (the one ufbt and fbt download), then the PATH's;
 - the firmware's symbols, from an ELF whose contents are what the device's flash holds:
-  the `.elf` it was flashed from, a build in the source tree you are in, or ufbt's
+  the `.elf` it was flashed from, one beside its package (`scripts/fetch_firmware.py`
+  puts the official build's there), a build in the source tree you are in, or ufbt's
   SDK, which has the ELF of its release;
 - the symbols of each app the firmware loads, read by the firmware's own gdb script
   when the app starts. A breakpoint set in an app's code beforehand is hit when the
-  app is launched;
+  app is launched. That goes for the stock apps too (NFC, Sub-GHz, Infrared…):
+  `scripts/fetch_firmware.py` gets the official build's symbols of them;
 - a stop where a crash begins, with the firmware's message, before it restarts. A
   debug build halts after a crash instead, and gdb can be started on it there as well.
   The line at the stop says which of the two `continue` leads to on this firmware.
@@ -1316,7 +1318,7 @@ The Flipper stands still while gdb has it stopped, and runs on when gdb leaves.
 
 [docs/DEVELOPING.md](docs/DEVELOPING.md#gdb-with-the-firmwares-symbols-and-your-apps)
 has a session with an app, and what `--elf`, `--apps` and `--with` are for.
-`scripts/gdb_check.py FIRMWARE` checks it (20 checks on the official firmware, with
+`scripts/gdb_check.py FIRMWARE` checks it (22 checks on the official firmware, with
 ufbt's SDK and toolchain). `run --gdb` still opens the stub at the start, on
 localhost:1234 (`--gdb-port`).
 

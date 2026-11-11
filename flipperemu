@@ -165,6 +165,7 @@ class Device:
         self.held_file = self.dir / "held.json"         # names of what is held to it
         self.gdb_sock = self.dir / "gdb.sock"           # its gdb stub, once asked for
         self.gdb_init = self.dir / "gdb.init"           # ... and what gdb is told (cmd_gdb)
+        self.gdb_apps = self.dir / "gdb-apps"           # ... links to apps' debug ELFs
 
     def running(self):
         """Is a QEMU serving this device's monitor socket?"""
@@ -1368,9 +1369,11 @@ def flash_has(dev, elf):
 
 def gdb_firmware(dev, asked):
     """-> (the firmware's ELF or None, the folder to look for its source tree
-    from).  Not asked for: the first of what was flashed, a build in the
-    source tree we are in, and ufbt's SDK whose contents are in the flash:
-    an update on the device itself leaves the others behind."""
+    from).  Not asked for: the first of what was flashed, an ELF beside the
+    package that was flashed (the update server has one for each build, and
+    scripts/fetch_firmware.py puts it there), a build in the source tree we
+    are in, and ufbt's SDK whose contents are in the flash: an update on the
+    device itself leaves the others behind."""
     if asked:
         elf = pathlib.Path(asked).resolve()
         if not elf.is_file():
@@ -1379,11 +1382,13 @@ def gdb_firmware(dev, asked):
             print(f"[{dev.name}] {asked} is not what its flash holds: what gdb "
                   "says of the firmware may be off")
         return elf, elf.parent
-    flashed = dev.info().get("source") or ""
-    flashed = pathlib.Path(flashed) if flashed.endswith(".elf") else None
+    source = dev.info().get("source") or ""
+    flashed = pathlib.Path(source) if source.endswith(".elf") else None
+    beside = sorted(pathlib.Path(source).parent.glob("*.elf")) if source else []
     tree = source_tree()
     for elf, origin in ((flashed, flashed),
                         (dev.elf, flashed),
+                        *((elf, None) for elf in beside),
                         (tree and tree / "build" / "latest" / "firmware.elf", None),
                         (sdk_home() / "current" / "firmware.elf", None)):
         if elf and elf.is_file() and flash_has(dev, elf):
@@ -1392,18 +1397,26 @@ def gdb_firmware(dev, asked):
     return None, None
 
 
+STOCK_SYMBOLS = "appsymbols"    # beside a firmware's ELF: its apps' debug ELFs
+
+
 def gdb_kit(elf, origin, apps):
-    """What reads the symbols of apps: (the firmware's gdb scripts, in the
-    order its own `debug` target has them; where the apps' debug ELFs are).
-    They are the firmware's, in its source tree or in ufbt's SDK."""
+    """What reads the symbols of apps: (the firmware's gdb script, which is
+    in its source tree or in ufbt's SDK; the folders the apps' debug ELFs are
+    looked for in, the last one first).  The stock apps' are beside the
+    firmware's ELF, where the update server's archive of them was unpacked
+    (scripts/fetch_firmware.py does that); the others are what fbt or ufbt
+    built, or what `--apps` names."""
     tree = source_tree(origin)
     if tree and (tree / "scripts" / "debug" / "flipperapps.py").is_file():
         kit, built = tree / "scripts" / "debug", origin / ".extapps"
     else:
         kit, built = sdk_home() / "current" / "scripts" / "debug", sdk_home() / "build"
     script = kit / "flipperapps.py"
+    built = pathlib.Path(apps).resolve() if apps else built
+    stock = (origin / STOCK_SYMBOLS).resolve()
     return (script if script.is_file() else None,
-            pathlib.Path(apps).resolve() if apps else built)
+            [stock, built] if stock.is_dir() and stock != built else [built])
 
 
 def cmd_gdb(args):
@@ -1432,11 +1445,13 @@ def cmd_gdb(args):
         print(f"[{dev.name}] {gdb} has no Python: no symbols of apps, and "
               "nothing said at a crash")
     else:
-        script, apps = gdb_kit(elf, origin, args.apps) if elf else (None, None)
+        script, apps = gdb_kit(elf, origin, args.apps) if elf else (None, [])
         if script:
-            print(f"[{dev.name}] apps' symbols, as they start: from {apps}")
-        about = {"fapscript": str(script or ""), "apps": str(apps or ""),
-                 "name": dev.name}
+            print(f"[{dev.name}] apps' symbols, as they start: from {apps[-1]}"
+                  + (f", and the stock apps' from {apps[0]}" if len(apps) > 1
+                     else ""))
+        about = {"fapscript": str(script or ""), "apps": [str(a) for a in apps],
+                 "links": str(dev.gdb_apps), "name": dev.name}
         lines += [f"python FLIPPEREMU_GDB = {about!r}",
                   f"source {ROOT / 'scripts' / 'fe_gdb.py'}"]
     dev.gdb_init.write_text("\n".join(lines) + "\n")
@@ -3243,11 +3258,14 @@ def main():
                              "[--serve PORT] [-- GDB'S ARGUMENTS]")
     p.add_argument("--elf", metavar="FILE",
                    help="the firmware's ELF (default: the one whose contents are "
-                        "in the device's flash, of what was flashed, a build in "
-                        "this source tree, and ufbt's SDK)")
+                        "in the device's flash, of what was flashed, the ELFs "
+                        "beside that package, a build in this source tree, and "
+                        "ufbt's SDK)")
     p.add_argument("--apps", metavar="DIR",
-                   help="where the apps' debug ELFs are (default: the build's "
-                        ".extapps; ufbt's build folder)")
+                   help="where the debug ELFs of the apps that were built are "
+                        "(default: the build's .extapps; ufbt's build folder).  "
+                        "The stock apps' are looked for in appsymbols/ beside "
+                        "the firmware's ELF")
     p.add_argument("--with", dest="program", metavar="GDB",
                    help="the gdb to run (default: the firmware toolchain's "
                         "arm-none-eabi-gdb-py3, then what the PATH has)")

@@ -265,8 +265,8 @@ and a half.
 ```
 
 ```
-[default] the firmware's symbols: ~/.ufbt/current/firmware.elf
-[default] apps' symbols, as they start: from ~/.ufbt/build
+[default] the firmware's symbols: firmware/official-1.5.1/flipper-z-f7-firmware-1.5.1.elf
+[default] apps' symbols, as they start: from ~/.ufbt/build, and the stock apps' from firmware/official-1.5.1/appsymbols
 vPortSuppressTicksAndSleep (expected_idle_ticks=287) at targets/f7/furi_hal/furi_hal_os.c:172
 (gdb) break fe_hello_app
 Function "fe_hello_app" not defined.
@@ -279,7 +279,7 @@ launch` in another terminal, and:
 
 ```
 [FURI] New application loaded. Adding debug info
-[FURI] Loading debug information from ~/.ufbt/build/fe_hello_d.elf
+[FURI] Loading debug information from devices/default/gdb-apps/fe_hello_d.elf
 
 Breakpoint 1, fe_hello_app (p=0x0) at examples/hello/hello.c:56
 56	    Hello hello = {
@@ -324,13 +324,14 @@ What `./flipperemu gdb` puts together, and how to have it otherwise:
   download; then what the PATH has. `--with GDB` names another. One without Python
   gets the firmware's symbols and nothing of the rest.
 - **The firmware's symbols** come from an ELF whose contents are what the device's
-  flash holds. It looks at the `.elf` the device was flashed from, a build in the
-  source tree you are in, and ufbt's SDK, which has the ELF of the release it is of.
-  A device with that release from its update package has the same bytes in its flash,
-  and so gets those symbols. `--elf FILE` names another: the official update server
-  has each build's ELF beside its package (`flipper-z-f7-firmware-VERSION.elf`, for
-  the dev channel's builds too). The SDK has no source files of the firmware:
-  `directory PATH` in gdb, with a checkout of it, shows its lines.
+  flash holds. It looks at the `.elf` the device was flashed from, the ELFs beside
+  the package it was flashed from, a build in the source tree you are in, and ufbt's
+  SDK, which has the ELF of the release it is of. `scripts/fetch_firmware.py` puts an
+  official build's ELF beside its package (`flipper-z-f7-firmware-VERSION.elf` on the
+  update server, for the dev channel's builds too), so a device with a firmware from
+  there has its symbols with nothing more to say. `--elf FILE` names another. None
+  of these has source files of the firmware: `directory PATH` in gdb, with a checkout
+  of it, shows its lines.
 - **Your app's symbols** are read by the firmware's own gdb script
   (`scripts/debug/flipperapps.py`, from its source tree or from the SDK). It goes
   through the firmware's list of loaded apps, and loads each app's debug ELF at the
@@ -338,6 +339,27 @@ What `./flipperemu gdb` puts together, and how to have it otherwise:
   symbols at once; one that is started later has them when it starts, before its first
   instruction. The debug ELFs are looked for where ufbt leaves them (`~/.ufbt/build`),
   or fbt (`.extapps` beside the firmware's ELF). `--apps DIR` is another place.
+- **The stock apps' symbols.** NFC, Sub-GHz, Infrared and the others are apps on the
+  card as well, and the official update server has their debug ELFs, one archive for
+  each build (`flipper-z-f7-appsymbols-VERSION.tgz`). `scripts/fetch_firmware.py`
+  unpacks it into `appsymbols/` beside the firmware's ELF, and gdb looks there too.
+  `break nfc_app` waits for NFC to be started, and a crash in a stock app has the
+  app's files and lines in its backtrace:
+
+  ```
+  [flipperemu] the firmware crashed: furi_check failed
+  (gdb) bt
+  #0  __furi_crash_implementation () at lib/cmsis_core/cmsis_gcc.h:968
+  #1  0x08042df2 in nfc_free (instance=0x20010750) at lib/nfc/nfc.c:260
+  #2  0x2002289c in nfc_app_free (instance=instance@entry=0x2000db50) at applications/main/nfc/nfc_app.c:143
+  #3  0x20022fb4 in nfc_app (p=0x0) at applications/main/nfc/nfc_app.c:536
+  #4  0x0806607c in flipper_application_thread (context=0x200085a8) at lib/flipper_application/flipper_application.c:239
+  ```
+
+  The firmware's script looks in one folder. With the stock apps' symbols there are
+  two, so it is given `gdb-apps/` in the device's folder: links to the files of both,
+  made again as each app starts (yours may have been built since). An app of yours
+  with the name of a stock one is the one that is taken.
 - **Whatever follows `--`** goes to gdb. `./flipperemu gdb -- -batch -ex bt` prints
   where the firmware is, and leaves.
 
@@ -463,7 +485,8 @@ Then `./flipperemu log -f` for what the firmware says, at the level you set
   once more (`./flipperemu gdb`), and leave.
 - **gdb says "No symbol … in current context" for your app.** Its debug ELF was not
   found, or is not of the build that runs: gdb says which file it looked for when the
-  app starts. `--apps DIR` names the folder it is in.
+  app starts. `--apps DIR` names the folder it is in. For a stock app of an official
+  build, `scripts/fetch_firmware.py` gets the symbols.
 - **The loader refuses the app, or the Flipper asks "Continue anyways?".** It was built
   for another API: [the SDK has to be the firmware's](#the-sdk-has-to-be-the-firmwares).
 
@@ -485,11 +508,13 @@ status is 77.
 mode: a backtrace of the firmware with functions and lines, the breakpoint in the
 app's entry that `ufbt launch` runs into, a breakpoint on a line of the app that runs
 and a variable printed there, the crash with its message and the app's line in the
-backtrace, the firmware running on after each, the debug flag off throughout, the
-stub on a TCP port with a gdb of its own on it, a second gdb turned away, what
+backtrace, the firmware running on after each, the debug flag off throughout, a
+breakpoint in a stock app by its name (where `appsymbols/` is beside the firmware),
+the stub on a TCP port with a gdb of its own on it, a second gdb turned away, what
 `status` and `continue` say of a firmware a gdb has stopped, a gdb that dies with the
-firmware stopped. It passes on the official 1.5.1 with the SDK's
-toolchain (gdb 13.2) and ELF (20 checks), and is skipped (77) without them.
+firmware stopped. It passes on the official 1.5.1 with the SDK's toolchain (gdb 13.2)
+and the update server's ELF and app symbols (22 checks), and is skipped (77) without
+ufbt.
 
 A recording is checked where the screen is: `scripts/smoke_test.py` runs
 `./flipperemu record` for four seconds with two key presses and has Pillow read the
@@ -552,5 +577,6 @@ By hand: the official self-update script sending a package without a radio stack
 Not tried: a firmware built by `fbt` in its own tree, and then run, updated and
 launched to with the commands above. The stand-in shows what `fbt` is handed, and not
 that a build of it works here. Neither is ufbt with another firmware's SDK. gdb was
-tried with the SDK's ELF and an app built by ufbt, and not with a firmware tree's
-ELF and `.extapps`, nor from an IDE.
+tried with the SDK's ELF and the update server's (the release's and the dev build's),
+an app built by ufbt and the server's symbols of the stock apps, and not with a
+firmware tree's ELF and `.extapps`, nor from an IDE.

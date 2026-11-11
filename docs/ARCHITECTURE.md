@@ -1126,3 +1126,4 @@ the emulated field.
 | `uart.log`, `uart.log.1` | what a serial adapter on pins 13 and 14 would have recorded: the firmware's log of this run, and of the one before |
 | `firmware.elf` | symbols for gdb (copied when flashing an ELF) |
 | `gdb.sock`, `gdb.init` | (once `./flipperemu gdb` was run) QEMU's gdb stub, and what gdb was told: the ELF, the stub, `scripts/fe_gdb.py` |
+| `gdb-apps/` | (with the stock apps' symbols beside the firmware's ELF) links to the apps' debug ELFs, the stock ones and what was built: the one folder the firmware's gdb script looks in |

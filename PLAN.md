@@ -222,6 +222,11 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         `flipperapps.py`, with the firmware's probe flag kept off and breakpoints of
         gdb's where an app starts and where a crash begins; `--serve PORT` for an
         IDE; `scripts/gdb_check.py` (BRINGUP_LOG 79)
+  - ☑ The stock apps under gdb, and an official build's symbols with nothing to
+        name: `scripts/fetch_firmware.py` gets the build's ELF and unpacks the update
+        server's archive of the apps' debug ELFs beside it; `gdb` finds the ELF beside
+        the package the device was flashed from, and has the firmware's script look in
+        both folders, the stock apps' and what was built (2026-11-10, BRINGUP_LOG 91)
   - ☐ gdb with a firmware tree's ELF and its `.extapps`; from an IDE (VS Code)
 - ☑ A recording of the screen as an animated GIF: `./flipperemu record OUT.gif`
       (a client of the front-panel link, for a device without a window) and
