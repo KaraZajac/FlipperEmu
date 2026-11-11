@@ -45,7 +45,9 @@
 #include "system/reset.h"
 #include "system/runstate.h"
 #include "system/system.h"
-#include "target/arm/cpu-qom.h"
+#include "system/cpu-throttle.h"
+#include "exec/cpu-common.h"
+#include "target/arm/cpu.h"
 #include "wb55.h"
 #include "flipper.h"
 
@@ -117,6 +119,10 @@ struct FlipperZeroState {
     FlipperSdSlot *sd_slot;      /* what the slot answers without a card */
     char *nvram;                 /* battery-backed state file */
     char *enclave;               /* the FUS's key store (flipper_enclave.c) */
+    QEMUTimer *halt_watch;       /* has the firmware halted? */
+    uint32_t halt_at;            /* where, when it last looked (0: it has not) */
+    bool halt_rest;              /* ... and the CPU rests because of it */
+    bool halt_said;
     Notifier exit_notifier;
 };
 
@@ -555,8 +561,93 @@ static void flipper_comp_val_read(void *opaque, int n)
     }
 }
 
+/*
+ * A firmware that has halted: a debug build after a crash (it waits for a
+ * debugger there), any build after furi_halt().  Both end in the same two
+ * instructions with the interrupts off, `wfi` and a branch back to it, and
+ * that `wfi` returns at once, on a real Flipper as well: an interrupt is
+ * pending, and masked.  A real one only draws its current then; here a core
+ * of the host would run at full speed for nothing, so the CPU is left to run
+ * for a hundredth of the time.  A reset ends that, a debugger or a pause that
+ * stops it, and a PC that has left the loop.
+ */
+#define HALT_WATCH_NS   (250 * SCALE_MS)
+#define HALT_REST_PCT   99
+
+static uint32_t flipper_halted_at(FlipperZeroState *s)
+{
+    ARMCPU *cpu = s->soc.armv7m.cpu;
+    uint32_t pc = cpu->env.regs[15] & ~1u;
+    uint16_t code[3];
+
+    if (pc < 2 ||
+        cpu_memory_rw_debug(CPU(cpu), pc - 2, code, sizeof(code), false)) {
+        return 0;
+    }
+    for (int i = 0; i < 3; i++) {
+        code[i] = le16_to_cpu(code[i]);
+    }
+    if (code[1] == 0xbf30 && code[2] == 0xe7fd) {       /* wfi; b .-2 */
+        return pc;
+    }
+    return code[0] == 0xbf30 && code[1] == 0xe7fd ? pc - 2 : 0;
+}
+
+static void flipper_halt_rest(FlipperZeroState *s, bool rest)
+{
+    if (rest == s->halt_rest) {
+        return;
+    }
+    s->halt_rest = rest;
+    if (rest) {
+        cpu_throttle_set(HALT_REST_PCT);
+    } else {
+        cpu_throttle_stop();
+    }
+}
+
+static void flipper_halt_watch(void *opaque)
+{
+    FlipperZeroState *s = opaque;
+    uint32_t at = flipper_halted_at(s);
+
+    if (!at) {
+        s->halt_said = false;
+        flipper_halt_rest(s, false);
+    } else if (at == s->halt_at) {      /* there twice: not passing through */
+        if (!s->halt_said) {
+            s->halt_said = true;
+            info_report("flipper-zero: the firmware has halted at 0x%08x (a "
+                        "debug build after a crash, or furi_halt()); its CPU "
+                        "rests until a reset or a debugger", at);
+            flipper_panel_halted(s->panel, at);
+        }
+        flipper_halt_rest(s, true);
+    }
+    s->halt_at = at;
+    timer_mod(s->halt_watch,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + HALT_WATCH_NS);
+}
+
+/* Stopped (a debugger, a pause): what goes on from there is not slowed,
+ * a single step least of all.  Still in the loop later: it rests again. */
+static void flipper_halt_vm_state(void *opaque, bool running, RunState state)
+{
+    FlipperZeroState *s = opaque;
+
+    if (!running) {
+        flipper_halt_rest(s, false);
+        s->halt_at = 0;
+    }
+}
+
 static void flipper_zero_reset(MachineState *machine, ResetType type)
 {
+    FlipperZeroState *s = FLIPPER_ZERO(machine);
+
+    flipper_halt_rest(s, false);
+    s->halt_at = 0;
+    s->halt_said = false;
     wb55_soc_latch_boot(&FLIPPER_ZERO(machine)->soc);
     qemu_devices_reset(type);
     flipper_drive_pins(FLIPPER_ZERO(machine));
@@ -788,6 +879,11 @@ static void flipper_zero_init(MachineState *machine)
     }
     armv7m_load_kernel(s->soc.armv7m.cpu, machine->kernel_filename,
                        WB55_FLASH_BASE, WB55_FLASH_SIZE);
+
+    s->halt_watch = timer_new_ns(QEMU_CLOCK_VIRTUAL, flipper_halt_watch, s);
+    timer_mod(s->halt_watch,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + HALT_WATCH_NS);
+    qemu_add_vm_change_state_handler(flipper_halt_vm_state, s);
 }
 
 static char *flipper_get_nvram(Object *obj, Error **errp)

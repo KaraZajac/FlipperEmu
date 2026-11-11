@@ -609,6 +609,7 @@ class MainWindow(QtWidgets.QMainWindow):
         L.speaker.connect(self.on_speaker)
         L.prop.connect(self.on_prop)
         L.power_off.connect(self.on_power_off)
+        L.halted.connect(self.on_halted)
         L.stopped.connect(self.on_stopped)
         V.key.connect(self.on_key)
         V.usb_clicked.connect(self.toggle_usb)
@@ -1181,6 +1182,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # debugger, and after furi_halt() every build waits for the end
         self.halt_timer.start(HALT_ASK_MS)
 
+    def on_halted(self, at):
+        """The emulator found the firmware in its halt loop.  Its log may have
+        nothing of that (a crash that printed nothing); `status` has the
+        rest."""
+        if not self.halted:
+            self.halt_timer.start(0)
+
     def on_restart(self):
         """The firmware started again.  After a crash, if its screen says so:
         its log has no report of one that came in the middle of another
@@ -1192,8 +1200,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def ask_halted(self):
         """`status` knows whether the firmware has halted, and whether it
         started again after a crash.  Asked when the emulator is found, after
-        a crash in the log, when the firmware started again, after a command
-        that failed, and for as long as the firmware stands halted."""
+        a crash in the log, when the emulator says that the firmware has
+        halted, when the firmware started again, after a command that failed,
+        and for as long as the firmware stands halted."""
         def done(code, text):
             self.halt_asked = False
             say, self.say_fault = self.say_fault, False

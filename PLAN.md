@@ -258,8 +258,11 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       after `furi_halt()`. `status`, every command that needs the CLI, `app` and the
       window ("HALTED" on the glass) say so, with the crash and the ways on (`gdb`,
       `reset`); known by the halt loop's code at the PC (BRINGUP_LOG 87)
-  - ☐ It keeps one host core busy (the loop's `wfi` returns at once: an interrupt is
-        pending and masked); the model could let the vCPU sleep there
+  - ☑ It kept one host core busy (the loop's `wfi` returns at once: an interrupt is
+        pending and masked). The machine looks for the halt loop itself and lets the
+        CPU run a hundredth of the time from then on: 7 % of a core, where a firmware
+        that idles takes 25 %; a reset ends it, gdb is not slowed (2026-11-11,
+        BRINGUP_LOG 93)
   - ☑ A crash in the middle of another thread's log line leaves no report in the log
         (the firmware drops it; seen on Momentum). The reason is in the fault register
         (RTC backup register 4, a pointer into the flash) until the crash screen is
@@ -269,8 +272,10 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         again and when a command failed, not only after a `[CRASH]` in the log: one
         opened on a firmware that has halted shows it, and a crash without a report is
         said from the fault register (2026-11-10, BRINGUP_LOG 89)
-  - ☐ A debug build whose crash printed nothing halts without a line in the log: the
-        window knows of it only with its next command (it does not poll `status`)
+  - ☑ A debug build whose crash printed nothing halts without a line in the log: the
+        window knew of it only with its next command. The machine says it now:
+        `halted` on the panel link, and a line in the terminal of a headless `run`
+        (2026-11-11, BRINGUP_LOG 93)
 
 ## M6: research tooling ☐
 - ☐ Snapshot workflow (`savevm` on qcow2 images; boot once, jump straight to an app)

@@ -280,6 +280,8 @@ class Driver:
         with the crash from the firmware's fault register."""
         w = self.win
         begun = len(self.console())
+        heard = []                      # the emulator's own word of a halt
+        w.link.halted.connect(heard.append)
         w.take_away("nfc")              # nothing to find: it goes on reading
         self.settle()
         w.command("app", "NFC")
@@ -318,6 +320,13 @@ class Driver:
                      and w.view.paused == "halted"
                      and w.windowTitle().endswith("(halted)"))
             self.shot("halted")
+            self.until(lambda: heard, 5)
+            check("crash: the emulator tells the window of the halt itself, "
+                  "with the place `status` has: a halt that left nothing in "
+                  "the log is shown too",
+                  heard == [int(halted["at"], 16)],
+                  f"heard: {[f'{at:#010x}' for at in heard]}, status: "
+                  f"{halted['at']}")
 
             def finds(how):
                 """the window forgets the halt; after how(): it knows again"""

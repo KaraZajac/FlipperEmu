@@ -857,19 +857,29 @@ It is asked by `status`; before a command waits for the CLI's prompt; by the CLI
 client (`fe_cli.py`'s `gone` hook) when an answer has stayed away for two seconds; and
 after a command failed with a timeout, so that its message can say why.
 
-The window has no other source for this than `status`, and does not ask all the time
-(each ask is a process). It asks a second after the emulator said hello on the panel
-link, a second after a `[CRASH]` in the log, a second after the firmware started again
-(the log's timestamps went back: `fe_log.REBOOT`), and at once after a command of its
-own failed; then every three seconds for as long as the answer is "halted". The same
-answer has the fault register. The console says what is in it when the window has just
-found the emulator, and when the firmware started again with no `[CRASH]` before that;
-after a crash that the log reported, it has been said. What this leaves out: a debug
-build whose crash printed nothing halts without a line in the log, and the window knows
-of it only with its next command.
+The window has what a halt is from `status`, and does not ask all the time (each ask
+is a process). It asks a second after the emulator said hello on the panel link, a
+second after a `[CRASH]` in the log, at once when the machine says `halted` on the link
+(below), a second after the firmware started again (the log's timestamps went back:
+`fe_log.REBOOT`), and at once after a command of its own failed; then every three
+seconds for as long as the answer is "halted". The same answer has the fault register.
+The console says what is in it when the window has just found the emulator, and when
+the firmware started again with no `[CRASH]` before that; after a crash that the log
+reported, it has been said.
 
-The halt loop keeps the vCPU busy: an interrupt is pending and masked, so its `wfi`
-returns at once, as on the chip.
+The halt loop would keep the vCPU busy: an interrupt is pending and masked, so its
+`wfi` returns at once, as on the chip. The chip only draws its current then; a host
+core at full speed for a firmware that does nothing is another matter. So the machine
+looks as well (`flipper_halt_watch()` in `flipper_zero.c`, every 250 ms of virtual
+time): the same three halfwords at the PC, found at the same place twice in a row. Then
+it says so once (a line on QEMU's stderr, which is the terminal of a headless `run`,
+and `halted 0xADDRESS` on the panel link, which is how the window learns of a halt that
+left nothing in the log) and lets the CPU run a hundredth of the time: QEMU's own vCPU
+throttle (`cpu_throttle_set(99)`, made for migration), 10 ms in each second. The
+emulator then takes 7 % of a host core, 1 % of it the vCPU's thread; a firmware that
+idles takes 25 %. The rest ends with a reset, with a PC that has left the loop, and
+whenever the machine is stopped (a debugger, a pause), so that a single step is not
+slowed; still in the loop half a second after it goes on, it rests again.
 
 **A crash without a report.** A crash prints with interrupts masked, and
 `furi_log_tx()` gives up at once in that state when another thread holds the log's

@@ -465,6 +465,8 @@ struct FlipperPanelState {
 void flipper_panel_sync(FlipperPanelState *s);
 /* the firmware turned the Flipper off; the emulator is about to exit */
 void flipper_panel_power_off(FlipperPanelState *s);
+/* the firmware has halted, with its PC there */
+void flipper_panel_halted(FlipperPanelState *s, uint32_t at);
 /* A link holds time still while the other side answers: its own stop, which
  * is not a pause (and which a pause outlasts).  -> it did stop the machine,
  * and flipper_vm_release() is to follow */

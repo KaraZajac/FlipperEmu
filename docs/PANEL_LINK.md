@@ -121,6 +121,16 @@ of a long Back press, or a flat battery off USB). An emulator that is off has no
 run, so QEMU exits right after this line; the window that started it stays, shows the
 Flipper off, and starts it again when Back is held.
 
+```
+halted 0x080123b0
+```
+
+The firmware has halted, with its PC there: a debug build after a crash (it waits for a
+debugger), any build after `furi_halt()`. Sent once, when the emulator finds the CPU in
+the halt loop (a `wfi` and a branch back to it; it looks every 250 ms and wants to see it
+twice). From then on the CPU rests, which a reset ends. A program that connects later
+does not get the line: `flipperemu status --json` has `halted` for that.
+
 ### To the emulator
 
 ```

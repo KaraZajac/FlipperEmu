@@ -592,8 +592,10 @@ dist/my_app.fap -> /ext/apps/Tools/my_app.fap (26916 bytes)
   ```
 
   It names the two ways on: `./flipperemu gdb` shows where the firmware stands, and
-  `./flipperemu reset` starts it again. Until then the emulator keeps one core of the
-  computer busy: the firmware's halt loop does not sleep.
+  `./flipperemu reset` starts it again. The emulator sees the halt itself within half a
+  second: the terminal of `./flipperemu run` says `the firmware has halted at
+  0x...`, the window shows HALTED, and the emulated CPU rests: a halted firmware
+  costs less of your computer than an idle one, though its halt loop never sleeps.
 - **After the start** it says whether the app runs. If the firmware logged warnings or
   errors since, they are shown; if the firmware crashed, its crash message is, and the
   exit status is 1. `./flipperemu log -f` in another terminal shows all of it.

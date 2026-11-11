@@ -100,9 +100,13 @@ usb      : plugged into a computer, which sees 0483:5740 Flipper mine: CDC ACM
 `./flipperemu gdb` is the debugger it waits for, and `./flipperemu reset` starts it
 again. In the window HALTED stands above the screen until then, and Device > Reboot
 (Ctrl+R) is the same reset. A window that is opened on a firmware that has halted
-already shows it a second later, and one whose command got no answer asks at once. While
-the firmware stands there the emulator keeps one core of your computer busy: the halt
-loop does not sleep.
+already shows it a second later, and one whose command got no answer asks at once. The
+emulator notices a halt by itself as well, within half a second: the terminal of a
+headless `run` gets a line (`the firmware has halted at 0x080123b0 …`), the window is
+told, also of a halt that left nothing in the log, and the CPU rests from then on. The
+halt loop does not sleep, on a real Flipper neither, and would keep a core of your
+computer busy; a halted firmware now costs less than one that idles (7 % of a core, not
+25 %). gdb and `reset` are not slowed by it.
 
 Everything else ufbt does is passed on as it is: `./flipperemu ufbt` alone builds,
 `ufbt create APPID=my_app` makes a new app's folder, `ufbt vscode_dist` sets up VS
@@ -546,7 +550,9 @@ release build it wants `status` to have the crash from the fault register until 
 button is pressed on the Flipper (26). `scripts/gui_check.py` has the same crash
 under the window: the
 console has to name it, a debug build has to show as halted (the state, the title,
-HALTED above the screen) and to run again after Reboot. Then the window loses the
+HALTED above the screen), the emulator's own word of the halt has to have reached the
+window with the address `status` has, and Reboot has to start it again. Then the window
+loses the
 emulator and finds it again, as one that is opened at that moment would: it has to
 show the halt again (and once more after a command that got no answer), or to say
 what the Flipper's crash screen says on a release build. There the check then starts

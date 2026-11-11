@@ -1374,6 +1374,34 @@ big lock, entry 92).
       comparator's handler are the same source in both releases; what differs in the
       path is the 5 V supply (1.0.1 switches it on itself, 1.5.1 asks the power
       service). Next: what the decoder is fed, read out under gdb.
+93. **A firmware that had halted cost a host core.** Known since entry 87: the halt
+    loop's `wfi` returns at once (an interrupt is pending, and masked), on the chip as
+    well, and QEMU runs that loop as fast as it can. A debug build left on its crash
+    over lunch is a fan at full speed for nothing.
+    - QEMU cannot sleep there by itself, and should not: the NVIC keeps its line to the
+      CPU up whatever PRIMASK says (the CPU checks the mask when it takes the
+      interrupt), so the CPU "has work". Taking the line down from the machine lasts
+      until the next timer interrupt pends, a millisecond.
+    - So the machine looks for the loop, as the launcher does (entry 87): `bf30 e7fd`
+      at the PC or just before it, every 250 ms of virtual time, at the same place
+      twice in a row. Then QEMU's vCPU throttle at 99 %: made for migration, there in
+      every system binary, and it gives way to a stop request, so a pause, a reset and
+      a debugger do not wait for it.
+    - Measured on the dev build, NFC closed in the middle of a read: the emulator
+      takes 6.8 % of a core halted (the vCPU's thread 1.0 %), 24.6 % alive and idle
+      (18.4 %). After `reset` the CLI answers as soon as it did.
+    - gdb: the rest ends when the machine stops, and starts again half a second after
+      it goes on if the PC is still in the loop. A backtrace and five single steps
+      there take 1.0 s together.
+    - The machine says it once per halt: a line on stderr (`the firmware has halted at
+      0x080123b0 …`), which a headless `run` shows in its terminal after the
+      firmware's own last words, and `halted 0x080123b0` on the panel link. That
+      closes entry 89's gap: the window asks `status` when the line comes, and shows a
+      halt that left nothing in the log.
+    - Results: the window check has a step for it on the debug build (the machine's
+      word has reached the window, with the address `status` has) and passes 33
+      there, the app check 27; on official 1.5.1 the window check passes 32, the gdb
+      check 22, the smoke test 28.
 
 ## Things that were right the first time (and why)
 

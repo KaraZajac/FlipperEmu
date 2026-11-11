@@ -26,6 +26,7 @@ class PanelLink(QtCore.QObject):
     speaker = QtCore.Signal(int, int)   # milli-Hz, duty in ppm; 0, 0: silent
     prop = QtCore.Signal(str, str, object)      # path, name, value (None: none)
     power_off = QtCore.Signal()         # the firmware switched the Flipper off
+    halted = QtCore.Signal(int)         # ... or has halted, with its PC there
     stopped = QtCore.Signal(str)        # time stands still on it ("paused",
                                         # "debug" ...: why), or goes on ("")
 
@@ -144,6 +145,8 @@ class PanelLink(QtCore.QObject):
         elif word == "power":
             if int(rest) == 0:
                 self.power_off.emit()
+        elif word == "halted":
+            self.halted.emit(int(rest, 16))
         elif word == "running":
             on, _, why = rest.partition(" ")
             self.stopped.emit("" if int(on) else why.strip() or "paused")

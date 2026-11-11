@@ -223,6 +223,13 @@ void flipper_panel_power_off(FlipperPanelState *s)
     }
 }
 
+void flipper_panel_halted(FlipperPanelState *s, uint32_t at)
+{
+    if (s && s->lk.open) {
+        flipper_link_send(&s->lk, "halted 0x%08x\n", at);
+    }
+}
+
 /* ---- out: properties the window watches */
 
 static void panel_watch_free(void *p)
