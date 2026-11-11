@@ -777,6 +777,87 @@ def still_text(dev, why):
     return f"it stands still (QEMU's state: {why})"
 
 
+def halted_at(m):
+    """Where the firmware sleeps for good, or None: it has not halted.  A
+    debug build that crashed waits for a debugger, and furi_halt() waits for
+    the end, both in the same two instructions with the interrupts off:
+    `wfi`, and a branch back to it.  A firmware that is alive goes on after
+    its `wfi` (there are those two places in an image, and no third)."""
+    hit = re.search(r"\bR15=([0-9a-f]{8})", m.cmd("info registers"))
+    pc = int(hit.group(1), 16) & ~1 if hit else 0
+    if pc < 2:
+        return None
+    code = [int(word, 16) for word in
+            re.findall(r"\b0x([0-9a-f]{4})\b", m.cmd(f"x/3hx {pc - 2:#x}"))]
+    if code[1:3] == HALT_LOOP:
+        return pc
+    return pc - 2 if code[0:2] == HALT_LOOP else None
+
+
+HALT_LOOP = [0xbf30, 0xe7fd]            # wfi; b .-2
+
+
+def firmware_halt(dev, m=None):
+    """A running device whose firmware has halted: {"at": where its CPU
+    sleeps, "kind": "CRASH" or "HALT", "report": what its log says of it}
+    (None and None: the log has nothing).  None: it has not halted, or the
+    emulator did not say."""
+    try:
+        if m:
+            at = halted_at(m)
+        else:
+            from fe_monitor import Monitor
+            m = Monitor(str(dev.monitor), timeout=2.0)
+            try:
+                at = halted_at(m)
+            finally:
+                m.close()
+    except (OSError, ConnectionError):
+        return None
+    if at is None:
+        return None
+    import fe_log
+    found = None
+    try:
+        with open(dev.uart, "rb") as f:     # its report is the last it wrote
+            f.seek(max(0, f.seek(0, os.SEEK_END) - 8192))
+            for raw in f.read().decode(errors="replace").splitlines():
+                found = fe_log.crash_of(fe_log.parse(raw)) or found
+    except OSError:
+        pass
+    kind, report = found or (None, None)
+    return {"at": f"{at:#010x}", "kind": kind, "report": report or None}
+
+
+def halt_text(dev, halt):
+    """... in words: (what happened, what to do about it)"""
+    said = f" ({halt['report']})" if halt["report"] else ""
+    if halt["kind"] == "HALT":
+        what = f"halted{said}: its own code asked for that"
+    elif halt["kind"] == "CRASH":
+        what = (f"crashed{said} and has halted: a debug build waits for a "
+                "debugger there, where a release build starts again")
+    else:
+        what = ("has halted, as a debug build does after a crash (its log "
+                "has no report of it)")
+    return what, (f"`./flipperemu -d {dev.name} gdb` shows where it stands, "
+                  f"`./flipperemu -d {dev.name} reset` starts it again")
+
+
+def halt_note(args):
+    """For a command that got no answer from a device: that its firmware has
+    halted, if it has"""
+    try:
+        dev = Device(args.device)
+        halt = firmware_halt(dev) if dev.running() else None
+    except (Exception, SystemExit):
+        return ""
+    if not halt:
+        return ""
+    what, todo = halt_text(dev, halt)
+    return f"\n[{dev.name}] the firmware {what}.  {todo}"
+
+
 def cmd_pause(args):
     """Time stands still on a running device, until `continue`"""
     dev = Device(args.device)
@@ -896,6 +977,7 @@ def device_status(dev):
     try:
         g = lambda path, prop: qom_get(m, path, prop)
         st["stopped"] = stopped(m) or None
+        st["halted"] = firmware_halt(dev, m)
         st["usb"] = read_usb(m)
         st["battery"] = read_battery(m)
         st["sd"] = {"card": dev.sd.exists(), "inserted": g("/machine", "sd-card")}
@@ -1003,6 +1085,10 @@ def cmd_status(args):
     print(f"[{dev.name}] running: {st['firmware'] or '?'}")
     if st["stopped"]:
         print(f"{'time':9}: {still_text(dev, st['stopped'])}")
+    if st["halted"]:
+        what, todo = halt_text(dev, st["halted"])
+        print(f"{'firmware':9}: it {what}")
+        print(f"{'':9}  {todo}")
     for name, text in rows:
         print(f"{name:9}{':' if name else ' '} {text}")
     return 0
@@ -1376,7 +1462,12 @@ def open_cli(dev, prompt=True, timeout=15.0):
     ep, why = usb_serial(dev)
     if why:
         sys.exit(f"[{dev.name}] no CLI: {why}")
+    halt = firmware_halt(dev)
+    if halt:
+        what, todo = halt_text(dev, halt)
+        sys.exit(f"[{dev.name}] no CLI: the firmware {what}.  {todo}")
     cli = FlipperCli(ep, lock=dev.dir / "usb.lock")
+    cli.gone = lambda: firmware_halt(dev)
     if prompt:
         try:
             cli.read_until_prompt(
@@ -2022,15 +2113,22 @@ def app_close(dev, cli):
     try:
         closed = fe_apps.close(
             cli, back=lambda long=False: press_back(dev, long))
-    except fe_apps.Restarted:
+    except (fe_apps.Restarted, TimeoutError) as e:
+        # a release build starts again after a crash, a debug build halts
+        halt = None if isinstance(e, fe_apps.Restarted) else firmware_halt(dev)
+        if isinstance(e, TimeoutError) and not halt:
+            raise
         crash = log_trouble(dev.uart, mark)[1] if mark is not None else None
         raise fe_apps.AppError(
             "the firmware " + (f"crashed ({crash})" if crash else "stopped")
-            + " when the app was asked to close, and has started again.  "
-            "The loader's request ends an app where it is, and not every "
+            + " when the app was asked to close, and "
+            + ("has halted: a debug build waits for a debugger there" if halt
+               else "has started again")
+            + ".  The loader's request ends an app where it is, and not every "
             "app is ready for that in the middle of its work (reading, "
             "sending): leave that with its Back button first.  "
             f"`./flipperemu -d {dev.name} log` has the firmware's report"
+            + (f"; {halt_text(dev, halt)[1]}" if halt else "")
         ) from None
     return [f'"{name}" closed' + (" (with its Back button: it takes no "
                                   "request to close)" if pressed else "")
@@ -2133,6 +2231,8 @@ def app_session(dev, cli, args, local, fap):
         return log_trouble(dev.uart, mark) if mark is not None else ([], None)
 
     def waiting():
+        if firmware_halt(dev):          # nobody is asking: said below
+            raise TimeoutError("the firmware gives no answer")
         left = max(0.0, args.wait - fe_apps.QUESTION)
         print(f"[{dev.name}] no answer yet: the Flipper may be asking on its "
               "screen whether to start it.  Answer there (in the window, or "
@@ -2158,7 +2258,11 @@ def app_session(dev, cli, args, local, fap):
         print("  warnings and errors in the firmware's log since then:")
         for text in lines[-12:]:
             print(f"    {text}")
-    if crash:
+    halt = firmware_halt(dev) if crash or lost else None
+    if halt:
+        what, todo = halt_text(dev, halt)
+        why = f"the firmware {what}.  {todo}"
+    elif crash:
         why = f"the firmware crashed with it, and started again: {crash}"
     elif lost:
         why = lost
@@ -3120,9 +3224,9 @@ def main():
     try:
         return args.func(args) or 0
     except (ConnectionError, TimeoutError) as e:    # e.g. the monitor is busy
-        sys.exit(f"flipperemu: {e}")
+        sys.exit(f"flipperemu: {e}" + halt_note(args))
     except fe_files.FilesError as e:
-        sys.exit(f"flipperemu: {e}")
+        sys.exit(f"flipperemu: {e}" + halt_note(args))
     except KeyboardInterrupt as e:
         if sys.stderr.isatty():
             sys.stderr.write("\r\x1b[K")

@@ -54,10 +54,11 @@ NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
       The radio stage is blanked, because a FUS-only CPU2 cannot install a stack.
 - ☐ XIP app loaders (custom firmwares that program FAP code into internal flash and
       execute it there)
-- ◐ Firmware matrix: official 1.5.1, Momentum mntm-012, Unleashed unlshd-094 and
-      RogueMaster RM1024-1347 (2026-11-10, BRINGUP_LOG 86) pass `scripts/smoke_test.py`
-      (now including a warm reboot) and the files, app, window, enclave and update
-      checks; run them on a schedule
+- ◐ Firmware matrix: official 1.5.1, the official dev build 3060cee9 (a debug build;
+      BRINGUP_LOG 87), Momentum mntm-012, Unleashed unlshd-094 and RogueMaster
+      RM1024-1347 (2026-11-10, BRINGUP_LOG 86) pass `scripts/smoke_test.py` (now
+      including a warm reboot) and the files, app, window, enclave and update checks;
+      run them on a schedule
 
 ## M4: senses ◐
 - ☑ Speaker: TIM16 CH1 PWM → QEMU audio (desktop driver or `--audio wav:FILE`); tones
@@ -234,6 +235,18 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       on the front-panel link: a pause, a debugger), and keeps the NFC link's own
       stops for a card's answer apart from it; what needs the firmware says why it
       cannot (BRINGUP_LOG 81)
+- ☑ A firmware that has halted (2026-11-10): a debug build after a crash, any build
+      after `furi_halt()`. `status`, every command that needs the CLI, `app` and the
+      window ("HALTED" on the glass) say so, with the crash and the ways on (`gdb`,
+      `reset`); known by the halt loop's code at the PC (BRINGUP_LOG 87)
+  - ☐ It keeps one host core busy (the loop's `wfi` returns at once: an interrupt is
+        pending and masked); the model could let the vCPU sleep there
+  - ☐ A crash in the middle of another thread's log line leaves no report in the log
+        (the firmware drops it; seen on Momentum). The reason is in the fault register
+        (RTC backup register 4, a pointer into the flash) until the crash screen is
+        left: `app --close`, `status` and the window could read it there
+  - ☐ The window learns of a halt from a `[CRASH]` in the log: one opened on a firmware
+        that has halted already, or after a crash without a report, does not know it
 
 ## M6: research tooling ☐
 - ☐ Snapshot workflow (`savevm` on qcow2 images; boot once, jump straight to an app)

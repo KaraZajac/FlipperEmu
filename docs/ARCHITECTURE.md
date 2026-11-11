@@ -831,6 +831,26 @@ as `fbt launch` uses it on a real Flipper: `loader close`, `loader open PATH [AR
   the launcher marks the end of `devices/NAME/uart.log` before `loader open` and reads
   what the firmware logged from there on: warnings, errors, and a crash.
 
+**A firmware that has halted.** A release build ends a crash with a reset. A debug
+build (no `FURI_NDEBUG`: the dev channel's packages, `./fbt`'s default), and any build
+after `furi_halt()`, ends it with interrupts off in `wfi; b .-2`, for a debugger to
+find. Nothing answers at the CLI after that, and the machine has nothing unusual to
+report: the processor is in WFI, as it is in the idle task. The launcher's
+`halted_at()` asks the monitor for the PC (`info registers`) and for the three
+halfwords from two bytes before it (`x/3hx`), and takes `bf30 e7fd` at the PC or just
+before it for the halt. Each of the five firmware images has that pair in exactly two
+places: the end of a crash and the end of `furi_halt()`. PRIMASK does not tell the two
+apart, and neither does a PC that stands still: the tickless idle sleeps in WFI with
+PRIMASK set, at one address. `firmware_halt()` adds what the log said last, `[CRASH]`
+or `[HALT]` with its message.
+
+It is asked by `status`; before a command waits for the CLI's prompt; by the CLI
+client (`fe_cli.py`'s `gone` hook) when an answer has stayed away for two seconds; and
+after a command failed with a timeout, so that its message can say why. The window
+asks `status` a second after a `[CRASH]` in the log, and then every three seconds for
+as long as the answer is yes. The halt loop keeps the vCPU busy: an interrupt is
+pending and masked, so its `wfi` returns at once, as on the chip.
+
 **The firmware's own tools** (the launcher's `ufbt` and `fbt`). They need nothing from
 the model: the USB serial port is a pty, and `runfap.py`, `storage.py`, `selfupdate.py`
 and miniterm open it like a `/dev/ttyACM`. What they need is its name. Their port

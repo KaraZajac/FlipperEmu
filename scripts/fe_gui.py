@@ -69,6 +69,8 @@ APP_WAIT_S = 45             # a question about an app on its screen: this long
 SCALES = (2, 3, 4, 5, 6)
 POWER_ON_MS = 1500          # hold Back this long, and an off Flipper starts
 RESET_MS = 3000             # Left + Back held this long: it reboots
+HALT_ASK_MS = 1000          # after a crash in the log: has it halted?
+HALT_AGAIN_MS = 3000        # and while it has: does it still stand there?
 TERMINALS = (("xdg-terminal-exec", []), ("konsole", ["-e"]),
              ("gnome-terminal", ["--"]), ("kgx", ["-e"]), ("kitty", []),
              ("alacritty", ["-e"]), ("foot", []), ("wezterm", ["start", "--"]),
@@ -180,6 +182,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.muted = False
         self.tone = (0, 0)
         self.stopped = ""               # time stands still on it: why
+        self.halted = False             # the firmware stands in its halt loop
+        self.halt_timer = QtCore.QTimer(self)
+        self.halt_timer.setSingleShot(True)
+        self.halt_timer.timeout.connect(self.ask_halted)
         self.recording = None           # a fe_record.Recording, while one runs
         self.recording_since = 0.0
         self.sd_none = (session is not None and session.args.no_sd) or \
@@ -643,6 +649,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.view.set_blank(False)
             self.resetting = False
             self.on_speaker(0, 0)
+            self.set_halted(False)
             self.on_stopped("")
         self.show_state()
         self.update_actions()
@@ -653,6 +660,8 @@ class MainWindow(QtWidgets.QMainWindow):
                  "connecting", "busy": "running (in another window)",
                  "off": "off", "lost": "not running", "installing":
                  "installing firmware"}.get(self.state, self.state)
+        if self.state == "on" and self.halted:
+            words = "halted"
         if self.state == "on" and self.stopped:
             words = {"paused": "paused", "debug": "stopped by a debugger"}.get(
                 self.stopped, f"stopped ({self.stopped})")
@@ -666,8 +675,17 @@ class MainWindow(QtWidgets.QMainWindow):
         if why == self.stopped:
             return
         self.stopped = why
-        self.view.set_paused(why)
+        self.view.set_paused(why or ("halted" if self.halted else ""))
         self.a_pause.setChecked(bool(why))
+        self.show_state()
+
+    def set_halted(self, halted):
+        """The firmware stands in its halt loop (a debug build after a crash,
+        any build after furi_halt()), or runs again"""
+        if halted == self.halted:
+            return
+        self.halted = halted
+        self.view.set_paused(self.stopped or ("halted" if halted else ""))
         self.show_state()
 
     def set_paused(self, on):
@@ -811,8 +829,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.command("stop")
 
     def reboot(self):
+        def done(code, text):
+            self.view.set_blank(False)
+            if self.halted:
+                self.ask_halted()
         self.view.set_blank(True)
-        self.command("reset", then=lambda code, text: self.view.set_blank(False))
+        self.command("reset", then=done)
 
     def combo_fired(self):
         if self.view.pressed("left") and self.view.pressed("back"):
@@ -1143,6 +1165,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log.add(f"{text}  (the firmware log has the rest: Ctrl+Shift+L)",
                      "error")
         self.statusBar().showMessage(text, 15000)
+        # a release build starts again by itself; a debug build waits for a
+        # debugger, and after furi_halt() every build waits for the end
+        self.halt_timer.start(HALT_ASK_MS)
+
+    def ask_halted(self):
+        """After a crash, and for as long as it stands there: `status` knows
+        whether the firmware has halted"""
+        def done(code, text):
+            try:
+                halted = json.loads(text)["halted"]
+            except (ValueError, KeyError, TypeError):
+                halted = None
+            if not (halted and self.is_live()):
+                self.set_halted(False)
+                return
+            if not self.halted:
+                why = ("its own code asked for that"
+                       if halted["kind"] == "HALT" else
+                       "a debug build waits for a debugger after a crash, "
+                       "where a release build starts again")
+                self.log.add(f"The firmware has halted: {why}.  Reboot "
+                             f"(Ctrl+R) starts it again; `./flipperemu -d "
+                             f"{self.name} gdb` in a terminal shows where it "
+                             "stands.", "error")
+                self.statusBar().showMessage(
+                    "The firmware has halted: Reboot (Ctrl+R) starts it again",
+                    60000)
+            self.set_halted(True)
+            self.halt_timer.start(HALT_AGAIN_MS)
+        if self.closing:
+            return
+        if self.is_live():
+            self.command("status", "--json", then=done, quiet=True)
+        else:
+            self.set_halted(False)
 
     def set_log_level(self, level):
         """The firmware's own log level.  It reads it when it starts: set,

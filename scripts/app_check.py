@@ -16,9 +16,12 @@ question is cancelled once, and answered once), a file that is no app, a name
 the firmware does not know.  Last, an app that does not live through being
 asked to close (the firmware's NFC app in the middle of a read: a check of
 its own fails, and the firmware starts again): the launcher says what
-happened.  And what a stopped device takes.  Exit status 0 = pass.
+happened.  A debug build does not start again after that: it halts and waits
+for a debugger, which `status` and every command at its CLI then say, until
+`reset`.  And what a stopped device takes.  Exit status 0 = pass.
 """
 import argparse
+import json
 import os
 import pathlib
 import re
@@ -183,10 +186,19 @@ def app_checks(b, work):
     return local
 
 
+def halted(b):
+    """What `status --json` has on a halted firmware, or None"""
+    try:
+        return json.loads(b.fe("status", "--json")[1]).get("halted")
+    except ValueError:
+        return None
+
+
 def crash_checks(b):
     """The loader's request ends an app's event loop where it is.  The NFC app
     of the official firmware frees its scanner then, which is still at work
-    while it reads: a furi_check fails, and the firmware starts again."""
+    while it reads: a furi_check fails, and the firmware starts again.  (A
+    debug build halts there, and waits for a debugger.)"""
     code, text = b.fe("app", "NFC")
     if code:
         print("  SKIP  no NFC app in this firmware to close in the middle of "
@@ -204,7 +216,27 @@ def crash_checks(b):
           "reads): the firmware's crash is reported, with what its log says",
           code == 1 and re.search(r"the firmware crashed \(.*furi_check "
                                   r"failed\)", text)
-          and "has started again" in text and "Traceback" not in text, text)
+          and ("has started again" in text or "has halted" in text)
+          and "Traceback" not in text, text)
+    if "has halted" in text:
+        st = halted(b) or {}
+        code, text = b.fe("status")
+        check("a debug build: it has halted there, and `status` says so, "
+              "with the crash and the ways on",
+              code == 0 and st.get("kind") == "CRASH"
+              and "furi_check failed" in (st.get("report") or "")
+              and re.search(r"^firmware +: it crashed \(.*furi_check failed\) "
+                            r"and has halted", text, re.M)
+              and f"-d {b.name} gdb" in text and f"-d {b.name} reset" in text,
+              f"{st}\n{text}")
+        start = time.monotonic()
+        code, text = b.fe("ls", "/ext")
+        took = time.monotonic() - start
+        check("... and a command at its CLI says that at once, and waits "
+              "for no prompt",
+              code == 1 and "no CLI: the firmware crashed" in text
+              and "has halted" in text and took < 5, f"{took:.1f} s: {text}")
+        b.fe("reset")
     end = time.monotonic() + 40
     while True:
         code, text = b.fe("app")
@@ -212,7 +244,7 @@ def crash_checks(b):
             break
         time.sleep(1)
     check("after it the firmware is up again: no app runs",
-          code == 0 and "no app runs" in text, text)
+          code == 0 and "no app runs" in text and not halted(b), text)
 
 
 def stopped_checks(b, local):

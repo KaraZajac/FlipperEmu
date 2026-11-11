@@ -22,6 +22,7 @@ import sys
 import time
 
 PROMPT = b">: "
+QUIET = 2.0                 # seconds without a byte before gone() is asked
 ANSI = re.compile(rb"\x1b\[[0-9;]*[A-Za-z]")
 
 
@@ -114,6 +115,9 @@ class FlipperCli:
         else:
             raise ValueError(f"cannot connect to a '{kind}' chardev")
         self.buf = b""
+        # gone(): asked while a prompt is long in coming; true = none will
+        # come (the firmware has halted), and the wait ends there
+        self.gone = None
 
     def take(self, lock, wait):
         self.lock = take_port(lock, wait)
@@ -141,10 +145,16 @@ class FlipperCli:
         """Everything up to and including the next CLI prompt.
         what: what to say when it does not come"""
         end = time.time() + timeout
+        heard = time.time()
         while not self.buf.endswith(PROMPT):
             if time.time() > end:
                 raise TimeoutError(what or "the Flipper's CLI does not answer")
-            self._fill(min(0.2, max(0.0, end - time.time())))
+            if self._fill(min(0.2, max(0.0, end - time.time()))):
+                heard = time.time()
+            elif self.gone and time.time() - heard > QUIET:
+                heard = time.time()
+                if self.gone():
+                    raise TimeoutError("the Flipper's CLI answers no more")
         out, self.buf = self.buf, b""
         return out
 

@@ -78,6 +78,26 @@ Rebooting system.
 The Flipper restarts and says "Flipper crashed and was rebooted" on its screen. The
 log goes on in the same place, so the crash is a few lines up in `./flipperemu log`.
 
+That is a release build, as the release channel's packages are. A debug build (the dev
+channel's packages, and what `./fbt` builds unless `DEBUG=0` is given) ends its report
+with `System halted. Connect debugger for more info` and stands still, as it does on a
+real Flipper: the screen stays as it was, and no button and no CLI answers.
+`./flipperemu status` has that in its first row, and every command that needs the CLI
+says it at once:
+
+```
+$ ./flipperemu status
+[mine] running: dev-08112026-3060cee9
+firmware : it crashed ([NFC] furi_check failed) and has halted: a debug build ...
+           `./flipperemu -d mine gdb` shows where it stands, `./flipperemu -d mine ...
+usb      : plugged into a computer, which sees 0483:5740 Flipper mine: CDC ACM
+```
+
+`./flipperemu gdb` is the debugger it waits for, and `./flipperemu reset` starts it
+again. In the window HALTED stands above the screen until then, and Device > Reboot
+(Ctrl+R) is the same reset. While the firmware stands there the emulator keeps one
+core of your computer busy: the halt loop does not sleep.
+
 Everything else ufbt does is passed on as it is: `./flipperemu ufbt` alone builds,
 `ufbt create APPID=my_app` makes a new app's folder, `ufbt vscode_dist` sets up VS
 Code, `ufbt cli` opens the Flipper's command line (Ctrl-] leaves it).
@@ -269,7 +289,8 @@ view_port = 0x20008f58
 The Flipper stands still while gdb has it stopped: its screen, its clock, what it says
 on USB. `continue` lets it run, Ctrl-C stops it again, `quit` leaves it running.
 
-A crash stops in gdb before the firmware restarts. Hold OK in the example:
+A crash stops in gdb before the firmware restarts (a debug build: before it halts).
+Hold OK in the example:
 
 ```
 [flipperemu] the firmware crashed: fe_hello: on purpose
@@ -355,6 +376,10 @@ as for ufbt, and the same targets refused. `fbt launch APPSRC=my_app`, `fbt cli`
 package has a radio stack in it. `./fbt updater_package` builds that package, and
 `flipperemu update` installs it without the stage.
 
+What `./fbt` builds is a debug build (the `D` of `f7-firmware-D`) unless you give it
+`DEBUG=0`. A debug build does not start again after a crash: it
+[halts](#an-app-from-its-source-to-the-screen), and `flipperemu status` says so.
+
 Then `./flipperemu log -f` for what the firmware says, at the level you set
 (`log --set-level debug`), and
 [gdb](#gdb-with-the-firmwares-symbols-and-your-apps).
@@ -397,6 +422,11 @@ Then `./flipperemu log -f` for what the firmware says, at the level you set
   launch` and `ufbt launch` ask in the same way, so an app that crashes here crashes
   on a `launch` over itself on a real Flipper too. Stop what is at work after the loop
   returns, then free it; `./flipperemu gdb` has the place (the backtrace of the crash).
+- **"no CLI: the firmware crashed (…) and has halted".** A debug build does not start
+  again after a crash: it waits for a debugger, and answers nothing until then. The
+  same words end the message above on such a build. `./flipperemu gdb` shows where it
+  stands (with symbols, if the firmware was flashed from an `.elf` or built in the
+  tree you are in); `./flipperemu reset` starts it again.
 - **"its USB serial port is in use by …".** Another command talks to the Flipper: a
   `ufbt cli` left open, a long `push`. One at a time.
 - **"no USB serial port for `ufbt launch`".** The cable is out (`./flipperemu usb
@@ -459,7 +489,12 @@ brightness the backlight has.
 
 An app that does not live through the request to close is the NFC app in the middle
 of a read: `scripts/app_check.py` asks it, and wants the crash named and the firmware
-back with no app running.
+back with no app running. A debug build does not come back by itself: there the check
+wants `status` and the next command at the CLI to say that the firmware has halted,
+the second within five seconds, and starts it again with `reset` (27 checks, where a
+release build has 25). `scripts/gui_check.py` has the same crash under the window: the
+console has to name it, a debug build has to show as halted (the state, the title,
+HALTED above the screen) and to run again after Reboot.
 
 `scripts/update_check.py FIRMWARE` gives a running device its own update package with
 `update` (`--package PKG`: another firmware's). It wants the package on the card
@@ -475,7 +510,8 @@ to lend the updater a level to see its error, and to give none back. And the
 refusals: a folder and a file that are no package, a pulled USB cable, a card that is
 out of its slot, a device that does not run. 29 checks; it passes on the official
 1.5.1, Momentum, Unleashed and RogueMaster with their own packages (3, 6, 4 and 10
-minutes), and from the official firmware to Unleashed with `--package`.
+minutes), on the official dev build with its own, and from the official firmware to
+Unleashed and to the dev build with `--package`.
 `ufbt_check.py` has the real `ufbt flash_usb` go through the wrapper (29 checks now).
 
 By hand: the official self-update script sending a package without a radio stack

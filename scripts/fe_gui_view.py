@@ -730,9 +730,10 @@ class FlipperView(QtWidgets.QWidget):
             self.draw_paused(p, fg)
 
     def draw_paused(self, p, colour):
-        """Time stands still: said on the glass above the pixels, which are
-        the firmware's, and stay as it left them"""
-        text = {"paused": "PAUSED",
+        """Time stands still, or the firmware does (it has halted): said on
+        the glass above the pixels, which are the firmware's, and stay as it
+        left them"""
+        text = {"paused": "PAUSED", "halted": "HALTED",
                 "debug": "STOPPED BY A DEBUGGER"}.get(self.paused, "STOPPED")
         font = QtGui.QFont(self.font())
         font.setPixelSize(6)

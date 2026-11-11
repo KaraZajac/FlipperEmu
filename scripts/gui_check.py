@@ -22,9 +22,11 @@ bench, unplugs USB, switches it off as a real one is (Back held for 5 s, then
 Power Off: the window stays, the emulator exits), copies a file to the card
 of the switched-off Flipper, switches
 it on again (Back held: the tag is there again), switches it off the hard way
-and on again by plugging USB in, reboots it with Left + Back, installs the
-firmware again from the Device menu, and closes the window (which stops the
-emulator).  Exit status 0 = pass. Pictures are kept in --out.
+and on again by plugging USB in, reboots it with Left + Back, lets an app
+crash the firmware (said in the console; a debug build halts then, which is
+said too, and Reboot starts it), installs the firmware again from the Device
+menu, and closes the window (which stops the emulator).  Exit status 0 =
+pass. Pictures are kept in --out.
 """
 import argparse
 import importlib.machinery
@@ -54,9 +56,12 @@ CRASH = re.compile(r"\[CRASH\]|furi_check failed|HardFault|Kernel is Dead")
 results = []
 
 
-def check(label, ok):
+def check(label, ok, detail=""):
     results.append((label, bool(ok)))
     print(f"  {'PASS' if ok else 'FAIL'}  {label}", flush=True)
+    if detail and not ok:
+        print("        " + str(detail).strip().replace("\n", "\n        "),
+              flush=True)
     return ok
 
 
@@ -261,6 +266,79 @@ class Driver:
 
     def console(self):
         return self.win.log.text.toPlainText()
+
+    def crash(self):
+        """A crash under the window: NFC, asked to close while it reads, fails
+        a check of its own (app_check.py).  The console says so.  A release
+        build starts again; a debug build halts, which the console says too,
+        and Reboot starts it.
+
+        The firmware's own report can be missing: what a crash prints is
+        dropped while another thread is in the middle of a log line (its log
+        stops there, and goes on with the next start).  Then the console has
+        what the launcher saw: the firmware started again under its request."""
+        w = self.win
+        begun = len(self.console())
+        w.take_away("nfc")              # nothing to find: it goes on reading
+        self.settle()
+        w.command("app", "NFC")
+        self.settle()
+        self.spin(1.5)
+        self.click("ok")                # its first item: Read
+        self.spin(3)
+        mark = len(self.console())
+        new = lambda: self.console()[mark:]
+        w.close_app()
+        self.settle()
+        if '"NFC" closed' in new():
+            print("  SKIP  crash: this firmware's NFC app closes in the "
+                  "middle of a read", flush=True)
+            return
+        again = "when the app was asked to close, and has started again"
+        self.until(lambda: "The firmware crashed: " in new() or again in new(),
+                   20)
+        said = "The firmware crashed: " in new()
+        self.spin(fe_gui.HALT_ASK_MS / 1000 + 0.5)
+        self.settle()
+        try:
+            halted = json.loads(self.launcher("status", "--json").stdout)["halted"]
+        except (ValueError, KeyError):
+            halted = None
+        if halted:
+            told = self.until(lambda: "The firmware has halted: a debug "
+                                      "build" in new(), 10)
+            shown = (w.state_label.text() == "halted"
+                     and w.view.paused == "halted"
+                     and w.windowTitle().endswith("(halted)"))
+            self.shot("halted")
+            w.reboot()
+            back = self.booted() and self.until(
+                lambda: w.state_label.text() == "running"
+                and not w.view.paused, 10)
+            check("crash: an app takes the firmware with it: the console "
+                  "says that it crashed, and that this build has halted, "
+                  "which the window shows as its state; Reboot starts it "
+                  "again, and the window says running", said and told
+                  and shown and back,
+                  f"crash said: {said}, halt said: {told}, shown: {shown}, "
+                  f"back: {back}; the console since:\n{new()}")
+        else:
+            back = self.booted()
+            self.until(lambda: again in new(), 20)
+            if not said:
+                print("  note  the firmware's log has no report of this "
+                      "crash: it came in the middle of another thread's log "
+                      "line", flush=True)
+            check("crash: an app takes the firmware with it: the console "
+                  "says so (with the crash, where the firmware's log has "
+                  "it); it starts again by itself",
+                  again in new() and back and "has halted" not in new()
+                  and w.state_label.text() == "running",
+                  f"crash said: {said}, back: {back}, state: "
+                  f"{w.state_label.text()!r}; the console in this step:\n"
+                  f"{self.console()[begun:]}")
+        self.settle()
+        self.spin(2)
 
     def drop(self, path):
         """a file dragged from a file manager and let go over the window"""
@@ -472,6 +550,8 @@ class Driver:
         self.shot("rebooted")
         text = self.uart.read_text(errors="replace")
         check("no crash in log", not CRASH.search(text))
+
+        self.crash()
 
         # Device > Install firmware: off, flashed, on again
         QtWidgets.QMessageBox.question = \

@@ -1190,6 +1190,54 @@ All three are small, self-contained, and suitable for sending upstream.
       enclave 35, update 29 (ten minutes). Files again on the official firmware after
       the change: 55.
 
+87. **A fifth firmware, and a crash that ends differently.** The official dev build
+    (3060cee9 of 2026-11-08, from the dev channel) started on the first try and
+    passed the smoke test (28) and the files check (55). The app check failed 2 of
+    its 25, both after the crash it asks for: "the Flipper's CLI was not done with
+    `loader close` after 15 s", and then no prompt at all.
+    - The dev channel's builds are debug builds, as `./fbt` makes them by default
+      (`DEBUG = 1` in `fbt_options.py`, so no `FURI_NDEBUG`).
+      `__furi_crash_implementation` ends in a reset only in a release build. A debug
+      build prints "System halted. Connect debugger for more info" and stays in
+      `wfi; b .-2` with interrupts off, on a real Flipper too. The launcher knew a
+      crash only as something the firmware comes back from.
+    - Telling a halted firmware from an idle one: not by PRIMASK (the tickless idle
+      sleeps in WFI with PRIMASK set) and not by a PC that stands still (the idle
+      task's does). By the code at the PC: `bf30 e7fd` there or two bytes before it,
+      read through the monitor, with no change to the machine. Each of the five
+      images has that pair in exactly two places, the end of a crash and the end of
+      `furi_halt()`. An idle firmware: 0 of 40 samples; one that reads NFC: 0 of 20.
+    - `status` has it in its first row, with the crash from the log and the ways on
+      (`gdb`, `reset`). A command that needs the CLI asks before it waits for a
+      prompt (0.2 s to say so, where it ran into a timeout), and the CLI client asks
+      when an answer has stayed away for two seconds: `app --close` reports the
+      crash and the halt 2.4 s after its request, where it had waited 15 s to know
+      nothing.
+    - The window asks `status` a second after a `[CRASH]` in the log. The console and
+      the status bar say that the firmware has halted, HALTED stands above the
+      screen, and the state reads "halted" until the firmware runs again (asked
+      every three seconds). The window check has an app crash the firmware on every
+      firmware now: 31 checks.
+    - A halted firmware keeps one host core at 100 %: an interrupt is pending and
+      masked, so the loop's `wfi` returns at once. The chip does the same. Left as
+      it is, and written into PLAN.md.
+    - gdb on the halted firmware shows where it stands: addresses only for the dev
+      channel's package, which has no ELF; a build from a tree has its symbols.
+    - The window check's new crash step failed on Momentum, twice in a row, and
+      for a reason that is the firmware's: its log had no `[CRASH]` at all. The log
+      stopped in the middle of another thread's line ("[D][DolphinState] icounter 1,
+      butthurt 0") and went on with the next start. `furi_log_tx()` drops what it is
+      given while interrupts are masked and another thread holds the log's mutex,
+      and a crash prints with interrupts masked: a crash in the middle of somebody
+      else's log line leaves no report, on a real Flipper too. The launcher still
+      says that the firmware started again under its request, and the check takes
+      that. (The reason is still in the firmware's fault register then, which
+      nothing here reads yet: PLAN.md.)
+    - Results. The dev build: smoke test 28, files 55, app 27, window 31, enclave
+      35, update 29 (101 s, 97 of them in the updater), and 29 from 1.5.1 to it.
+      1.5.1 after the change: smoke test 28, files 55, app 25, window 31, update
+      29. Momentum, Unleashed and RogueMaster: app 25, window 31.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

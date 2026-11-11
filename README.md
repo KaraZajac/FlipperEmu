@@ -30,14 +30,16 @@ backlight's fade, a recording of the screen, pause and continue, CLI over USB, t
 secure enclave, IR receive and transmit,
 Sub-GHz receive and transmit, 125 kHz RFID read, emulate and T5577 write, iButton read
 and emulate, NFC read (NTAG215, MIFARE Classic 1K) and emulate, USB/IP export, warm
-reboot, no crash): **official 1.5.1**, **Momentum mntm-012**, **Unleashed
-unlshd-094** and **RogueMaster RM1024-1347**. The window passes `scripts/gui_check.py`
-(clicked buttons, a recording of the screen, Pause, the firmware log and its level, the
-backlight fading in, a file copied to the card, an app dropped on it, the LED blinking
-while NFC reads, the bench, switching off and on, the Left + Back reboot, installing
-firmware) on the same four, off-screen. `scripts/update_check.py` (an update package
-written to the card of a running device and installed there, and the updater's error
-screen) passes on the same four, and from the official firmware to Unleashed.
+reboot, no crash): **official 1.5.1**, the official **dev build 3060cee9** (a debug
+build, as `./fbt` makes them), **Momentum mntm-012**, **Unleashed unlshd-094** and
+**RogueMaster RM1024-1347**. The window passes `scripts/gui_check.py` (clicked buttons,
+a recording of the screen, Pause, the firmware log and its level, the backlight fading
+in, a file copied to the card, an app dropped on it, the LED blinking while NFC reads,
+the bench, switching off and on, the Left + Back reboot, a crash and what the firmware
+does after it, installing firmware) on the same five, off-screen.
+`scripts/update_check.py` (an update package written to the card of a running device
+and installed there, and the updater's error screen) passes on the same five, from the
+official firmware to Unleashed, and from the release to the dev build.
 `scripts/ufbt_check.py` (ufbt 0.2.6 building `examples/hello`, launching it there, and
 `ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's and that app's
 symbols) pass on the official one.
@@ -280,7 +282,9 @@ instead, and `--headless` no window at all.
   did (its transmissions, what a reader read), and has a line for the Flipper's CLI.
 - **The firmware log** (View > The firmware log, Ctrl+Shift+L) is what the firmware
   itself logs, in its colours, as it logs it: see [The firmware log](#the-firmware-log).
-  When the firmware crashes, the window says so, and the log has the rest.
+  When the firmware crashes, the window says so, and the log has the rest. A debug
+  build halts after a crash: HALTED stands above the screen then, until the firmware
+  is started again (Device > Reboot, Ctrl+R).
 - **View**: zoom from 2× to 6×, a white, black or Catppuccin Mocha body, the LCD's pixel
   grid. Device > Save the screen saves the LCD as a PNG; Install firmware flashes another
   one and starts it.
@@ -317,7 +321,8 @@ program can use it too. `scripts/gui_check.py FIRMWARE` checks the window off-sc
 boots a throwaway device, clicks its buttons, records its screen, pauses it, reads the
 firmware's log and sets its level, counts the steps of the backlight's fade, copies a
 file to its card, drops an app on it and starts it again with F5, watches the LED blink
-while NFC reads, switches it off and on, and reboots it.
+while NFC reads, switches it off and on, reboots it, and has an app crash the
+firmware.
 
 ## The `flipperemu` tool
 
@@ -329,7 +334,7 @@ while NFC reads, switches it off and on, and reboots it.
 | `run --unplugged` \| `run --battery PERCENT` \| `run --gtk` | start on battery (USB cable out); with this charge; in QEMU's own window (the bare LCD) |
 | `stop` | shut a running device down cleanly (saves its NVRAM) |
 | `gui [--scale N]` | the window that looks like a Flipper, for a device that runs already |
-| `status [--json]` | what is plugged into a running device and held to it |
+| `status [--json]` | what is plugged into a running device and held to it; whether its firmware has halted |
 | `usb plug` \| `usb unplug` \| `usb charger` | its USB cable: into a computer, out, into a charger (no argument: show it) |
 | `battery [PERCENT] [--voltage MV] [--temperature C] [--current MA]` | its battery (no argument: show it) |
 | `sd eject` \| `sd insert` | pull its microSD card out, push it back in |
@@ -417,7 +422,7 @@ and keeps at the newest one unless you scroll up. Choose which levels show, type
 a word to see only the lines with it (`/…/` for a regular expression), and set the
 firmware's level from the button: the Flipper restarts to take it. Save… writes what is
 shown to a text file. When a `[CRASH]` goes by, the status bar and the console say what
-it was.
+it was, and whether the firmware has halted there, as a debug build does.
 
 <p align="center"><img src="docs/img/30-window-fwlog.png" width="75%"
 alt="The firmware log in the window, with the firmware's level at debug"></p>
@@ -557,6 +562,22 @@ dist/my_app.fap -> /ext/apps/Tools/my_app.fap (26916 bytes)
   failed) when the app was asked to close, and has started again`, with exit status 1.
   If it is your app: when its event loop returns, stop what is still at work (a
   worker, a timer, a scan) before you free it.
+- **A debug build halts after a crash.** A release build starts again. A debug build
+  (the dev channel's packages, and what `./fbt` builds unless `DEBUG=0` is given)
+  stands still and waits for a debugger, on a real Flipper too: the screen stays as it
+  was, and no button and no CLI answers. The message above then ends `and has halted`.
+  `./flipperemu status` says so in its first row for as long as that lasts, and every
+  command that needs the Flipper's CLI says so at once, where it would wait for a
+  prompt that does not come:
+
+  ```
+  $ ./flipperemu ls /ext
+  [mine] no CLI: the firmware crashed ([NFC] furi_check failed) and has halted: ...
+  ```
+
+  It names the two ways on: `./flipperemu gdb` shows where the firmware stands, and
+  `./flipperemu reset` starts it again. Until then the emulator keeps one core of the
+  computer busy: the firmware's halt loop does not sleep.
 - **After the start** it says whether the app runs. If the firmware logged warnings or
   errors since, they are shown; if the firmware crashed, its crash message is, and the
   exit status is 1. `./flipperemu log -f` in another terminal shows all of it.
@@ -578,7 +599,8 @@ behind F5, with its lines in the console.
 
 `scripts/app_check.py FIRMWARE` checks this on a throwaway device with an app the
 firmware brought along, and with the firmware's NFC app closed in the middle of a
-read, for the crash: 25 checks on each of the four firmwares.
+read, for the crash: 25 checks on the four release firmwares, and 27 on the debug
+build, where the firmware halts and has to be started again.
 
 ### ufbt and fbt
 
@@ -728,8 +750,9 @@ when you start, it gets `info` for as long as it works, so that an error on its 
 is seen.
 
 `scripts/update_check.py FIRMWARE [--package PKG]` checks all of that on a throwaway
-device (29 checks: the official firmware, Momentum, Unleashed and RogueMaster with
-their own packages, and the official one updated to Unleashed).
+device (29 checks: the official firmware, its dev build, Momentum, Unleashed and
+RogueMaster with their own packages, and the official one updated to Unleashed and to
+the dev build).
 
 | | |
 |:-:|:-:|
@@ -1268,7 +1291,8 @@ folder, and starts gdb on it with what it finds:
 - the symbols of each app the firmware loads, read by the firmware's own gdb script
   when the app starts. A breakpoint set in an app's code beforehand is hit when the
   app is launched;
-- a stop where a crash begins, with the firmware's message, before it restarts.
+- a stop where a crash begins, with the firmware's message, before it restarts. A
+  debug build halts after a crash instead, and gdb can be started on it there as well.
 
 The Flipper stands still while gdb has it stopped, and runs on when gdb leaves.
 
