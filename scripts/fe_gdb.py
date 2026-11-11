@@ -40,7 +40,23 @@ def say(text):
     print(f"[flipperemu] {text}")
 
 
+def held():
+    """Has gdb the firmware, and does it stand still?"""
+    try:
+        thread = gdb.selected_thread()
+        return bool(gdb.selected_inferior().pid and thread
+                    and thread.is_stopped())
+    except (gdb.error, RuntimeError):
+        return False
+
+
 def flag_off(*_):
+    # The firmware's script calls this once more as gdb leaves.  An IDE's gdb
+    # (`target extended-remote`) is still connected then, after its detach,
+    # with the firmware running: and QEMU's stub stops the machine at
+    # whatever it is sent while it runs, with nobody left to let it go on.
+    if not held():
+        return
     try:
         gdb.execute(f"set variable {FLAG} = 0", to_string=True)
     except gdb.error:

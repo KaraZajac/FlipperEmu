@@ -43,7 +43,8 @@ and installed there, and the updater's error screen) passes on the same five, fr
 official firmware to Unleashed, and from the release to the dev build.
 `scripts/ufbt_check.py` (ufbt 0.2.6 building `examples/hello`, launching it there, and
 `ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's symbols, that
-app's and a stock app's) pass on the official one. The release candidate **1.5.1-rc**
+app's and a stock app's, and its debug configuration for VS Code used the way that
+debugger would) pass on the official one. The release candidate **1.5.1-rc**
 passes all of these (the ufbt check was not run on it).
 
 Older official releases run the smoke test as well: **1.4.3** passes all of it;
@@ -176,7 +177,8 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
 - CPU2 modelled as ST's FUS with no wireless stack. That's a real device state, and it
   keeps the BT paths healthy.
 - gdb on a device that runs, with the firmware's symbols and those of the apps it
-  loads: a breakpoint in an app's code, and a stop at a crash.
+  loads: a breakpoint in an app's code, and a stop at a crash. `gdb --vscode` writes
+  the debug configuration for VS Code into the app's folder.
 - The screen as a picture (PNG) and as a recording (an animated GIF, a few kB for a
   few seconds of an app), from the launcher and from the window.
 
@@ -404,6 +406,7 @@ it runs: once with the wait given up, once to the end.
 | `record out.gif [--seconds N] [--scale N]` | what its LCD shows, as an animated GIF: until Ctrl-C, or for N seconds (a device without a window; with one: Device > Record the screen) |
 | `gdb [--elf FILE] [--apps DIR] [--with GDB] [-- GDB'S ARGUMENTS]` | gdb on a running device, with the firmware's symbols and its apps' |
 | `gdb --serve PORT` | its gdb stub on a TCP port of this computer, for an IDE |
+| `gdb --vscode [--serve PORT]` | ... and a debug configuration for VS Code (the Cortex-Debug extension) in `.vscode/launch.json` of the folder you are in |
 | `info` | which firmware is on the device |
 
 `--serial` (the USART1 log) takes `stdio` (default), `file:PATH`, `pty`, `tcp:PORT`
@@ -1383,12 +1386,19 @@ The Flipper stands still while gdb has it stopped, and runs on when gdb leaves.
 ./flipperemu gdb                                                     # second terminal
 
 ./flipperemu gdb --serve 3333          # the stub on localhost:3333, for an IDE
+./flipperemu gdb --vscode              # ... and .vscode/launch.json, in this folder
 ./flipperemu gdb -- -batch -ex bt      # after --: gdb's own arguments
 ```
 
+`gdb --vscode`, in an app's folder, writes a debug configuration for VS Code's
+Cortex-Debug extension (the one ufbt's own are for): the stub's port, the firmware's
+ELF, the toolchain's gdb, and a command file with the rest of the above. A launch.json
+that is there, ufbt's with its comments too, keeps what it has. It was tried with a
+gdb driven the way the extension drives one, and not in VS Code itself.
+
 [docs/DEVELOPING.md](docs/DEVELOPING.md#gdb-with-the-firmwares-symbols-and-your-apps)
 has a session with an app, and what `--elf`, `--apps` and `--with` are for.
-`scripts/gdb_check.py FIRMWARE` checks it (22 checks on the official firmware, with
+`scripts/gdb_check.py FIRMWARE` checks it (30 checks on the official firmware, with
 ufbt's SDK and toolchain). `run --gdb` still opens the stub at the start, on
 localhost:1234 (`--gdb-port`).
 

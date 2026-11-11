@@ -184,6 +184,7 @@ class Device:
         self.gdb_sock = self.dir / "gdb.sock"           # its gdb stub, once asked for
         self.gdb_init = self.dir / "gdb.init"           # ... and what gdb is told (cmd_gdb)
         self.gdb_apps = self.dir / "gdb-apps"           # ... links to apps' debug ELFs
+        self.gdb_ide = self.dir / "gdb-ide.init"        # ... and what an IDE's gdb is told
 
     def running(self):
         """Is a QEMU serving this device's monitor socket?"""
@@ -1501,6 +1502,170 @@ def gdb_kit(elf, origin, apps):
             [stock, built] if stock.is_dir() and stock != built else [built])
 
 
+VSCODE_PORT = 3333      # the stub's, for `gdb --vscode` without a `--serve`
+
+
+def jsonc_plain(text):
+    """A file of VS Code's, which may have comments and a comma before a
+    closing bracket -> the same text with blanks in their place and every
+    other character where it was: JSON, if the file is sound"""
+    out = list(text)
+    i, n, last = 0, len(text), None
+    while i < n:
+        c = text[i]
+        if c == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+            last = i
+        elif text.startswith(("//", "/*"), i):
+            if text[i + 1] == "/":
+                j = text.find("\n", i)
+                j = n if j < 0 else j
+            else:
+                j = text.find("*/", i + 2)
+                j = n if j < 0 else j + 2
+            for k in range(i, j):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = j
+            continue
+        elif not c.isspace():
+            if c in "}]" and last is not None and text[last] == ",":
+                out[last] = " "
+            last = i
+        i += 1
+    return "".join(out)
+
+
+def launch_spans(plain):
+    """Where the debug configurations are in a launch.json that has no
+    comments any more: (the place after the '[' of its "configurations",
+    [(start, end) of each]), or None when it has no such list"""
+    i, n, depth = 0, len(plain), 0
+    key = 0                 # 1: "configurations" was read, 2: and its colon
+    inside = first = start = None
+    spans = []
+    while i < n:
+        c = plain[i]
+        if c == '"':
+            j = i + 1
+            while j < n and plain[j] != '"':
+                j += 2 if plain[j] == "\\" else 1
+            key = 1 if (inside is None and depth == 1
+                        and plain[i + 1:j] == "configurations") else 0
+            i = j
+        elif c in "{[":
+            depth += 1
+            if inside is None and key == 2 and c == "[":
+                inside, first = depth, i + 1
+            elif inside is not None and depth == inside + 1 and c == "{":
+                start = i
+            key = 0
+        elif c in "}]":
+            depth -= 1
+            if inside is not None and depth == inside and start is not None:
+                spans.append((start, i + 1))
+                start = None
+            elif inside is not None and depth < inside:
+                return first, spans
+        elif c == ":" and key == 1:
+            key = 2
+        elif not c.isspace():
+            key = 0
+        i += 1
+    return None
+
+
+def vscode_put(text, name, block):
+    """A launch.json's text with a debug configuration in it, in the place of
+    the one of that name or after the last one: (the text, how it got there),
+    or (None, None) when the file is no launch.json.  All else in the file
+    stays as it is, its comments too: the launch.json that `ufbt vscode_dist`
+    writes has some, and commas that JSON does not take."""
+    def named(piece):
+        try:
+            return json.loads(piece).get("name")
+        except (ValueError, AttributeError):
+            return None
+
+    plain = jsonc_plain(text)
+    found = launch_spans(plain)
+    if not found:
+        return None, None
+    first, spans = found
+    ours = [span for span in spans if named(plain[span[0]:span[1]]) == name]
+    if ours:
+        a, b = ours[0]
+        new, how = text[:a] + block.lstrip() + text[b:], "is as of now"
+    elif spans:
+        b = spans[-1][1]
+        new, how = text[:b] + ",\n" + block + text[b:], "added"
+    else:
+        new, how = text[:first] + "\n" + block + "\n    " + text[first:], "added"
+    # (a file that VS Code could not read is never written)
+    try:
+        configs = json.loads(jsonc_plain(new))["configurations"]
+        if name not in [c.get("name") for c in configs if isinstance(c, dict)]:
+            return None, None
+    except (ValueError, KeyError, TypeError):
+        return None, None
+    return new, how
+
+
+def vscode_launch(dev, gdb, elf, port, kit=None):
+    """`gdb --vscode`: a debug configuration for VS Code in the folder we are
+    in, for the Cortex-Debug extension (the one ufbt's own configurations are
+    for).  The extension names the ELF and the stub to its gdb, and the
+    device's gdb-ide.init is the rest of what `./flipperemu gdb` sets up."""
+    if not elf:
+        print(f"[{dev.name}] no configuration for VS Code without the "
+              "firmware's ELF")
+        return 1
+    gdb = os.path.abspath(gdb)
+    name = f"FlipperEmu ({dev.name})"
+    config = {"name": name, "type": "cortex-debug", "request": "attach",
+              "servertype": "external", "gdbTarget": f"localhost:{port}",
+              "executable": str(elf), "gdbPath": gdb,
+              "cwd": "${workspaceFolder}",
+              "postAttachCommands": [f"source {dev.gdb_ide}"]}
+    tools = pathlib.Path(gdb).parent
+    if (tools / "arm-none-eabi-objdump").is_file():
+        config["armToolchainPath"] = str(tools)     # (it reads the ELF with them)
+    svd = kit / "STM32WB55_CM4.svd" if kit else None
+    if svd and svd.is_file():
+        config["svdFile"] = str(svd)                # (its view of the peripherals)
+    block = "\n".join(" " * 8 + line for line in json.dumps(
+        config, indent=4, ensure_ascii=False).splitlines())
+    path = pathlib.Path(".vscode") / "launch.json"
+    again = (f"[{dev.name}] Once more after the device was started again, or "
+             "has another firmware: the stub and the ELF are those of now")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = None
+    except (OSError, UnicodeDecodeError) as e:
+        sys.exit(f"flipperemu: {path}: {e}")
+    if text is None:
+        new, how = ('{\n    "version": "0.2.0",\n    "configurations": [\n'
+                    + block + "\n    ]\n}\n"), "is there"
+    else:
+        new, how = vscode_put(text, name, block)
+    if new is None:
+        print(f"[{dev.name}] {path} is no launch.json that this can add to, and "
+              "is left as it is.  For the Cortex-Debug extension, among its "
+              '"configurations":\n' + block)
+        print(again)
+        return 0
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(new, encoding="utf-8")
+    print(f'[{dev.name}] {path}: "{name}" {how}, for the Cortex-Debug '
+          "extension: open this folder in VS Code, and Run and Debug has it "
+          "(F5)")
+    print(again)
+    return 0
+
+
 def cmd_gdb(args):
     """gdb on a running device.  Its stub is asked of the emulator when it is
     wanted, on a socket in the device's folder: nothing has to be decided when
@@ -1510,6 +1675,8 @@ def cmd_gdb(args):
         sys.exit(f"[{dev.name}] is not running: `./flipperemu -d {dev.name} run` "
                  "starts it (`run --wait-gdb`: and has it wait for gdb at its "
                  "first instruction)")
+    if args.vscode and not args.serve:
+        args.serve = VSCODE_PORT
     target = gdb_open_stub(dev, args.serve)
     elf, origin = gdb_firmware(dev, args.elf)
     gdb = gdb_program(args.program, source_tree(origin) if origin else None)
@@ -1523,6 +1690,7 @@ def cmd_gdb(args):
               "A firmware flashed from an .elf has them, and so has the "
               "official release ufbt's SDK is of; --elf FILE names another")
     lines.append(f"target remote {target}")
+    script = None
     if not gdb_has_python(gdb):
         print(f"[{dev.name}] {gdb} has no Python: no symbols of apps, and "
               "nothing said at a crash")
@@ -1532,16 +1700,31 @@ def cmd_gdb(args):
             print(f"[{dev.name}] apps' symbols, as they start: from {apps[-1]}"
                   + (f", and the stock apps' from {apps[0]}" if len(apps) > 1
                      else ""))
+        elif elf:
+            # (said, or a breakpoint in an app stays pending with no reason
+            # to be seen)
+            print(f"[{dev.name}] no symbols of apps: the script that reads "
+                  f"them comes with ufbt's SDK, and {sdk_home()} has none "
+                  "(`ufbt update` fetches it; UFBT_HOME names another place)")
         about = {"fapscript": str(script or ""), "apps": [str(a) for a in apps],
                  "links": str(dev.gdb_apps), "name": dev.name}
         lines += [f"python FLIPPEREMU_GDB = {about!r}",
                   f"source {ROOT / 'scripts' / 'fe_gdb.py'}"]
     dev.gdb_init.write_text("\n".join(lines) + "\n")
+    # (an IDE names the ELF and the stub to its gdb itself: the rest, to be
+    # sourced by a gdb that is on the device)
+    dev.gdb_ide.write_text("\n".join(
+        ["# for a gdb that an IDE has put on the device: the rest of gdb.init"]
+        + [line for line in lines[1:]
+           if not line.startswith(("file ", "target remote "))]) + "\n")
     cmd = [gdb, "-q", "-x", str(dev.gdb_init), *args.gdb_args]
     if args.serve:
         print(f"[{dev.name}] its gdb stub is on localhost:{args.serve}, for an IDE "
               f"(`target remote localhost:{args.serve}`), or with all of the "
               "above:\n    " + shlex.join(cmd))
+        if args.vscode:
+            return vscode_launch(dev, gdb, elf, args.serve,
+                                 script.parent if script else None)
         return 0
     # Ctrl-C in gdb's terminal reaches us too, and is gdb's to take
     ours = signal.signal(signal.SIGINT, lambda *_: None)
@@ -3587,7 +3770,7 @@ def main():
     p = sub.add_parser("gdb", help="gdb on a running device, with the firmware's "
                        "and its apps' symbols",
                        usage="flipperemu gdb [--elf FILE] [--apps DIR] [--with GDB] "
-                             "[--serve PORT] [-- GDB'S ARGUMENTS]")
+                             "[--serve PORT] [--vscode] [-- GDB'S ARGUMENTS]")
     p.add_argument("--elf", metavar="FILE",
                    help="the firmware's ELF (default: the one whose contents are "
                         "in the device's flash, of what was flashed, the ELFs "
@@ -3604,6 +3787,10 @@ def main():
     p.add_argument("--serve", type=int, metavar="PORT",
                    help="open the stub on a TCP port of this computer and leave: "
                         "for an IDE, or a gdb of your own")
+    p.add_argument("--vscode", action="store_true",
+                   help="... and write a debug configuration for VS Code's "
+                        "Cortex-Debug extension into .vscode/launch.json of the "
+                        "folder you are in (port 3333 without a --serve)")
     p.add_argument("--gdb-port", type=int, help=argparse.SUPPRESS)  # found by itself now
     p.add_argument("gdb_args", nargs="*", help="after --: passed on to gdb")
     p.set_defaults(func=cmd_gdb)

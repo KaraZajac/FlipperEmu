@@ -260,7 +260,13 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         server's archive of the apps' debug ELFs beside it; `gdb` finds the ELF beside
         the package the device was flashed from, and has the firmware's script look in
         both folders, the stock apps' and what was built (2026-11-10, BRINGUP_LOG 91)
-  - ☐ gdb with a firmware tree's ELF and its `.extapps`; from an IDE (VS Code)
+  - ☐ gdb with a firmware tree's ELF and its `.extapps`
+  - ☑ gdb from VS Code (2026-11-11): `gdb --vscode` writes a debug configuration
+        for the Cortex-Debug extension into `.vscode/launch.json` of the app's folder
+        (a file that is there keeps all else, ufbt's comments too), with
+        `gdb-ide.init` for the rest; an IDE's gdb that leaves no longer leaves the
+        Flipper stopped. Used by a gdb driven over GDB/MI as the extension drives
+        one, in the gdb check (30 checks); VS Code itself is ☐ (BRINGUP_LOG 99)
   - ☑ A test of an app as a script (2026-11-11): `./flipperemu wait` until the CLI
         answers, the log has a line (`--log`) or the screen is as in a file
         (`--screen`), alone or after a command of the launcher's (`-- COMMAND`);

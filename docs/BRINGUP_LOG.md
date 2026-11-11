@@ -1592,6 +1592,50 @@ big lock, entry 92).
       for the device after `stop`. `examples/hello/test.sh` starts its Flipper this
       way, so the ufbt check runs it too.
 
+99. **An IDE's gdb left the Flipper standing still when it left.** `gdb --vscode`
+    writes a debug configuration for VS Code's Cortex-Debug extension. VS Code is
+    not on this machine, so the configuration was used by a gdb driven over its
+    machine interface (GDB/MI, with `mi-async`) the way that extension drives one.
+    All of it worked, and then the Flipper stood still after the gdb had gone.
+    What was found on the way:
+    - After the detach the firmware ran; after gdb's exit it was paused. The
+      firmware's own gdb script (`flipperapps.py`) sets the debug flag back to 0 as
+      gdb leaves (`gdb.events.gdb_exiting`), and QEMU's stub stops the machine at
+      any byte it receives while the machine runs: that is how it takes a Ctrl-C.
+      With `target remote`, which `./flipperemu gdb` uses, a detach ends the
+      connection, and the write fails without a sound. An IDE connects with `target
+      extended-remote`, where the connection outlives the detach: the write went
+      out, the machine stopped, and gdb was gone. `scripts/fe_gdb.py` (which has
+      that write in its hands already, to keep the flag off) now writes only when
+      gdb has the firmware and it stands still.
+    - One trial had a breakpoint that stayed pending for ever, with nothing said.
+      The shell had no `UFBT_HOME`, the launcher found no SDK and so no script for
+      the apps' symbols, and said nothing of it. It says "no symbols of apps" now,
+      and where it looked.
+    - The launch.json that `ufbt vscode_dist` writes is not JSON: it has comments,
+      before the first brace too, and commas before closing brackets. The first
+      version gave up on such a file and printed the configuration to paste, which
+      would have been the answer for exactly the people this is for. Now the file's
+      text is kept: comments and those commas are blanked in a copy of the same
+      length, the configurations are found in the copy, and the new one is put into
+      the original at that place, after the last one or in place of the one of its
+      name. The result is read once more before it is written; a file that cannot be
+      read that way is left alone, and the configuration printed.
+    - A breakpoint by a file's full path, an IDE's kind, did not bind in a copy of
+      the example: ufbt has one build folder for all projects, and the object from
+      the first folder was kept, with that folder's path in its debug info. `ufbt
+      -c` and a build put it right; the gdb check cleans before it builds.
+    - `monitor halt` and `monitor reset halt`, which such front ends send to a probe's
+      gdb server, are "unknown command" to QEMU's monitor and do no harm. gdb's `kill`
+      ends the emulator.
+    - The gdb check has eight more checks (30): the missing SDK said, the
+      configuration in a new folder, in ufbt's launch.json (nothing else of the file
+      changed, a second time leaves the same file), not in a file that is none, and
+      then the session over GDB/MI: connected, a pending breakpoint by full path, the
+      app started and the breakpoint run into with the app's variables there, a
+      pause, and a detach and exit after which the CLI answers and the app has
+      logged its line.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

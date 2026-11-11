@@ -543,6 +543,7 @@ For an IDE, or a gdb of your own:
 It prints the gdb command that has all of the above (`gdb -x devices/NAME/gdb.init`).
 A front end that takes a gdb server's address takes `localhost:3333`. The stub stays
 there until the device stops; a `./flipperemu gdb` after it uses it where it is.
+For VS Code there is more than the port: [below](#from-vs-code).
 
 `ufbt debug` and `fbt debug` are refused, as they go to a debug probe. They would also
 set the firmware's flag for one (`furi_hal_debug_gdb_session_active`), with which the
@@ -550,6 +551,74 @@ firmware runs a breakpoint instruction where an app starts and where it crashes.
 probe halts the processor there. QEMU's stub has no probe behind it, and the firmware
 would crash on the instruction. `./flipperemu gdb` keeps the flag off, and has
 breakpoints of gdb's at those two places.
+
+### From VS Code
+
+```
+$ ../../flipperemu gdb --vscode
+[default] the firmware's symbols: …/official-1.5.1/flipper-z-f7-firmware-1.5.1.elf
+[default] apps' symbols, as they start: from ~/.ufbt/build, and the stock apps' from …/official-1.5.1/appsymbols
+[default] its gdb stub is on localhost:3333, for an IDE (`target remote localhost:3333`), or with all of the above:
+    ~/.ufbt/toolchain/current/bin/arm-none-eabi-gdb-py3 -q -x …/devices/default/gdb.init
+[default] .vscode/launch.json: "FlipperEmu (default)" added, for the Cortex-Debug extension: open this folder in VS Code, and Run and Debug has it (F5)
+[default] Once more after the device was started again, or has another firmware: the stub and the ELF are those of now
+```
+
+In your app's folder, with the device running, `gdb --vscode` opens the stub on a
+port (3333, or `--serve PORT`) and writes a debug configuration into
+`.vscode/launch.json`. It is for Cortex-Debug (`marus25.cortex-debug`), the extension
+that ufbt's own configurations are for and that `ufbt vscode_dist` recommends for the
+folder:
+
+```json
+{
+    "name": "FlipperEmu (default)",
+    "type": "cortex-debug",
+    "request": "attach",
+    "servertype": "external",
+    "gdbTarget": "localhost:3333",
+    "executable": "…/official-1.5.1/flipper-z-f7-firmware-1.5.1.elf",
+    "gdbPath": "…/toolchain/current/bin/arm-none-eabi-gdb-py3",
+    "cwd": "${workspaceFolder}",
+    "postAttachCommands": [
+        "source …/devices/default/gdb-ide.init"
+    ],
+    "armToolchainPath": "…/toolchain/current/bin",
+    "svdFile": "…/scripts/debug/STM32WB55_CM4.svd"
+}
+```
+
+The extension starts that gdb with the firmware's ELF, puts it on the stub, and has
+it read `gdb-ide.init`: the rest of what `./flipperemu gdb` tells a gdb, which is the
+apps' symbols as they start, the stop at a crash, and the debug flag kept off.
+
+- **A launch.json that is there** keeps all it has, its comments too. The one from
+  `ufbt vscode_dist` gets the configuration after ufbt's own. Those are for a debug
+  probe and a real Flipper; "FlipperEmu (default)" is the one for the emulated one.
+- **Run it again** when the device was started again or has another firmware. The
+  port and the ELF are those of the moment, and the configuration of that name is
+  written anew.
+- **A breakpoint in your app** can be set before the app is on the Flipper. gdb holds
+  it until the app starts (`../../flipperemu ufbt launch` in a terminal), and has it
+  in place before the app's first instruction.
+- **Leaving.** A gdb that detaches and exits leaves the Flipper running. A `kill`
+  from gdb ends the emulator, as it would end a program it debugs: `run` starts the
+  device again. `./flipperemu reset` in a terminal restarts the firmware.
+- **A breakpoint that is never reached, on a line that runs.** gdb looks for the file
+  by the full path in the app's debug info. ufbt has one build folder for all
+  projects (`~/.ufbt/build`), and a source file that was built before from another
+  folder, a copy of the project, keeps that folder's path there. `ufbt -c` and a new
+  build put it right.
+- **No symbols of your app at all.** `gdb` says so when it finds no SDK of ufbt's
+  ("no symbols of apps: …"): it looks in `~/.ufbt`, or where `UFBT_HOME` says.
+
+This was tried without VS Code, which the machine it was written on does not have.
+A gdb was driven over its machine interface the way the extension drives one: the
+firmware running while commands go on, a breakpoint by the file's full path set
+before the app starts and run into, a pause, variables, a detach and an exit. The
+gdb check does that each time. What the extension's own views make of it was not
+seen: if something there is off, the configuration is a plain one to change, and
+`gdb --vscode` only ever writes the one of its name.
 
 ## A firmware: `fbt`
 
@@ -683,11 +752,15 @@ app's entry that `ufbt launch` runs into, a breakpoint on a line of the app that
 and a variable printed there, the crash with its message and the app's line in the
 backtrace, the firmware running on after each, the debug flag off throughout, a
 breakpoint in a stock app by its name (where `appsymbols/` is beside the firmware),
-the stub on a TCP port with a gdb of its own on it, a second gdb turned away, what
-`status` and `continue` say of a firmware a gdb has stopped, a gdb that dies with the
-firmware stopped. It passes on the official 1.5.1 with the SDK's toolchain (gdb 13.2)
-and the update server's ELF and app symbols (22 checks), and is skipped (77) without
-ufbt.
+the stub on a TCP port with a gdb of its own on it, `gdb --vscode` (the configuration
+in a new folder, in the launch.json `ufbt vscode_dist` writes with nothing else of
+that file changed, and not in a file that is no launch.json; then that configuration
+used by a gdb that is driven the way VS Code's debugger drives one, to a breakpoint
+by a file's full path, a pause, and a disconnect after which the firmware runs), a
+second gdb turned away, what `status` and `continue` say of a firmware a gdb has
+stopped, a gdb that dies with the firmware stopped. It passes on the official 1.5.1
+with the SDK's toolchain (gdb 13.2) and the update server's ELF and app symbols (30
+checks), and is skipped (77) without ufbt.
 
 `scripts/wait_check.py FIRMWARE` is for `wait` and the screen as text, with an app the
 firmware brought along: the three kinds of wait, alone and after a command; a line
@@ -767,4 +840,5 @@ launched to with the commands above. The stand-in shows what `fbt` is handed, an
 that a build of it works here. Neither is ufbt with another firmware's SDK. gdb was
 tried with the SDK's ELF and the update server's (the release's and the dev build's),
 an app built by ufbt and the server's symbols of the stock apps, and not with a
-firmware tree's ELF and `.extapps`, nor from an IDE.
+firmware tree's ELF and `.extapps`. The configuration for VS Code was used by a gdb
+driven as the extension drives one, and not by VS Code itself.
