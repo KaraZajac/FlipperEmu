@@ -77,10 +77,14 @@ class Bench:
     def answers(self):
         """The CLI gives two commands their two answers, and nothing else:
         (it does, what it said)"""
-        code, text = self.fe("cli", "loader info", "uptime")
-        lines = text.strip().splitlines()
-        return (code == 0 and len(lines) == 2 and "pplication" in lines[0]
-                and lines[1].startswith("Uptime:")), text
+        r = subprocess.run([sys.executable, str(ROOT / "flipperemu"), "-d",
+                            self.name, "cli", "loader info", "uptime"],
+                           capture_output=True, text=True, timeout=600,
+                           stdin=subprocess.DEVNULL)
+        lines = r.stdout.strip().splitlines()   # (stderr: the launcher's own)
+        return (r.returncode == 0 and len(lines) == 2
+                and "pplication" in lines[0]
+                and lines[1].startswith("Uptime:")), r.stdout + r.stderr
 
     def start(self, first=False):
         self.dir.mkdir(parents=True, exist_ok=True)

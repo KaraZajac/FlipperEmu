@@ -1517,6 +1517,9 @@ def usb_serial(dev):
     return ep, why
 
 
+CUT_WAIT = 1.5      # s for a prompt, after a command that was cut off
+
+
 def open_cli(dev, prompt=True, timeout=15.0):
     """The CLI on a running device's USB serial port (an fe_cli.FlipperCli, at
     its prompt), or an exit that says why there is none.  The port is one line:
@@ -1531,12 +1534,41 @@ def open_cli(dev, prompt=True, timeout=15.0):
         sys.exit(f"[{dev.name}] no CLI: the firmware {what}.  {todo}")
     cli = FlipperCli(ep, lock=dev.dir / "usb.lock")
     cli.gone = lambda: firmware_halt(dev)
+    waited = 0.0
+    if cli.cut:
+        # Whoever had the port before was killed in the middle.  A firmware
+        # that ends a command when the port closes prompts at once; an old
+        # one may need Ctrl-C first (fe_cli.end_cut_off).
+        began = time.time()
+        left = cli.end_cut_off(min(CUT_WAIT, timeout))
+        waited = time.time() - began
+        if left is not None:
+            sent, typed = left
+            if typed:
+                shown = typed.decode("latin-1")[:40]
+                print(f"[{dev.name}] {cli.cut} was cut off in the middle, and "
+                      f"the last of what it was sending ({shown!r}) was left "
+                      "typed at the firmware's prompt: Ctrl-C cleared it.",
+                      file=sys.stderr)
+            elif sent:
+                print(f"[{dev.name}] {cli.cut} was cut off in the middle, and "
+                      "the firmware's CLI still waited for the rest of what "
+                      f"it was to be sent: it got Ctrl-C ({sent} of them) "
+                      "until it answered again.  If it was writing a file, "
+                      "those are at its end.", file=sys.stderr)
+            if prompt:
+                cli.buf = b""
+            elif sent:
+                cli.buf = b"\r\n>: "       # (for the terminal to show)
+            return cli
     if prompt:
         try:
             cli.read_until_prompt(
-                timeout, "no CLI prompt (is the firmware's CLI over USB "
-                         "enabled, and not still at a command that was cut "
-                         "off?)")
+                max(1.0, timeout - waited),
+                "no CLI prompt (is the firmware's CLI over USB enabled, and "
+                "not still at a command that was cut off?  "
+                f"`./flipperemu -d {dev.name} reset` starts the firmware "
+                "again)")
         except TimeoutError as e:
             cli.close()
             sys.exit(f"[{dev.name}] {e}")

@@ -50,7 +50,8 @@ Older official releases run the smoke test as well: **1.4.3** passes all of it;
 **1.3.4**, **1.1.2** and **0.99.1** pass all but the five NFC steps, which are skipped
 (they use the `nfc` command's shell, new in 1.4). **1.0.1** and **0.105.0** do the
 same, except that `ikey read` finds a Metakom iButton key there only in about two
-tries of three (open, see PLAN.md).
+tries of three (open, see PLAN.md). The files, app and window checks were run on
+**1.4.3** and **1.0.1** as well, and pass on both.
 
 | | |
 |:-:|:-:|
@@ -531,7 +532,9 @@ When it stops in the middle:
   that file included.
 - **A program killed** while it had the port leaves nothing in it for the next one: what
   it had written and the firmware had not taken is dropped, and so is what the firmware
-  was still saying to it.
+  was still saying to it. An old firmware (official 1.0.1) may still wait for the rest
+  of a piece of a file then, or have that piece's last byte typed at its prompt. The
+  next command finds that out, sends Ctrl-C until the prompt is empty, and says so.
 
 One thing the emulator leaves as it is, because it is the firmware's: a CLI command
 that is cut off (a terminal closed in the middle of `storage tree` of a full card) is

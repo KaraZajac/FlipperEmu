@@ -59,9 +59,11 @@ NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
       RM1024-1347 (2026-11-10, BRINGUP_LOG 86) pass `scripts/smoke_test.py` (now
       including a warm reboot) and the files, app, window, enclave and update checks,
       and so does the release candidate 1.5.1-rc; run them on a schedule
-  - ◐ Older official releases, the smoke test only (2026-11-10, BRINGUP_LOG 92):
-        1.4.3 passes all 28 steps; 1.3.4, 1.1.2 and 0.99.1 pass 23, the five NFC
-        steps skipped (no `nfc` shell before 1.4)
+  - ◐ Older official releases (2026-11-10, BRINGUP_LOG 92; 2026-11-11, 96). The
+        smoke test: 1.4.3 passes all 28 steps; 1.3.4, 1.1.2 and 0.99.1 pass 23, the
+        five NFC steps skipped (no `nfc` shell before 1.4). The files (55), app (26)
+        and window (36) checks: 1.4.3 and 1.0.1 pass all of them. Not run on older
+        releases: the enclave, update, ufbt and gdb checks
   - ☐ 1.0.1 and 0.105.0 fail one step: `ikey read` finds a Metakom key in 8 to 10
         tries of 15 (1.5.1: 15 of 15, with the same code in the firmware). Every
         edge reaches the firmware's handler once and with its exact time; deep sleep,

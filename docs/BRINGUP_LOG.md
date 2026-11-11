@@ -1486,6 +1486,38 @@ big lock, entry 92).
       the level as it was, so that step is not taken there, and the halt after a
       crash is one more.
 
+96. **A killed `push` left official 1.0.1 silent, or with a letter typed.** Found when
+    the files, app and window checks ran on older releases for the first time. 1.4.3
+    passed all three (55, 26 and 36 checks); 1.0.1 passed the app and window checks
+    and 51 of the files check's 55: after "a push killed" the next command got "no CLI
+    prompt", and three later steps with it.
+    - Newer firmwares end a command when the port closes. 1.0.1's `storage write_chunk
+      PATH 1024` reads 1024 bytes, whatever comes and however long it takes, and its
+      USB serial service puts a byte into the same stream when the port closes and
+      one when it opens (at that one the CLI prints its banner). A chunk that is
+      waited for takes both as data.
+    - Measured with a file whose bytes say where they are, 24 pushes killed. 8 times
+      the firmware was at a clean prompt. 6 times it said nothing, and prompted after
+      1022 more bytes: 1024 less the two marks, so the kill had come between the
+      command and its data. 10 times it showed its banner, its prompt and one letter
+      typed there, always the chunk's last byte: the chunk was full one byte early.
+      (Not traced, but it fits: the firmware fetches the last packet from the endpoint
+      only when its stream has room for 64 bytes, and the closing mark needs room for
+      one.) The command after that would have been `tuptime`.
+    - Nothing in this is the emulator's. The USB model hands the device all that was
+      written and then drops DTR, as a computer does (ARCHITECTURE.md, "Hanging up").
+    - The launcher can tell that the program before it was killed: a command writes
+      its name into the port's lock and takes it out when it leaves, so a name found
+      there is a holder that never left. It then listens before it types. Silence
+      gets Ctrl-C, 64 at a time, until the firmware speaks; a prompt with something
+      typed at it gets one, which clears the line. Both are said on stderr, with the
+      command that was cut off. A firmware that prompts at once pays 0.3 s of
+      listening after a kill, and nothing otherwise.
+    - The files check counted the launcher's own notes as lines of the firmware's
+      answer ("and only that"); it now counts what is on stdout.
+    - 14 of 14 killed pushes on 1.0.1 are followed by a command that gets its answer
+      (before: 6 of 8). The files check passes there with 55, and on 1.5.1 as before.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

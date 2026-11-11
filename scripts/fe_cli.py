@@ -23,6 +23,9 @@ import time
 
 PROMPT = b">: "
 QUIET = 2.0                 # seconds without a byte before gone() is asked
+# the most that a command that was cut off can still wait for: one chunk of a
+# `storage write_chunk`, as the firmware's own tools send it (ours: 1024)
+CUT_MOST = 8192 + 64
 ANSI = re.compile(rb"\x1b\[[0-9;]*[A-Za-z]")
 
 
@@ -64,7 +67,9 @@ class PortBusy(ConnectionError):
 def take_port(lock, wait=10.0):
     """Lock the file that whoever talks on a device's USB serial port holds
     locked.  It is waited for for `wait` seconds (a command of a few lines is
-    over sooner), then it is PortBusy.  -> the open file, for leave_port()"""
+    over sooner), then it is PortBusy.  -> the open file, for leave_port().
+    Its `left` is who had the port before and did not leave it (it was killed
+    in the middle of what it did there), or ''."""
     f = open(lock, "a+")
     end = time.monotonic() + wait
     while True:
@@ -81,10 +86,13 @@ def take_port(lock, wait=10.0):
                                + ": one at a time") from None
             time.sleep(0.1)
     f.seek(0)
+    left = f.read().strip()                 # (leave_port() takes it away)
+    f.seek(0)
     f.truncate()
     f.write(f"`{' '.join([os.path.basename(sys.argv[0]), *sys.argv[1:]])}` "
             f"(pid {os.getpid()})\n")
     f.flush()
+    f.left = left
     return f
 
 
@@ -100,6 +108,9 @@ class FlipperCli:
         (take_port)"""
         kind, where = endpoint
         self.sock = self.lock = None
+        # who had the port before and was killed there (take_port); "" = it
+        # left as it should
+        self.cut = ""
         if lock:
             self.take(lock, wait)
         if kind == "pty":
@@ -121,6 +132,7 @@ class FlipperCli:
 
     def take(self, lock, wait):
         self.lock = take_port(lock, wait)
+        self.cut = self.lock.left
 
     def close(self):
         if self.sock:
@@ -157,6 +169,47 @@ class FlipperCli:
                     raise TimeoutError("the Flipper's CLI answers no more")
         out, self.buf = self.buf, b""
         return out
+
+    def end_cut_off(self, wait=1.5, most=CUT_MOST, step=64, quiet=0.3,
+                    limit=20.0):
+        """The command before this one was cut off: where did that leave the
+        firmware's CLI?  A firmware that ends a command when the port closes
+        prompts at once.  An old one (official 1.0.1) does not: its `storage
+        write_chunk` waits for every byte of its chunk, however long, and
+        takes for one of them the mark that the port's closing puts into what
+        it reads.  So it is either still waiting, and says nothing, or it had
+        its chunk one byte early, and the last byte that was sent is typed at
+        its prompt, where the next command would begin with it.  Either way it
+        gets Ctrl-C, as it would at a terminal: as many as it still waits for,
+        or the one that clears its line.
+        -> (how many it got, what was typed at its prompt), with the CLI at an
+        empty prompt and what it said in buf; None if it came to no prompt."""
+        end = time.time() + limit
+
+        def hear(first):
+            got = self._fill(first)
+            while got and time.time() < end and self._fill(quiet):
+                pass
+            return got
+
+        hear(wait)
+        sent, typed = 0, b""
+        while not self.buf.endswith(PROMPT):
+            if sent >= most or time.time() > end:
+                return None
+            _, free, _ = select.select([], [self.fd], [], 0.5)
+            if not free:
+                return None         # it takes no more: it is busy, not waiting
+            at = self.buf.rfind(PROMPT)
+            if at >= 0:
+                typed = self.buf[at + len(PROMPT):]
+            # one clears a line (or ends a command that still talks); a chunk
+            # that is waited for takes many
+            piece = b"\x03" * (1 if self.buf else min(step, most - sent))
+            sent += self.sock.send(piece) if self.sock \
+                else os.write(self.fd, piece)
+            hear(1.0 if self.buf else 0.05)
+        return sent, typed
 
     def read_exactly(self, n, timeout):
         """The next n bytes, whatever they are"""

@@ -824,6 +824,21 @@ commands. It comes back in pieces of 8192 (`read_chunks`), each asked for with a
 The port is one line with one reader: a command holds `devices/NAME/usb.lock` (an
 flock with its holder's name in it) for as long as it has the CLI.
 
+A holder that was killed leaves its name in the lock, and the next command reads there
+that the one before it was cut off. Most firmwares end a command when the port closes,
+and prompt when it opens again. Official 1.0.1 does not: its `storage write_chunk`
+reads its N bytes whatever comes, and its USB serial service marks the port's closing
+and its opening with a byte each in the same stream (at the second the CLI prints its
+banner). Two things follow when a `push` is killed there. If a piece's bytes never came,
+the command still waits for them, takes both marks for two of them, and says nothing to
+the next client. If the port closed while the piece's last packet was still in the
+endpoint, the closing mark is first: the piece is full one byte early, and its last
+byte is typed at the prompt, where the next command would begin with it. So after a
+killed holder the launcher listens before it types (`fe_cli.end_cut_off`): silence gets
+Ctrl-C, 64 at a time, until the firmware speaks; a prompt with something typed at it
+gets one, which clears the line. Either is said on stderr. A firmware that prompts at
+once pays 0.3 s of listening, and only after a kill.
+
 Between two pieces of a write the firmware is at its prompt, so that is where a `push`
 that gets Ctrl-C stops, and removes what it wrote. `read_chunks` has no such place: once
 begun, the firmware sends the file to its end, and a port that is closed on it does not
