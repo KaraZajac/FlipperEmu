@@ -1563,6 +1563,35 @@ big lock, entry 92).
       (30 checks) and on the official debug build (32, with the halt). The ufbt check
       runs `examples/hello/test.sh` at its end (31 checks; the test takes 13 s there).
 
+98. **A test had to put its Flipper in the background itself.** The first line of
+    `examples/hello/test.sh` was `run … &`, and a shell that starts something that way
+    learns nothing of it. With a wrong path for the firmware the script went on to
+    its `wait`, which said "not running" a minute later, while the reason had scrolled
+    by; and that reason was a Python traceback, because nothing looked at a firmware
+    file before reading it. Now `run --detach` comes back when the emulator is up
+    (3 s for a new device with the official 1.5.1, its card made and its firmware
+    flashed) or with what the run said and its status (0.6 s for the wrong path), and
+    a file that is not there, a folder, a text file called `.tgz` or a firmware cut
+    short is one line from `run` and `flash`. How it is done:
+    - The launcher starts itself once more, with the same arguments, in a session of
+      its own (the terminal's Ctrl-C and its hangup do not reach it) and with a file
+      for what it prints. It shows what that file gains and waits for one of two
+      things: the device's monitor answers, or the other launcher has ended. An
+      environment variable tells the second one not to detach again; it takes it out
+      of its environment, so that nothing it starts inherits it.
+    - Where that file is. A device's folder is made when its firmware is flashed,
+      and a run that fails for its firmware must leave no device behind: a later
+      `run` would take the empty folder for a Flipper. So the file begins beside the
+      devices' folders and becomes `devices/NAME/run.log` once the emulator is up;
+      a run that failed removes it.
+    - "Is running: stop first" is said by the first launcher, before it starts
+      anything, and the firmware's log is not printed into `run.log` (`--serial
+      null` unless told otherwise): it is where `log` and `wait --log` read it.
+    - `scripts/wait_check.py` has eight checks for it (38 on the four release
+      firmwares now, 40 on the debug build), one of them that no launcher is left
+      for the device after `stop`. `examples/hello/test.sh` starts its Flipper this
+      way, so the ufbt check runs it too.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

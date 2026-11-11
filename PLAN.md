@@ -268,8 +268,10 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         character, `?` for what may differ); a failed wait says what was there, and
         a crash, a halt, a pause or a stopped emulator as its reason;
         `examples/hello/test.sh`; `scripts/wait_check.py` (BRINGUP_LOG 97)
-  - ☐ `run --detach`, for a test that does not have to put the emulator in the
-        background itself, and is told at once of a firmware that is not there
+  - ☑ `run --detach` (2026-11-11), for a test that does not have to put the
+        emulator in the background itself: back when the emulator is up, or with
+        what went wrong; a firmware file that is not there, or is none, is one line
+        and no traceback, for `run` and `flash` alike (BRINGUP_LOG 98)
 - ☑ A recording of the screen as an animated GIF: `./flipperemu record OUT.gif`
       (a client of the front-panel link, for a device without a window) and
       Device > Record the screen in the window; `scripts/fe_record.py` writes the

@@ -17,7 +17,9 @@ test waits for its app's first screen.  Then what must be refused, and a
 command that fails.  Last what a wait says when what it waits for cannot come:
 after a crash (the firmware's NFC app, closed while it reads: a release build
 starts again, a debug build halts), and when the device is stopped under it.
-Exit status 0 = pass.
+At the end `run --detach`, which a test starts its Flipper with: back when the
+emulator is up, back at once with one line for a firmware that is not there,
+and no launcher left behind after a `stop`.  Exit status 0 = pass.
 """
 import argparse
 import os
@@ -28,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fe_screen                                            # noqa: E402
@@ -247,6 +250,71 @@ def stop_checks(b):
           code == 1 and "not running" in err and not out, out + err)
 
 
+def launchers(name):
+    """The launchers that run this device (`run`, detached or not)"""
+    found = []
+    for d in pathlib.Path("/proc").iterdir():
+        if d.name.isdigit():
+            try:
+                argv = (d / "cmdline").read_bytes().split(b"\0")
+            except OSError:
+                continue
+            if name.encode() in argv and b"run" in argv \
+                    and any(a.endswith(b"flipperemu") for a in argv):
+                found.append(int(d.name))
+    return found
+
+
+def detach_checks(b, work):
+    """`run --detach` on the device, which is stopped by now"""
+    none = types.SimpleNamespace(name=b.name + "-none")
+    for how in ((), ("--detach",)):
+        code, out, err, took = fe(none, "run", *how, "--headless", "--audio",
+                                  "none", "-f", work / "none.tgz")
+        left = [p.name for p in b.dir.parent.iterdir() if none.name in p.name]
+        check(f"`run {' '.join(how)} -f` with a firmware that is not there: "
+              "one line that says so, at once, and no device left behind",
+              code == 1 and "No such file" in out + err
+              and "Traceback" not in out + err and took < 10 and not left,
+              f"{out + err}\nleft: {left}")
+    (work / "text.tgz").write_text("no firmware at all\n")
+    code, out, err, took = fe(none, "run", "--detach", "--headless", "--audio",
+                              "none", "-f", work / "text.tgz")
+    left = [p.name for p in b.dir.parent.iterdir() if none.name in p.name]
+    check("... and with a file that is no firmware: the same",
+          code == 1 and "not an update package" in out + err
+          and "Traceback" not in out + err and took < 10 and not left,
+          f"{out + err}\nleft: {left}")
+    code, out, err, took = fe(b, "run", "--detach", "--headless", "--audio",
+                              "none")
+    log = b.dir / "run.log"
+    check("`run --detach`: back when the emulator is up, with its lines and "
+          "where it prints from then on",
+          code == 0 and "runs on by itself" in out and "USB serial" in out
+          and log.is_file() and took < 60, out + err)
+    code, out, err, took = fe(b, "wait", "--timeout", 90)
+    check("... `wait` after it: its CLI answers",
+          code == 0 and "its CLI answers" in out, out + err)
+    code, out, err, took = fe(b, "wait", "--log", "loader|desktop|usb",
+                              "--timeout", 30)
+    check("... and its log is where `wait --log` reads it", code == 0,
+          out + err)
+    code, out, err, took = fe(b, "run", "--detach", "--headless", "--audio",
+                              "none")
+    check("`run --detach` on a device that runs: refused at once",
+          code == 1 and "is running" in err and took < 10, out + err)
+    had = launchers(b.name)
+    fe(b, "stop")
+    end = time.time() + 15
+    while time.time() < end and launchers(b.name):
+        time.sleep(0.3)
+    code, out, err, took = fe(b, "wait", "--timeout", 1)
+    check("`stop`: it is not running, and the launcher that ran it by itself "
+          "has gone",
+          len(had) == 1 and not launchers(b.name) and code == 1
+          and "not running" in err, f"before: {had}, now: {launchers(b.name)}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("firmware")
@@ -280,8 +348,10 @@ def main():
                   crash and log[max(0, crash.start() - 300):crash.end() + 300])
             crash_checks(b)
             stop_checks(b)
+            detach_checks(b, work)
     finally:
         b.stop()
+        fe(b, "stop")
         shutil.rmtree(work, ignore_errors=True)
         if not args.keep:
             shutil.rmtree(b.dir, ignore_errors=True)

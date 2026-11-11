@@ -224,7 +224,7 @@ keep.
 ```sh
 fe() { ../../flipperemu -d "${device:-hello-test}" "$@"; }
 
-fe run --headless --audio none --serial null -f "$1" &
+fe run --detach --headless --audio none -f "$1"    # a Flipper, running by itself
 trap 'fe stop' EXIT
 
 fe wait                                           # the firmware is up
@@ -239,13 +239,14 @@ echo "test.sh: the app does what it should"
 ```
 $ ./test.sh ../../firmware/official-1.5.1/flipper-z-f7-update-1.5.1.tgz
 …                                      (the emulator's lines as it starts)
-[hello-test] its CLI answers (9.3 s)
+[hello-test] it runs on by itself, until `./flipperemu -d hello-test stop`  (…)
+[hello-test] its CLI answers (5.4 s)
 …                                      (ufbt's)
-9480 [I][FeHello] started
+8519 [I][FeHello] started
 [hello-test] its screen is as in screens/start.txt (0.1 s)
-11075 [I][FeHello] Down, which makes 2
+10129 [I][FeHello] Down, which makes 2
 [hello-test] its screen is as in screens/two.txt (0.1 s)
-12485 [I][FeHello] left after 2
+11509 [I][FeHello] left after 2
 test.sh: the app does what it should
 [hello-test] stopped
 ```
@@ -254,6 +255,22 @@ It runs in the app's folder, as `ufbt` does, on a Flipper it makes for itself
 (`devices/hello-test`, or the name given after the firmware), and takes a quarter of
 a minute once the app is built. The two screens it compares with were taken on the
 official firmware: one that draws its text in another font needs its own.
+
+`run --detach` starts the Flipper and comes back to the script: with 0 when the
+emulator is up, which takes three seconds for a new device (its card made, its
+firmware flashed), and with what went wrong when it never came up. For a firmware
+that is not there that is one line, at once, and under `sh -e` the end of the test:
+
+```
+$ ./test.sh no-such.tgz
+no-such.tgz: No such file or directory
+```
+
+The firmware has not started by then, which is what the `wait` after it is for. The
+emulator runs on in the background until `stop`, which the `trap` sees to however
+the script ends. What it prints from then on is in `devices/NAME/run.log`, and the
+firmware's log is where it always is (`flipperemu log`). A plain `run … &` does as
+well, but it tells of a wrong firmware only to a `wait` that runs out a minute later.
 
 Each `wait` ends with 0 when what it waits for is there, and with 1 and the reason
 when it is not there in time (`--timeout S`, 60 seconds unless told), which under
@@ -679,9 +696,11 @@ being the same pixels; one character changed in a reference (the wait fails, wit
 the number of pixels and the screen), and a `?` put there (it passes); what is
 refused, with a button the Flipper has not among it; the NFC app's crash under a
 wait, which a release build has to name as a restart after a crash and a debug build
-as a halt, within seconds; and a device stopped under a wait. It passes on the
-official 1.5.1, Momentum, Unleashed and RogueMaster (30 checks), and on a debug
-build of the official firmware (32).
+as a halt, within seconds; a device stopped under a wait; and `run --detach`: back
+when the emulator is up, refused for a device that runs, one line and no device left
+for a firmware that is not there or is none, and no launcher left after `stop`. It
+passes on the official 1.5.1, Momentum, Unleashed and RogueMaster (38 checks), and
+on a debug build of the official firmware (40).
 
 A recording is checked where the screen is: `scripts/smoke_test.py` runs
 `./flipperemu record` for four seconds with two key presses and has Pillow read the

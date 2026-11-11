@@ -117,7 +117,24 @@ def parse_elf(data: bytes):
 
 
 def load_firmware(path: pathlib.Path):
-    """-> (elements, elf_bytes_or_None, resources_source_or_None, label)"""
+    """-> (elements, elf_bytes_or_None, resources_source_or_None, label).
+    A file that is not there, or is no firmware, ends the command with a line
+    that says so."""
+    try:
+        return read_firmware(path)
+    except OSError as e:
+        sys.exit(f"{path}: {e.strerror or e}")
+    except tarfile.TarError:
+        sys.exit(f"{path}: not an update package (a .tgz with a firmware.dfu "
+                 "in it)")
+    except (struct.error, IndexError, KeyError):
+        sys.exit(f"{path}: not a firmware that can be flashed: it ends early, "
+                 "or is damaged")
+    except ValueError as e:
+        sys.exit(f"{path}: not a firmware that can be flashed: {e}")
+
+
+def read_firmware(path: pathlib.Path):
     raw = path.read_bytes()
     name = path.name.lower()
     if raw[:4] == b"\x7fELF":
@@ -139,7 +156,8 @@ def load_firmware(path: pathlib.Path):
             return parse_dfu(tar.extractfile(dfu).read()), None, path, label
     if name.endswith(".bin"):
         return [(FLASH_BASE, raw)], None, None, path.name
-    raise ValueError(f"don't know how to load {path}")
+    raise ValueError("neither an ELF, a .dfu, a .bin nor an update package "
+                     "(.tgz)")
 
 
 # ---------------------------------------------------------------- device
@@ -540,12 +558,76 @@ def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
     return cmd + list(args.qemu_args or [])
 
 
+DETACHED = "FLIPPEREMU_DETACHED"     # set for the run that `run --detach` starts
+
+
+def run_detached(dev):
+    """`run --detach`: this same run as a process of its own, and back to the
+    shell when its emulator is up, or with what it said when that never came.
+    A script's `run ... &` learns of a firmware that is not there a minute
+    later, from a `wait` that ran out."""
+    import tempfile
+    DEVICES.mkdir(parents=True, exist_ok=True)
+    # (beside the device's folder until there is one: a run that fails for
+    # its firmware leaves no device behind)
+    fd, said = tempfile.mkstemp(prefix=f".{dev.name}-run-", suffix=".log",
+                                dir=DEVICES)
+    with os.fdopen(fd, "wb") as out:
+        child = subprocess.Popen(
+            [sys.executable, str(ROOT / "flipperemu"), *sys.argv[1:]],
+            stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+            start_new_session=True,
+            env=dict(os.environ, PYTHONUNBUFFERED="1", **{DETACHED: "1"}))
+    shown = 0
+
+    def show():
+        nonlocal shown
+        with open(said, "rb") as f:
+            f.seek(shown)
+            data = f.read()
+        shown += len(data)
+        sys.stdout.flush()
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+
+    try:
+        while child.poll() is None and not dev.running():
+            show()
+            time.sleep(0.2)
+        if child.poll() is not None:
+            show()
+            return child.returncode or 1
+        time.sleep(0.5)                 # (its lines about the ports)
+        show()
+        log = dev.dir / "run.log"
+        os.replace(said, log)
+        said = None
+        print(f"[{dev.name}] it runs on by itself, until `./flipperemu -d "
+              f"{dev.name} stop`  (what the emulator prints: {log})")
+        return 0
+    except KeyboardInterrupt:
+        child.terminate()
+        show()
+        return 130
+    finally:
+        if said:
+            try:
+                os.unlink(said)
+            except OSError:
+                pass
+
+
 def cmd_run(args):
     if not QEMU.exists():
         sys.exit(f"QEMU not built yet: run scripts/setup_qemu.sh ({QEMU})")
     dev = Device(args.device)
+    detached = os.environ.pop(DETACHED, None)
     if not args.print_cmd:
         dev.refuse_if_running()
+        if args.detach and not detached:
+            return run_detached(dev)
+        if args.detach and args.serial == "stdio":
+            args.serial = "null"        # (the log is `flipperemu log`'s to show)
     if args.update and (args.usb == "none" or args.unplugged):
         sys.exit("--update starts the install over the USB CLI; drop --usb none "
                  "and --unplugged")
@@ -3134,6 +3216,11 @@ def main():
                         "cannot install it, so the updater will fail)")
     p.add_argument("--erase-all", action="store_true", help="wipe flash before programming")
     p.add_argument("--headless", action="store_true", help="no window")
+    p.add_argument("--detach", action="store_true",
+                   help="for a script: leave it running by itself, and come "
+                        "back when the emulator is up (`wait` is for the "
+                        "firmware) or with what went wrong.  The firmware's "
+                        "log is not printed then (`flipperemu log` has it)")
     p.add_argument("--gtk", action="store_true",
                    help="QEMU's own window, the bare LCD, instead of the one that "
                         "looks like a Flipper (which needs PySide6)")

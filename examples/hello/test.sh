@@ -9,7 +9,7 @@
 fe() { ../../flipperemu -d "${device:-hello-test}" "$@"; }
 device=$2
 
-fe run --headless --audio none --serial null -f "$1" &
+fe run --detach --headless --audio none -f "$1"
 trap 'fe stop' EXIT
 
 fe wait                                           # the firmware is up

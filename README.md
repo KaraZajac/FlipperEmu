@@ -81,10 +81,10 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
   it, as on a real one. A real Flipper that is plugged in is left alone.
   [docs/DEVELOPING.md](docs/DEVELOPING.md) is the page for whoever writes an app or a
   firmware.
-- Tests of an app as a script: `./flipperemu wait` holds it until the firmware has
-  logged a line or its screen is as in a file, and says what was there instead when
-  that does not come. The screen is text for that (`shot --text`), which `git diff`
-  can show.
+- Tests of an app as a script: `run --detach` starts a Flipper that runs by itself,
+  `./flipperemu wait` holds the script until the firmware has logged a line or its
+  screen is as in a file, and says what was there instead when that does not come.
+  The screen is text for that (`shot --text`), which `git diff` can show.
 - Persistent devices: the internal flash (`flash.img`) and the battery-backed state (fuel
   gauge data memory and RTC backup domain, `nvram.bin`) survive restarts.
 - The firmware's log (USART1: `[I][Flipper] Startup complete`, …) on stdio, a pty or
@@ -359,6 +359,7 @@ it runs: once with the wait given up, once to the end.
 | command | what it does |
 |---|---|
 | `run [-f FW] [--headless] [--gdb\|--wait-gdb] [--serial S] [--usb U] [--no-sd] [--log-level L]` | (flash and) boot |
+| `run --detach …` | the same, left running by itself: back when the emulator is up, or with what went wrong (for a script) |
 | `run --update PKG` | install an update package through the firmware's own updater (keeps settings and files) |
 | `update PKG [--cli] [--keep-radio] [--no-wait] [--timeout S]` | the same on a device that runs: the package is written to its card, which is out of its slot for that moment (`--cli`: sent through the firmware's CLI), and the launcher waits until the Flipper is back |
 | `run --unplugged` \| `run --battery PERCENT` \| `run --gtk` | start on battery (USB cable out); with this charge; in QEMU's own window (the bare LCD) |
@@ -678,13 +679,17 @@ stand-in: a firmware built by `fbt` in its tree has not been tried yet.
 ```sh
 fe() { ../../flipperemu -d hello-test "$@"; }
 
-fe run --headless --audio none --serial null -f FIRMWARE &
+fe run --detach --headless --audio none -f FIRMWARE   # back when the emulator is up
 fe wait                                           # until its CLI answers
 fe wait --log 'FeHello.*started' -- ufbt launch   # that command, then its line
 fe wait --screen screens/start.txt                # until the screen is as in the file
 fe shot --text                                    # the screen as text: 32 lines of ▀▄█
 fe stop
 ```
+
+`run --detach` leaves the Flipper running by itself and comes back when the emulator
+is up, or at once with one line when it cannot start: a firmware file that is not
+there, a device that already runs.
 
 `wait` is what a test needs between its steps. It ends with 0 when the firmware's CLI
 answers, when its log has a line (`--log`), or when its screen is as in a file
@@ -698,8 +703,8 @@ The screen as text is two pixels to a character (`▀`, `▄`, `█` and a blank
 reference is a text file in the app's repository, with `?` where the screen may
 differ. `examples/hello/test.sh FIRMWARE` is such a test, and
 [docs/DEVELOPING.md](docs/DEVELOPING.md#a-test-that-runs-by-itself) goes through it.
-`scripts/wait_check.py FIRMWARE` checks all of it: 30 checks on the four release
-firmwares, and 32 on the debug build.
+`scripts/wait_check.py FIRMWARE` checks all of it: 38 checks on the four release
+firmwares, and 40 on the debug build.
 
 ### Smoke-testing a build
 
