@@ -81,6 +81,10 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
   it, as on a real one. A real Flipper that is plugged in is left alone.
   [docs/DEVELOPING.md](docs/DEVELOPING.md) is the page for whoever writes an app or a
   firmware.
+- Tests of an app as a script: `./flipperemu wait` holds it until the firmware has
+  logged a line or its screen is as in a file, and says what was there instead when
+  that does not come. The screen is text for that (`shot --text`), which `git diff`
+  can show.
 - Persistent devices: the internal flash (`flash.img`) and the battery-backed state (fuel
   gauge data memory and RTC backup domain, `nvram.bin`) survive restarts.
 - The firmware's log (USART1: `[I][Flipper] Startup complete`, …) on stdio, a pty or
@@ -394,7 +398,8 @@ it runs: once with the wait given up, once to the end.
 | `flash FW [--erase-all]` | program `.elf` / `.dfu` / `.bin` / update `.tgz` into `flash.img` |
 | `sd [--resources X] [--size 512M]` | rebuild the microSD from a resources tgz, update package or folder |
 | `press ok down down ok …` | press buttons on a running device |
-| `shot out.png` | save the LCD of a running device |
+| `shot out.png` \| `shot --text [OUT.txt]` | the LCD of a running device: a picture, or text that a script can compare (two pixels to a character) |
+| `wait [--log REGEX \| --screen FILE] [--timeout S] [-- COMMAND …]` | for a script: until its CLI answers, its log has a line, or its screen is as in a file; 1 with the reason when that does not come |
 | `record out.gif [--seconds N] [--scale N]` | what its LCD shows, as an animated GIF: until Ctrl-C, or for N seconds (a device without a window; with one: Device > Record the screen) |
 | `gdb [--elf FILE] [--apps DIR] [--with GDB] [-- GDB'S ARGUMENTS]` | gdb on a running device, with the firmware's symbols and its apps' |
 | `gdb --serve PORT` | its gdb stub on a TCP port of this computer, for an IDE |
@@ -664,9 +669,37 @@ Everything else (a plain build, `ufbt create`, `ufbt update`) is passed on as it
 
 [docs/DEVELOPING.md](docs/DEVELOPING.md) goes through it: the loop for an app, the SDK
 that has to match the firmware, a firmware tree, and what the usual failures mean.
-`scripts/ufbt_check.py FIRMWARE` checks it with the `ufbt` on the PATH (29 checks on
+`scripts/ufbt_check.py FIRMWARE` checks it with the `ufbt` on the PATH (31 checks on
 the official firmware). For `fbt` it checks what the launcher hands to it, with a
 stand-in: a firmware built by `fbt` in its tree has not been tried yet.
+
+### A test of an app, as a script
+
+```sh
+fe() { ../../flipperemu -d hello-test "$@"; }
+
+fe run --headless --audio none --serial null -f FIRMWARE &
+fe wait                                           # until its CLI answers
+fe wait --log 'FeHello.*started' -- ufbt launch   # that command, then its line
+fe wait --screen screens/start.txt                # until the screen is as in the file
+fe shot --text                                    # the screen as text: 32 lines of ▀▄█
+fe stop
+```
+
+`wait` is what a test needs between its steps. It ends with 0 when the firmware's CLI
+answers, when its log has a line (`--log`), or when its screen is as in a file
+(`--screen`), and with 1 when that has not come in time, saying what was there
+instead: the log's last line, or the screen and the number of pixels that differ. A
+firmware that crashed meanwhile, halted, is paused or is not running any more is
+named as the reason. With a command after `--`, only what comes after that command
+counts.
+
+The screen as text is two pixels to a character (`▀`, `▄`, `█` and a blank), so a
+reference is a text file in the app's repository, with `?` where the screen may
+differ. `examples/hello/test.sh FIRMWARE` is such a test, and
+[docs/DEVELOPING.md](docs/DEVELOPING.md#a-test-that-runs-by-itself) goes through it.
+`scripts/wait_check.py FIRMWARE` checks all of it: 30 checks on the four release
+firmwares, and 32 on the debug build.
 
 ### Smoke-testing a build
 

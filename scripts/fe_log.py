@@ -122,9 +122,10 @@ class Follower:
     short (the device was started again) it is read from its start, and
     poll() says so with RESTART."""
 
-    def __init__(self, path, tail=None):
+    def __init__(self, path, tail=None, new=False):
         """tail: of a log that is there already, only so many bytes of its
-        end (None: all of it)"""
+        end (None: all of it); new: nothing of it, only what is added from
+        now on"""
         self.path = str(path)
         self.tail = tail
         self.f = None
@@ -134,6 +135,8 @@ class Follower:
         self.more = False           # the last poll() did not reach the end
         self.rest = b""             # the start of a line that is not complete
         self.rest_since = 0.0
+        if new and self._open():
+            self.pos = os.fstat(self.f.fileno()).st_size
 
     def close(self):
         if self.f:
@@ -211,8 +214,8 @@ class Log:
     REBOOT where the firmware started again within one.  The firmware counts
     its timestamps from its start: one that goes back is a new start."""
 
-    def __init__(self, path, tail=None):
-        self.follower = Follower(path, tail)
+    def __init__(self, path, tail=None, new=False):
+        self.follower = Follower(path, tail, new)
         self.last_ms = None
 
     @property

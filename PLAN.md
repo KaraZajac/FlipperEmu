@@ -261,6 +261,15 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         the package the device was flashed from, and has the firmware's script look in
         both folders, the stock apps' and what was built (2026-11-10, BRINGUP_LOG 91)
   - ☐ gdb with a firmware tree's ELF and its `.extapps`; from an IDE (VS Code)
+  - ☑ A test of an app as a script (2026-11-11): `./flipperemu wait` until the CLI
+        answers, the log has a line (`--log`) or the screen is as in a file
+        (`--screen`), alone or after a command of the launcher's (`-- COMMAND`);
+        the screen as text (`shot --text`, `scripts/fe_screen.py`: two pixels to a
+        character, `?` for what may differ); a failed wait says what was there, and
+        a crash, a halt, a pause or a stopped emulator as its reason;
+        `examples/hello/test.sh`; `scripts/wait_check.py` (BRINGUP_LOG 97)
+  - ☐ `run --detach`, for a test that does not have to put the emulator in the
+        background itself, and is told at once of a firmware that is not there
 - ☑ A recording of the screen as an animated GIF: `./flipperemu record OUT.gif`
       (a client of the front-panel link, for a device without a window) and
       Device > Record the screen in the window; `scripts/fe_record.py` writes the

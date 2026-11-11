@@ -1518,6 +1518,51 @@ big lock, entry 92).
     - 14 of 14 killed pushes on 1.0.1 are followed by a command that gets its answer
       (before: 6 of 8). The files check passes there with 55, and on 1.5.1 as before.
 
+97. **A test of an app could not be a script.** Everything a test does was there:
+    `run --headless`, `ufbt launch`, `press`, `log`, `shot`. What was missing is the
+    part between two steps. A script had to sleep and hope, or to read the log file
+    itself, and a picture of the screen is nothing a shell can compare or a
+    repository likes to keep. Now `./flipperemu wait` holds a script until the CLI
+    answers, until the log has a line (`--log REGEX`) or until the screen is as in a
+    file (`--screen FILE`), and `shot --text` is the screen as text: two pixels to a
+    character, 32 lines, with `?` in a reference for what may differ.
+    `examples/hello/test.sh` is the example app tested that way, and
+    `scripts/wait_check.py` the check. What came up while it was tried:
+    - A line that is waited for after a button has to come after the button. Without
+      a command, `wait --log` reads the log from the firmware's start, which is right
+      for "has it started" and wrong for a counter that said "2" a minute ago. With
+      `-- COMMAND` the launcher notes where the log ends, runs the command, and
+      counts only what was written since. (A wait that counted from its own start
+      would have been simpler, and would lose the line that a `press` in the
+      script's line before it had already brought.)
+    - A picture of the desktop as the reference did not match in five seconds, and
+      nothing was wrong: the desktop's animation on the official 1.5.1 has seven
+      pictures and takes 6.4 s to come round. The page for developers now says to
+      wait for a screen of the app's own, and to pause for a reference of one that
+      moves.
+    - A wait that fails has to say what was there instead, or the test's author
+      starts the emulator by hand to look. For the log it is the last line with
+      something in it (a halted debug build ends its log with an empty one, and "its
+      last line:" with nothing after it was the first version); for the screen it is
+      the number of pixels that differ and the screen itself, as text.
+    - A crash under a wait. A release build starts again, and its log then ends with
+      "USB Mode change done": no word of a crash in what the wait showed. The wait
+      now takes the restart from the log's own mark, and the crash's message from the
+      fault register (entry 88), and goes on waiting, because a line can still come
+      after a restart (`wait --log … -- reset` is a wait for one). A debug build
+      halts, and nothing comes any more: the wait ends within two seconds with the
+      crash and what can be done, also the one for a screen, which first ran to its
+      timeout in front of a firmware that had halted. The same for an emulator that
+      was stopped under a wait.
+    - `press sideways` pressed nothing and ended with 0. The launcher handed the name
+      to QEMU's `sendkey`, which refused it, and nobody read the answer; found when a
+      command that should have failed for the page's example was followed by a
+      minute's wait. `press` now takes the six buttons, in capitals too, and says
+      which there are for anything else.
+    - The check passes on the official 1.5.1, Momentum, Unleashed and RogueMaster
+      (30 checks) and on the official debug build (32, with the halt). The ufbt check
+      runs `examples/hello/test.sh` at its end (31 checks; the test takes 13 s there).
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

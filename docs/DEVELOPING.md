@@ -6,6 +6,8 @@ would be: the build tools you already use, pointed at it.
 - [An app, from its source to the screen](#an-app-from-its-source-to-the-screen)
 - [A GIF of your app](#a-gif-of-your-app)
 - [Pause it](#pause-it)
+- [The LED and the backlight](#the-led-and-the-backlight)
+- [A test that runs by itself](#a-test-that-runs-by-itself)
 - [Why `./flipperemu ufbt`, and not `ufbt` alone](#why-flipperemu-ufbt-and-not-ufbt-alone)
 - [The SDK has to be the firmware's](#the-sdk-has-to-be-the-firmwares)
 - [gdb, with the firmware's symbols and your app's](#gdb-with-the-firmwares-symbols-and-your-apps)
@@ -208,6 +210,152 @@ backlight fades over an eighth of a second, and a blink is 10 ms of light in eve
   `hold@0=255`, `wait@2=0` (for a trigger from another engine).
 
 A recording (`record`) is of the screen, without the lights. The window shows both.
+
+## A test that runs by itself
+
+A test of an app is the loop above with nobody at the keys: a Flipper, the app on it,
+some buttons, and a look at what came of them. Two things make a script of that.
+`wait` holds the script until the Flipper is where the next step needs it, and
+`shot --text` is its screen as text, which a script can compare and a repository can
+keep.
+
+`examples/hello/test.sh` is that for the example app:
+
+```sh
+fe() { ../../flipperemu -d "${device:-hello-test}" "$@"; }
+
+fe run --headless --audio none --serial null -f "$1" &
+trap 'fe stop' EXIT
+
+fe wait                                           # the firmware is up
+fe wait --log 'FeHello.*started' -- ufbt launch   # build, install, start: its line
+fe wait --screen screens/start.txt                # ... and its first screen
+fe wait --log 'which makes 2' -- press up down
+fe wait --screen screens/two.txt
+fe wait --log 'left after 2' -- press back
+echo "test.sh: the app does what it should"
+```
+
+```
+$ ./test.sh ../../firmware/official-1.5.1/flipper-z-f7-update-1.5.1.tgz
+…                                      (the emulator's lines as it starts)
+[hello-test] its CLI answers (9.3 s)
+…                                      (ufbt's)
+9480 [I][FeHello] started
+[hello-test] its screen is as in screens/start.txt (0.1 s)
+11075 [I][FeHello] Down, which makes 2
+[hello-test] its screen is as in screens/two.txt (0.1 s)
+12485 [I][FeHello] left after 2
+test.sh: the app does what it should
+[hello-test] stopped
+```
+
+It runs in the app's folder, as `ufbt` does, on a Flipper it makes for itself
+(`devices/hello-test`, or the name given after the firmware), and takes a quarter of
+a minute once the app is built. The two screens it compares with were taken on the
+official firmware: one that draws its text in another font needs its own.
+
+Each `wait` ends with 0 when what it waits for is there, and with 1 and the reason
+when it is not there in time (`--timeout S`, 60 seconds unless told), which under
+`sh -e` ends the script with that status.
+
+- **`wait`** alone: until the firmware's CLI answers. It has started then, and
+  `ufbt launch`, `push`, `app` and the rest get their answers. It also waits for the
+  emulator itself, so it may follow a `run … &` directly.
+- **`wait --log REGEX`**: until the firmware's log has a line with it, which is
+  printed. Capitals matter only if the expression has any, as with `log -g`.
+- **`wait --screen FILE`**: until the screen is as in the file, pixel for pixel.
+
+With a command after `--`, that command of the launcher's is run first and the wait
+is for what comes of it: the time counts from its end, and of the log only what was
+written since it began. That is the form for a step of a test. Without a command,
+`wait --log` reads the log from the firmware's start, which is right for "has it
+come up", and wrong where the line of an earlier step may already stand there. A
+command that fails ends the `wait` with that command's exit status, and nothing is
+waited for.
+
+### The screen as text
+
+```
+$ ../../flipperemu shot --text
+
+
+
+                      ██  ██       ██ ██             ██▀▀▀ ██ ▀▀                       ██▀▀▀
+                      ██▄▄██ ▄█▀█▄ ██ ██ ▄█▀█▄       ██▄▄  ██ ██ █▄▀█▄ █▄▀█▄ ▄█▀█▄ █▄█▀██▄▄▄ █▄▀█▄▀█▄ ██ ██
+                      ██  ██ ██▀▀▀ ██ ██ ██ ██       ██    ██ ██ ██ ██ ██ ██ ██▀▀▀ ██  ██    ██ ██ ██ ██ ██
+                      ██  ██ ▀█▄█▀ ██ ██ ▀█▄█▀ ██    ██    ██ ██ ██▄█▀ ██▄█▀ ▀█▄█▀ ██  ██▄▄▄ ██ ██ ██ ▀█▄▀█
+                                               ▄▀                ██    ██
+
+
+
+
+
+               ▄▀▀▀▄                                 █       █  █           █           █
+               █ ▄▀█   █▀▀▄ █▀▀ ▄▀▀▄ ▄▀▀ ▄▀▀ ▄▀▀▄ ▄▀▀█      ▀█▀ █▀▀▄ ▄▀▀▄   █ ▄▀▀█ ▄▀▀ ▀█▀ ▀   █▀▀▄ ▄▀▀▄ █▀▀▄ ▄▀▀▄
+               █▀  █   █  █ █   █▀▀▀  ▀▄  ▀▄ █▀▀▀ █  █  ▄    █  █  █ █▀▀▀   █ █  █  ▀▄  █  ▄   █  █ █  █ █  █ █▀▀▀
+                ▀▀▀    █▀▀  ▀    ▀▀  ▀▀  ▀▀   ▀▀   ▀▀▀ ▄▀    ▀  ▀  ▀  ▀▀    ▀  ▀▀▀ ▀▀   ▀      ▀  ▀  ▀▀  ▀  ▀  ▀▀
+                       ▀
+
+
+
+
+
+
+     █▀▀▀▄           █      █                              █                  ▄▀▀▀▄ █  ▄▀                     █
+     █▄▄▄▀ ▄▀▀█ ▄▀▀▄ █ ▄▀   █ ▄▀▀▄ ▄▀▀█ █  █ ▄▀▀▄ ▄▀▀      █ ▄▀▀▄ █▀▀▄ ▄▀▀█   █   █ █▄▀     ▄▀▀▄ █▀▀ ▄▀▀█ ▄▀▀ █▀▀▄ ▄▀▀▄ ▄▀▀
+     █   █ █  █ █  ▄ █▀▄    █ █▀▀▀ █  █ █  █ █▀▀▀  ▀▄  ▄   █ █  █ █  █ █  █   █   █ █ ▀▄    █  ▄ █   █  █  ▀▄ █  █ █▀▀▀  ▀▄
+     ▀▀▀▀   ▀▀▀  ▀▀  ▀  ▀   ▀  ▀▀   ▀▀▀  ▀▀   ▀▀  ▀▀  ▄▀   ▀  ▀▀  ▀  ▀  ▀▀█    ▀▀▀  ▀   ▀    ▀▀  ▀    ▀▀▀ ▀▀  ▀  ▀  ▀▀  ▀▀
+                                                                        ▀▀
+```
+
+Two pixels to a character, one above the other: `▀` is the upper one, `▄` the lower,
+`█` both, and a blank neither. That makes 32 lines of up to 128 characters; the
+blanks at a line's end are left out. `shot --text FILE`, or `shot` with a name that
+ends in `.txt`, writes it to a file.
+
+As a reference such a file has advantages over a picture: `git diff` shows what
+changed on the screen, and an editor changes it. In a reference a `?` stands for two
+pixels that may be anything: a clock, the battery, a number that counts. A picture
+from `shot` is taken as a reference too (a PNG needs Pillow to be read), and
+`scripts/fe_screen.py PICTURE` prints one as text, or with a reference after it the
+number of pixels that differ.
+
+To make a reference, bring the app to the screen by hand and take the shot. For a
+screen that moves, `pause` first and put `?` where it moves. The desktop is a poor
+thing to wait for: its animation takes six seconds and more to come round (seven
+pictures on the official 1.5.1), and the firmware picks another one from time to
+time. Wait for a screen of your app's.
+
+### When a wait fails
+
+It says what was there instead, on stderr:
+
+```
+$ ../../flipperemu -d hello-test wait --log 'which makes 9' --timeout 3
+[hello-test] no line with 'which makes 9' in the firmware's log since it started, in 3.0 s.
+[hello-test] its last line: 6825 [I][FeHello] Down, which makes 2
+$ ../../flipperemu -d hello-test wait --screen screens/start.txt --timeout 3
+[hello-test] its screen is not as in screens/start.txt after 3.2 s: 317 pixels differ.
+[hello-test] it shows:
+…
+             ▄▀▀▀▄                                 █       █  █           █           █      █▀▀▀▄
+                ▄▀   █▀▀▄ █▀▀ ▄▀▀▄ ▄▀▀ ▄▀▀ ▄▀▀▄ ▄▀▀█      ▀█▀ █▀▀▄ ▄▀▀▄   █ ▄▀▀█ ▄▀▀ ▀█▀ ▀   █   █ ▄▀▀▄ █  █  █ █▀▀▄
+              ▄▀     █  █ █   █▀▀▀  ▀▄  ▀▄ █▀▀▀ █  █  ▄    █  █  █ █▀▀▀   █ █  █  ▀▄  █  ▄   █   █ █  █ █  █  █ █  █
+             ▀▀▀▀▀   █▀▀  ▀    ▀▀  ▀▀  ▀▀   ▀▀   ▀▀▀ ▄▀    ▀  ▀  ▀  ▀▀    ▀  ▀▀▀ ▀▀   ▀      ▀▀▀▀   ▀▀   ▀▀ ▀▀  ▀  ▀
+…
+```
+
+The firmware itself may be the reason, and then the message has it:
+
+- **It crashed and started again** (a release build): "The firmware started again
+  after a crash: its screen says "…" until a button is pressed there", with the
+  crash's own message where the firmware kept one. A wait for a log line goes on to
+  its timeout all the same, because the line may still come.
+- **It crashed and halted** (a debug build): the wait ends in a second or two, with
+  the crash, and with `gdb` and `reset` as what can be done.
+- **It is paused**, or a debugger has it stopped: "Mind that it is paused".
+- **The emulator ended**: "It is not running any more", without waiting further.
 
 ## Why `./flipperemu ufbt`, and not `ufbt` alone
 
@@ -506,10 +654,11 @@ terminal of its own with a second command kept waiting, the refused targets,
 `ufbt flash_usb` (the SDK's package sent without its radio stack, and installed), a
 stopped device. For `fbt` it has a stand-in that says what it was called with: the
 tree's `fbt` is found from a folder inside it and run in its root, the emulated port
-is named, a port you name yourself is left alone, and the same targets are refused. It
-passes on the official 1.5.1 with ufbt 0.2.6 and its SDK (29 checks). Without `ufbt`,
-or with an SDK for another API than the firmware's, it checks nothing and its exit
-status is 77.
+is named, a port you name yourself is left alone, and the same targets are refused.
+At its end it runs `examples/hello/test.sh` as it is, and wants it to pass and to
+leave no Flipper running. It passes on the official 1.5.1 with ufbt 0.2.6 and its SDK
+(31 checks). Without `ufbt`, or with an SDK for another API than the firmware's, it
+checks nothing and its exit status is 77.
 
 `scripts/gdb_check.py FIRMWARE` does what the gdb section shows, with gdb in batch
 mode: a backtrace of the firmware with functions and lines, the breakpoint in the
@@ -522,6 +671,17 @@ the stub on a TCP port with a gdb of its own on it, a second gdb turned away, wh
 firmware stopped. It passes on the official 1.5.1 with the SDK's toolchain (gdb 13.2)
 and the update server's ELF and app symbols (22 checks), and is skipped (77) without
 ufbt.
+
+`scripts/wait_check.py FIRMWARE` is for `wait` and the screen as text, with an app the
+firmware brought along: the three kinds of wait, alone and after a command; a line
+from before the command that does not count; the screen as text and as a picture
+being the same pixels; one character changed in a reference (the wait fails, with
+the number of pixels and the screen), and a `?` put there (it passes); what is
+refused, with a button the Flipper has not among it; the NFC app's crash under a
+wait, which a release build has to name as a restart after a crash and a debug build
+as a halt, within seconds; and a device stopped under a wait. It passes on the
+official 1.5.1, Momentum, Unleashed and RogueMaster (30 checks), and on a debug
+build of the official firmware (32).
 
 A recording is checked where the screen is: `scripts/smoke_test.py` runs
 `./flipperemu record` for four seconds with two key presses and has Pillow read the

@@ -19,7 +19,9 @@ restarts.  Then `ufbt cli` in a terminal of its own, with a command typed
 and a second command kept waiting; the targets that are refused, because
 they go to a debug probe; `ufbt flash_usb`, which the launcher does itself,
 with the SDK's update package less its radio stack; and what a stopped
-device takes.  Exit status 0 = pass.
+device takes.  Then the app's own test, examples/hello/test.sh, which has a
+device of its own and goes by `wait`: the log's lines and the screen as text.
+Exit status 0 = pass.
 
 `./flipperemu fbt` is checked with a stand-in for a firmware tree's `fbt`,
 which says what it was called with: which fbt is found, where it is run, the
@@ -279,6 +281,29 @@ def stopped_checks(b, folder, tree):
           code == 0 and ": updater_package FLIP_PORT=" in text, text)
 
 
+def test_script_checks(name, firmware):
+    """examples/hello/test.sh, as docs/DEVELOPING.md has it: a Flipper of its
+    own, the app built and started, its log and its screens waited for"""
+    folder = ROOT / "examples" / "hello"
+    began = time.time()
+    try:
+        r = subprocess.run(["./test.sh", os.path.abspath(firmware), name],
+                           cwd=folder, capture_output=True, text=True,
+                           timeout=600, stdin=subprocess.DEVNULL)
+        code, text = r.returncode, (r.stdout + r.stderr).replace("\r", "\n")
+    except subprocess.TimeoutExpired as e:
+        code, text = None, str(e)
+    check("the example's own test (examples/hello/test.sh) on a Flipper of "
+          f"its own: it passes ({time.time() - began:.0f} s)",
+          code == 0 and "the app does what it should" in text
+          and text.count("its screen is as in screens/") == 2, text[-3000:])
+    r = subprocess.run([sys.executable, str(ROOT / "flipperemu"), "-d", name,
+                        "wait", "--timeout", "1"], capture_output=True,
+                       text=True, stdin=subprocess.DEVNULL)
+    check("... and it leaves no Flipper running",
+          r.returncode == 1 and "not running" in r.stderr, r.stdout + r.stderr)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("firmware")
@@ -310,9 +335,13 @@ def main():
             b.stop()
             if done:
                 stopped_checks(b, folder, tree)
+                test_script_checks(b.name + "-t", args.firmware)
     finally:
         b.stop()
+        subprocess.run([sys.executable, str(ROOT / "flipperemu"), "-d",
+                        b.name + "-t", "stop"], capture_output=True)
         shutil.rmtree(work, ignore_errors=True)
+        shutil.rmtree(str(b.dir) + "-t", ignore_errors=True)
         if not args.keep:
             shutil.rmtree(b.dir, ignore_errors=True)
     if done is None:

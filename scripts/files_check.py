@@ -86,7 +86,7 @@ class Bench:
                 and "pplication" in lines[0]
                 and lines[1].startswith("Uptime:")), r.stdout + r.stderr
 
-    def start(self, first=False):
+    def start(self, first=False, wait=True):
         self.dir.mkdir(parents=True, exist_ok=True)
         if self.uart.exists():          # each run its own log
             self.uart.rename(self.dir / f"uart-run{self.runs}.log")
@@ -97,6 +97,8 @@ class Bench:
             cmd += ["-f", self.firmware]
         self.log = open(self.dir / "qemu.log", "ab")
         self.proc = subprocess.Popen(cmd, stdout=self.log, stderr=subprocess.STDOUT)
+        if not wait:                    # (wait_check.py: the launcher's `wait`)
+            return True
         end = time.time() + self.timeout
         while time.time() < end and "Startup complete" not in self.uart_text():
             time.sleep(0.2)

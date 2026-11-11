@@ -2824,9 +2824,214 @@ def cmd_enclave(args):
                            usage=ENCLAVE_USAGE)
 
 
+def screen_bits(dev):
+    """What the LCD of a running device shows now, as fe_screen's pixels"""
+    import fe_screen
+    import tempfile
+    fd, ppm = tempfile.mkstemp(prefix="fe-shot-", suffix=".ppm")
+    os.close(fd)
+    m = open_monitor(dev)
+    try:
+        for attempt in range(3):        # (the picture is written on the side)
+            m.screenshot(ppm)
+            try:
+                with open(ppm, "rb") as f:
+                    return fe_screen.from_ppm(f.read())
+            except ValueError:
+                if attempt == 2:
+                    raise
+                time.sleep(0.1)
+    finally:
+        m.close()
+        try:
+            os.unlink(ppm)
+        except OSError:
+            pass
+
+
 def cmd_shot(args):
-    from fe_monitor import Monitor
-    print(Monitor(str(Device(args.device).monitor)).screenshot(args.out))
+    """The LCD of a running device: a picture, or text (fe_screen.py)"""
+    dev = Device(args.device)
+    if not (args.text or (args.out or "").endswith(".txt")):
+        if not args.out:
+            sys.exit("shot: a file for the picture (`shot OUT.png`), or "
+                     "--text for the screen as text")
+        m = open_monitor(dev)
+        try:
+            print(m.screenshot(args.out))
+        finally:
+            m.close()
+        return 0
+    import fe_screen
+    shown = fe_screen.to_text(screen_bits(dev))
+    if not args.out:
+        fe_screen.write(shown)
+        return 0
+    try:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(shown)
+    except OSError as e:
+        sys.exit(f"{args.out}: {e.strerror}")
+    print(args.out)
+    return 0
+
+
+WAIT_LOOK = 0.25    # s between two looks at a screen
+
+
+def wait_state(dev):
+    """For a wait that was in vain: what the device does instead, or ''"""
+    if not dev.running():
+        return "  It is not running any more."
+    try:
+        m = open_monitor(dev)
+        try:
+            still = stopped(m)
+            halt = None if still else firmware_halt(dev, m)
+            fault = None if still or halt else firmware_fault(dev, m)
+        finally:
+            m.close()
+    except (OSError, ConnectionError):
+        return ""
+    if still:
+        return f"  Mind that {still_text(dev, still)}."
+    if halt:
+        what, todo = halt_text(dev, halt)
+        return f"  The firmware {what}.  {todo}"
+    if fault:
+        return (f"  The firmware started again after a crash: its screen says "
+                f"\"{fault}\" until a button is pressed there.")
+    return ""
+
+
+def cmd_wait(args):
+    """Until a device is where a script wants it: its CLI answers (when
+    nothing else is asked for), its log has a line, or its screen is as in a
+    file.  0: it is so; 1: not within --timeout, with the reason."""
+    import fe_log
+    dev = Device(args.device)
+    if args.timeout <= 0:
+        sys.exit("--timeout: more than 0")
+    if args.log is not None and args.screen:
+        sys.exit("wait: --log or --screen, one at a time")
+    pattern = ref = None
+    if args.log is not None:
+        try:
+            pattern = fe_log.smart(args.log)
+        except re.error as e:
+            sys.exit(f"--log {args.log}: {e}")
+    if args.screen:
+        import fe_screen
+        try:
+            ref = fe_screen.load(args.screen)
+        except OSError as e:
+            sys.exit(f"{args.screen}: {e.strerror}")
+        except ValueError as e:
+            sys.exit(f"{args.screen}: {e}")
+    began = time.time()
+    while not dev.running():        # (`run ... &` in the line before this one)
+        if time.time() - began > args.timeout:
+            sys.exit(f"[{dev.name}] not running after {args.timeout:g} s")
+        time.sleep(0.2)
+    command = args.command[1:] if args.command[:1] == ["--"] else args.command
+    log = fe_log.Log(dev.uart, new=bool(command)) if pattern else None
+    if command:
+        # What is waited for comes of this: the log counts from here on.
+        done = subprocess.run([sys.executable, str(ROOT / "flipperemu"), "-d",
+                               dev.name, *command])
+        if done.returncode:
+            return done.returncode
+        began = time.time()
+    end = began + args.timeout
+
+    def took():
+        return f"{time.time() - began:.1f} s"
+
+    if log:
+        found = last = None
+        if not command:             # what it logged since it started
+            while True:
+                for item in log.poll():
+                    if isinstance(item, fe_log.Mark):
+                        found = None
+                    else:
+                        last = item if item.plain.strip() else last
+                        if pattern.search(item.plain):
+                            found = item
+                if not log.more:
+                    break
+        looked = time.time()
+        again = ""
+        while not found:
+            for item in log.poll():
+                if isinstance(item, fe_log.Mark):
+                    # (the line may still come: `wait --log ... -- reset`)
+                    again = ("  The firmware started again meanwhile (after "
+                             "a crash, if nothing reset it).")
+                    continue
+                last = item if item.plain.strip() else last
+                if pattern.search(item.plain):
+                    found = item
+                    break
+            if found or log.more:
+                continue
+            state = ""
+            if time.time() - looked > 2.0:      # can it still come?
+                looked = time.time()
+                state = wait_state(dev)
+                if "paused" in state or "started again" in state:
+                    state = ""          # (what is waited for can still come)
+            if state or time.time() > end:
+                since = "after that" if command else "since it started"
+                sys.exit(f"[{dev.name}] no line with {args.log!r} in the "
+                         f"firmware's log {since}, in {took()}."
+                         + (state or wait_state(dev) or again)
+                         + (f"\n[{dev.name}] its last line: {last.plain[:200]}"
+                            if last else f"\n[{dev.name}] it logged nothing"
+                            + (" after it" if command else "")))
+            time.sleep(0.1)
+        print(found.plain, flush=True)
+        return 0
+
+    if ref:
+        reference, counts = ref
+        looked = time.time()
+        while True:
+            bits = screen_bits(dev)
+            n = fe_screen.differing(bits, reference, counts)
+            if not n:
+                print(f"[{dev.name}] its screen is as in {args.screen} "
+                      f"({took()})")
+                return 0
+            if time.time() > end:
+                break
+            if time.time() - looked > 2.0:      # can it still come?
+                looked = time.time()
+                if firmware_halt(dev):
+                    break
+            time.sleep(WAIT_LOOK)
+        print(f"[{dev.name}] its screen is not as in {args.screen} after "
+              f"{took()}: {n} pixel{'s' if n != 1 else ''} differ"
+              f"{'' if n != 1 else 's'}.{wait_state(dev)}\n"
+              f"[{dev.name}] it shows:", file=sys.stderr)
+        fe_screen.write(fe_screen.to_text(bits), sys.stderr)
+        return 1
+
+    while True:
+        try:
+            open_cli(dev, timeout=max(1.0, min(10.0, end - time.time()))).close()
+            print(f"[{dev.name}] its CLI answers ({took()})")
+            return 0
+        except SystemExit as e:
+            why = str(e.code)
+        except (OSError, TimeoutError) as e:
+            why = f"[{dev.name}] no CLI: {e}"
+        for_good = not dev.running() or "--usb none" in why \
+            or firmware_halt(dev)
+        if for_good or time.time() > end:
+            sys.exit(f"{why}\n[{dev.name}] waited {took()} for its CLI"
+                     + ("" if dev.running() else ": it is not running any more"))
+        time.sleep(0.5)
 
 
 def cmd_record(args):
@@ -2868,13 +3073,21 @@ def cmd_record(args):
 
 
 def cmd_press(args):
+    from fe_monitor import KEYS
     dev = Device(args.device)
+    keys = [key.lower() for key in args.keys]
+    for key, typed in zip(keys, args.keys):
+        if key not in KEYS:         # (the emulator would press nothing, in silence)
+            sys.exit(f"press: {typed!r} is no button of a Flipper's: "
+                     + ", ".join(KEYS))
+    if args.hold <= 0 or args.gap < 0:
+        sys.exit("press: --hold is more than 0 ms, and --gap not less")
     m = open_monitor(dev)
     try:
         still = stopped(m)
         if still:
             sys.exit(f"[{dev.name}] feels no button: {still_text(dev, still)}")
-        for key in args.keys:
+        for key in keys:
             m.press(key, args.hold)
             time.sleep(args.gap / 1000)
     finally:
@@ -3308,9 +3521,45 @@ def main():
     p.add_argument("gdb_args", nargs="*", help="after --: passed on to gdb")
     p.set_defaults(func=cmd_gdb)
 
-    p = sub.add_parser("shot", help="save the LCD of a running device as PNG")
-    p.add_argument("out")
+    p = sub.add_parser("shot", help="the LCD of a running device, as a PNG or "
+                       "as text")
+    p.add_argument("out", nargs="?", help="the PNG to write (with --text or a "
+                   "name that ends in .txt: the text)")
+    p.add_argument("--text", action="store_true",
+                   help="the screen as 32 lines of text, two pixels to a "
+                        "character (' ', '▀', '▄', '█'): printed, or written "
+                        "to OUT.  `wait --screen` compares with such a file")
     p.set_defaults(func=cmd_shot)
+
+    p = sub.add_parser(
+        "wait", help="wait until a running device is where a script wants it",
+        usage="flipperemu wait [--log REGEX | --screen FILE] [--timeout S] "
+              "[-- COMMAND ...]",
+        description="Waits until the device's CLI answers (it has started and "
+        "takes commands); with --log, until the firmware's log has a line; "
+        "with --screen, until its screen is as in a file.  Exit code 0: it is "
+        "so.  1: not within --timeout, and why.  A device that is only just "
+        "being started (`run --headless &` in the line before) is waited for "
+        "too.",
+        epilog="A COMMAND after `--` is one of flipperemu's own (`-- press "
+        "ok`, `-- app run FILE`): it is run first, and what is waited for is "
+        "what comes of it.")
+    p.add_argument("--log", metavar="REGEX",
+                   help="until a line of the firmware's log holds this "
+                        "(capitals in it matter only if it has any).  A line "
+                        "that it logged since it started counts; with a "
+                        "COMMAND, only one from the command's start on.  The "
+                        "line is printed")
+    p.add_argument("--screen", metavar="FILE",
+                   help="until the screen is as in FILE: text as `shot "
+                        "--text` writes it, where a '?' is two pixels that "
+                        "may be anything; or a picture by `shot`")
+    p.add_argument("--timeout", type=float, default=60.0, metavar="S",
+                   help="give up after so many seconds (default 60)")
+    p.add_argument("command", nargs=argparse.REMAINDER, metavar="-- COMMAND",
+                   help="first run this command of flipperemu's, for the same "
+                        "device")
+    p.set_defaults(func=cmd_wait)
 
     p = sub.add_parser("record", help="the LCD of a running device as an "
                        "animated GIF")
