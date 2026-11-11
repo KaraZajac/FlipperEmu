@@ -276,12 +276,13 @@ instead, and `--headless` no window at all.
   one that is low blue, and one that nothing drives stays dark. Click a pin to hold it
   high or low from outside, as a wire to 3V3 or to GND would (it gets a jumper wire),
   and to let go of it again. The pointer over a pin says what the firmware has it as,
-  and the GPIO menu has all eighteen. Pins 13 and 14 are where a real Flipper's log
-  comes out: click them, or beside the pins, to read it. **GPIO > Record what the pins
-  do…** writes every change of a pin's level to a file with its time, as a logic
-  analyzer on the header would, until GPIO > End the record; the status bar counts
-  the changes meanwhile. (`./flipperemu gpio` is the same from a shell; more
-  [below](#the-gpio-header).)
+  and the GPIO menu has all eighteen, and beneath them the two serial ports with the
+  speed the firmware set (the console says when an app opens one, and when it closes
+  it). Pins 13 and 14 are where a real Flipper's log comes out: click them, or beside
+  the pins, to read it. **GPIO > Record what the pins do…** writes every change of a
+  pin's level to a file with its time, as a logic analyzer on the header would, until
+  GPIO > End the record; the status bar counts the changes meanwhile. (`./flipperemu
+  gpio` is the same from a shell; more [below](#the-gpio-header).)
 - **The lights and sounds** show on the body: the LED glows, the body shakes when the
   motor runs, and a speaker sign shows a tone (it plays through `--audio`).
 - **The bench** under it has a tile for each of USB, the microSD card, the battery, NFC,
@@ -1334,16 +1335,28 @@ $ ./flipperemu gpio
    7  PC3   analog                         floating
   10  PA14  analog                         floating  SWC on the case
   12  PA13  analog                         floating  SIO on the case
-  13  PB6   alternate function 7, pull-up  unknown   the firmware's log is on this UART (its TX)
-  14  PB7   input, pull-up                 high      the firmware's log is on this UART (its RX)
+  13  PB6   alternate function 7, pull-up  unknown   USART1's TX (`uart --port usart` has what it sends)
+  14  PB7   input, pull-up                 high      USART1's RX (`uart send --port usart` puts bytes on it)
   15  PC1   analog                         floating
   16  PC0   analog                         floating
   17  PB14  analog                         high      the iButton pin (`ibutton` holds a key to it)
+its serial ports, as the firmware has them (`uart` sends and reads there)
+  pins 13 and 14 (USART1)   230400 baud, 8N1; what comes in is dropped (its receiver is off)
+  pins 15 and 16 (LPUART1)  off (nothing has opened it)
 ```
 
 A pin goes by the MCU's name (`PA7`), by what the case says beside it (`A7`, `C0`,
 `SWC`) or by its number on the header (`2`). `status` has the header in one line (the
 pins that are outputs, and those held), and `status --json` all of it.
+
+Beneath the pins are the header's two serial ports as the firmware has them at that
+moment: off, or the baud rate and the frame it set, and what becomes of a byte that
+comes in. It is read (by interrupt or by DMA), it is dropped (the receiver is off, as
+the log's port has it until an app opens that port), or it waits to be read (the
+receiver is on, with no interrupt and no DMA for it). `status` has the same two
+lines. An app with the wrong baud rate, or one that opened the other port than the
+one your wire is on, shows here without a look at its source. More on the ports
+[below](#the-serial-port-on-pins-15-and-16).
 
 In the window the pins of the drawn Flipper are the same thing by hand. A pin is lit
 amber while it is high and blue while it is low. A click on one has a menu to hold it
@@ -1360,8 +1373,8 @@ times a second, so a pin that blinks faster than that shows only some of its bli
   peripheral has (an alternate function): what a UART, a timer's PWM or SPI puts on a
   pin is not a level the emulator keeps, so it is not on the header yet.
 - A held pin is a level, not a voltage: the ADC is not there to read it.
-- The log's UART (13, 14) and the iButton pin (17) are read here, and not held: they
-  have `log` and `ibutton`.
+- USART1's pins (13, 14) and the iButton pin (17) are read here, and not held: they
+  have `uart --port usart` (and `log`) and `ibutton`.
 - `--wait` looks at the pin twenty times a second: a shorter pulse can pass unseen.
 
 #### A record of what the pins did
@@ -1425,7 +1438,7 @@ file with its whole path, or `off`; read, the changes and nanoseconds so far and
 file.
 
 `scripts/gpio_check.py FIRMWARE` checks it with the firmware's own `gpio` CLI command
-on the other side of the pins: 53 checks, on the official 1.5.1, the official dev
+on the other side of the pins: 54 checks, on the official 1.5.1, the official dev
 build, Momentum, Unleashed and RogueMaster. Not tried: an interrupt an app has on a
 held pin (the buttons' come the same way), and a pin that an app has as an open-drain
 output.
@@ -1478,11 +1491,45 @@ closing
   firmware sends.
 - What the firmware sent in this run is in `devices/NAME/lpuart.log`, whether or not
   anything listened.
-- `gpio` has the two pins as `alternate function 8` while an app has the port open,
-  and as what they were before when it has closed it.
+- `gpio` has the two pins as `alternate function 8`, `LPUART1's TX` and `LPUART1's
+  RX`, while an app has the port open, and as what they were before when it has
+  closed it.
+
+**What the firmware has a port as** is the second line of each port in `uart`, and
+beneath the pins in `gpio`: the baud rate and the frame the app set, and who takes
+what comes in. Here `echo.js` runs:
+
+```
+$ ./flipperemu uart
+[flipper] pins 15 and 16 (LPUART1): /dev/pts/4 (also /home/you/devices/flipper/lpuart.tty); what the firmware sent there: ...
+[flipper]   the firmware has it as: 115200 baud, 8N1; what comes in is read (by interrupt)
+[flipper] pins 13 and 14 (USART1): the terminal it was started in; what the firmware sent there: ...
+[flipper]   the firmware has it as: 230400 baud, 8N1; what comes in waits to be read (its receiver is on, with no interrupt and no DMA for it)
+```
+
+- The baud rate is what the port's divider gives, said as the usual rate when it is
+  within half a percent of one (the log's 230400 is 230215 in the register).
+- `off (nothing has opened it)` is LPUART1 until an app asks for it, and again when
+  the app has closed it. An app that should have the port and does not is seen here
+  first.
+- `what comes in is dropped (its receiver is off)` is the log's port, USART1, as the
+  firmware starts: it only sends there.
+- `what comes in waits to be read` is the same port while an app has the other one
+  open: the firmware then switches USART1's receiver on (its expansion service,
+  which watched pin 14 for a module, has stepped aside) and reads nothing from it.
+  The first byte sent there is taken and never read, the next ones wait. (A driver
+  of your own that polls its port has the port this way too, and does read.)
+- In `status --json` it is `serial`: for each port `name`, `tx`, `rx`, `on`, `baud`,
+  `divider` (the rate as the register has it), `frame`, `sends` and `hears` (`off`,
+  `irq`, `dma` or `unread`).
 
 What a wire does, and this does too: what is sent while no app has the port open is
-lost (`uart send` takes it and exits 0).
+lost. `uart send` takes it, exits 0, and says so on stderr:
+
+```
+$ ./flipperemu uart send "hello\n"
+[flipper] pins 15 and 16: nothing in the firmware has the port open (LPUART1 is off): that was sent, and nobody heard it
+```
 
 **Pins 13 and 14** (TX and RX on the case) are USART1, the other serial port:
 `FuriHalSerialIdUsart`, `serial.setup("usart", 115200)`, and the one most GPS and
@@ -1560,7 +1607,7 @@ for your program, and a socket (`devices/NAME/lpuart.sock`, `usart.sock`) for `u
 send` and `uart term`, which is why the two do not take the port from each other.
 
 `scripts/uart_check.py FIRMWARE` checks both ports with that script on the Flipper's
-side, and the bridge: 64 checks, on the official 1.5.1, the official dev build,
+side, and the bridge: 68 checks, on the official 1.5.1, the official dev build,
 Momentum, Unleashed and RogueMaster.
 
 Two bugs were in the way, and both are fixed (docs/BRINGUP_LOG.md, 104). After every

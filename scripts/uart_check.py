@@ -33,9 +33,11 @@ and 16 still runs; pins 13 and 14 have a pty, and a program on it is answered
 beside `uart send`) and one with --lpuart tcp:PORT.  Exit status 0 = pass.
 """
 import argparse
+import json
 import os
 import pathlib
 import pty
+import re
 import select
 import shutil
 import socket
@@ -147,12 +149,21 @@ def open_checks(b):
     lines = out.splitlines()
     check("`uart` alone: where the two ports go (pins 15 and 16 to a pty, "
           "with the device's lpuart.tty as its name)",
-          code == 0 and len(lines) == 2 and link.is_symlink()
+          code == 0 and len(lines) == 4 and link.is_symlink()
           and f"pins 15 and 16 (LPUART1): {os.readlink(link)}" in lines[0]
-          and "pins 13 and 14 (USART1): a file" in lines[1], out + err)
+          and "pins 13 and 14 (USART1): a file" in lines[2], out + err)
+    check("... and how the firmware has them: the one off, the other at its "
+          "log's speed, and deaf", len(lines) == 4
+          and lines[1].endswith("the firmware has it as: off (nothing has "
+                                "opened it)")
+          and re.search(r"has it as: \d+ baud, 8N1; what comes in is dropped "
+                        r"\(its receiver is off\)$", lines[3]), out + err)
     code, out, err, took = fe(b, "uart", "send", "stale\\n")
     check("a line sent while no app has the port open: taken (and lost, as "
-          "with nothing wired), exit 0", code == 0 and took < 5,
+          "with nothing wired), exit 0, and told that nobody heard it",
+          code == 0 and took < 5 and not out
+          and "nothing in the firmware has the port open (LPUART1 is off)"
+          in err and "nobody heard it" in err,
           f"{code} in {took:.1f} s\n{out}{err}")
     once = b.dir / "uart_once.js"
     once.write_text(ONCE)
@@ -207,8 +218,22 @@ def open_checks(b):
     code, out, err, took = fe(b, "gpio")
     tx, rx = row(out, "PC1"), row(out, "PC0")
     check("`gpio` while the port is open: pins 15 and 16 are the "
-          "peripheral's", "alternate function" in tx
-          and "alternate function" in rx, f"{tx}\n{rx}\n{err}")
+          "peripheral's, by its name", "alternate function" in tx
+          and "alternate function" in rx and tx.endswith("LPUART1's TX")
+          and rx.endswith("LPUART1's RX"), f"{tx}\n{rx}\n{err}")
+    c2, o2, e2, _ = fe(b, "status", "--json")
+    try:
+        port = json.loads(o2)["serial"][1]
+    except (ValueError, KeyError, IndexError, TypeError):
+        port = None
+    check("... and beneath the pins the port as the app has it: 115200 baud, "
+          "8N1, read by interrupt; `status --json` has the same",
+          re.search(r"pins 15 and 16 \(LPUART1\) +115200 baud, 8N1; what "
+                    r"comes in is read \(by interrupt\)", out)
+          and port and (port["name"], port["on"], port["baud"], port["frame"],
+                        port["hears"]) == ("LPUART1", True, 115200, "8N1",
+                                           "irq"),
+          f"{out}{err}\n{port}")
     return p
 
 
@@ -388,6 +413,10 @@ def speed_checks(b):
                  code == 0 and "ready" in out, f"{code} {out!r} {err}"):
         print("        the CLI: " + ended(p, 5))
         return
+    code, out, err, took = fe(b, "uart")
+    check("... and `uart` has the speed that the app asked for",
+          "the firmware has it as: 1200 baud, 8N1; what comes in is read"
+          in out, out + err)
     line = (string.ascii_lowercase * 10)[:239]
     code, out, err, took = fe(b, "uart", "send", line + "\\n", "--for", 1)
     check("240 bytes for that port take the two seconds they take on a wire "
@@ -437,6 +466,11 @@ def bridge_checks(b):
         check("the USB-UART bridge: what the host writes on the USB serial "
               "port comes out of pin 13", code == 0,
               f"{code} {out[-300:]!r} {err}")
+        code, out, err, took = fe(b, "gpio")
+        check("... `gpio` has the port as the bridge does: 115200 baud, read "
+              "by DMA",
+              re.search(r"pins 13 and 14 \(USART1\) +115200 baud, 8N1; what "
+                        r"comes in is read \(by DMA\)", out), out + err)
         t0 = time.time()
         code, out, err, took = fe(b, "uart", "send", "--port", "usart",
                                   "to usb\\n")

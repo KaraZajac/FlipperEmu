@@ -1936,6 +1936,46 @@ big lock, entry 92).
       ways (a short line, which only the idle interrupt delivers, and 600 bytes,
       which go round the buffer twice).
 
+107. **The serial ports by name.** What an app had made of a port was not to be seen
+    from outside. `gpio` had `alternate function 8` on two pins; a `uart send` to a
+    port that no app had open took the bytes, exited 0 and said nothing; and an app
+    with another baud rate than the board's was understood all the same (entry 106),
+    so nothing showed that either.
+    - The machine has a property for it, `header-serial`, read only: a word for
+      each port, `USART1:13:14:230215:8N1:on:off`. The name, the two pins, the
+      baud rate from BRR and PRESC (0 while UE is clear), the frame, whether TE is
+      set, and who is told of a byte that comes in: `irq` (RXNEIE), `dma` (DMAR),
+      `off` (RE clear) or `unread` (RE set and neither). It is made from the UART
+      model's registers when asked. PRESC is read through the bus, because the
+      model has that register only with patch 0007.
+    - `gpio` has the ports beneath its pins, `status` has them as `serial`, `uart`
+      alone has a second line for each port, and the window has them in the GPIO
+      menu, in a pin's tip, and in the console when one opens or closes. A rate
+      within half a percent of a usual one is said as that one: the firmware's
+      divider for 230400 baud gives 230215.
+    - The two pins of a port are named for it in `gpio`: `USART1's TX` on 13 and
+      `USART1's RX` on 14 always, `LPUART1's TX` and `LPUART1's RX` on 15 and 16
+      while the firmware has them as alternate function 8.
+    - `uart send` to a port that hears nothing still exits 0, as a wire takes what
+      nobody reads, and says on stderr which of the two it is: the port is off, or
+      its receiver is.
+    - Seen with it: the firmware logs at 230400 baud with USART1's receiver off,
+      and the receiver goes on as soon as an app has either port open, with nothing
+      reading it. That is the firmware's doing. Its serial control keeps the
+      receiver off while the expansion service has an interrupt on pin 14, to see a
+      module's pulse; an app that takes a port disables that service first, and
+      the receiver is put back on. The log's port then takes one byte into RDR,
+      which stays there, and the next one waits (a real UART would lose it and set
+      its overrun flag, which nothing reads either). `uart send` says so for that
+      port after its `--for`.
+    - The JavaScript `serial` module reads by interrupt and the USB-UART bridge by
+      DMA at 115200 baud, on all five firmwares.
+    - Not there: other peripherals by name (SPI, I2C, a timer's PWM on a pin); a
+      rate on the host's side, so the wrong baud rate is now shown, and still
+      understood.
+    - `scripts/uart_check.py`: 68 checks (64 before); `scripts/gpio_check.py`: 54
+      (53); `scripts/gui_check.py`: 47 (45), on the five firmwares.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

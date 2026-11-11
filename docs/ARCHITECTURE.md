@@ -1057,6 +1057,19 @@ ufbt is not run at all, and `update` sends the package without the stage (BRINGU
   overrun (the next byte waits in the backend), framing and parity errors. The
   machine connects `dma-rx` only where the device has it, so a QEMU tree without the
   patch gives a machine that runs.
+- **The ports by name**: the machine property `header-serial` (read only) is the two
+  ports as the firmware has them at that moment, a word for each.
+  `USART1:13:14:230215:8N1:on:off` is the name, the TX and the RX pin by their
+  numbers on the header, the baud rate that BRR and PRESC give (0 while UE is
+  clear), the frame (M0 and M1, PCE and PS, STOP), whether the transmitter is on
+  (TE), and who is told of a byte that comes in: `irq` (RXNEIE), `dma` (DMAR), `off`
+  (RE is clear: the byte is dropped) or `unread` (RE is set and neither of the two:
+  the byte waits). `flipper_zero.c` makes it from the UART model's registers when it
+  is asked, with PRESC read through the bus, so that it builds on a QEMU tree whose
+  model has no such register. `scripts/fe_header.py` turns it into words
+  (`parse_serial`, `port_text`: a rate within half a percent of a usual one is said
+  as that one) for `gpio`, `status`, `uart` and the window, which has the property
+  among those it watches on the front-panel link.
 
 ## The front panel (`flipper_panel.c`, `scripts/fe_gui*.py`)
 

@@ -328,7 +328,12 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
   - ☐ The UART model's other half: what the firmware sends at the baud rate, an
         overrun when the app does not read, a rate on the host's side (a wrong
         baud rate is understood now)
-  - ☐ The port by name in `gpio`, in `status` and in the window's GPIO menu
+  - ☑ The serial ports by name (2026-11-11): what the firmware has each port as
+        (off, or its baud rate and frame, and who takes what comes in: an
+        interrupt, the DMA, nobody) in `gpio`, `status`, `uart` and the window's
+        GPIO menu and console; the two pins by the port's name; a `uart send` that
+        nobody hears says so. Machine property `header-serial`; `uart_check.py`
+        is 68 checks, `gpio_check.py` 54, `gui_check.py` 47 (BRINGUP_LOG 107)
   - ☐ What other peripherals put on a pin: PWM, SPI and I2C devices on the header;
         a voltage for the ADC
   - ☐ An interrupt on a held pin and an open-drain output (untried: they need an

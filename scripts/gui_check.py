@@ -323,6 +323,37 @@ class Driver:
               and "Click for the iButton menu" in v.pin_tips.get(17, ""),
               f"log behind {behind}, in front {log}; iButton menu {ibutton}")
 
+        w.fill_gpio_menu()
+        ports = {name: a.text() for name, a in w.gpio_ports.items()}
+        said = self.launcher("gpio").stdout
+        first = ports.get("USART1", "")
+        check("pins: the two serial ports as the firmware has them, in the "
+              "GPIO menu as `gpio` has them, and on pin 13: the log's, which "
+              "does not listen, and one that is off",
+              re.match(r"Pins 13 and 14 \(USART1\): \d+ baud, 8N1; what comes "
+                       r"in is dropped", first)
+              and first.split(": ", 1)[1] in said
+              and ports.get("LPUART1") == "Pins 15 and 16 (LPUART1): off "
+                                          "(nothing has opened it)"
+              and "USART1's TX, " + first.split(": ", 1)[1]
+              in v.pin_tips.get(13, "")
+              and not w.gpio_ports["USART1"].isEnabled(),
+              f"{ports}\npin 13: {v.pin_tips.get(13)}")
+        real = w.props.get(("/machine", "header-serial"))
+        w.on_serial("USART1:13:14:230215:8N1:on:unread "
+                    "LPUART1:15:16:9600:8N1:on:irq", tell=True)
+        tip = v.pin_tips.get(15, "")
+        w.on_serial(real, tell=True)
+        self.spin(0.2)
+        said = self.console()
+        check("pins: a port that an app opens, and closes, is in the log "
+              "with its speed (the machine's word for it given here)",
+              "Pins 15 and 16 (LPUART1): 9600 baud, 8N1; what comes in is "
+              "read (by interrupt)" in said
+              and "Pins 15 and 16 (LPUART1): off (nothing has opened it)"
+              in said and "USART1" not in said.split("9600 baud")[-1]
+              and "LPUART1" not in tip, f"{said[-400:]}\npin 15: {tip}")
+
     def pin_record(self):
         """The record of what the pins do, from the GPIO menu (the file is
         given here: the menu's line asks for one)"""

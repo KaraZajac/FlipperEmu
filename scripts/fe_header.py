@@ -13,6 +13,11 @@ to 3V3 or to GND would, and to let go of it.
 The machine's `header-record` is a file that gets every change of a pin's
 level with its time, a VCD file as logic analyzers' programs read (Record).
 
+Four of the pins are two serial ports.  The machine's `header-serial` has them
+as the firmware has set them up, "NAME:TX:RX:BAUD:FRAME:SENDS:HEARS":
+
+    USART1:13:14:230215:8N1:on:off LPUART1:15:16:0:8N1:off:off
+
 Copyright (c) 2026, Kara Zajac
 SPDX-License-Identifier: BSD-3-Clause
 """
@@ -23,9 +28,15 @@ LABELS = {2: "A7", 3: "A6", 4: "A4", 5: "B3", 6: "B2", 7: "C3", 10: "SWC",
           12: "SIO", 13: "TX", 14: "RX", 15: "C1", 16: "C0", 17: "1W"}
 POWER = {1: "+5V", 8: "GND", 9: "3V3", 11: "GND", 18: "GND"}
 # The pins that are not held from here, and why
-NOT_HELD = {13: "the firmware's log is on this UART (its TX)",
-            14: "the firmware's log is on this UART (its RX)",
+NOT_HELD = {13: "USART1's TX (`uart --port usart` has what it sends)",
+            14: "USART1's RX (`uart send --port usart` puts bytes on it)",
             17: "the iButton pin (`ibutton` holds a key to it)"}
+# The alternate function that puts a serial port on its pins
+PORT_FUNCTION = {"USART1": 7, "LPUART1": 8}
+# The baud rates with a name: a divider seldom gives one to the last digit
+RATES = (110, 300, 600, 1200, 2400, 4800, 9600, 14400, 19200, 28800, 31250,
+         38400, 57600, 74880, 76800, 115200, 230400, 250000, 460800, 500000,
+         921600, 1000000, 1500000, 2000000, 3000000)
 
 
 def parse(text):
@@ -61,6 +72,59 @@ def mode_text(p):
              else p["mode"])
             + (", open drain" if p["open_drain"] else "")
             + (f", pull-{p['pull']}" if p["pull"] else ""))
+
+
+def parse_serial(text):
+    """The header's serial ports as the firmware has them, each a dict: its
+    "name" (USART1), its pins by their numbers on the header ("tx", "rx"),
+    is it "on", its "baud" rate (the usual one that its divider gives within
+    half a percent, or else what the divider gives, which is "divider"), its
+    "frame" (8N1), does it send ("sends"), and who takes what comes in
+    ("hears": irq, dma; off: nobody, the receiver is off and a byte is
+    dropped; unread: nobody, the receiver is on and a byte waits)."""
+    ports = []
+    for word in text.split():
+        name, tx, rx, baud, frame, sends, hears = word.split(":")
+        if hears not in ("off", "irq", "dma", "unread"):
+            raise ValueError(word)
+        divider = int(baud)
+        near = min(RATES, key=lambda r: abs(r - divider))
+        ports.append({
+            "name": name, "tx": int(tx), "rx": int(rx), "on": divider > 0,
+            "baud": near if abs(near - divider) <= near / 200 else divider,
+            "divider": divider, "frame": frame, "sends": sends == "on",
+            "hears": hears})
+    return ports
+
+
+def port_name(port, first="p"):
+    return f"{first}ins {port['tx']} and {port['rx']} ({port['name']})"
+
+
+def port_text(port):
+    """How the firmware has a serial port, in words"""
+    if not port["on"]:
+        return "off (nothing has opened it)"
+    return (f"{port['baud']} baud, {port['frame']}; "
+            + ("" if port["sends"] else "its transmitter is off; ")
+            + {"off": "what comes in is dropped (its receiver is off)",
+               "irq": "what comes in is read (by interrupt)",
+               "dma": "what comes in is read (by DMA)",
+               "unread": "what comes in waits to be read (its receiver is "
+                         "on, with no interrupt and no DMA for it)"}
+               [port["hears"]])
+
+
+def port_pin(p, ports):
+    """Is a pin of the header one of a serial port's just now?  (the port,
+    "TX" or "RX"), or None.  USART1's pins are its own at all times; LPUART1's
+    are a port's while the firmware has them in its alternate function."""
+    for port in ports or ():
+        side = {port["tx"]: "TX", port["rx"]: "RX"}.get(p["number"])
+        if side and (not p["holdable"]
+                     or p["function"] == PORT_FUNCTION.get(port["name"])):
+            return port, side
+    return None
 
 
 def overruled(p):

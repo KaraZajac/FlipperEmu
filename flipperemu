@@ -1210,6 +1210,7 @@ def device_status(dev):
                         "last_transmission": newest(dev.dir / "subghz-tx")}
         st["sound"] = {"muted": g("/machine/speaker", "mute")}
         st["gpio"] = read_header(m)
+        st["serial"] = read_serial(m)
         st["lights"] = {"led": g("/machine/led", "led"),
                         "blinking": g("/machine/led", "blinking"),
                         "backlight": g("/machine/led", "backlight"),
@@ -1286,6 +1287,9 @@ def cmd_status(args):
                     + f"; last sent: {last(st['subghz']['last_transmission'])}"),
         ("sound", "muted" if st["sound"]["muted"] else "on"),
         *([("gpio", fe_header.summary(st["gpio"]))] if st["gpio"] else []),
+        *[("" if i else "serial",
+           f"{fe_header.port_name(p)}: {fe_header.port_text(p)}")
+          for i, p in enumerate(st["serial"] or ())],
         ("lights", lights_text(st["lights"])),
         ("log", f"the firmware's level: {log_level_text(st['log']['level'])}"
                 + (f"; kept in {st['log']['file']}" if st["log"]["file"] else "")),
@@ -1384,6 +1388,16 @@ def read_header(m):
     emulator that cannot tell yet"""
     text = qom_get(m, "/machine", "header")
     return fe_header.parse(text) if isinstance(text, str) else None
+
+
+def read_serial(m):
+    """The header's serial ports as the firmware has them
+    (fe_header.parse_serial), or None from an emulator that cannot tell yet"""
+    text = qom_get(m, "/machine", "header-serial")
+    try:
+        return fe_header.parse_serial(text) if isinstance(text, str) else None
+    except ValueError:
+        return None
 
 
 def header_pin(pins, word):
@@ -1560,12 +1574,16 @@ def cmd_gpio(args):
     if args.timeout <= 0:
         sys.exit("gpio: --timeout is more than 0 seconds")
 
+    ports = None
+
     def now():
         # (the monitor takes one client at a time: not kept, so that a test
         # can press a button while this waits)
+        nonlocal ports
         m = open_monitor(dev)
         try:
             pins = read_header(m)
+            ports = read_serial(m)
         finally:
             m.close()
         if pins is None:
@@ -1600,6 +1618,9 @@ def cmd_gpio(args):
         wide = max(len(fe_header.mode_text(p)) for p in pins)
         for p in pins:
             note = fe_header.NOT_HELD.get(p["number"], "")
+            of = fe_header.port_pin(p, ports)
+            if of and not note:
+                note = f"{of[0]['name']}'s {of[1]}"
             if p["held"]:
                 note = f"held {p['held']} from outside" + (
                     ", which does not show while the firmware drives the pin"
@@ -1608,6 +1629,13 @@ def cmd_gpio(args):
                 note = f"{p['label']} on the case"
             print(f"  {p['number']:>2}  {p['pin']:5} "
                   f"{fe_header.mode_text(p):{wide}}  {p['level']:8}  {note}".rstrip())
+        if ports:
+            print("its serial ports, as the firmware has them (`uart` sends "
+                  "and reads there)")
+            wide = max(len(fe_header.port_name(p)) for p in ports)
+            for p in ports:
+                print(f"  {fe_header.port_name(p):{wide}}  "
+                      f"{fe_header.port_text(p)}")
         return 0
 
     p = header_pin(pins, args.pin)
@@ -2190,6 +2218,29 @@ UART_PORTS = {"lpuart": ("lpuart-user", "15 and 16", "LPUART1"),
 UART_OWN = {"lpuart": "lpuart-own", "usart": "uart-own"}
 
 
+def uart_state(dev, port):
+    """How the firmware has a port just now (a dict of
+    fe_header.parse_serial), or None from an emulator that cannot tell"""
+    m = open_monitor(dev)
+    try:
+        ports = read_serial(m)
+    finally:
+        m.close()
+    return next((p for p in ports or () if p["name"] == UART_PORTS[port][2]),
+                None)
+
+
+def uart_deaf(state):
+    """Why the firmware hears nothing on a port, or None: it does, or the
+    emulator cannot tell"""
+    if state and not state["on"]:
+        return f"nothing in the firmware has the port open ({state['name']} is off)"
+    if state and state["hears"] == "off":
+        return (f"the firmware does not listen there ({state['name']}'s "
+                "receiver is off)")
+    return None
+
+
 def uart_link(dev, port):
     return dev.lpuart_tty if port == "lpuart" else dev.usart_tty
 
@@ -2330,6 +2381,7 @@ def cmd_uart(args):
     try:
         ports = {port: usb_endpoint(m, UART_PORTS[port][0]) for port in UART_PORTS}
         own = usb_endpoint(m, UART_OWN[args.port])
+        states = {p["name"]: p for p in read_serial(m) or ()}
     finally:
         m.close()
     if not args.action:
@@ -2340,6 +2392,9 @@ def cmd_uart(args):
                   f"{uart_where(dev, port, ports[port])}"
                   + (f"; what the firmware sent there: {log}"
                      if log.exists() else ""))
+            if chip in states:
+                print(f"[{dev.name}]   the firmware has it as: "
+                      f"{fe_header.port_text(states[chip])}")
         return 0
     port, at = args.port, ports[args.port]
     _, pins, chip = UART_PORTS[port]
@@ -2389,11 +2444,22 @@ def cmd_uart(args):
             start = log.stat().st_size
         except OSError:
             start = 0
+        deaf = uart_deaf(states.get(chip))
         if not uart_put(line, data, args.seconds):
-            print(f"[{dev.name}] pins {pins}: the firmware has the port open, "
-                  "but did not read all of that: the rest is lost",
-                  file=sys.stderr)
+            state = uart_state(dev, port)
+            print(f"[{dev.name}] pins {pins}: "
+                  + (f"{chip}'s receiver is on, but nothing in the firmware "
+                     "takes its bytes (neither an interrupt nor the DMA is set "
+                     "up for them)" if state and state["hears"] == "unread"
+                     else "the firmware has the port open, but did not read "
+                          "all of that")
+                  + ": the rest is lost", file=sys.stderr)
             return 1
+        # (said when it was so before and after: an app that opens the port
+        # in between has heard a part of it)
+        if deaf and deaf == uart_deaf(uart_state(dev, port)):
+            print(f"[{dev.name}] pins {pins}: {deaf}: that was sent, and "
+                  "nobody heard it", file=sys.stderr)
         if want is None:
             return 0
         seen, came = uart_seen(dev, port, start, want, args.seconds, line)

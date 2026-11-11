@@ -88,9 +88,16 @@ def start_checks(b):
                   for p in "PA7 PA6 PA4 PB3 PB2 PC3 PC1 PC0".split()), out)
     check("... and the pins with their own use say so: the log's UART (its RX "
           "an input pulled up, and high), the iButton pin",
-          "log is on this UART" in row(out, "PB6")
-          and re.match(r"14 PB7 input, pull-up high .*UART", row(out, "PB7"))
+          "USART1's TX" in row(out, "PB6")
+          and re.match(r"14 PB7 input, pull-up high USART1's RX",
+                       row(out, "PB7"))
           and "iButton" in row(out, "PB14"), out)
+    check("... beneath them the two serial ports as the firmware has them: "
+          "the log's, which sends and does not listen, and one that is off",
+          re.search(r"\n  pins 13 and 14 \(USART1\) +\d+ baud, 8N1; what "
+                    r"comes in is dropped \(its receiver is off\)\n"
+                    r"  pins 15 and 16 \(LPUART1\) +off \(nothing has opened "
+                    r"it\)\n$", out), out)
     code, out, err, took = fe(b, "gpio", "PA7")
     check("a pin alone: its level as one word, and nothing else",
           code == 0 and out == "floating\n" and not err, out + err)
@@ -367,8 +374,10 @@ def refused_checks(b):
 
     refused("the iButton pin (1W) is not held from here", ["PB14", "iButton"],
             "1W", "high")
-    refused("nor is the log's UART (TX, RX)", ["PB6", "log"], "TX", "low")
-    refused("... RX", ["PB7", "log"], "PB7", "low")
+    refused("nor are USART1's pins, the log's (TX, RX)",
+            ["PB6", "USART1's TX", "uart --port usart"], "TX", "low")
+    refused("... RX", ["PB7", "USART1's RX", "uart send --port usart"],
+            "PB7", "low")
     refused("a pin that is not on the header (PD3), with those that are",
             ["'PD3'", "PA7", "PC0"], "PD3")
     refused("a power pin (9, 3V3)", ["3V3"], "9", "high")

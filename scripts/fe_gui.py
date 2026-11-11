@@ -53,7 +53,7 @@ WATCHES = (
     ("/machine/ir", "tx"), ("/machine/subghz", "radio"),
     ("/machine/speaker", "mute"),
     ("/machine", "log-level"), ("/machine", "header"),
-    ("/machine", "header-record"),
+    ("/machine", "header-record"), ("/machine", "header-serial"),
 )
 
 # what can come from a file: (the menu's word for them, file filter, where
@@ -184,6 +184,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.exit_code = 0
         self.props = {}                 # (path, name): value, as reported
         self.header = []                # the GPIO header's pins (fe_header)
+        self.ports = []                 # ... and its serial ports
         self.pin_record = None          # (changes, ns, the file) while they
         #                                 are recorded
         self.state = None
@@ -697,6 +698,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.view.set_power(state, *self.hint(state))
             self.view.set_blank(False)
+            self.ports = []
             self.on_header(None)
             self.on_pin_record(None)
             self.resetting = False
@@ -977,6 +979,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.fwlog.set_level(value)
         if key == ("/machine", "header"):
             self.on_header(value)
+        if key == ("/machine", "header-serial"):
+            self.on_serial(value, tell=not first)
         if not first and old != value:
             self.changed(path, name, old, value)
         self.tiles_due.start()
@@ -2116,10 +2120,36 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view.set_header({p["number"]: (p["level"], p["held"])
                               for p in self.header}, tips)
 
+    def on_serial(self, text, tell=False):
+        """What the machine says of the header's serial ports (None: nothing).
+        tell: a port that went on or off, or to another speed or reader, goes
+        to the log."""
+        try:
+            ports = fe_header.parse_serial(text) if isinstance(text, str) else []
+        except ValueError:
+            ports = []
+        # (USART1's receiver goes on and off with every app that opens a
+        # port, and nobody reads it either way: that is no news)
+        what = lambda p: (p["on"], p["baud"], p["frame"],
+                          p["hears"] in ("irq", "dma") and p["hears"])
+        before = {p["name"]: what(p) for p in self.ports}
+        self.ports = ports
+        for p in ports if tell else ():
+            if before.get(p["name"], what(p)) != what(p):
+                self.log.add(f"{fe_header.port_name(p, 'P')}: "
+                             f"{fe_header.port_text(p)}", "flipper")
+        self.on_header(self.props.get(("/machine", "header")))
+
     def pin_text(self, p):
         """A pin of the header in one line"""
         text = f"Pin {p['number']}, {p['label']} ({p['pin']}): "
-        if not p["holdable"]:
+        of = fe_header.port_pin(p, self.ports)
+        if of:
+            text += f"{of[0]['name']}'s {of[1]}, {fe_header.port_text(of[0])}"
+            if not p["holdable"]:
+                return text
+            text += "; "
+        elif not p["holdable"]:
             return text + fe_header.NOT_HELD.get(p["number"], "not for holding"
                                                  ).replace("`ibutton`", "iButton")
         text += f"{fe_header.mode_text(p)}, {p['level']}"
@@ -2230,6 +2260,14 @@ class MainWindow(QtWidgets.QMainWindow):
                                 f"Pin {number}: {fe_header.POWER[number]}")
                 a.setEnabled(False)
                 self.gpio_items[number] = a
+        self.gpio_ports = {}            # a serial port's name: its line
+        if self.ports:
+            m.addSeparator()
+        for port in self.ports:
+            a = m.addAction(f"{fe_header.port_name(port, 'P')}: "
+                            f"{fe_header.port_text(port)}")
+            a.setEnabled(False)
+            self.gpio_ports[port["name"]] = a
         m.addSeparator()
         a = m.addAction("Let go of all pins")
         a.setEnabled(any(p["held"] for p in self.header))

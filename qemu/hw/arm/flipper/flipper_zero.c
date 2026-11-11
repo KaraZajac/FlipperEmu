@@ -49,6 +49,7 @@
 #include "system/reset.h"
 #include "system/runstate.h"
 #include "system/system.h"
+#include "system/address-spaces.h"
 #include "system/cpu-throttle.h"
 #include "exec/cpu-common.h"
 #include "target/arm/cpu.h"
@@ -745,6 +746,64 @@ static char *flipper_get_header(Object *obj, Error **errp)
     return g_string_free(out, false);
 }
 
+/*
+ * A serial port of the header as the firmware has it,
+ * "NAME:TX:RX:BAUD:FRAME:SENDS:HEARS": TX and RX its pins by their numbers on
+ * the header; BAUD what its divider gives, 0 while the port is off; FRAME as
+ * in 8N1; SENDS on or off; HEARS off, irq or dma (who is told of a byte), or
+ * unread: the receiver is on and nobody is told, so a byte waits.
+ */
+static void serial_port(GString *out, const char *name, hwaddr base,
+                        Stm32l4x5UsartBaseState *u, bool lp, int tx, int rx)
+{
+    static const uint16_t prescaler[16] = {
+        1, 2, 4, 6, 8, 10, 12, 16, 32, 64, 128, 256, 256, 256, 256, 256
+    };
+    static const char *const stop[] = { "1", "0.5", "2", "1.5" };
+    bool on = extract32(u->cr1, 0, 1), parity = extract32(u->cr1, 10, 1);
+    int bits = extract32(u->cr1, 28, 1) ? 7 : extract32(u->cr1, 12, 1) ? 9 : 8;
+    uint32_t presc = 0, div, baud;
+    uint64_t hz;
+
+    /* (PRESC is not in every QEMU tree's model: read as the firmware does) */
+    address_space_read(&address_space_memory, base + 0x2C,
+                       MEMTXATTRS_UNSPECIFIED, &presc, sizeof(presc));
+    hz = clock_get_hz(u->clk) / prescaler[le32_to_cpu(presc) & 0xF];
+    if (lp) {
+        div = u->brr & 0xFFFFF;         /* BRR = 256 * clock / baud rate */
+        baud = div < 0x300 ? 0 : hz * 256 / div;
+    } else {
+        div = u->brr & 0xFFFF;
+        if (div < 16) {
+            baud = 0;
+        } else {
+            if (extract32(u->cr1, 15, 1)) {     /* oversampling by 8 */
+                div = ((div & 0xFFF0) | ((div & 7) << 1)) / 2;
+            }
+            baud = hz / div;
+        }
+    }
+    g_string_append_printf(out, "%s%s:%d:%d:%u:%d%c%s:%s:%s",
+                           out->len ? " " : "", name, tx, rx, on ? baud : 0,
+                           bits - parity, !parity ? 'N' :
+                           extract32(u->cr1, 9, 1) ? 'O' : 'E',
+                           stop[extract32(u->cr2, 12, 2)],
+                           on && extract32(u->cr1, 3, 1) ? "on" : "off",
+                           !on || !extract32(u->cr1, 2, 1) ? "off" :
+                           extract32(u->cr3, 6, 1) ? "dma" :
+                           extract32(u->cr1, 5, 1) ? "irq" : "unread");
+}
+
+static char *flipper_get_header_serial(Object *obj, Error **errp)
+{
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+    GString *out = g_string_new(NULL);
+
+    serial_port(out, "USART1", 0x40013800, &s->soc.usart1, false, 13, 14);
+    serial_port(out, "LPUART1", 0x40008000, &s->soc.lpuart1, true, 15, 16);
+    return g_string_free(out, false);
+}
+
 /* "PA7=1", "PA7=0" or "PA7=z" (let go of it); several, with blanks or
  * commas between them */
 static void flipper_set_header(Object *obj, const char *value, Error **errp)
@@ -1436,6 +1495,11 @@ static void flipper_zero_instance_init(Object *obj)
     object_property_set_description(obj, "header",
         "The GPIO header's pins as the firmware has them, and what the "
         "outside holds on them: set PA7=1, PA7=0 or PA7=z (let go)");
+    object_property_add_str(obj, "header-serial", flipper_get_header_serial,
+                            NULL);
+    object_property_set_description(obj, "header-serial",
+        "The header's serial ports as the firmware has them: for each its "
+        "name, pins, baud rate (0: off), frame, and who takes what comes in");
     object_property_add_str(obj, "header-record", flipper_get_header_record,
                             flipper_set_header_record);
     object_property_set_description(obj, "header-record",

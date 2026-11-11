@@ -307,6 +307,13 @@ you said: hello
   logs on those pins until the app has the port and again when it has closed it,
   so the app's bytes are in `uart.log` among the log's lines, and `uart term
   --port usart` shows both.
+- **Has the app the port, and at which speed?** `uart` alone says for each port what
+  the firmware has it as: `off (nothing has opened it)`, or `9600 baud, 8N1; what
+  comes in is read (by interrupt)`. `gpio`, `status` and the window's GPIO menu have
+  the same line, and the window's console says when an app opens a port and when it
+  closes it. An app that took the other port, or set another rate than the board's,
+  is found there. A `uart send` that nobody hears still exits 0, as a wire would
+  have it, and says so on stderr.
 
 The example needs no build: `examples/uart/echo.js` is a script for the firmware's
 `js` command that opens the port and answers every line (the README's "The serial
@@ -314,7 +321,8 @@ port on pins 15 and 16" has the session). What ran here is that script, on five
 firmwares; the JavaScript `serial` module is the calls above. Reception by DMA
 (`furi_hal_serial_dma_rx_start`) works too: the firmware's USB-UART bridge uses it,
 and passes bytes both ways here. Three limits matter for an app. A wrong baud rate
-is not found: your side of the wire has no rate, so the app is understood at any.
+is not found: your side of the wire has no rate, so the app is understood at any
+(`uart` says which one it set).
 What the app sends is there at once, not at its baud rate. And a byte the app does
 not read waits on the wire, where a real UART would lose the next one and set its
 overrun flag.
@@ -873,15 +881,18 @@ of changes that the file has, and nothing is written after it; `gpio watch` prin
 the two changes the firmware makes while it watches and leaves no record behind; a
 record goes on over a reset; a record of pin 17 while the firmware reads a DS1990A
 has the reset pulse and, right after it, the key's presence pulse; and a record the
-emulator was stopped under is whole. It passes on the official 1.5.1, the
-official dev build, Momentum, Unleashed and RogueMaster (53 checks). It has no app of
-its own: an interrupt on a held pin and an open-drain output were not tried. The
-window's pins are in `scripts/gui_check.py`: a click on pin 2 and Hold it high (the
-window has it high with a wire on it, and the launcher's `gpio PA7` from outside
-says `high`), pin 3 held low, the GPIO menu's lines, Let go of all pins, the
-clicks on 13 and 17 that hold nothing (the firmware log, the iButton menu), and a
-record begun from the GPIO menu: the status bar counts a pin held and let go of, and
-the file read back after End the record has both changes.
+emulator was stopped under is whole. Beneath the pins it wants the two serial ports
+as the firmware starts with them: the log's with a baud rate and its receiver off,
+the other one off. It passes on the official 1.5.1, the official dev build,
+Momentum, Unleashed and RogueMaster (54 checks). It has no app of its own: an
+interrupt on a held pin and an open-drain output were not tried. The window's pins
+are in `scripts/gui_check.py`: a click on pin 2 and Hold it high (the window has it
+high with a wire on it, and the launcher's `gpio PA7` from outside says `high`),
+pin 3 held low, the GPIO menu's lines, Let go of all pins, the clicks on 13 and 17
+that hold nothing (the firmware log, the iButton menu), the two serial ports in the
+GPIO menu in `gpio`'s words and on pin 13, a port that opens and closes in the
+console, and a record begun from the GPIO menu: the status bar counts a pin held
+and let go of, and the file read back after End the record has both changes.
 
 `scripts/uart_check.py FIRMWARE` has `examples/uart/echo.js` on the Flipper's side
 of pins 15 and 16: where `uart` says the ports go; a line sent while no app has the
@@ -900,9 +911,12 @@ with `--lpuart none` and `--serial pty`, with a program on the pty of pins 13 an
 port's speed (240 bytes for the script at 1200 baud take their two seconds, with a
 `--for` of one) and the firmware's USB-UART bridge, which receives by DMA: the USB
 serial port's bytes out of pin 13, a short line and 600 bytes into pin 14 at the
-host, the CLI back after Back and Exit. It passes on the official 1.5.1, the
-official dev build, Momentum, Unleashed and RogueMaster (64 checks). It has no app
-in C.
+host, the CLI back after Back and Exit. All along, what the firmware has each port
+as: both in `uart` after a start, the note of a send that nobody heard, the
+script's port at 115200 baud and read by interrupt in `gpio` and in `status
+--json`, 1200 baud when the script asks for that, and the bridge's read by DMA. It
+passes on the official 1.5.1, the official dev build, Momentum, Unleashed and
+RogueMaster (68 checks). It has no app in C.
 
 `scripts/gdb_check.py FIRMWARE` does what the gdb section shows, with gdb in batch
 mode: a backtrace of the firmware with functions and lines, the breakpoint in the
