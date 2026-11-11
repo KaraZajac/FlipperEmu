@@ -5,7 +5,8 @@
 The launcher's command file (devices/NAME/gdb.init) sets FLIPPEREMU_GDB and
 sources this:
 
-    python FLIPPEREMU_GDB = {"fapscript": "…/flipperapps.py", "apps": "DIR"}
+    python FLIPPEREMU_GDB = {"fapscript": "…/flipperapps.py", "apps": "DIR",
+                             "name": "the device's"}
     source …/scripts/fe_gdb.py
 
 What it is for.  The firmware has a flag that says a debugger is there
@@ -21,14 +22,16 @@ at those two places:
   the app's symbols there, and the firmware goes on.  A breakpoint that was
   set in the app's code before it was loaded is in place by then.
 - where a crash begins.  gdb stops, this says what the firmware says of it,
-  and `bt` shows where it was.  `continue` lets the firmware restart, as it
-  does without a debugger.
+  and `bt` shows where it was.  After `continue` the firmware does what it
+  does without a debugger: a release build restarts, and a debug build (what
+  `./fbt` builds unless told otherwise) halts and waits.  This says which.
 """
 import gdb
 
 FLAG = "furi_hal_debug_gdb_session_active"
 APP_START = "flipper_application_alloc_thread"
 CRASH = "__furi_crash_implementation"
+RESET = "furi_hal_power_reset"          # how a release build ends a crash
 
 
 def say(text):
@@ -66,6 +69,16 @@ def crash_message():
         return "?"
 
 
+def restarts():
+    """Whether this firmware starts again after a crash.  A release build's
+    crash ends with a reset; a debug build's has none, and ends in a loop
+    that waits for a debugger.  None: its code could not be read"""
+    try:
+        return RESET in gdb.execute(f"disassemble {CRASH}", to_string=True)
+    except gdb.error:
+        return None
+
+
 class AppStart(gdb.Breakpoint):
     """Where the loader has an app in memory and is about to start it.  Not a
     stop: the app's symbols are read, and the firmware goes on."""
@@ -84,8 +97,9 @@ class AppStart(gdb.Breakpoint):
 
 
 class FlipperEmu:
-    def __init__(self, fapscript, apps):
+    def __init__(self, fapscript, apps, name=""):
         self.at_app_start = self.at_crash = None
+        self.name = name
         if address(FLAG) is None:
             say("no symbols of a Flipper firmware: breakpoints by address, and "
                 "no symbols of apps")
@@ -97,6 +111,7 @@ class FlipperEmu:
         if where is not None:
             self.at_crash = gdb.Breakpoint(f"*{where:#x}", internal=True)
             self.at_crash.silent = True
+            self.restarts = restarts()
             gdb.events.stop.connect(self.stopped)
 
     def apps(self, fapscript, apps):
@@ -122,7 +137,14 @@ class FlipperEmu:
         if (isinstance(event, gdb.BreakpointEvent)
                 and self.at_crash in event.breakpoints):
             say(f"the firmware crashed: {crash_message()}")
-            say("`bt` shows where; `continue` lets it restart")
+            if self.restarts is False:
+                device = f"-d {self.name} " if self.name else ""
+                say("`bt` shows where; after `continue` it halts: this is a "
+                    "debug build, which waits there for a debugger")
+                say(f"(`./flipperemu {device}reset` in another terminal "
+                    "starts it again)")
+            else:
+                say("`bt` shows where; `continue` lets it restart")
 
 
 FLIPPEREMU = FlipperEmu(**globals().get("FLIPPEREMU_GDB",

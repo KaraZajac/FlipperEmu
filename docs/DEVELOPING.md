@@ -307,6 +307,13 @@ Hold OK in the example:
 #2  0x08062b98 in flipper_application_thread (context=0x20008688) at lib/flipper_application/flipper_application.c:239
 ```
 
+On a debug build the second line says what `continue` leads to there:
+
+```
+[flipperemu] `bt` shows where; after `continue` it halts: this is a debug build, which waits there for a debugger
+[flipperemu] (`./flipperemu -d mine reset` in another terminal starts it again)
+```
+
 What `./flipperemu gdb` puts together, and how to have it otherwise:
 
 - **The stub** is QEMU's. It is opened when gdb is asked for, on a socket in the
@@ -320,8 +327,10 @@ What `./flipperemu gdb` puts together, and how to have it otherwise:
   flash holds. It looks at the `.elf` the device was flashed from, a build in the
   source tree you are in, and ufbt's SDK, which has the ELF of the release it is of.
   A device with that release from its update package has the same bytes in its flash,
-  and so gets those symbols. `--elf FILE` names another. The SDK has no source files
-  of the firmware: `directory PATH` in gdb, with a checkout of it, shows its lines.
+  and so gets those symbols. `--elf FILE` names another: the official update server
+  has each build's ELF beside its package (`flipper-z-f7-firmware-VERSION.elf`, for
+  the dev channel's builds too). The SDK has no source files of the firmware:
+  `directory PATH` in gdb, with a checkout of it, shows its lines.
 - **Your app's symbols** are read by the firmware's own gdb script
   (`scripts/debug/flipperapps.py`, from its source tree or from the SDK). It goes
   through the firmware's list of loaded apps, and loads each app's debug ELF at the

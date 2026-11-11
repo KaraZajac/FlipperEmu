@@ -1302,6 +1302,7 @@ folder, and starts gdb on it with what it finds:
   app is launched;
 - a stop where a crash begins, with the firmware's message, before it restarts. A
   debug build halts after a crash instead, and gdb can be started on it there as well.
+  The line at the stop says which of the two `continue` leads to on this firmware.
 
 The Flipper stands still while gdb has it stopped, and runs on when gdb leaves.
 

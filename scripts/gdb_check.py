@@ -183,7 +183,8 @@ def gdb_checks(b, work, folder):
     check("the app crashes: gdb stops there, and says what the firmware says "
           "of it",
           waiting and code == 0
-          and "the firmware crashed: fe_hello: on purpose" in said, said)
+          and "the firmware crashed: fe_hello: on purpose" in said
+          and "`continue` lets it restart" in said, said)
     check("... with the app's line in the backtrace, and the flag still off",
           "fe_hello_app (" in said and f"hello.c:{line_of(source, 'furi_crash(')}"
           in said and OFF in said, said)

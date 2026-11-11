@@ -1282,6 +1282,19 @@ All three are small, self-contained, and suitable for sending upstream.
       RogueMaster. RogueMaster's log lost its report for real in the last run, and
       the window said the crash by itself there too.
 
+90. **gdb's line at a crash was a release build's.** "`continue` lets it restart" is
+    wrong on a debug build, and a debug build is what a developer with a firmware
+    tree has under gdb. `fe_gdb.py` reads the crash function's code once: a release
+    build's calls `furi_hal_power_reset`, a debug build's has no such call (seen in
+    both official ELFs). On a debug build the line says that it halts after
+    `continue`, and which command starts it again.
+    - The dev channel's ELF is on the update server next to its package, so `gdb
+      --elf` had the debug build's symbols: at the NFC crash gdb said the new line,
+      `bt` had `nfc_free` at `lib/nfc/nfc.c:260`, and the firmware stood halted
+      afterwards, as `status` said.
+    - The gdb check wants the release wording on 1.5.1 (20 of 20). It builds its
+      app with ufbt's SDK, which is the release's: it does not run on the dev build.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

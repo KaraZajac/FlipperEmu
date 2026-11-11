@@ -1435,7 +1435,8 @@ def cmd_gdb(args):
         script, apps = gdb_kit(elf, origin, args.apps) if elf else (None, None)
         if script:
             print(f"[{dev.name}] apps' symbols, as they start: from {apps}")
-        about = {"fapscript": str(script or ""), "apps": str(apps or "")}
+        about = {"fapscript": str(script or ""), "apps": str(apps or ""),
+                 "name": dev.name}
         lines += [f"python FLIPPEREMU_GDB = {about!r}",
                   f"source {ROOT / 'scripts' / 'fe_gdb.py'}"]
     dev.gdb_init.write_text("\n".join(lines) + "\n")
