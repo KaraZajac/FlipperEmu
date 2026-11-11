@@ -1675,6 +1675,39 @@ big lock, entry 92).
       the official 1.5.1, the official dev build, Momentum, Unleashed and
       RogueMaster. Without an app it cannot have an interrupt on a pin or an
       open-drain output; both are untried.
+101. **The window's GPIO pins.** The drawn Flipper had eighteen sockets along its top
+    that did one thing: a click anywhere on them opened the firmware log. Now each
+    socket is its pin: lit amber while the pin is high, blue while it is low, dark
+    while nothing drives it; a click on one holds it high or low from outside, or
+    lets go of it, and a held pin has a jumper wire standing on it.
+    - The window does not ask the monitor. It watches the machine's property
+      `header` over the front-panel link, as it watches the other properties its
+      bench shows: the emulator looks ten times a second and sends the property
+      when it changed. The monitor stays free for the launcher, which matters:
+      it takes one client at a time (100).
+    - A click holds a pin by running the launcher's `gpio PA7 high`, like every
+      other action of the window, so what the window does a script can do, and the
+      answer is in the console. The pin lights when the property comes back
+      changed, and not because it was clicked.
+    - `scripts/fe_header.py` is the one place that reads the property and words a
+      pin (`output, high; held low from outside`): the launcher's table, its
+      `status` line, the window's menus and the lines under the pointer all come
+      from it.
+    - Which socket a click is on: the nearest pin within half the pitch. Between
+      the two rows, and on the five power pins, a click opens the firmware log as
+      before; so do 13 and 14, where the log's UART is. Pin 17, the iButton pin,
+      opens the iButton menu. None of those can be held.
+    - The pin menu is one menu, emptied and filled for the pin clicked. The GPIO
+      menu in the menu bar is filled when it opens: all eighteen pins, a submenu
+      for each of the ten that can be held, with what is held ticked.
+    - Ten looks a second is what a pin's light can follow. A pin an app toggles
+      faster shows some of its levels; a record of every edge is the next piece
+      (`gpio watch`).
+    - `gui_check.py` has six more checks (42, on all five firmwares): the header as
+      the machine has it and the line under the pointer, the menu of pin 2, Hold
+      it high (seen in the window, and `gpio PA7` from outside says `high`), pin 3
+      held low and the GPIO menu's lines, Let go of all pins, and the clicks on
+      13 and 17. Off-screen, like the rest of the window's checks.
 
 ## Things that were right the first time (and why)
 

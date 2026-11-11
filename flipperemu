@@ -74,6 +74,8 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "scripts"))
+import fe_header                                # noqa: E402  (small: the rest
+                                                # is imported where it is used)
 
 QEMU = ROOT / "build" / "qemu" / "qemu-system-arm"
 DEVICES = ROOT / "devices"
@@ -1208,7 +1210,7 @@ def cmd_status(args):
                        and radio.get("freq", "").isdigit() else "")
                     + f"; last sent: {last(st['subghz']['last_transmission'])}"),
         ("sound", "muted" if st["sound"]["muted"] else "on"),
-        *([("gpio", header_summary(st["gpio"]))] if st["gpio"] else []),
+        *([("gpio", fe_header.summary(st["gpio"]))] if st["gpio"] else []),
         ("lights", lights_text(st["lights"])),
         ("log", f"the firmware's level: {log_level_text(st['log']['level'])}"
                 + (f"; kept in {st['log']['file']}" if st["log"]["file"] else "")),
@@ -1302,67 +1304,11 @@ def cmd_sound(args):
     return 0
 
 
-# What is printed beside the GPIO header's pins on a Flipper's case, by the
-# pin's number on the header.  The others: 1 is +5V, 9 is 3V3, and 8, 11 and
-# 18 are GND.
-HEADER_LABELS = {2: "A7", 3: "A6", 4: "A4", 5: "B3", 6: "B2", 7: "C3",
-                 10: "SWC", 12: "SIO", 13: "TX", 14: "RX", 15: "C1", 16: "C0",
-                 17: "1W"}
-HEADER_NOT_HELD = {13: "the firmware's log is on this UART (its TX)",
-                   14: "the firmware's log is on this UART (its RX)",
-                   17: "the iButton pin (`ibutton` holds a key to it)"}
-
-
 def read_header(m):
-    """The GPIO header's signal pins in their order on it, each a dict: its
-    "number" there, the MCU's "pin" (PA7), the "label" on the case, what the
-    firmware has it as ("mode": input, output, alternate or analog; "function":
-    which alternate one; "open_drain"; "pull": up, down or None), its "level"
-    (high, low, floating: nothing holds it, or unknown: a peripheral's signal,
-    which the emulator does not keep as a level), and what the outside holds
-    on it ("held": high, low or None; "holdable": may it).  None: from an
-    emulator that cannot tell yet."""
+    """The GPIO header's signal pins (fe_header.parse), or None from an
+    emulator that cannot tell yet"""
     text = qom_get(m, "/machine", "header")
-    if not isinstance(text, str):
-        return None
-    pins = []
-    for word in text.split():
-        number, pin, mode, pull, level, held = word.split(":")
-        function = re.fullmatch(r"af(\d+)(od)?", mode)
-        pins.append({
-            "number": int(number), "pin": pin,
-            "label": HEADER_LABELS.get(int(number), pin[1:]),
-            "mode": "alternate" if function else
-                    {"in": "input", "out": "output", "od": "output"}.get(mode, mode),
-            "function": int(function[1]) if function else None,
-            "open_drain": mode.endswith("od"),
-            "pull": None if pull == "none" else pull,
-            "level": {"0": "low", "1": "high", "z": "floating"}.get(level, "unknown"),
-            "held": held if held in ("high", "low") else None,
-            "holdable": held != "-"})
-    return pins
-
-
-def header_mode_text(p):
-    """What the firmware has a pin as, in words"""
-    return ((f"alternate function {p['function']}" if p["mode"] == "alternate"
-             else p["mode"])
-            + (", open drain" if p["open_drain"] else "")
-            + (f", pull-{p['pull']}" if p["pull"] else ""))
-
-
-def header_overruled(p):
-    """Is something held to a pin that the firmware drives both ways?  On
-    hardware the two would fight; here the firmware's level is the pin's."""
-    return bool(p["held"]) and p["mode"] == "output" and not p["open_drain"]
-
-
-def header_summary(pins):
-    """The header in one line, for `status`: the pins that something is on"""
-    parts = [f"{p['pin']} is an output, {p['level']}" for p in pins
-             if p["mode"] == "output" and p["holdable"]]
-    parts += [f"{p['pin']} is held {p['held']}" for p in pins if p["held"]]
-    return "; ".join(parts) or "none of its pins is an output, none is held"
+    return fe_header.parse(text) if isinstance(text, str) else None
 
 
 def header_pin(pins, word):
@@ -1373,7 +1319,7 @@ def header_pin(pins, word):
         if want in (p["pin"], p["label"], str(p["number"])):
             return p
     names = " ".join(p["pin"] for p in pins)
-    other = {"1": "+5V", "9": "3V3", "8": "GND", "11": "GND", "18": "GND",
+    other = {**{str(n): what for n, what in fe_header.POWER.items()},
              "5V": "+5V", "+5V": "+5V", "3V3": "3V3", "GND": "GND"}.get(want)
     sys.exit(f"gpio: {word!r} is " + (f"{other} on the header, and no pin to "
                                      "read or hold" if other else
@@ -1429,17 +1375,17 @@ def cmd_gpio(args):
     if not args.pin:
         print(f"[{dev.name}] the GPIO header (1 is +5V, 9 is 3V3; 8, 11 and "
               "18 are GND)")
-        wide = max(len(header_mode_text(p)) for p in pins)
+        wide = max(len(fe_header.mode_text(p)) for p in pins)
         for p in pins:
-            note = HEADER_NOT_HELD.get(p["number"], "")
+            note = fe_header.NOT_HELD.get(p["number"], "")
             if p["held"]:
                 note = f"held {p['held']} from outside" + (
                     ", which does not show while the firmware drives the pin"
-                    if header_overruled(p) else "")
+                    if fe_header.overruled(p) else "")
             elif p["label"] in ("SWC", "SIO"):
                 note = f"{p['label']} on the case"
             print(f"  {p['number']:>2}  {p['pin']:5} "
-                  f"{header_mode_text(p):{wide}}  {p['level']:8}  {note}".rstrip())
+                  f"{fe_header.mode_text(p):{wide}}  {p['level']:8}  {note}".rstrip())
         return 0
 
     p = header_pin(pins, args.pin)
@@ -1449,7 +1395,7 @@ def cmd_gpio(args):
             if time.time() - t0 > args.timeout:
                 sys.exit(f"[{dev.name}] {p['pin']} is {p['level']} and not "
                          f"{args.wait} after {args.timeout:g} s (the firmware "
-                         f"has it as: {header_mode_text(p)}"
+                         f"has it as: {fe_header.mode_text(p)}"
                          + (f"; held {p['held']} from outside" if p["held"]
                             else "") + ")")
             time.sleep(0.05)
@@ -1461,15 +1407,15 @@ def cmd_gpio(args):
         return 0
     if not p["holdable"]:
         sys.exit(f"gpio: {p['pin']} is not a pin to hold; "
-                 + HEADER_NOT_HELD.get(p["number"], "it has its own use"))
+                 + fe_header.NOT_HELD.get(p["number"], "it has its own use"))
     hold([f"{p['pin']}={levels[level]}"])
     p = header_pin(now(), p["pin"])
     print(f"[{dev.name}] {p['pin']} (pin {p['number']} of the header): "
           + (f"held {p['held']} from outside" if p["held"] else "let go of")
           + f"; it is {p['level']} (the firmware has it as: "
-          f"{header_mode_text(p)})"
+          f"{fe_header.mode_text(p)})"
           + (". The firmware drives it, and what is held to it shows when it "
-             "is an input again" if header_overruled(p) else ""))
+             "is an input again" if fe_header.overruled(p) else ""))
     return 0
 
 

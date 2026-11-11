@@ -17,7 +17,9 @@ click on the GPIO pins and sets the firmware's log level from it, copies a
 file to its card, drops an app on the window (which installs and starts it),
 does that again with F5 and closes the app, drops the same app as if it were
 built for another API (refused, or asked about on the Flipper's screen and
-then answered with a button), holds an NFC tag to it from the
+then answered with a button), holds pins of the GPIO header high and low with
+a click on them (they light, and the firmware reads them so), lets go of
+them, holds an NFC tag to it from the
 bench, unplugs USB, switches it off as a real one is (Back held for 5 s, then
 Power Off: the window stays, the emulator exits), copies a file to the card
 of the switched-off Flipper, switches
@@ -228,6 +230,96 @@ class Driver:
         return subprocess.run(
             [sys.executable, str(w.launcher), "-d", w.name, *args],
             capture_output=True, text=True, timeout=30)
+
+    def pins(self):
+        """The GPIO header: its pins lit by their level, and a click on one
+        to hold it from outside"""
+        w, v = self.win, self.win.view
+
+        def press(number):
+            QTest.mouseClick(v, Qt.LeftButton, Qt.NoModifier,
+                             v.pin_point(number))
+            self.spin(0.4)
+
+        def state(number):
+            return v.header.get(number)
+
+        self.until(lambda: len(w.header) == 13, 5)
+        tip = v.pin_tips.get(2, "")
+        check("pins: the header as the machine has it: thirteen signal pins, "
+              "none held, and a line for each one under the pointer",
+              len(w.header) == 13 and not any(p["held"] for p in w.header)
+              and tip.startswith("Pin 2, A7 (PA7): ")
+              and tip.endswith("Click to hold it high or low from outside")
+              and v.pin_tips.get(1) == "Pin 1: +5V"
+              and v.tip("gpio", 2) == tip and v.pin_at(v.pin_point(2)) == 2,
+              f"{len(w.header)} pins; {tip!r}")
+
+        press(2)
+        acts = [a for a in w.pin_menu.actions() if not a.isSeparator()]
+        shown = w.pin_menu.isVisible() and len(acts) == 4
+        check("pins: a click on pin 2 (A7): its menu, with what the firmware "
+              "has it as, and nothing to let go of yet",
+              shown and acts[0].text().startswith("Pin 2, A7 (PA7): ")
+              and not acts[0].isEnabled() and not acts[3].isEnabled(),
+              "; ".join(a.text() for a in acts))
+        if shown:
+            acts[1].trigger()           # Hold it high
+        w.pin_menu.close()
+        held = self.until(lambda: state(2) == ("high", "high"), 15)
+        self.settle()
+        said = self.launcher("gpio", "PA7").stdout.strip()
+        check("pins: Hold it high: the pin is lit and has a wire on it; the "
+              "firmware reads it high",
+              held and said == "high" and "held high" in v.pin_tips.get(2, "")
+              and "PA7 (pin 2 of the header): held high" in self.console(),
+              f"{state(2)}; gpio PA7: {said!r}")
+
+        press(3)
+        acts = [a for a in w.pin_menu.actions() if not a.isSeparator()]
+        if w.pin_menu.isVisible() and len(acts) == 4:
+            acts[2].trigger()           # Hold it low
+        w.pin_menu.close()
+        low = self.until(lambda: state(3) == ("low", "low"), 15)
+        self.settle()
+        self.shot("pins")
+        w.fill_gpio_menu()              # as the menu bar's GPIO menu opens
+        line = w.gpio_items[2]
+        subs = line.actions() if isinstance(line, QtWidgets.QMenu) else []
+        check("pins: pin 3 held low; the GPIO menu has every pin, the held "
+              "ones ticked",
+              low and len(w.gpio_items) == 18 and len(subs) == 3
+              and "held high from outside" in line.title()
+              and subs[0].isChecked() and not subs[1].isChecked()
+              and subs[2].isEnabled() and w.a_gpio_free.isEnabled()
+              and not w.gpio_items[1].isEnabled()
+              and w.gpio_items[1].text() == "Pin 1: +5V",
+              f"{state(3)}; {len(w.gpio_items)} lines")
+
+        w.a_gpio_free.trigger()
+        free = self.until(lambda: state(2) is not None
+                          and not state(2)[1] and not state(3)[1], 15)
+        self.settle()
+        said = self.launcher("gpio").stdout
+        check("pins: Let go of all pins: nothing is held any more",
+              free and "held" not in said
+              and "nothing is held to the GPIO header any more"
+              in self.console(), f"{state(2)} {state(3)}")
+
+        w.show_log()
+        self.spin(0.3)
+        behind = not w.front.get(w.fwlog)
+        press(13)
+        log = bool(w.front.get(w.fwlog))
+        press(17)
+        ibutton = w.menu_ibutton.isVisible()
+        w.menu_ibutton.close()
+        check("pins: a click on 13 (TX) opens the firmware log, one on 17 "
+              "(1W) the iButton menu; neither is a pin to hold",
+              behind and log and ibutton and not w.pin_menu.isVisible()
+              and "Click to read the firmware's log" in v.pin_tips.get(13, "")
+              and "Click for the iButton menu" in v.pin_tips.get(17, ""),
+              f"log behind {behind}, in front {log}; iButton menu {ibutton}")
 
     def blink(self):
         """The LED chip's engines, as the window gets them: NFC > Read blinks
@@ -667,6 +759,7 @@ class Driver:
 
         self.files_and_apps()
         self.blink()
+        self.pins()
 
         w.hold("nfc", ["ntag215", "04A1B2C3D4E5F6", "https://example.com"])
         w.set_cable("unplugged")

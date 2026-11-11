@@ -245,6 +245,10 @@ A pin is named as the MCU has it (`PA7`), as the case has it (`A7`) or by that n
   that something is held to it, and that it does not show).
 - What a peripheral puts on a pin (a UART, PWM, SPI, I2C) is `unknown`: only the levels
   of plain inputs and outputs are on the header so far. The ADC reads nothing.
+- **By hand, in the window:** the pins on top of the drawn Flipper light with their
+  level (amber for high, blue for low), so an app that drives one is seen driving it.
+  A click on a pin holds it high or low, or lets go of it; the GPIO menu has the list.
+  It is the same `gpio` command underneath, and what it answered is in the console.
 
 In a test script (see below) that is two lines:
 
@@ -795,7 +799,11 @@ output and sets (as a table, as a word, by its three names, in `status`, and a
 of with the firmware's `gpio read` for each, a pin held while the firmware drives it,
 what is held over a reset, and what is refused. It passes on the official 1.5.1, the
 official dev build, Momentum, Unleashed and RogueMaster (38 checks). It has no app of
-its own: an interrupt on a held pin and an open-drain output were not tried.
+its own: an interrupt on a held pin and an open-drain output were not tried. The
+window's pins are in `scripts/gui_check.py`: a click on pin 2 and Hold it high (the
+window has it high with a wire on it, and the launcher's `gpio PA7` from outside
+says `high`), pin 3 held low, the GPIO menu's lines, Let go of all pins, and the
+clicks on 13 and 17 that hold nothing (the firmware log, the iButton menu).
 
 `scripts/gdb_check.py FIRMWARE` does what the gdb section shows, with gdb in batch
 mode: a backtrace of the firmware with functions and lines, the breakpoint in the

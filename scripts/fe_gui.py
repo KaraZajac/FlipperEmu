@@ -31,6 +31,7 @@ from PySide6.QtCore import Qt
 
 import fe_files
 import fe_gui_widgets as W
+import fe_header
 import fe_record
 from fe_gui_link import PanelLink
 from fe_gui_view import (LIT_BG, LIT_FG, VIEW_H, VIEW_W, FlipperView,
@@ -51,7 +52,7 @@ WATCHES = (
     ("/machine/ibutton", "tx"), ("/machine/ibutton", "reader"),
     ("/machine/ir", "tx"), ("/machine/subghz", "radio"),
     ("/machine/speaker", "mute"),
-    ("/machine", "log-level"),
+    ("/machine", "log-level"), ("/machine", "header"),
 )
 
 # what can come from a file: (the menu's word for them, file filter, where
@@ -90,10 +91,12 @@ Left held after letting go of Back and it starts in DFU mode.</p>
 <p>Its ports are where a real one has them. Click the <b>USB plug</b> in its
 right side to plug it in and out, the <b>microSD card</b>
 at the bottom right to pull it out and push it back, the <b>infrared
-window</b> in the upper left face to point a remote at it, and the <b>GPIO
-pins</b> along the top for what the firmware logs (it comes out of two of
-them). Right-click for their menus, and anywhere else on the Flipper for the
-Device menu.</p>
+window</b> in the upper left face to point a remote at it, and a <b>GPIO
+pin</b> along the top to hold it high or low from outside, as a wire would
+(a pin that is high is lit amber, one that is low blue; the GPIO menu has what
+the firmware has each as). What the firmware logs comes out of pins 13 and 14:
+click those to read it. Right-click for their menus, and anywhere else on the
+Flipper for the Device menu.</p>
 <p>Files dropped on the window go where they belong: .nfc and Proxmark3
 .json cards, .rfid tags, .ibtn keys, .sub captures, .ir remotes, and
 firmware. An app (<b>.fap</b>) is copied to its card and started, and
@@ -179,6 +182,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings = settings or Settings(config_path())
         self.exit_code = 0
         self.props = {}                 # (path, name): value, as reported
+        self.header = []                # the GPIO header's pins (fe_header)
         self.state = None
         self.expect_off = False         # it said it is switching off
         self.qemu_up = session is not None      # ours, and running
@@ -504,6 +508,11 @@ class MainWindow(QtWidgets.QMainWindow):
         r.addSeparator()
         self.a_sdr_stop = A(r, "Stop", lambda: self.stop_link("subghz"))
 
+        m = self.menu_gpio = bar.addMenu("&GPIO")
+        m.aboutToShow.connect(self.fill_gpio_menu)
+        self.fill_gpio_menu()
+        self.pin_menu = QtWidgets.QMenu(self)   # of the pin that was clicked
+
         m = self.menu_view = bar.addMenu("&View")
         z = m.addMenu("Zoom")
         group = QtGui.QActionGroup(self)
@@ -644,6 +653,7 @@ class MainWindow(QtWidgets.QMainWindow):
         V.usb_clicked.connect(self.toggle_usb)
         V.sd_clicked.connect(self.on_sd_click)
         V.port_clicked.connect(self.on_port_click)
+        V.pin_clicked.connect(self.on_pin_click)
         V.menu_wanted.connect(self.on_context_menu)
         self.runner.output.connect(lambda line: self.log.add(line, "you"))
         self.runner.failed.connect(self.on_failed)
@@ -681,6 +691,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.view.set_power(state, *self.hint(state))
             self.view.set_blank(False)
+            self.on_header(None)
             self.resetting = False
             self.on_speaker(0, 0)
             self.set_halted(False)
@@ -954,6 +965,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.on_speaker(*self.tone)
         if key == ("/machine", "log-level"):
             self.fwlog.set_level(value)
+        if key == ("/machine", "header"):
+            self.on_header(value)
         if not first and old != value:
             self.changed(path, name, old, value)
         self.tiles_due.start()
@@ -2068,13 +2081,107 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_port_click(self, zone, pos):
         if zone == "ir":
             self.menu_ir.popup(pos)
-        elif zone == "gpio":
-            self.show_fwlog()
 
     def on_context_menu(self, zone, pos):
-        menu = {"usb": self.menu_usb, "sd": self.menu_sd,
-                "ir": self.menu_ir}.get(zone, self.menu_device)
+        menu = {"usb": self.menu_usb, "sd": self.menu_sd, "ir": self.menu_ir,
+                "gpio": self.menu_gpio}.get(zone, self.menu_device)
         menu.popup(pos)
+
+    # ----------------------------------------------------- the GPIO header
+
+    def on_header(self, text):
+        """What the machine says of its GPIO header (None: nothing, as an
+        emulator that is off, or one from before it could)"""
+        try:
+            self.header = fe_header.parse(text) if isinstance(text, str) else []
+        except ValueError:
+            self.header = []
+        tips = {n: f"Pin {n}: {what}" for n, what in fe_header.POWER.items()} \
+            if self.header else {}
+        for p in self.header:
+            tips[p["number"]] = self.pin_text(p) + (
+                ". Click to hold it high or low from outside" if p["holdable"]
+                else ". Click for the iButton menu" if p["number"] == 17
+                else ". Click to read the firmware's log")
+        self.view.set_header({p["number"]: (p["level"], p["held"])
+                              for p in self.header}, tips)
+
+    def pin_text(self, p):
+        """A pin of the header in one line"""
+        text = f"Pin {p['number']}, {p['label']} ({p['pin']}): "
+        if not p["holdable"]:
+            return text + fe_header.NOT_HELD.get(p["number"], "not for holding"
+                                                 ).replace("`ibutton`", "iButton")
+        text += f"{fe_header.mode_text(p)}, {p['level']}"
+        if p["held"]:
+            text += f"; held {p['held']} from outside" + (
+                ", which does not show while the firmware drives it"
+                if fe_header.overruled(p) else "")
+        return text
+
+    def hold_pin(self, pin, level):
+        """level: high, low or free; pin None: let go of all"""
+        self.command("gpio", *([pin, level] if pin else ["free"]))
+
+    def pin_actions(self, menu, p):
+        """What can be done with a pin, into a menu"""
+        for text, level in (("Hold it high (a wire to 3V3)", "high"),
+                            ("Hold it low (a wire to GND)", "low")):
+            a = menu.addAction(text)
+            a.setCheckable(True)
+            a.setChecked(p["held"] == level)
+            a.triggered.connect(lambda _=False, pin=p["pin"], level=level:
+                                self.hold_pin(pin, level))
+        a = menu.addAction("Let go of it")
+        a.setEnabled(bool(p["held"]))
+        a.triggered.connect(lambda _=False, pin=p["pin"]:
+                            self.hold_pin(pin, "free"))
+
+    def on_pin_click(self, number, pos):
+        """A click on the GPIO header: a pin to hold gets its menu; the
+        log's UART, and a click beside the pins, the firmware log; the iButton
+        pin its menu"""
+        p = next((p for p in self.header if p["number"] == number), None)
+        if p and p["holdable"]:
+            menu = self.pin_menu
+            menu.clear()
+            menu.addAction(self.pin_text(p)).setEnabled(False)
+            menu.addSeparator()
+            self.pin_actions(menu, p)
+            menu.popup(pos)
+        elif p and number == 17:
+            self.menu_ibutton.popup(pos)
+        elif number not in fe_header.POWER:
+            self.show_fwlog()
+
+    def fill_gpio_menu(self):
+        """The GPIO menu: the header as it is now"""
+        m = self.menu_gpio
+        m.clear()
+        self.gpio_items = {}            # pin number: its line (a test's way in)
+        if not self.header:
+            m.addAction("Its pins show here while it runs" if not self.is_live()
+                        else "This emulator cannot tell of its pins: it was "
+                             "started before it could").setEnabled(False)
+        pins = {p["number"]: p for p in self.header}
+        for number in range(1, 19) if self.header else ():
+            p = pins.get(number)
+            if p and p["holdable"]:
+                sub = m.addMenu(self.pin_text(p))
+                self.pin_actions(sub, p)
+                self.gpio_items[number] = sub
+            else:
+                a = m.addAction(self.pin_text(p) if p else
+                                f"Pin {number}: {fe_header.POWER[number]}")
+                a.setEnabled(False)
+                self.gpio_items[number] = a
+        m.addSeparator()
+        a = m.addAction("Let go of all pins")
+        a.setEnabled(any(p["held"] for p in self.header))
+        a.triggered.connect(lambda _=False: self.hold_pin(None, "free"))
+        self.a_gpio_free = a
+        m.addAction("The firmware log (pins 13 and 14)").triggered.connect(
+            lambda _=False: self.show_fwlog())
 
     # ------------------------------------------------------------ the view
 

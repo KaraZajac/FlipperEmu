@@ -34,7 +34,8 @@ reboot, no crash): **official 1.5.1**, the official **dev build 3060cee9** (a de
 build, as `./fbt` makes them), **Momentum mntm-012**, **Unleashed unlshd-094** and
 **RogueMaster RM1024-1347**. The window passes `scripts/gui_check.py` (clicked buttons,
 a recording of the screen, Pause, the firmware log and its level, the backlight fading
-in, a file copied to the card, an app dropped on it, the LED blinking while NFC reads,
+in, a file copied to the card, an app dropped on it, pins of the GPIO header held with
+a click, the LED blinking while NFC reads,
 the bench, switching off and on, the Left + Back reboot, a crash and what the firmware
 does after it, an update through the firmware's updater, installing firmware) on the
 same five, off-screen.
@@ -267,9 +268,13 @@ instead, and `--headless` no window at all.
   finger would) and push it back in.
 - **The infrared window** in the upper left face: click it for the Infrared menu, to
   point a remote at it. It glows when the Flipper transmits.
-- **The GPIO pins** along the top: click them for the firmware log, which on a real
-  Flipper comes out of two of them. (What the firmware does with the others, and a
-  wire held to one: `./flipperemu gpio`, [below](#the-gpio-header).)
+- **The GPIO pins** along the top show their levels: a pin that is high is lit amber,
+  one that is low blue, and one that nothing drives stays dark. Click a pin to hold it
+  high or low from outside, as a wire to 3V3 or to GND would (it gets a jumper wire),
+  and to let go of it again. The pointer over a pin says what the firmware has it as,
+  and the GPIO menu has all eighteen. Pins 13 and 14 are where a real Flipper's log
+  comes out: click them, or beside the pins, to read it. (`./flipperemu gpio` is the
+  same from a shell; more [below](#the-gpio-header).)
 - **The lights and sounds** show on the body: the LED glows, the body shakes when the
   motor runs, and a speaker sign shows a tone (it plays through `--audio`).
 - **The bench** under it has a tile for each of USB, the microSD card, the battery, NFC,
@@ -354,7 +359,8 @@ program can use it too. `scripts/gui_check.py FIRMWARE` checks the window off-sc
 boots a throwaway device, clicks its buttons, records its screen, pauses it, reads the
 firmware's log and sets its level, counts the steps of the backlight's fade, copies a
 file to its card, drops an app on it, starts it again with F5 and once more by putting
-a new file in its place, watches the LED blink
+a new file in its place, holds two pins of the GPIO header with clicks on them and
+lets go of them, watches the LED blink
 while NFC reads, switches it off and on, reboots it, has an app crash the firmware,
 loses the emulator and finds it again after that, and updates it twice with the package
 it runs: once with the wait given up, once to the end.
@@ -456,7 +462,8 @@ logged. What more there is to see at debug and trace is the build's to say: offi
 at info.
 
 In the window the firmware log is a tab beside the console (View > The firmware log,
-Ctrl+Shift+L, or a click on the GPIO pins). It shows the last 5000 lines as they come,
+Ctrl+Shift+L, or a click on pin 13 or 14 of the GPIO header, where a real one has
+it). It shows the last 5000 lines as they come,
 and keeps at the newest one unless you scroll up. Choose which levels show, type a tag or
 a word to see only the lines with it (`/…/` for a regular expression), and set the
 firmware's level from the button: the Flipper restarts to take it. Save… writes what is
@@ -1322,6 +1329,12 @@ $ ./flipperemu gpio
 A pin goes by the MCU's name (`PA7`), by what the case says beside it (`A7`, `C0`,
 `SWC`) or by its number on the header (`2`). `status` has the header in one line (the
 pins that are outputs, and those held), and `status --json` all of it.
+
+In the window the pins of the drawn Flipper are the same thing by hand. A pin is lit
+amber while it is high and blue while it is low. A click on one has a menu to hold it
+high or low and to let go of it, and a held pin has a jumper wire on it. The GPIO menu
+lists every pin with what the firmware has it as. The window looks at the header ten
+times a second, so a pin that blinks faster than that shows only some of its blinks.
 
 - What is held stays so over a reset of the firmware, as a wire would, and is gone with
   the emulator (`stop`).

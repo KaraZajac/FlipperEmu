@@ -285,7 +285,12 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         machine's property `header`, on the L4x5 GPIO model's outside connections;
         `scripts/gpio_check.py`, with the firmware's `gpio` CLI command on the
         other side (BRINGUP_LOG 100)
-  - ☐ The window's pins: lit by their level, and a click to hold one
+  - ☑ The window's pins (2026-11-11): lit by their level, a click on one to hold
+        it high or low or let go of it (a jumper wire shows on a held one), a line
+        for each under the pointer, and a GPIO menu with all eighteen; the window
+        watches the property `header` over the front-panel link, and holds a pin
+        with the launcher's `gpio`; `scripts/fe_header.py` reads the property for
+        both; six more checks in `gui_check.py` (BRINGUP_LOG 101)
   - ☐ A record of what a pin did (`gpio watch`, a VCD file for a pulse `--wait`
         is too slow for)
   - ☐ What a peripheral puts on a pin: LPUART1 on 15 and 16 as a serial port, PWM,

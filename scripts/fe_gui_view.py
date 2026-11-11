@@ -54,6 +54,7 @@ GPIO_PINS = ([BX + 82 + i * GPIO_PITCH for i in range(8)]
              + [BX + 214.3 + i * GPIO_PITCH for i in range(10)])
 GPIO_ROWS = (QRectF(GPIO_PINS[0] - 4.6, BY + 0.5, 7 * GPIO_PITCH + 9.2, 3.9),
              QRectF(GPIO_PINS[8] - 4.6, BY + 0.5, 9 * GPIO_PITCH + 9.2, 3.9))
+PIN_HIGH, PIN_LOW = "#ffb72e", "#4a86e8"        # a pin's level, in its socket
 SD_X, SD_W, SD_H = BX + 298, 40.0, 20.0         # the card, in the bottom edge
 SD_OUT = (2.5, 13.0)                            # how far it shows: in, pulled
 USB_OUT = 11.0                                  # how far an unplugged plug is
@@ -281,7 +282,9 @@ class FlipperView(QtWidgets.QWidget):
     key = QtCore.Signal(str, bool)      # a button went down (True) or up
     usb_clicked = QtCore.Signal()
     sd_clicked = QtCore.Signal()
-    port_clicked = QtCore.Signal(str, QtCore.QPoint)    # "ir" or "gpio"
+    port_clicked = QtCore.Signal(str, QtCore.QPoint)    # "ir"
+    pin_clicked = QtCore.Signal(int, QtCore.QPoint)     # a pin of the GPIO
+                                        # header, by its number (0: beside one)
     menu_wanted = QtCore.Signal(str, QtCore.QPoint)     # zone ("" for none)
 
     def __init__(self, name, scale=3, theme="white", parent=None):
@@ -307,6 +310,9 @@ class FlipperView(QtWidgets.QWidget):
         self.mouse_key = None
         self.mouse_zone = None
         self.hover = None
+        self.hover_pin = 0              # the GPIO pin under the mouse (number)
+        self.header = {}                # GPIO pin number: (level, held)
+        self.pin_tips = {}              # ... and what to say of it
         self.shake = 0
         self.clock = QtCore.QElapsedTimer()
         self.clock.start()
@@ -368,6 +374,13 @@ class FlipperView(QtWidgets.QWidget):
 
     def set_sd(self, state):
         self._set(sd=state)
+
+    def set_header(self, pins, tips):
+        """The GPIO header.  pins: a pin's number there -> (its level: high,
+        low or something else; what is held to it from outside: high, low or
+        None).  tips: the number -> what to say of that pin."""
+        self.pin_tips = dict(tips)
+        self._set(header=dict(pins))
 
     def set_power(self, power, *hint):
         """'on', or what else it is, with what to say on the dark screen"""
@@ -457,6 +470,20 @@ class FlipperView(QtWidgets.QWidget):
                 return name
         return None
 
+    def pin_at(self, pos):
+        """The GPIO pin under a point of the widget, by its number on the
+        header (1 to 18); 0: none"""
+        x = pos.x() / self.k
+        if self.zone_at(pos) != "gpio":
+            return 0
+        return next((i + 1 for i, at in enumerate(GPIO_PINS)
+                     if abs(x - at) <= GPIO_PITCH / 2), 0)
+
+    def pin_point(self, number):
+        """Where that pin is in the widget (for a test, to click it)"""
+        return QtCore.QPoint(round(GPIO_PINS[number - 1] * self.k),
+                             round((BY + 2.4) * self.k))
+
     def mousePressEvent(self, e):
         if e.button() != Qt.LeftButton:
             return
@@ -482,16 +509,21 @@ class FlipperView(QtWidgets.QWidget):
                 self.usb_clicked.emit()
             elif zone == "sd":
                 self.sd_clicked.emit()
+            elif zone == "gpio":
+                self.pin_clicked.emit(self.pin_at(e.position()),
+                                      e.globalPosition().toPoint())
             else:
                 self.port_clicked.emit(zone, e.globalPosition().toPoint())
 
     def mouseMoveEvent(self, e):
         zone = self.zone_at(e.position())
-        if self._set(hover=zone):
+        was = self.hover
+        if self._set(hover=zone, hover_pin=self.pin_at(e.position())) \
+                and zone != was:
             self.setCursor(Qt.PointingHandCursor if zone else Qt.ArrowCursor)
 
     def leaveEvent(self, e):
-        self._set(hover=None)
+        self._set(hover=None, hover_pin=0)
         self.unsetCursor()
 
     def contextMenuEvent(self, e):
@@ -518,7 +550,7 @@ class FlipperView(QtWidgets.QWidget):
 
     def event(self, e):
         if e.type() == QtCore.QEvent.ToolTip:
-            text = self.tip(self.zone_at(e.pos()))
+            text = self.tip(self.zone_at(e.pos()), self.pin_at(e.pos()))
             if text:
                 QtWidgets.QToolTip.showText(e.globalPos(), text, self)
             else:
@@ -526,8 +558,10 @@ class FlipperView(QtWidgets.QWidget):
             return True
         return super().event(e)
 
-    def tip(self, zone):
+    def tip(self, zone, pin=0):
         off = self.power != "on"
+        if zone == "gpio" and self.pin_tips.get(pin):
+            return self.pin_tips[pin]
         return {
             "up": "Up (↑)", "down": "Down (↓)", "left": "Left (←)",
             "right": "Right (→)", "ok": "OK (Enter or Space)",
@@ -540,8 +574,9 @@ class FlipperView(QtWidgets.QWidget):
             "sd": {True: "The microSD card: click to pull it out",
                    False: "The microSD card: click to push it in",
                    None: "No microSD card in this run"}[self.sd],
-            "gpio": "The GPIO pins. What the firmware logs comes out of two "
-                    "of them (13 and 14): click to read it",
+            "gpio": "The GPIO pins: click one to hold it high or low from "
+                    "outside. What the firmware logs comes out of two of "
+                    "them (13 and 14): click here to read it",
             "ir": "The infrared window: click to point a remote at it",
         }.get(zone, "")
 
@@ -669,11 +704,25 @@ class FlipperView(QtWidgets.QWidget):
         for row in GPIO_ROWS:                   # the GPIO sockets, in the top
             p.setBrush(socket)
             p.drawRoundedRect(row, 1.2, 1.2)
-        for x in GPIO_PINS:
-            p.setBrush(QColor("#050506"))
-            p.drawRect(QRectF(x - 2.0, BY + 1.2, 4.0, 2.5))
+        for number, x in enumerate(GPIO_PINS, 1):
+            level, held = self.header.get(number, (None, None))
+            hole = QRectF(x - 2.0, BY + 1.2, 4.0, 2.5)
+            if self.hover == "gpio" and self.hover_pin == number:
+                p.setBrush(mix(t["port"], "#ffffff", 0.6))
+                p.drawRoundedRect(hole.adjusted(-1.0, -0.7, 1.0, 0.2), 0.8, 0.8)
+            # a pin that is high or low shows it; one that floats, or carries
+            # a peripheral's signal, is dark
+            p.setBrush(QColor(PIN_HIGH) if level == "high" else
+                       mix("#050506", PIN_LOW, 0.8) if level == "low" else
+                       QColor("#050506"))
+            p.drawRect(hole)
             p.setBrush(t["pin"])                # (a glint of the contact in it)
             p.drawRect(QRectF(x - 0.8, BY + 2.6, 1.6, 1.1))
+            if held:                            # a jumper wire in the socket:
+                p.setBrush(QColor(PIN_HIGH if held == "high" else PIN_LOW))
+                p.drawRect(QRectF(x - 0.9, 0, 1.8, BY - 3.2))   # to 3V3 or GND
+                p.setBrush(QColor("#1b1b1f"))   # (its black plug)
+                p.drawRoundedRect(QRectF(x - 2.6, BY - 3.6, 5.2, 5.2), 0.7, 0.7)
         p.setBrush(t["port"])                   # the slots in its edges
         p.save()
         p.setTransform(USB_T, True)
