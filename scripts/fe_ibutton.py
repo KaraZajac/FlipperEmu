@@ -49,7 +49,19 @@ def maxim_crc8(data, crc=0):
 
 
 def hexbytes(text):
-    return bytes(int(x, 16) for x in text.replace(":", " ").split())
+    """Bytes from hex digits: apart (`01 A1 B2`, `01:A1:B2`), or run together
+    as the Flipper prints a key (`01A1B2`)."""
+    out = bytearray()
+    for word in text.replace(":", " ").split():
+        if word[:2] in ("0x", "0X") and len(word) > 2:
+            word = word[2:]
+        if not all(c in "0123456789abcdefABCDEF" for c in word):
+            raise ValueError(f"{word}: not hex digits")
+        if len(word) > 2 and len(word) % 2:
+            raise ValueError(f"{word}: {len(word)} hex digits, half a byte too "
+                             "many or too few")
+        out += bytes.fromhex(word.zfill(2))
+    return bytes(out)
 
 
 def rom_of(data):

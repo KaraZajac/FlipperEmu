@@ -985,6 +985,7 @@ reader's field.
 
 ```sh
 ./flipperemu ibutton ds1990 01 A1 B2 C3 D4 E5 F6    # a DS1990A (7 bytes: the CRC is added)
+./flipperemu ibutton ds1990 01A1B2C3D4E5F68F        # the same, as `ikey read` prints it
 ./flipperemu ibutton key.ibtn                       # a Flipper .ibtn file
 ./flipperemu ibutton ds1996 0C A1 B2 C3 D4 E5 F6    # a DS1996, 8 KB of memory (zeroed)
 ./flipperemu ibutton cyfral A1 B2                   # a Cyfral key
