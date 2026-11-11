@@ -15,7 +15,8 @@ scan of the bus (its CLI's `i2c`) finds the two and nothing else, and the
 launcher has counted its calls; `gpio`, `status` and `status --json` say what
 is on the bus.  A value is read bare and set from outside, and what cannot be
 is refused: a temperature out of the sensor's range, an address with nothing
-at it, a value the device has not, one that is fixed while it runs.
+at it, a value the device has not, one that is fixed while it runs.  `i2c
+--json` has the bus and every device's values for a program.
 
 Where the firmware's JS has an i2c module (Momentum, Unleashed, RogueMaster;
 the official firmware's has none, and that part is skipped), the firmware runs
@@ -201,6 +202,27 @@ def value_checks(b):
     code, out, err, _ = fe(b, "i2c", "0x48", "temperature")
     check("... and the temperature is as it was set",
           code == 0 and out.strip() == "30.25", out + err)
+    code, out, err, _ = fe(b, "i2c", "--json")
+    c2, o2, e2, _ = fe(b, "i2c", "--json", "0x50")
+    c3, o3, e3, _ = fe(b, "i2c", "--json", "0x48", "temperature")
+    try:
+        whole, one = json.loads(out), json.loads(o2)
+    except ValueError:
+        whole, one = {}, {}
+    devices = whole.get("devices") or []
+    check("`i2c --json`: the bus for a program, each device with its values "
+          "(a temperature in °C, an EEPROM's file); with an address, that "
+          "device alone; not with a value's name, which comes bare",
+          (code, c2) == (0, 0)
+          and (whole.get("name"), whole.get("sda"), whole.get("scl"))
+          == ("I2C3", 15, 16) and whole.get("calls", 0) >= 128
+          and devices == [{"type": "tmp105", "address": 0x48,
+                           "values": {"temperature": 30.25}}, one]
+          and one.get("type") == "at24c-eeprom"
+          and one.get("file") == str(b.dir / "i2c-50.bin")
+          and one.get("values", {}).get("rom-size") == 256
+          and c3 == 1 and "comes bare" in e3 and not o3,
+          out + err + o2 + e2 + o3 + e3)
 
 
 def script_checks(b, timeout):

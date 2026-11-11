@@ -2121,6 +2121,41 @@ big lock, entry 92).
       (the script), on Momentum, Unleashed and RogueMaster (the app); 33 and two
       skipped on the official dev build.
 
+112. **The I2C bus in the window; `i2c --json`.** The window had the header's pins
+    and its serial ports, and nothing of the bus: a sensor on it was set from a
+    shell.
+    - The GPIO menu has a line for the bus in `i2c`'s words and, beneath it, one
+      for each device that opens to the device's values. A temperature has `set
+      it…`, a dialog in °C. The window sets it with the launcher's `i2c ADDRESS
+      NAME VALUE`, as it makes every change.
+    - A device's values are not on the front-panel link. They are properties of
+      QEMU's own devices, other ones for each type, and the link has 64 watches
+      at most. The launcher already knows which of them are a device's own and
+      that a temperature is in thousandths of a degree, so it got `i2c --json`:
+      the bus, and each device with its values. The window asks for it when the
+      devices of the bus change, when the GPIO menu opens, and after it set a
+      value. A program can use it as well.
+    - The words for a value are in `fe_header.py` now, for the launcher and the
+      window alike: the menu's line cannot differ from `i2c`'s.
+    - The console and the firmware's calls. `header-i2c` changes with each call,
+      and a scan is 128 of them in under a second. The window waits until the
+      bus has been quiet for 0.7 s (3 s at most, for an app that never stops)
+      and writes one line with what the calls since its last line came to.
+    - An app that reads a sensor every second would be a line a second that way.
+      A line is written only when the calls went differently than those of the
+      last line (all answered, some, none) or after ten seconds of silence. The
+      menu's line has the numbers at any time.
+    - Tried with the firmware's scan: one line, `Pins 15 and 16 (I2C3): the
+      firmware called 128 addresses, 2 answered; the last: 0x7f to write, no
+      answer`.
+    - Left for the record of transfers: a word on an address that was not
+      shifted (the app calls 0x24, the sensor is at 0x48).
+    - `scripts/gui_check.py` has three more checks (50, on the five firmwares),
+      with a TMP105 and an EEPROM on the bus of its device. The dialog is
+      answered by a timer that finds it, since `exec()` does not return before
+      that. `scripts/i2c_check.py` has one more (38 and one skipped; 34 and two
+      skipped on the official dev build).
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

@@ -360,9 +360,15 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         `test.sh`; `run --i2c help` lists the types, and one that QEMU has not is
         refused before anything is flashed; `scripts/i2c_check.py` is 37 checks
         (BRINGUP_LOG 111)
-  - ☐ More on that bus: the bus in the window's GPIO menu; a record of the
-        transfers (who was called, what was written and read); the C app on the
-        other firmwares, each with its own SDK
+  - ☑ That bus in the window (2026-11-11): the GPIO menu has the bus, each
+        device with its values and a sensor's temperature to set; the console
+        says what the firmware's calls came to (one line for a scan, none for
+        each read of an app that reads every second); `i2c --json` for a
+        program; `gui_check.py` is 50 checks, `i2c_check.py` 38 (BRINGUP_LOG 112)
+  - ☐ More on that bus: a record of the transfers (who was called, what was
+        written and read), and with it a word on an address that was not
+        shifted (a call to 0x24 that nobody answers while a device is at 0x48);
+        the C app on the other firmwares, each with its own SDK
   - ☐ What other peripherals put on a pin: PWM, SPI devices on the header; a
         voltage for the ADC
   - ☐ An interrupt on a held pin and an open-drain output (untried: they need an

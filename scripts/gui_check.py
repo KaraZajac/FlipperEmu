@@ -20,7 +20,10 @@ built for another API (refused, or asked about on the Flipper's screen and
 then answered with a button), holds pins of the GPIO header high and low with
 a click on them (they light, and the firmware reads them so), lets go of
 them, records what a pin does to a file (GPIO > Record what the pins do),
-holds an NFC tag to it from the
+finds a sensor and an EEPROM on the header's I2C bus in the GPIO menu (the
+device starts with `--i2c tmp105@0x48 --i2c eeprom@0x50`), sets the sensor's
+temperature from there, lets the firmware scan the bus (which the console
+says), holds an NFC tag to it from the
 bench, unplugs USB, switches it off as a real one is (Back held for 5 s, then
 Power Off: the window stays, the emulator exits), copies a file to the card
 of the switched-off Flipper, switches
@@ -354,6 +357,88 @@ class Driver:
               and "Pins 15 and 16 (LPUART1): off (nothing has opened it)"
               in said and "USART1" not in said.split("9600 baud")[-1]
               and "LPUART1" not in tip, f"{said[-400:]}\npin 15: {tip}")
+
+    def i2c_bus(self):
+        """The header's I2C bus: the devices that `run --i2c` put there in
+        the GPIO menu, a sensor's temperature set from it, and what the
+        firmware calls there in the console"""
+        w, v = self.win, self.win.view
+        self.until(lambda: w.i2c is not None, 5)
+        w.fill_gpio_menu()              # as the menu bar's GPIO menu opens
+        self.settle()                   # ... and the launcher said the values
+        said = self.launcher("i2c").stdout
+        bus = w.a_gpio_i2c.text() if w.a_gpio_i2c else ""
+        lines = {at: (m.title(), [(a.text(), a.isEnabled())
+                                  for a in m.actions()])
+                 for at, m in w.gpio_i2c.items()}
+        sensor, rom = lines.get(0x48, ("", [])), lines.get(0x50, ("", []))
+        kept = re.search(r"kept in \S+i2c-50\.bin", said)
+        check("i2c: the bus in the GPIO menu as `i2c` has it: a sensor at "
+              "0x48 with its temperature, which can be set, an EEPROM at "
+              "0x50 and the file of its contents; both on pins 15 and 16",
+              bus.startswith("Pins 15 and 16 (I2C3): tmp105 at 0x48, "
+                             "at24c-eeprom at 0x50; ")
+              and bus.split(": ", 1)[1] in said and not w.a_gpio_i2c.isEnabled()
+              and sensor == ("0x48: tmp105, temperature 23.5 °C",
+                             [("temperature 23.5 °C: set it…", True)])
+              and rom[0].startswith("0x50: at24c-eeprom, ")
+              and "kept in i2c-50.bin" in rom[0] and kept
+              and (kept[0], False) in rom[1] and ("rom-size 256", False) in rom[1]
+              and "I2C3's SDA, tmp105 at 0x48, at24c-eeprom at 0x50 on it; "
+              in v.pin_tips.get(15, "")
+              and "I2C3's SCL, tmp105 at 0x48, " in v.pin_tips.get(16, ""),
+              f"{bus}\n{lines}\npin 15: {v.pin_tips.get(15)}\n{said}")
+
+        was = []
+
+        def answer():                   # the dialog, once it is there
+            for d in w.findChildren(fe_gui.W.DegreesDialog):
+                if d.isVisible():
+                    was.append(d.celsius.value())
+                    d.celsius.setValue(30.25)
+                    d.accept()
+
+        timer = QtCore.QTimer(interval=100)
+        timer.timeout.connect(answer)
+        acts = w.gpio_i2c[0x48].actions() if 0x48 in w.gpio_i2c else []
+        if acts and acts[0].isEnabled():
+            timer.start()
+            acts[0].trigger()           # temperature 23.5 °C: set it…
+            timer.stop()
+        self.settle()
+        bare = self.launcher("i2c", "0x48", "temperature").stdout.strip()
+        w.fill_gpio_menu()
+        self.settle()
+        title = w.gpio_i2c[0x48].title() if 0x48 in w.gpio_i2c else ""
+        check("i2c: the sensor's line, 'set it': a dialog with the "
+              "temperature as it is; 30.25 °C given there is what the sensor "
+              "has, the console says so, and the menu",
+              was == [23.5] and bare == "30.25"
+              and "tmp105 at 0x48: temperature 30.25 °C" in self.console()
+              and title == "0x48: tmp105, temperature 30.25 °C",
+              f"the dialog had {was}; i2c 0x48 temperature: {bare!r}; "
+              f"{title!r}\n{self.console()[-300:]}")
+
+        scan = self.launcher("cli", "--timeout", "25", "i2c")
+        news = ("Pins 15 and 16 (I2C3): the firmware called 128 addresses, 2 "
+                "answered; the last: 0x7f to write, no answer")
+        told = self.until(lambda: news in self.console(), 10)
+        open_ = w.a_gpio_i2c.text() if w.a_gpio_i2c else ""
+        w.fill_gpio_menu()
+        self.settle()
+        bus = w.a_gpio_i2c.text() if w.a_gpio_i2c else ""
+        said = self.launcher("i2c").stdout
+        check("i2c: the firmware scans the bus (its `i2c` command): one line "
+              "in the console, 128 addresses of which two answered, and the "
+              "GPIO menu has the calls as `i2c` has them, a menu that was "
+              "open meanwhile too",
+              scan.returncode == 0 and told and open_ == bus
+              and self.console().count("(I2C3): the firmware called") == 1
+              and re.search(r"the firmware called \d+ addresses, \d+ "
+                            r"answered; the last: 0x7f to write, no answer",
+                            bus) and bus.split(": ", 1)[1] in said,
+              f"{scan.returncode}: {scan.stdout[-200:]}{scan.stderr[-200:]}\n"
+              f"{bus}\nwhile open: {open_}\n{self.console()[-300:]}")
 
     def pin_record(self):
         """The record of what the pins do, from the GPIO menu (the file is
@@ -854,6 +939,7 @@ class Driver:
         self.blink()
         self.pins()
         self.pin_record()
+        self.i2c_bus()
 
         w.hold("nfc", ["ntag215", "04A1B2C3D4E5F6", "https://example.com"])
         w.set_cable("unplugged")
@@ -950,7 +1036,8 @@ def main():
     launcher = importlib.machinery.SourceFileLoader(
         "flipperemu_launcher", str(ROOT / "flipperemu")).load_module()
     sys.argv = ["flipperemu", "-d", name, "run", "-f", args.firmware,
-                "--audio", "none", "--serial", f"file:{uart}"]
+                "--audio", "none", "--serial", f"file:{uart}",
+                "--i2c", "tmp105@0x48,temperature=23.5", "--i2c", "eeprom@0x50"]
     try:
         code = launcher.main()
         check("exit status of the run: 0", code == 0)

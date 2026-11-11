@@ -54,6 +54,7 @@ WATCHES = (
     ("/machine/speaker", "mute"),
     ("/machine", "log-level"), ("/machine", "header"),
     ("/machine", "header-record"), ("/machine", "header-serial"),
+    ("/machine", "header-i2c"),
 )
 
 # what can come from a file: (the menu's word for them, file filter, where
@@ -71,6 +72,10 @@ UPDATES = "Update packages (*.tgz *.tar.gz *.tar *.fuf)"
 APPS = "Flipper apps (*.fap)"
 APP_WAIT_S = 45             # a question about an app on its screen: this long
 WATCH_MS = 500              # a watched app's file is looked at this often
+I2C_TELL_MS = 700           # the header's I2C bus quiet for this long: what
+#                             the firmware called there goes to the log
+I2C_BURST_S = 3             # ... or once it has called for this long
+I2C_QUIET_S = 10            # the same as the last time is news after this long
 SCALES = (2, 3, 4, 5, 6)
 POWER_ON_MS = 1500          # hold Back this long, and an off Flipper starts
 RESET_MS = 3000             # Left + Back held this long: it reboots
@@ -187,6 +192,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ports = []                 # ... and its serial ports
         self.pin_record = None          # (changes, ns, the file) while they
         #                                 are recorded
+        self.i2c = None                 # the header's I2C bus (fe_header)
+        self.i2c_values = {}            # an address there: its device with
+        #                                 its values (`i2c --json`)
+        self.i2c_asked = False          # ... which the launcher is asked for
+        self.i2c_seen = (0, 0)          # its calls, and those nobody took,
+        #                                 that the log has been told of
+        self.i2c_kind = None            # ... and how the last ones were taken
+        self.i2c_at = float("-inf")     # when the firmware last called there
+        self.i2c_from = 0.0             # ... when the calls not told of began,
+        self.i2c_gap = 0.0              # and how long the bus was quiet before
+        self.a_gpio_i2c = None          # the GPIO menu's line for the bus
+        self.gpio_i2c = {}              # ... and an address: its device's menu
         self.state = None
         self.expect_off = False         # it said it is switching off
         self.qemu_up = session is not None      # ours, and running
@@ -250,6 +267,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo.timeout.connect(self.combo_fired)
         self.tiles_due = QtCore.QTimer(self, singleShot=True, interval=0)
         self.tiles_due.timeout.connect(self.refresh_tiles)
+        self.i2c_due = QtCore.QTimer(self, singleShot=True,
+                                     interval=I2C_TELL_MS)
+        self.i2c_due.timeout.connect(self.tell_i2c)
         self.poll = QtCore.QTimer(self, interval=250)
         self.poll.timeout.connect(self.tick)
         self.poll.start()
@@ -699,6 +719,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.view.set_power(state, *self.hint(state))
             self.view.set_blank(False)
             self.ports = []
+            self.on_i2c(None)
             self.on_header(None)
             self.on_pin_record(None)
             self.resetting = False
@@ -981,6 +1002,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.on_header(value)
         if key == ("/machine", "header-serial"):
             self.on_serial(value, tell=not first)
+        if key == ("/machine", "header-i2c"):
+            self.on_i2c(value, tell=not first)
         if not first and old != value:
             self.changed(path, name, old, value)
         self.tiles_due.start()
@@ -2144,6 +2167,13 @@ class MainWindow(QtWidgets.QMainWindow):
         """A pin of the header in one line"""
         text = f"Pin {p['number']}, {p['label']} ({p['pin']}): "
         of = fe_header.port_pin(p, self.ports)
+        bus = self.i2c
+        line = bus and {bus["sda"]: "SDA", bus["scl"]: "SCL"}.get(p["number"])
+        if line and (bus["devices"] or fe_header.i2c_pin(p, bus)):
+            # (the firmware has the pins as the bus's only while it talks
+            # there; a device on the bus is wired to them all the time)
+            text += (f"{bus['name']}'s {line}, {fe_header.i2c_devices(bus)} "
+                     "on it; ")
         if of:
             text += f"{of[0]['name']}'s {of[1]}, {fe_header.port_text(of[0])}"
             if not p["holdable"]:
@@ -2162,6 +2192,141 @@ class MainWindow(QtWidgets.QMainWindow):
     def hold_pin(self, pin, level):
         """level: high, low or free; pin None: let go of all"""
         self.command("gpio", *([pin, level] if pin else ["free"]))
+
+    def on_i2c(self, text, tell=False):
+        """What the machine says of the header's I2C bus (None: nothing).
+        tell: what the firmware calls there goes to the log, once the bus is
+        quiet again (tell_i2c)."""
+        try:
+            bus = fe_header.parse_i2c(text) if isinstance(text, str) else None
+        except ValueError:
+            bus = None
+        there = lambda b: b and [(d["type"], d["address"])
+                                 for d in b["devices"]]
+        before, self.i2c = self.i2c, bus
+        if bus and self.a_gpio_i2c:     # the GPIO menu's line, if it is open
+            self.a_gpio_i2c.setText(self.i2c_line())
+        if there(bus) != there(before):
+            self.i2c_values = {}
+            self.ask_i2c_values()
+            self.on_header(self.props.get(("/machine", "header")))
+        counts = (bus["calls"], bus["unanswered"]) if bus else (0, 0)
+        if not (tell and bus) or counts[0] < self.i2c_seen[0]:
+            # as it was found, or an emulator that started anew: no news
+            self.i2c_due.stop()
+            self.i2c_seen, self.i2c_kind = counts, None
+            self.i2c_at = float("-inf")
+            return
+        now = time.monotonic()
+        if not self.i2c_due.isActive():
+            self.i2c_gap, self.i2c_from = now - self.i2c_at, now
+        self.i2c_at = now
+        if now - self.i2c_from < I2C_BURST_S:
+            self.i2c_due.start()        # (once more from its beginning)
+
+    def i2c_line(self):
+        """The header's I2C bus in a line, as `i2c` has it"""
+        return (f"{fe_header.i2c_name(self.i2c, 'P')}: "
+                f"{fe_header.i2c_text(self.i2c)}")
+
+    def tell_i2c(self):
+        """The firmware's calls on the header's I2C bus since the log was
+        last told, in a line.  An app that asks a sensor again and again would
+        fill the log: calls that were taken as the ones before are told only
+        after the bus has been quiet for a while (I2C_QUIET_S)."""
+        bus = self.i2c
+        if not bus:
+            return
+        calls = bus["calls"] - self.i2c_seen[0]
+        lost = bus["unanswered"] - self.i2c_seen[1]
+        self.i2c_seen = (bus["calls"], bus["unanswered"])
+        if calls <= 0 or not bus["last"]:
+            return
+        kind = "all" if lost <= 0 else "none" if lost >= calls else "some"
+        if kind != self.i2c_kind or self.i2c_gap >= I2C_QUIET_S:
+            self.log.add(
+                f"{fe_header.i2c_name(bus, 'P')}: " + fe_header.i2c_did(
+                    {"calls": calls, "unanswered": max(0, min(lost, calls)),
+                     "last": bus["last"]}), "flipper")
+        self.i2c_kind = kind
+
+    def ask_i2c_values(self):
+        """The values of the devices on the header's I2C bus, from the
+        launcher (`i2c --json`): they are the devices' own, and no property
+        of the machine that the link could watch"""
+        if (self.is_live() and self.i2c and self.i2c["devices"]
+                and not self.i2c_asked):
+            self.i2c_asked = True
+            self.command("i2c", "--json", then=self.on_i2c_values, quiet=True)
+
+    def on_i2c_values(self, code, text):
+        self.i2c_asked = False
+        try:
+            devices = json.loads(text)["devices"] if code == 0 else None
+            if devices is not None:
+                self.i2c_values = {d["address"]: d for d in devices
+                                   if isinstance(d["values"], dict)}
+        except (ValueError, KeyError, TypeError):
+            return
+        for d in (self.i2c or {}).get("devices", ()):
+            if d["address"] in self.gpio_i2c:   # the menu, if it is open
+                self.fill_i2c_device(self.gpio_i2c[d["address"]], d)
+
+    def i2c_known(self, d):
+        """A device on the header's I2C bus with its values, as the
+        launcher had them the last time (None: not yet)"""
+        known = self.i2c_values.get(d["address"])
+        return known if known and known.get("type") == d["type"] else None
+
+    def fill_i2c_device(self, sub, d):
+        """A device on the header's I2C bus, a line of the GPIO menu: its
+        values, and under it each one; a temperature can be set, as the world
+        around a sensor would"""
+        at, known = d["address"], self.i2c_known(d)
+        title = f"0x{at:02x}: {d['type']}"
+        sub.clear()
+        if not known:
+            sub.setTitle(title)
+            sub.addAction("Its values are being read").setEnabled(False)
+            return
+        said = {name: fe_header.i2c_value(known, name)
+                for name in known["values"]}
+        few = []
+        for name, words in said.items():
+            if known.get("file") and name == "drive":
+                words = f"kept in {os.path.basename(known['file'])}"
+            if len(", ".join(few + [words])) > 70:
+                few.append("…")
+                break
+            few.append(words)
+        sub.setTitle(", ".join([title] + few).replace("&", "&&"))
+        for name, words in said.items():
+            value = known["values"][name]
+            if fe_header.i2c_degrees(name) and isinstance(value, (int, float)) \
+                    and not isinstance(value, bool):
+                a = sub.addAction(f"{words}: set it…".replace("&", "&&"))
+                a.triggered.connect(lambda _=False, at=at, name=name:
+                                    self.ask_i2c_value(at, name))
+            else:
+                sub.addAction(words.replace("&", "&&")).setEnabled(False)
+        if not said:
+            sub.addAction("It has no value of its own").setEnabled(False)
+
+    def ask_i2c_value(self, address, name):
+        """A new temperature for a sensor on the header's I2C bus"""
+        known = self.i2c_values.get(address)
+        if not known:
+            return
+        value = known["values"].get(name)
+        d = W.DegreesDialog(self, f"{known['type']} at 0x{address:02x}", name,
+                            value if isinstance(value, (int, float)) else 25.0)
+        if d.ask():
+            self.set_i2c_value(address, name, d.value())
+
+    def set_i2c_value(self, address, name, value):
+        """Set a value of a device on the header's I2C bus, as `i2c` does"""
+        self.command("i2c", f"0x{address:02x}", name, value,
+                     then=lambda code, text: self.ask_i2c_values())
 
     def on_pin_record(self, text):
         """What the machine says of the record of its pins (None, or
@@ -2243,6 +2408,8 @@ class MainWindow(QtWidgets.QMainWindow):
         """The GPIO menu: the header as it is now"""
         m = self.menu_gpio
         m.clear()
+        for sub in self.gpio_i2c.values():
+            sub.deleteLater()           # (clear() leaves a menu under it)
         self.gpio_items = {}            # pin number: its line (a test's way in)
         if not self.header:
             m.addAction("Its pins show here while it runs" if not self.is_live()
@@ -2268,6 +2435,21 @@ class MainWindow(QtWidgets.QMainWindow):
                             f"{fe_header.port_text(port)}")
             a.setEnabled(False)
             self.gpio_ports[port["name"]] = a
+        bus = self.i2c
+        self.a_gpio_i2c = None          # the I2C bus's line
+        self.gpio_i2c = {}              # ... and an address: its device's menu
+        if bus:
+            m.addSeparator()
+            a = m.addAction(self.i2c_line())
+            a.setEnabled(False)
+            self.a_gpio_i2c = a
+            for d in bus["devices"]:
+                sub = self.gpio_i2c[d["address"]] = m.addMenu("")
+                self.fill_i2c_device(sub, d)
+            if not bus["devices"]:
+                m.addAction("(`run --i2c TYPE@ADDRESS` puts a device there, "
+                            "as --i2c tmp105@0x48)").setEnabled(False)
+            self.ask_i2c_values()       # they may have changed since
         m.addSeparator()
         a = m.addAction("Let go of all pins")
         a.setEnabled(any(p["held"] for p in self.header))

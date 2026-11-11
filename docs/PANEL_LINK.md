@@ -187,11 +187,17 @@ monitor. Then what changed comes back over the link, whoever changed it.
 | `/machine/ir tx` | the latest infrared transmission (an `.ir` file) |
 | `/machine/subghz radio` | the CC1101's state and tuning |
 | `/machine/speaker mute` | the speaker muted |
+| `/machine log-level` | the level of the firmware's log, as the RTC's register has it |
+| `/machine header`, `header-record` | the pins of the GPIO header (what the firmware has each as, its level, what is held to it); a record of the pins and the changes it has so far |
+| `/machine header-serial`, `header-i2c` | the header's two serial ports (off, or the baud rate and who takes what comes in); its I2C bus (the devices on it, how many addresses the firmware called and how many answered) |
 
 `/machine/subghz tx` is the whole RAW recording of the latest transmission, too long to
 watch; the window looks for new files in `devices/NAME/subghz-tx/` instead. What the
 launcher held to the Flipper is named in `devices/NAME/held.json` (`{"nfc": "an NTAG215
-04 A1 …"}`): the emulator has the card's bytes, not what it was called.
+04 A1 …"}`): the emulator has the card's bytes, not what it was called. The values of
+a device on the I2C bus (a sensor's temperature) are properties of QEMU's own devices,
+a different set for each type: the window asks the launcher for them (`i2c --json`)
+when the bus's devices change, when the GPIO menu opens and after it set one.
 
 ## Trying it
 

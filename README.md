@@ -285,11 +285,15 @@ instead, and `--headless` no window at all.
   and to let go of it again. The pointer over a pin says what the firmware has it as,
   and the GPIO menu has all eighteen, and beneath them the two serial ports with the
   speed the firmware set (the console says when an app opens one, and when it closes
-  it). Pins 13 and 14 are where a real Flipper's log comes out: click them, or beside
-  the pins, to read it. **GPIO > Record what the pins do…** writes every change of a
-  pin's level to a file with its time, as a logic analyzer on the header would, until
-  GPIO > End the record; the status bar counts the changes meanwhile. (`./flipperemu
-  gpio` is the same from a shell; more [below](#the-gpio-header).)
+  it) and the I2C bus of pins 15 and 16: the devices that `run --i2c` put there, each
+  with its values, a sensor's temperature to set from the menu, and how many of the
+  firmware's calls were answered (the console has that too, once the firmware has
+  talked on the bus). Pins 13 and 14 are where a real Flipper's log comes out: click
+  them, or beside the pins, to read it. **GPIO > Record what the pins do…** writes
+  every change of a pin's level to a file with its time, as a logic analyzer on the
+  header would, until GPIO > End the record; the status bar counts the changes
+  meanwhile. (`./flipperemu gpio` is the same from a shell; more
+  [below](#the-gpio-header).)
 - **The lights and sounds** show on the body: the LED glows, the body shakes when the
   motor runs, and a speaker sign shows a tone (it plays through `--audio`).
 - **The bench** under it has a tile for each of USB, the microSD card, the battery, NFC,
@@ -375,9 +379,10 @@ boots a throwaway device, clicks its buttons, records its screen, pauses it, rea
 firmware's log and sets its level, counts the steps of the backlight's fade, copies a
 file to its card, drops an app on it, starts it again with F5 and once more by putting
 a new file in its place, holds two pins of the GPIO header with clicks on them and
-lets go of them, records what a pin does to a file from the GPIO menu, watches the
-LED blink
-while NFC reads, switches it off and on, reboots it, has an app crash the firmware,
+lets go of them, records what a pin does to a file from the GPIO menu, sets a sensor
+on the header's I2C bus to another temperature from that menu and has the firmware
+scan the bus, watches the LED blink while NFC reads, switches it off and on, reboots
+it, has an app crash the firmware,
 loses the emulator and finds it again after that, and updates it twice with the package
 it runs: once with the wait given up, once to the end.
 
@@ -402,7 +407,7 @@ it runs: once with the wait given up, once to the end.
 | `uart` \| `uart send TEXT [--expect TEXT]` \| `uart wait TEXT` \| `uart term` | the serial port on pins 15 and 16 of its header: where it goes; send to the app that has it open, and wait for its answer; wait for what the app sends; a terminal on it. `--port usart`: the one on pins 13 and 14 |
 | `expansion [--rpc] [--baud N] [--for S] [--port P]` | be an expansion module on its header, to the firmware's expansion service: the call, the baud rate, heartbeats, an RPC session; every frame printed |
 | `run --i2c TYPE@ADDRESS[,NAME=VALUE]` | start with a device on the I2C bus of its header (pins 15 and 16): `--i2c tmp105@0x48,temperature=23.5`, `--i2c eeprom@0x50`; once for each device. `run --i2c help` lists the types |
-| `i2c` \| `i2c ADDRESS` \| `i2c ADDRESS NAME` \| `i2c ADDRESS NAME VALUE` | that bus: its devices with their values, and what the firmware called; one device; one value, bare; set a value while the firmware runs |
+| `i2c` \| `i2c ADDRESS` \| `i2c ADDRESS NAME` \| `i2c ADDRESS NAME VALUE` | that bus: its devices with their values, and what the firmware called; one device; one value, bare; set a value while the firmware runs. `i2c --json`: the bus and its devices' values for a program |
 | `reset` | reboot it, as holding Left + Back does |
 | `pause` \| `continue` | time stands still on it (screen, timers, radios), and goes on from there |
 | `run --usbip [PORT]` | export the USB device over USB/IP (then `sudo scripts/usbip_attach.py`) |
@@ -1378,8 +1383,9 @@ More on it [below](#i2c-devices-on-pins-15-and-16).
 In the window the pins of the drawn Flipper are the same thing by hand. A pin is lit
 amber while it is high and blue while it is low. A click on one has a menu to hold it
 high or low and to let go of it, and a held pin has a jumper wire on it. The GPIO menu
-lists every pin with what the firmware has it as. The window looks at the header ten
-times a second, so a pin that blinks faster than that shows only some of its blinks.
+lists every pin with what the firmware has it as, and beneath the pins the two serial
+ports and the I2C bus with its devices. The window looks at the header ten times a
+second, so a pin that blinks faster than that shows only some of its blinks.
 
 - What is held stays so over a reset of the firmware, as a wire would, and is gone with
   the emulator (`stop`).
@@ -1757,6 +1763,7 @@ from outside and a hand on the device:
 ./flipperemu i2c 0x48                     # one device
 ./flipperemu i2c 0x48 temperature         # one value and nothing else (for a script)
 ./flipperemu i2c 0x48 temperature 30.25   # set it, while the firmware runs
+./flipperemu i2c --json                   # the bus and its devices, for a program
 ```
 
 With Momentum, whose JavaScript has an `i2c` module, and `examples/i2c/sensor.js`,
@@ -1853,6 +1860,19 @@ app's screen compared with a file after each
   answered: the JavaScript module wants the address shifted left by one (0x48 is
   `0x90`), and C's `furi_hal_i2c` functions do too. `gpio` and `status` have the same
   line, and `status --json` has it as `i2c`.
+- **`i2c --json`** is the bus for a program: what `status --json` has as `i2c`, and
+  each device with its `values` by name (a temperature in °C; an address as a number,
+  72 for 0x48), an EEPROM with the `file` of its contents. `i2c --json 0x48` is that
+  device alone.
+- **In the window** the GPIO menu has the bus beneath the serial ports, in the same
+  words, and a line for each device that opens to its values. A sensor's temperature
+  has `set it…` there: a dialog with the value in °C, and the firmware's next read
+  has what was given. The pointer over pin 15 or 16 says what is on the bus. The
+  console gets a line when the firmware has talked on the bus (`Pins 15 and 16
+  (I2C3): the firmware called 128 addresses, 2 answered; …`): one for a scan or for
+  an app's start, and another only when the calls go differently (all answered,
+  some, none) or after ten seconds of silence. An app that reads its sensor every
+  second is one line there, and one more when the sensor stops answering.
 - What is set from outside stays over a reset of the firmware, as the weather would.
 - **An EEPROM's contents** are a file of the device, `devices/NAME/i2c-50.bin` for the
   one at 0x50. A new one has 0xFF in every byte, as a chip that was never written.
@@ -1872,6 +1892,8 @@ Not there:
 - `examples/i2c/sensor.c` ran on the official 1.5.1 alone, the firmware that the SDK
   of the ufbt here is for. It was not built for the other four.
 - A device cannot be put on the bus, or taken off it, while the emulator runs.
+- The window sets a temperature and shows the other values. `i2c ADDRESS NAME VALUE`
+  sets any value that can be set.
 - The two lines are no levels: pins 15 and 16 read `unknown` on the header while the
   firmware talks, and a record of the pins has no bits of a transfer. A transfer
   takes no time at any bus speed, and no device stretches the clock.
@@ -1880,9 +1902,9 @@ Not there:
 - A record of the transfers themselves (what was written to whom, what was read).
 
 `scripts/i2c_check.py FIRMWARE` checks all of it with the firmware's scan, that script
-and that app: 37 checks on Momentum, Unleashed and RogueMaster, with the app's part
-skipped (ufbt's SDK is for another firmware); 37 on the official 1.5.1, with the
-script's part skipped; 33 on the official dev build, with both skipped.
+and that app: 38 checks on Momentum, Unleashed and RogueMaster, with the app's part
+skipped (ufbt's SDK is for another firmware); 38 on the official 1.5.1, with the
+script's part skipped; 34 on the official dev build, with both skipped.
 
 An EEPROM's file needs one fix to QEMU's model (`qemu/patches/0009`,
 docs/BRINGUP_LOG.md, 110): it wanted the file's length in whole sectors of 512 bytes

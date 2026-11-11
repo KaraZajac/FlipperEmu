@@ -646,7 +646,7 @@ def i2c_degrees(name):
     thousandths of a degree; here they are read and written in °C.
     They also forget one that is given with the device (it is set back when
     the device is put on its bus), so it is set once the emulator runs."""
-    return name.startswith("temperature")
+    return fe_header.i2c_degrees(name)
 
 
 def i2c_parse(specs):
@@ -764,16 +764,32 @@ def i2c_own(m, address):
     return sorted(out)
 
 
+def i2c_read(m, address, name):
+    """A value of that device as it is (None: it has none); a temperature
+    in °C"""
+    value = qom_get(m, i2c_path(address), name)
+    if (i2c_degrees(name) and isinstance(value, int)
+            and not isinstance(value, bool)):
+        return value / 1000
+    return value
+
+
 def i2c_value(m, address, name, unit=True):
     """A value of that device, in words"""
-    value = qom_get(m, i2c_path(address), name)
-    if isinstance(value, bool):
-        return "on" if value else "off"
-    if i2c_degrees(name) and isinstance(value, int):
-        return f"{value / 1000:g}" + (" °C" if unit else "")
-    if isinstance(value, str):
-        return json.dumps(value) if unit else value
-    return "?" if value is None else str(value)
+    return fe_header.i2c_said(name, i2c_read(m, address, name), unit)
+
+
+def i2c_device(dev, m, kind, address):
+    """A device on the header's bus with the values it has of its own, as
+    `i2c --json` prints it; an EEPROM whose contents are kept in the
+    device's folder has that "file" too"""
+    d = {"type": kind, "address": address,
+         "values": {name: i2c_read(m, address, name)
+                    for name in i2c_own(m, address)}}
+    if (kind == "at24c-eeprom"
+            and d["values"].get("drive") == f"i2c-{address:02x}-rom"):
+        d["file"] = str(i2c_rom(dev, address))
+    return d
 
 
 def i2c_put(m, address, name, value):
@@ -2802,8 +2818,12 @@ def cmd_uart(args):
 def cmd_i2c(args):
     """The I2C bus of a running device's GPIO header: the devices on it with
     their values, and what the firmware called there; a device's values; one
-    value (bare, for a script); or set one."""
+    value (bare, for a script); or set one.  --json: the bus, or a device,
+    for a program."""
     dev = Device(args.device)
+    if args.json and args.prop is not None:
+        sys.exit("i2c --json: the bus, or a device (`i2c --json 0x48`); one "
+                 "value comes bare without it (`i2c 0x48 temperature`)")
     address = None
     if args.address is not None:
         if not re.fullmatch(r"0[xX][0-9a-fA-F]{1,2}", args.address):
@@ -2823,19 +2843,21 @@ def cmd_i2c(args):
         there = {d["address"]: d["type"] for d in bus["devices"]}
         wide = max(map(len, there.values()), default=0)
 
-        def value(at, name):
-            said = i2c_value(m, at, name)
-            if name != "drive" or there[at] != "at24c-eeprom":
-                return f"{name} {said}"
-            if said == f'"i2c-{at:02x}-rom"':
-                return f"kept in {i2c_rom(dev, at)}"
-            return "kept nowhere" if said == '""' else f"kept in drive {said}"
-
         def line(at):
-            values = ", ".join(value(at, name) for name in i2c_own(m, at))
+            d = i2c_device(dev, m, there[at], at)
+            values = ", ".join(fe_header.i2c_value(d, name)
+                               for name in d["values"])
             return (f"[{dev.name}]   0x{at:02x}  {there[at]:{wide}}  "
                     f"{values}").rstrip()
 
+        if args.json and (address is None or address in there):
+            print(json.dumps(
+                dict(bus, devices=[i2c_device(dev, m, there[at], at)
+                                   for at in there])
+                if address is None else
+                i2c_device(dev, m, there[address], address),
+                indent=2, ensure_ascii=False))
+            return 0
         if address is None:
             print(f"[{dev.name}] {fe_header.i2c_name(bus)}: "
                   f"{fe_header.i2c_text(bus)}")
@@ -4828,6 +4850,11 @@ def main():
                    help="one of its values: temperature")
     p.add_argument("value", nargs="?", metavar="VALUE",
                    help="set it to this: 23.5")
+    p.add_argument("--json", action="store_true",
+                   help="for a program: the bus as `status --json` has it, "
+                        "each device with its values (a temperature in °C; "
+                        "an address as a number, 72 for 0x48); with an "
+                        "address: that device alone")
     p.set_defaults(func=cmd_i2c)
 
     p = sub.add_parser("reset", help="reboot a running device, as holding Left + "

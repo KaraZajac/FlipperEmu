@@ -21,6 +21,7 @@ as the firmware has set them up, "NAME:TX:RX:BAUD:FRAME:SENDS:HEARS":
 Copyright (c) 2026, Kara Zajac
 SPDX-License-Identifier: BSD-3-Clause
 """
+import json
 import re
 
 # What is printed beside the pins on a Flipper's case, by the pin's number
@@ -175,22 +176,59 @@ def i2c_devices(bus):
                      for d in bus["devices"]) or "no device"
 
 
+def i2c_did(bus):
+    """What the firmware did on the header's I2C bus, in words: how many
+    addresses it called ("calls"), how many of those nobody took
+    ("unanswered"), and the "last" one"""
+    last, calls = bus["last"], bus["calls"]
+    if not calls or not last:
+        return "the firmware has called no address yet"
+    taken = calls - bus["unanswered"]
+    return (f"the firmware called {calls} "
+            f"address{'' if calls == 1 else 'es'}, "
+            + ("none" if not taken else "it" if calls == 1 else
+               "all" if taken == calls else str(taken))
+            + f" answered; the last: 0x{last['address']:02x} to "
+            f"{'read' if last['read'] else 'write'}, "
+            + ("answered" if last["taken"] else "no answer"))
+
+
 def i2c_text(bus):
     """What is on the header's I2C bus and what the firmware did there, in
     words"""
-    last, calls = bus["last"], bus["calls"]
-    if not calls:
-        did = "the firmware has called no address yet"
-    else:
-        taken = calls - bus["unanswered"]
-        did = (f"the firmware called {calls} "
-               f"address{'' if calls == 1 else 'es'}, "
-               + ("none" if not taken else "it" if calls == 1 else
-                  "all" if taken == calls else str(taken))
-               + f" answered; the last: 0x{last['address']:02x} to "
-               f"{'read' if last['read'] else 'write'}, "
-               + ("answered" if last["taken"] else "no answer"))
-    return f"{i2c_devices(bus)}; {did}"
+    return f"{i2c_devices(bus)}; {i2c_did(bus)}"
+
+
+def i2c_degrees(name):
+    """Is a value of that name, of a device on the bus, a temperature?
+    QEMU's sensors have theirs in thousandths of a degree; the launcher reads
+    and writes them in °C."""
+    return name.startswith("temperature")
+
+
+def i2c_said(name, value, unit=True):
+    """A value of a device on the bus in words, from what `i2c --json` has
+    for it (a temperature: in °C).  unit: with its unit, and a text in
+    quotes; without: bare, for a script."""
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    if i2c_degrees(name) and isinstance(value, (int, float)):
+        return f"{value:g}" + (" °C" if unit else "")
+    if isinstance(value, str):
+        return json.dumps(value) if unit else value
+    return "?" if value is None else str(value)
+
+
+def i2c_value(device, name):
+    """A value of a device, as `i2c --json` has the device, with its name:
+    "temperature 23.5 °C".  An EEPROM's drive is said as where its contents
+    are kept."""
+    value = device["values"].get(name)
+    if name != "drive" or device["type"] != "at24c-eeprom":
+        return f"{name} {i2c_said(name, value)}"
+    if device.get("file"):
+        return f"kept in {device['file']}"
+    return "kept nowhere" if not value else f"kept in drive {json.dumps(value)}"
 
 
 def i2c_pin(p, bus):

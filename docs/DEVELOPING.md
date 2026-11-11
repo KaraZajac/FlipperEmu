@@ -374,6 +374,13 @@ $ ../../flipperemu i2c
   desk does not have; the app's next read has it. `i2c 0x48 temperature` prints the
   value and nothing else. What QEMU's model does not take is refused in words
   (a TMP105's range ends below 128 °C).
+- **By hand,** the window's GPIO menu has the bus and each device with its values,
+  and a sensor's temperature is set there (`set it…`). The console says when the
+  firmware has talked on the bus and how many of its calls were answered: an app
+  that calls the wrong address is a line there (`the firmware called 2 addresses,
+  none answered; the last: 0x24 to write, no answer`) without a look at `i2c`.
+- **For a program,** `i2c --json` is the bus and every device with its values (a
+  temperature in °C; an address as a number, 72 for 0x48).
 - **The EEPROM** keeps its contents in `devices/NAME/i2c-50.bin`, over a reset and
   over `stop` and the next `run`: a test can compare the file with what the app
   should have written, or copy a prepared image there before `run`. A new one is
@@ -1026,7 +1033,11 @@ pin 3 held low, the GPIO menu's lines, Let go of all pins, the clicks on 13 and 
 that hold nothing (the firmware log, the iButton menu), the two serial ports in the
 GPIO menu in `gpio`'s words and on pin 13, a port that opens and closes in the
 console, and a record begun from the GPIO menu: the status bar counts a pin held
-and let go of, and the file read back after End the record has both changes.
+and let go of, and the file read back after End the record has both changes. The
+I2C bus is there with a sensor and an EEPROM on it: the GPIO menu's line for the
+bus and the one for each device in `i2c`'s words, the two pins' tips, the sensor's
+temperature set through the menu's dialog (the launcher's `i2c` from outside has
+it after), and one line in the console for the firmware's scan of 128 addresses.
 
 `scripts/uart_check.py FIRMWARE` has `examples/uart/echo.js` on the Flipper's side
 of pins 15 and 16: where `uart` says the ports go; a line sent while no app has the
@@ -1069,7 +1080,8 @@ at the start and the EEPROM's file, which is new and 0xFF throughout; the
 firmware's scan finds the two addresses and no other, and the bus's line has its
 128 calls, two of them answered and the last one not; `gpio`, `status` and `status
 --json` have the bus; a value read bare, a value set, and six things refused with
-the value left as it was; `examples/i2c/sensor.js` reads the temperature that was
+the value left as it was; `i2c --json` has the bus, both devices and their values,
+and one device alone; `examples/i2c/sensor.js` reads the temperature that was
 set and counts one in the EEPROM, reads another after that was set from outside,
 the file has the count, and after a reset of the firmware the temperature is still
 as set and the count goes on; `examples/i2c/sensor.c`, built and started by `ufbt
@@ -1078,10 +1090,10 @@ another one within a second of its being set from outside, and leaves the count 
 the file when it is closed; `examples/i2c/test.sh` passes on a Flipper of its own;
 a `run` with another `rom-size` is refused and the file is as it was; and a start
 with the EEPROM alone has no sensor in the scan, in the script or in the app, and
-the count from before. 37 checks on Momentum, Unleashed and RogueMaster, with the
+the count from before. 38 checks on Momentum, Unleashed and RogueMaster, with the
 app's part skipped: the SDK of the ufbt here is for the official 1.5.1. On that
-one it is 37 as well, with the script's part skipped, since the official
-JavaScript has no `i2c` module. On the official dev build it is 33, with both
+one it is 38 as well, with the script's part skipped, since the official
+JavaScript has no `i2c` module. On the official dev build it is 34, with both
 skipped: only the scan talks on the bus there.
 
 `scripts/gdb_check.py FIRMWARE` does what the gdb section shows, with gdb in batch

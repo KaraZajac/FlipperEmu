@@ -611,6 +611,21 @@ class BatteryDialog(Form):
                 f"{self.celsius.value():.1f}"]
 
 
+class DegreesDialog(Form):
+    """What a sensor on the header's I2C bus measures"""
+
+    def __init__(self, parent, device, name, celsius=25.0):
+        super().__init__(parent, device,
+                         "What the sensor measures, as the world around it "
+                         "would have it. The firmware reads it the next time "
+                         "it asks the sensor.")
+        self.celsius = self.spin(name.capitalize(), -273.15, 1000, celsius,
+                                 " °C", decimals=2)
+
+    def value(self):
+        return f"{self.celsius.value():g}"
+
+
 class IqDialog(Form):
     def __init__(self, parent, path):
         super().__init__(parent, "An IQ recording as its antenna",
