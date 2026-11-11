@@ -77,6 +77,14 @@ NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
 - ☑ Battery/USB power (2026-11-10): `./flipperemu battery`, `usb plug|unplug|charger`
       and the window; SYSDWN under 3.15 V, so a flat battery switches the Flipper off
 - ☑ STOP2 deep sleep (CPU2 performs the SHCI clock switch); now the default, 1–2 % host CPU idle
+  - ☐ Today an idle 1.5.1 takes 5 % of a host core off USB (it draws its desktop) and a
+        quarter on USB: 1000 ticks a second, 190 µs of host CPU each. Over a third of
+        the emulated CPU's waking time there is QEMU's slow path for pages that hold an
+        MPU region smaller than themselves: the firmware's 32-byte stack guards put the
+        whole main stack and the idle task's stack in such pages, so every stack access
+        of every interrupt handler takes it. A cache for parts of a page in QEMU's TLB
+        would make every handler faster, which matters where microseconds do
+        (BRINGUP_LOG 94)
 - ☑ IR: receive (TIM2 input capture + virtual receiver; 14 protocols, raw, .ir files;
       decoded by the Infrared app and `ir rx`) and transmit capture (TIM1 with its
       repetition counter, two DMA channels on TIM1_UP; every transmission →

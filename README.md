@@ -156,10 +156,11 @@ tries of three (open, see PLAN.md).
 - Lights: the LED chip (LP5562) runs the programs the firmware loads into its three
   engines, so the LED blinks while an app reads or sends, and the backlight fades in
   and out. `./flipperemu status` says what they do (`the LED: blinks cyan (00ffff)`).
-- Power: STOP2 deep sleep (1–2 % of a host core when idle), a fuel gauge and charger you
-  can set (`./flipperemu battery`, `usb`), and a USB cable that carries VBUS. The
-  firmware switches the Flipper off as on hardware (the power-off dialog, `power off`,
-  a flat battery off USB), and the window switches it on again when Back is held.
+- Power: STOP2 deep sleep (5 % of a host core when idle and off USB), a fuel gauge and
+  charger you can set (`./flipperemu battery`, `usb`), and a USB cable that carries
+  VBUS. The firmware switches the Flipper off as on hardware (the power-off dialog,
+  `power off`, a flat battery off USB), and the window switches it on again when Back
+  is held.
 - Secure enclave: the key store of ST's FUS on CPU2 and the AES peripheral it loads keys
   into, with factory keys of FlipperEmu's own. The firmware's check of its ten keys
   passes, so there is no "Secure Enclave is damaged" at start. `furi_hal_crypto` and the
@@ -1218,8 +1219,9 @@ cable plugged in, `power off` leaves the Flipper on its "It's now safe to unplug
 cable" screen until the cable is pulled.
 
 With `--usb` (the default) the virtual cable is plugged in, so the Flipper shows
-charging. As on hardware, a Flipper on USB never enters deep sleep: expect about 20 % of
-a host core while idle, against 1–2 % with `--usb none` or the cable pulled.
+charging. As on hardware, a Flipper on USB never enters deep sleep: expect about a
+quarter of a host core while idle, against 5 % with `--usb none` or the cable pulled
+(`./flipperemu usb unplug`), and 7 % for a firmware that has halted.
 
 ### The secure enclave
 

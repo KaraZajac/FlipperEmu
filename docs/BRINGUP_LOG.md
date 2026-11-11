@@ -1403,6 +1403,43 @@ big lock, entry 92).
       there, the app check 27; on official 1.5.1 the window check passes 32, the gdb
       check 22, the smoke test 28.
 
+94. **What an idle firmware costs, and where it goes.** Looked at after entry 93, where
+    a halted firmware came out cheaper than an idle one. Nothing in the emulator
+    changed for it: the README's numbers were out of date, and this is what a later
+    attempt needs.
+    - Official 1.5.1 on its desktop, headless, on an i9-9980HK: 24 % of a core with
+      the cable in (the vCPU's thread 17.5 %, the main loop 6.5 %), 5 % with it out or
+      with `--usb none` (4.5 % and 0.7 %). The README said 20 % and 1–2 %.
+    - The firmware's interrupts say why (`log int` through the monitor): with the
+      cable in, 1000 ticks a second and 24 thread switches, and nothing else; with it
+      out, 45 to 49 ticks and the same 24 switches. The firmware does not sleep
+      deeply on USB, as on a real Flipper. So a tick costs 190 µs of host CPU, 130 of
+      them in the vCPU's thread.
+    - The main loop is asleep in `ppoll` in 96 % of 700 samples of its stack
+      (eu-stack), and the rest is its own bookkeeping: nothing of ours runs there too
+      often.
+    - The vCPU's thread is awake in 16 % of 900 samples. Of those: 37 % in the TLB's
+      slow path (`mmu_lookup` → `tlb_fill_align` → `tlb_set_page_full`), 26 % in
+      translated code, 14 % looking up the next block, 13 % entering and leaving the
+      exception.
+    - The slow path is the firmware's stack guards. Each is an MPU region of 32 bytes;
+      QEMU's pages are 1 KiB here, and a page that holds a region smaller than itself
+      is never cached: `get_phys_addr_pmsav7()` reports it with `lg_page_size` 0,
+      `tlb_set_page_full()` marks the entry invalid, and every access to the page asks
+      the MPU model and writes the entry again. The main stack is 1 KiB, one page
+      with its guard at the bottom (`_stack_size = 0x400`, `_stack_end = 0x20030000`).
+      The idle task's stack is 512 bytes (`configIDLE_TASK_STACK_DEPTH 128`): under
+      gdb its guard is at 0x20001dc0 (RASR 0x060f0009: 32 bytes, read-only) and its
+      stack pointer at 0x20001f58, in the same page. So every stack access of every
+      interrupt handler, and of the idle task, takes that path; so does the lowest
+      kilobyte of each thread's stack.
+    - Not changed. A cache for parts of a page is a change to QEMU's TLB, not a small
+      patch, and the most it gives an idle Flipper is that third. It would make every
+      handler faster as well, which matters where microseconds do (1-Wire, entry 92):
+      it is in the plan for that reason.
+    - With no cable the 5 % is the firmware's own work: the vCPU is awake in 4.6 % of
+      the samples, drawing the desktop's animation and reading the fuel gauge.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
@@ -1429,7 +1466,10 @@ big lock, entry 92).
   a new device adds ~2.3 s, because the firmware provisions the fuel gauge (real
   `BQ27220_CONFIG_APPLY_US` delays).
 - `snake_game.fap` loads from the emulated SD in 48 ms (firmware's own measurement).
-- Idle: the vCPU sleeps in WFI between ticks, so the host CPU stays near idle.
+- Idle, official 1.5.1 on its desktop, of one host core (an i9-9980HK): 5 % with no
+  USB cable (STOP2 between some 50 ticks and 24 thread switches a second), 24 % with
+  one (no deep sleep on USB, as on hardware: 1000 ticks a second), 7 % once the
+  firmware has halted (entries 93 and 94).
 - OTA (`run --update`): Unleashed → official 1.5.1 in 68 s, including writing the
   flash and unpacking 1074 resource files to the SD. Momentum's 11 MB resource
   bundle takes longer.

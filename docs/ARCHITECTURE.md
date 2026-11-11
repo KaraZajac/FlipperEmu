@@ -78,9 +78,20 @@ Method = Legacy (light sleep only). Either way, timekeeping holds: RTOS uptime m
 wall time across long sleeps.
 
 While the USB cable is attached, the firmware never stops (USB insomnia, as on
-hardware). It takes the 1 kHz tick with WFI in between, about 20 % of a host core,
-versus 1–2 % with the cable out (`--usb none`, or `qom-set /machine/soc/usb attached
-false`).
+hardware). It takes the 1 kHz tick with WFI in between: about a quarter of a host core,
+versus 5 % with the cable out (`./flipperemu usb unplug`, `--usb none`, or `qom-set
+/machine/soc/usb attached false`), where it takes some 50 ticks and 24 thread switches
+a second and draws its desktop.
+
+Each tick wakes QEMU's main loop (SysTick's timer runs there) and the vCPU's thread:
+190 µs of host CPU together, 130 of them the vCPU's. Over a third of the vCPU's waking
+time is one slow path. The firmware guards every stack with a 32-byte MPU region,
+QEMU's pages are 1 KiB on an M-profile CPU with an MPU, and a page that holds a region
+smaller than itself is never cached: every access to it asks the MPU model again and
+writes its TLB entry again (`TLB_INVALID_MASK` in `tlb_set_page_full()`). The main stack
+is 1 KiB and exactly such a page (`_stack_size` and `_stack_end` in the firmware's
+linker script), and the idle task's 512 bytes lie in their guard's page: every stack
+access of an interrupt handler and of the idle task goes that way (BRINGUP_LOG 94).
 
 ## Interrupts: EXTI and SYSCFG
 
