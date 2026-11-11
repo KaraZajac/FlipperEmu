@@ -319,9 +319,15 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         `scripts/uart_check.py` is 54 checks now (BRINGUP_LOG 105)
   - ☐ The pin itself: a start bit on pin 14 as an edge the firmware's expansion
         service can see (it waits for a pulse there before it opens the port)
-  - ☐ The UART model: reception by DMA and the IDLE flag (the firmware's USB-UART
-        bridge sends and does not hear), bytes paced by the baud rate (about 1000
-        a second now, at any), `qemu_chr_fe_accept_input()` after a read
+  - ☑ The UART model's reception (2026-11-11, QEMU patch 0007): the request to
+        the DMA controller, the IDLE flag, bytes at the baud rate (BRR and the
+        PRESC register, the LPUART's own formula), `qemu_chr_fe_accept_input()`
+        after a read, registers read a byte wide. The firmware's USB-UART bridge
+        passes bytes both ways; `uart send --for` is how long nothing may move;
+        `scripts/uart_check.py` is 64 checks (BRINGUP_LOG 106)
+  - ☐ The UART model's other half: what the firmware sends at the baud rate, an
+        overrun when the app does not read, a rate on the host's side (a wrong
+        baud rate is understood now)
   - ☐ The port by name in `gpio`, in `status` and in the window's GPIO menu
   - ☐ What other peripherals put on a pin: PWM, SPI and I2C devices on the header;
         a voltage for the ADC

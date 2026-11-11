@@ -1878,6 +1878,64 @@ big lock, entry 92).
       here goes into the UART, not onto PB7.
     - `scripts/uart_check.py`: 54 checks (38 before), on the five firmwares.
 
+106. **The UART hears by DMA, at the baud rate (QEMU patch 0007).** The firmware's
+    USB-UART bridge sent and did not hear, and every port took about a byte a
+    millisecond whatever its baud rate. Both were the stock UART model's reception,
+    which had four gaps.
+    - No request to the DMA controller. The bridge receives into a circular buffer
+      of 256 bytes on DMA1 channel 6 (USART1; channel 7 for LPUART1), with the
+      channel's half and full interrupts and the UART's idle interrupt. The model
+      has a `dma-rx` line now, high while DMAR and RXNE are set, wired to the DMA
+      model's requests 14 and 16.
+    - With the line wired the bridge still heard nothing, and the channel was off:
+      TEIF6 in the DMA's ISR, EN cleared, CNDTR still 256. The channel reads RDR a
+      byte wide, as PSIZE says, and the UART's registers refused every access that
+      was not four bytes; the DMA model answers a refused access with a transfer
+      error, as the chip does for a bus error. Behind an APB bridge an access of
+      any size is one of the whole register, so the model takes them now.
+    - No IDLE flag. It is set two frame times after the last byte, 2 ms at least
+      (the bytes come from a socket, not from a line that keeps bit times), once
+      for a run of bytes. The firmware has the idle interrupt on in its byte-wise
+      mode too (`furi_hal_serial_async_rx_start`), so every app got a new
+      interrupt; the JavaScript `serial` module and its 900-character line did not
+      mind.
+    - No pacing. A byte was taken whenever RXNE was clear, and the backend was not
+      told when RDR had been read, so it looked again at the main loop's next
+      turn. Now a byte is taken when the one before has had its frame time, with a
+      timer on the virtual clock and `qemu_chr_fe_accept_input()`. Measured with
+      `examples/uart/echo.js` at other rates, 240 bytes: 2.3 s at 1200 baud (2.0 s
+      on a wire), 0.57 s at 9600 (0.25 s), 0.21 s at 921600; most of what is over
+      the wire's time is the launcher starting. At 115200 a byte comes every
+      130 µs (87 µs on a wire): the rest is the main loop's turn for each.
+    - No PRESC register. The firmware's driver picks a prescaler for the LPUART
+      from 9600 baud down (/2 there, /16 at 1200) and writes BRR for it; without
+      the register the pace at 9600 baud would have been that of 19200. The
+      LPUART's rate was also taken from 16 bits of BRR by the USART's formula; it
+      is 256 x clock / prescaler / BRR, with 20 bits.
+    - Order inside the model: the DMA request is set before the interrupt line,
+      because the channel's read of RDR comes back into the model while the first
+      call is still on its way; and the time of the next byte is set before either.
+    - `uart send` assumed 400 bytes a second at the least for its time limit. At
+      1200 baud that is wrong, so `--for` is now how long nothing may move. It
+      sends in pieces of 16 bytes, because an AF_UNIX socket takes a piece out of
+      its count (SIOCOUTQ) only when the last byte of it has been read.
+    - The machine connects `dma-rx` only where the device has the line. A QEMU
+      tree without the patch gives a machine that starts, with the ports as they
+      were; a plain `qdev_connect_gpio_out_named()` would have ended it at its
+      start. Built that way once to see it: the CLI answers, and the check below
+      is 61 of 64, the three being the baud rate and the bridge's two receptions.
+    - The bridge asks before it ends ("Exit USB-UART?"): Back, then Left. Until
+      then the CLI has no USB port, and `cli`, `push` and the rest say that there
+      is no prompt.
+    - Not there: pacing of what the firmware sends; overrun (a byte the app does
+      not read waits in the socket, and `uart send` says after `--for` that the
+      rest was not taken); a rate on the host's side, so a wrong baud rate is
+      still understood.
+    - `scripts/uart_check.py`: 64 checks (54 before), on the five firmwares: the
+      two seconds of 240 bytes at 1200 baud with `--for 1`, and the bridge both
+      ways (a short line, which only the idle interrupt delivers, and 600 bytes,
+      which go round the buffer twice).
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

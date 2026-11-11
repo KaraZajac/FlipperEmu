@@ -1462,7 +1462,8 @@ closing
 
 - `uart send` writes the text as it is. `\r`, `\n`, `\t`, `\0`, `\e`, `\xNN` and `\\`
   stand for what cannot be typed, and with `--hex` the text is bytes in hex. It is
-  back when the firmware has taken all of it.
+  back when the firmware has taken all of it, which is as long as the bytes take on
+  a wire at the app's baud rate.
 - `--expect TEXT` then waits until the firmware has sent that text, prints what it
   sent up to there, and exits 0. When it does not come in five seconds (`--for S`)
   it prints what did come, says so, and exits 1: a line of a test script for each
@@ -1506,13 +1507,43 @@ for these two:
 - A `--serial` in QEMU's own words (`--serial none`, say) has no second end, and
   `uart send --port usart` says so.
 
+**The baud rate** the app set is the speed its port takes bytes at, on both ports: a
+start bit, the data bits and the stop bits for each. 240 bytes are in after two
+seconds at 1200 baud and after a fiftieth of a second at 115200. When the last byte
+has come and the line stays quiet, the firmware is told (the UART's idle interrupt),
+which is how an app that reads whole messages knows that one has ended.
+
+- `uart send` waits as long as that takes. Its `--for S` is how long nothing may
+  move before it gives up, not a limit for the whole text.
+- An app can take its bytes one by one (the JavaScript `serial` module,
+  `furi_hal_serial_async_rx_start`) or by DMA (`furi_hal_serial_dma_rx_start`).
+
+**The firmware's own USB-UART bridge** (GPIO, then USB-UART Bridge) is an app of the
+second kind, and works in both directions. It takes the USB serial port from the
+CLI: what a program writes to `devices/NAME/usb.tty` comes out of pin 13, and what
+comes in on pin 14 goes to that program.
+
+```
+$ ./flipperemu cli "loader open GPIO"
+$ ./flipperemu press ok                             # its first item: the bridge
+$ picocom devices/NAME/usb.tty                      # the host's side, in a terminal
+$ ./flipperemu uart send --port usart "hello\r\n"   # in another: picocom shows it
+$ ./flipperemu uart wait --port usart "typed"       # what was typed into picocom
+$ ./flipperemu press back left                      # "Exit USB-UART?": Exit
+```
+
+While the bridge is on, the CLI is not there: `cli`, `push` and what else goes
+through it wait until Back and Exit have given the port back.
+
 What it does not do yet:
 
-- The baud rate is not modelled. The firmware receives about 1000 bytes a second
-  whatever the app asked for, and an app with the wrong rate is understood here.
-- Reception by DMA. An app that takes its bytes one by one (the JavaScript `serial`
-  module, `furi_hal_serial_async_rx_start`) hears everything; the firmware's USB-UART
-  bridge, which receives by DMA, sends and does not hear.
+- Sending is not paced: what the firmware sends is there at once, at any baud rate.
+- The speed is the app's alone. Your side of the wire has no rate to get wrong, so an
+  app with the wrong baud rate is understood all the same, only slower or faster, and
+  a framing error never comes.
+- No overrun. When the app does not read, the next byte waits on the wire instead of
+  being lost, and `uart send` says after its `--for` that the firmware did not take
+  the rest.
 - A program that has the pty or the TCP port open and does not read holds up the
   firmware's sending, once the buffer between them is full (a few hundred bytes).
 - The pty has a pty's ways: QEMU looks once a second whether a program has opened
@@ -1529,16 +1560,21 @@ for your program, and a socket (`devices/NAME/lpuart.sock`, `usart.sock`) for `u
 send` and `uart term`, which is why the two do not take the port from each other.
 
 `scripts/uart_check.py FIRMWARE` checks both ports with that script on the Flipper's
-side: 54 checks, on the official 1.5.1, the official dev build, Momentum, Unleashed
-and RogueMaster.
+side, and the bridge: 64 checks, on the official 1.5.1, the official dev build,
+Momentum, Unleashed and RogueMaster.
 
 Two bugs were in the way, and both are fixed (docs/BRINGUP_LOG.md, 104). After every
 deep sleep the firmware switches its two UARTs back on, also one that no app has: on
 a real Flipper that write does nothing, because the clock controller holds the
 peripheral in reset, and here it took, so that the app which opened the port
 afterwards hung in its set-up. And QEMU wrote a byte twice into a port's log file
-when the program on the port was slow to read (`qemu/patches/0006`; **a QEMU tree
-built before 2026-11-11 wants `scripts/setup_qemu.sh` once more**).
+when the program on the port was slow to read (`qemu/patches/0006`).
+
+The baud rate, the idle line and reception by DMA are an addition to QEMU's UART
+model (`qemu/patches/0007`, docs/BRINGUP_LOG.md, 106). **A QEMU tree that was set up
+before these two patches came (2026-11-11) wants `scripts/setup_qemu.sh` once more.**
+Without 0007 the machine still runs, with the port as it was: about 1000 bytes a
+second at any baud rate, and a bridge that sends and does not hear.
 
 ### The secure enclave
 
@@ -1696,7 +1732,8 @@ examples/uart/         a script for the serial port on pins 15 and 16
 flipperemu             launcher / device manager
 qemu/hw/arm/flipper/   the QEMU machine + STM32WB55 SoC + board devices (C)
 qemu/patches/          fixes to upstream QEMU (SysTick, SD over SPI, open-drain GPIO,
-                       register reads without the big lock, a chardev's log file)
+                       register reads without the big lock, a chardev's log file,
+                       the UART's reception)
 scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_monitor.py,
                        fe_cli.py, fe_files.py (files on the card), fe_apps.py
                        (apps and the loader), fe_ir.py,

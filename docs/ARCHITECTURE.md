@@ -1035,10 +1035,28 @@ ufbt is not run at all, and `update` sends the package without the stage (BRINGU
   one is open, a pty keeps what was written for its next opener, and it does not
   say how much the other side has read. The socket does (SIOCOUTQ), so `uart send`
   stays until QEMU has read everything, which is when the firmware has: the model
-  takes a byte only with RXNE clear. Its end is read all the while, because a
-  connected end that is not read stops the firmware's sending after a few hundred
-  bytes. The model is the stock L4x5 one: no IDLE flag, no DMA request, no pacing by
-  the baud rate.
+  takes a byte only with RXNE clear. It sends in pieces of 16 bytes, because the
+  socket counts a piece as unread until its last byte is taken, and gives up when
+  that count has not moved for the time of `--for`. Its end is read all the while,
+  because a connected end that is not read stops the firmware's sending after a few
+  hundred bytes.
+- **The UART model** is QEMU's L4x5 one (`hw/char/stm32l4x5_usart.c`) with its
+  reception filled in by `qemu/patches/0007`, for both ports. A byte is taken from
+  the chardev when RXNE is clear and the byte before has had its frame time (start,
+  data and stop bits at the baud rate of BRR and the PRESC register, which the model
+  did not have; the LPUART's rate is 256 x clock / prescaler / BRR). A timer on the
+  virtual clock opens the port again when that time is over, and
+  `qemu_chr_fe_accept_input()` tells the backend, which otherwise looked again only
+  at the main loop's next turn (a byte a millisecond). Two frame times after the
+  last byte (2 ms at least) IDLE is set, once for a run of bytes. With DMAR set the
+  device raises `dma-rx` while RXNE is set, wired in `stm32wb55_soc.c` to the DMA
+  model's request lines 14 (USART1) and 16 (LPUART1); the channel's read of RDR, a
+  byte wide, clears RXNE and the request. The request is set before the interrupt
+  line, because that read comes back into the model from inside. While the receiver
+  is off, bytes are taken at once and dropped. Not modelled: pacing of what is sent,
+  overrun (the next byte waits in the backend), framing and parity errors. The
+  machine connects `dma-rx` only where the device has it, so a QEMU tree without the
+  patch gives a machine that runs.
 
 ## The front panel (`flipper_panel.c`, `scripts/fe_gui*.py`)
 

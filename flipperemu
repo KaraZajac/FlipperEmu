@@ -26,7 +26,8 @@ you flash stays flashed, settings and files persist across runs.
   ./flipperemu gpio record OUT.vcd | gpio watch
                                              every change of its pins, with its time
   ./flipperemu uart | uart term | uart send "AT\r\n" --expect OK
-                                             the serial port on its pins 15 and 16
+                                             the serial ports of its header: pins 15
+                                             and 16, or 13 and 14 (--port usart)
   ./flipperemu reset                         reboot it, as Left + Back do on a real one
   ./flipperemu pause | continue              time stands still on it, and goes on
   ./flipperemu flash fw.dfu                  just program the flash
@@ -2262,28 +2263,36 @@ def uart_drop(line):
 
 def uart_put(line, data, seconds):
     """Send on our end of a port, and stay until the emulator has taken all
-    of it: it takes a byte when the firmware has read the one before, and
-    what it has not taken when our end closes is lost.  -> whether it took
-    all of it in that time"""
+    of it: it takes a byte when the firmware has read the one before and
+    the port's speed lets the next one in, and what it has not taken when
+    our end closes is lost.  `seconds` is how long nothing may move: a
+    long text at 1200 baud takes its time.  -> whether it took all of it"""
     import fcntl
     import select
     import termios
-    end = time.monotonic() + seconds
+    # The socket counts a piece as unread until its last byte is taken, so
+    # the pieces are small: at 300 baud one is gone in half a second.
+    piece = 16
     sent = 0
+    unread = None
+    moved = time.monotonic()
     line.sock.setblocking(False)
-    while time.monotonic() < end:
+    while time.monotonic() - moved < seconds:
         uart_drop(line)
-        if sent < len(data):
-            if select.select([], [line.fd], [], 0.01)[1]:
-                try:
-                    sent += line.sock.send(data[sent:sent + 4096])
-                except BlockingIOError:
-                    pass
-        elif struct.unpack("i", fcntl.ioctl(line.fd, termios.TIOCOUTQ,
-                                            bytes(4)))[0]:
-            time.sleep(0.002)               # (unread by the emulator)
-        else:
+        if sent < len(data) and select.select([], [line.fd], [], 0)[1]:
+            try:
+                sent += line.sock.send(data[sent:sent + piece])
+                moved = time.monotonic()
+                continue
+            except BlockingIOError:
+                pass
+        left = struct.unpack("i", fcntl.ioctl(line.fd, termios.TIOCOUTQ,
+                                              bytes(4)))[0]
+        if sent >= len(data) and not left:
             return True
+        if left != unread:
+            unread, moved = left, time.monotonic()
+        time.sleep(0.002)
     return False
 
 
@@ -2380,7 +2389,7 @@ def cmd_uart(args):
             start = log.stat().st_size
         except OSError:
             start = 0
-        if not uart_put(line, data, max(args.seconds, 1 + len(data) / 400)):
+        if not uart_put(line, data, args.seconds):
             print(f"[{dev.name}] pins {pins}: the firmware has the port open, "
                   "but did not read all of that: the rest is lost",
                   file=sys.stderr)
@@ -4113,7 +4122,8 @@ def main():
         "sends is kept in devices/<name>/lpuart.log whether or not anything "
         "listens; `wait` and --expect read it there, each from where the one "
         "before found its text.  What is sent while no app has the port open "
-        "is lost, as with nothing wired.  A program of yours has the port "
+        "is lost, as with nothing wired; an app that has it open gets the "
+        "bytes at its baud rate.  A program of yours has the port "
         "too, at the same time: its pty (devices/<name>/lpuart.tty), or the "
         "TCP port of --lpuart tcp:PORT.  --port usart: all of that on pins "
         "13 (TX) and 14 (RX) instead (USART1), where the firmware logs until "
@@ -4131,7 +4141,9 @@ def main():
                         "(exit status 1: it did not, in time), and print "
                         "what it sent")
     p.add_argument("--for", dest="seconds", type=float, default=5.0, metavar="S",
-                   help="wait, --expect: for so many seconds (default 5)")
+                   help="wait, --expect: for so many seconds (default 5); "
+                        "send: give up when the firmware has taken nothing "
+                        "for so long")
     p.set_defaults(func=cmd_uart)
 
     p = sub.add_parser("reset", help="reboot a running device, as holding Left + "

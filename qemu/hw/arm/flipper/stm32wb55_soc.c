@@ -184,6 +184,18 @@ static void soc_map(SysBusDevice *sbd, hwaddr addr, Error **errp)
     }
 }
 
+/*
+ * A UART's request to the DMA controller while it has a byte. The line is
+ * an addition to QEMU's model (qemu/patches/0007); a source tree without it
+ * still gives a machine that runs, whose UARTs receive by interrupt only.
+ */
+static void soc_uart_dma_rx(DeviceState *dev, qemu_irq request)
+{
+    if (object_property_find(OBJECT(dev), "dma-rx[0]")) {
+        qdev_connect_gpio_out_named(dev, "dma-rx", 0, request);
+    }
+}
+
 static void wb55_soc_init(Object *obj)
 {
     WB55SocState *s = WB55_SOC(obj);
@@ -460,12 +472,14 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
     qdev_connect_clock_in(dev, "clk", hclk);
     soc_map(SYS_BUS_DEVICE(dev), 0x40013800, errp);
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, NVIC(WB55_IRQ_USART1));
+    soc_uart_dma_rx(dev, DREQ(WB55_DREQ_USART1_RX));
     wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_APB2RSTR, 14, dev);
     dev = DEVICE(&s->lpuart1);
     qdev_prop_set_chr(dev, "chardev", serial_hd(1));
     qdev_connect_clock_in(dev, "clk", hclk);
     soc_map(SYS_BUS_DEVICE(dev), 0x40008000, errp);
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, NVIC(WB55_IRQ_LPUART1));
+    soc_uart_dma_rx(dev, DREQ(WB55_DREQ_LPUART1_RX));
     wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_APB1RSTR2, 0, dev);
 
     /* ---- USB FS device (+ built-in host): registers, packet memory */

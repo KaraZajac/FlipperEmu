@@ -22,7 +22,13 @@ logs: `uart wait --port usart` reads the log, what is sent while the firmware
 only logs is lost, and the same script on that port is answered the same way
 (a line, 900 characters, `uart term`, the two ports not in each other's way),
 with the firmware's log back on the pins when the script has closed the port.
-Last a start with --lpuart none and --serial pty (an app that opens pins 15
+The port's speed: for a script at 1200 baud 240 bytes take the two seconds
+they take on a wire, and --for, which is how long nothing may move, does not
+cut them off.  The firmware's own USB-UART bridge (the GPIO app), which reads
+its port by DMA: what the host writes on the USB serial port comes out of pin
+13, and what comes in on pin 14 goes to the host, a short line at once (the
+idle line) and 600 bytes in their order; Back and Exit give the CLI its USB
+port back.  Last a start with --lpuart none and --serial pty (an app that opens pins 15
 and 16 still runs; pins 13 and 14 have a pty, and a program on it is answered
 beside `uart send`) and one with --lpuart tcp:PORT.  Exit status 0 = pass.
 """
@@ -367,6 +373,101 @@ def usart_checks(b):
           between[1] and b"[I][" in between[0], between[0][-400:])
 
 
+def speed_checks(b):
+    """The port's speed: what is sent comes in at the app's baud rate"""
+    text = ECHO.read_text()
+    slow = b.dir / "echo1200.js"
+    slow.write_text(text.replace("115200", "1200"))
+    code, out, err, took = fe(b, "push", slow, "/ext")
+    if not check("the script, at 1200 baud, is on the card",
+                 code == 0 and text.count("115200") == 1, out + err):
+        return
+    p = script(b, "/ext/echo1200.js")
+    code, out, err, took = fe(b, "uart", "wait", "ready", "--for", 30)
+    if not check("an app opens the port at 1200 baud: its first line comes",
+                 code == 0 and "ready" in out, f"{code} {out!r} {err}"):
+        print("        the CLI: " + ended(p, 5))
+        return
+    line = (string.ascii_lowercase * 10)[:239]
+    code, out, err, took = fe(b, "uart", "send", line + "\\n", "--for", 1)
+    check("240 bytes for that port take the two seconds they take on a wire "
+          "at 1200 baud, and --for 1 does not cut them off (it is how long "
+          "nothing may move)", code == 0 and 1.9 <= took < 8,
+          f"{code} in {took:.2f} s\n{out}{err}")
+    code, out, err, took = fe(b, "uart", "wait", line[-40:] + "\\r\\n",
+                              "--for", 10)
+    check("... and are answered, in their order",
+          code == 0 and "you said: " + line in out, f"{code} {out!r} {err}")
+    code, out, err, took = fe(b, "uart", "send", "bye\\n", "--expect",
+                              "closing")
+    said = ended(p)
+    check("... the script closes the port and ends",
+          code == 0 and "echo done" in said and CRASH.search(said) is None,
+          f"{code} {out!r} {err}\nthe CLI: {said}")
+
+
+def bridge_checks(b):
+    """The firmware's USB-UART bridge (in its GPIO app), which reads pins
+    13 and 14 by DMA, and has the USB serial port instead of the CLI"""
+    code, out, err, took = fe(b, "cli", "loader open GPIO")
+    if not check("the GPIO app starts", code == 0
+                 and CRASH.search(out) is None, f"{code} {out}{err}"):
+        return
+    fe(b, "press", "ok")                    # its first item: USB-UART Bridge
+    fd = os.open(b.dir / "usb.tty", os.O_RDWR | os.O_NOCTTY)
+    got = b""
+
+    def hear(want, seconds):
+        nonlocal got
+        end = time.time() + seconds
+        while time.time() < end and want not in got:
+            if select.select([fd], [], [], 0.05)[0]:
+                got += os.read(fd, 65536)
+        return want in got
+
+    try:
+        tty.setraw(fd)
+        time.sleep(1.5)         # (QEMU looks once a second who has a pty)
+        for turn_ in range(1, 4):           # (the bridge takes a moment)
+            os.write(fd, b"from usb %d\r\n" % turn_)
+            code, out, err, took = fe(b, "uart", "wait", "--port", "usart",
+                                      f"from usb {turn_}\\r\\n", "--for", 4)
+            if code == 0:
+                break
+        check("the USB-UART bridge: what the host writes on the USB serial "
+              "port comes out of pin 13", code == 0,
+              f"{code} {out[-300:]!r} {err}")
+        t0 = time.time()
+        code, out, err, took = fe(b, "uart", "send", "--port", "usart",
+                                  "to usb\\n")
+        heard = hear(b"to usb\n", 5)
+        check("... a short line into pin 14 is at the host at once (the "
+              "bridge reads the port by DMA, and the idle line tells it)",
+              code == 0 and heard and time.time() - t0 < 2,
+              f"{code} in {time.time() - t0:.2f} s {out}{err}\n"
+              f"the USB port: {got[-200:]!r}")
+        big = ((string.ascii_letters + string.digits) * 10)[:599]
+        code, out, err, took = fe(b, "uart", "send", "--port", "usart",
+                                  big + "\\n")
+        heard = hear(big.encode() + b"\n", 10)
+        check("... 600 bytes: all of them, in their order",
+              code == 0 and heard, f"{code} in {took:.1f} s {out}{err}\n"
+              f"the USB port: {len(got)} bytes, {got[-700:]!r}")
+    finally:
+        os.close(fd)
+    fe(b, "press", "back")
+    fe(b, "press", "left")                  # "Exit USB-UART?": Exit
+    code, out, err, took = fe(b, "wait", "--timeout", 30)
+    fe(b, "press", "back")                  # and out of the app
+    end = time.time() + 15
+    ok, said = b.answers()
+    while not ok and time.time() < end:
+        time.sleep(0.5)
+        ok, said = b.answers()
+    check("Back and Exit: the bridge gives the USB port back, and the CLI "
+          "answers", code == 0 and ok, f"{code} {out}{err}\n{said}")
+
+
 def other_checks(b):
     c1, o1, e1, _ = fe(b, "uart", "send", "--hex", "zz")
     c2, o2, e2, _ = fe(b, "uart", "send")
@@ -512,6 +613,8 @@ def main():
                     turn(b, "after reset", "the script after a reset: ready, "
                                            "answered, closed")
                 usart_checks(b)
+                speed_checks(b)
+                bridge_checks(b)
                 other_checks(b)
                 none_checks(b, args.timeout)
                 tcp_checks(b, args.timeout)

@@ -1,0 +1,468 @@
+From: FlipperEmu
+Subject: [PATCH] stm32l4x5_usart: reception by DMA, the idle line, the baud rate
+
+Four things a driver for this UART uses when it receives were not in the
+model.
+
+The request to a DMA channel. With DMAR set in CR3 the UART asks for a
+transfer while RXNE is set, and the channel's read of RDR clears both.
+There was no such line, so a driver that receives by DMA into a circular
+buffer never got a byte. The device has a GPIO output "dma-rx" now, a
+level, for the board to wire to its DMA controller. A channel reads RDR
+(and writes TDR) a byte at a time, so the registers take accesses of one
+and two bytes, as they do behind an APB bridge, which makes each of them
+an access to the whole register.
+
+The idle line. IDLE in ISR is set when the line has been quiet for a
+frame after a byte, and is how such a driver learns that a message
+shorter than its buffer has ended. The flag was never set. It is set now
+two frames after the last byte (not sooner than 2 ms, since the bytes
+come from a host that does not keep bit times), once for each run of
+bytes, and cleared by IDLECF as before.
+
+The baud rate. The model took a byte from its backend whenever RXNE was
+clear, and was not told when the guest had read RDR, so the next byte
+came at the main loop's next turn: about a byte a millisecond, whatever
+the guest had set. A byte is taken now when the one before has had its
+frame time (start bit, data bits, stop bits at the baud rate), by a
+timer on the virtual clock, and the backend is told with
+qemu_chr_fe_accept_input(). 115200 baud is several times faster than
+before, and 1200 baud takes the time it takes on a wire. While the
+receiver is off (UE or RE clear) bytes are taken at once and dropped, as
+before. Sending is not paced.
+
+The prescaler. PRESC (offset 0x2C) was not a register, so its write was
+logged as unimplemented and the baud rate was computed without it. The
+LPUART's rate was also computed with the USART's formula from 16 bits of
+BRR, where it is 256 * clock / prescaler / BRR with a BRR of 20 bits.
+Both are right now, also in what the backend is told
+(CHR_IOCTL_SERIAL_SET_PARAMS).
+
+Clearing UE now clears RXNE, IDLE and ORE as the hardware does: a byte
+that came for the last owner of the port is not the first one its next
+owner reads.
+
+Seen with the Flipper Zero firmware: its USB-UART bridge receives by DMA
+with the idle interrupt and heard nothing; its serial driver chooses a
+prescaler for the LPUART from 9600 baud down.
+
+Signed-off-by: FlipperEmu
+---
+--- a/hw/char/stm32l4x5_usart.c
++++ b/hw/char/stm32l4x5_usart.c
+@@ -18,6 +18,7 @@
+ #include "qemu/osdep.h"
+ #include "qemu/log.h"
+ #include "qemu/module.h"
++#include "qemu/timer.h"
+ #include "qapi/error.h"
+ #include "chardev/char-fe.h"
+ #include "chardev/char-serial.h"
+@@ -153,6 +154,18 @@
+     FIELD(RDR, RDR, 0, 9)
+ REG32(TDR, 0x28)
+     FIELD(TDR, TDR, 0, 9)
++/* Not in the STM32L4x5: the clock prescaler of the later parts (STM32WB) */
++REG32(PRESC, 0x2C)
++    FIELD(PRESC, PRESCALER, 0, 4)
++
++/*
++ * The idle line is a character's time with nothing on the line.  The
++ * backend can be later than that with a character it has (it comes at the
++ * main loop's next turn), and a guest that takes the idle line for the end
++ * of a message must not be told so in the middle of one: the model waits at
++ * least this long.
++ */
++#define USART_IDLE_MIN_NS (2 * SCALE_MS)
+ 
+ static void stm32l4x5_update_isr(Stm32l4x5UsartBaseState *s)
+ {
+@@ -171,6 +184,13 @@
+ 
+ static void stm32l4x5_update_irq(Stm32l4x5UsartBaseState *s)
+ {
++    /*
++     * The request to the DMA first: its transfer reads RDR, which comes
++     * back here and changes the flags the interrupt line is made of.
++     */
++    qemu_set_irq(s->dma_rx, (s->cr3 & R_CR3_DMAR_MASK) &&
++                            (s->isr & R_ISR_RXNE_MASK));
++
+     if (((s->isr & R_ISR_WUF_MASK) && (s->cr3 & R_CR3_WUFIE_MASK))        ||
+         ((s->isr & R_ISR_CMF_MASK) && (s->cr1 & R_CR1_CMIE_MASK))         ||
+         ((s->isr & R_ISR_ABRF_MASK) && (s->cr1 & R_CR1_RXNEIE_MASK))      ||
+@@ -195,15 +215,134 @@
+     }
+ }
+ 
++static bool usart_rx_enabled(Stm32l4x5UsartBaseState *s)
++{
++    return (s->cr1 & R_CR1_UE_MASK) && (s->cr1 & R_CR1_RE_MASK);
++}
++
++/* The baud rate the registers say, 0 when they do not say one yet */
++static uint32_t usart_baud(Stm32l4x5UsartBaseState *s)
++{
++    static const uint16_t presc[16] = {
++        1, 2, 4, 6, 8, 10, 12, 16, 32, 64, 128, 256, 256, 256, 256, 256
++    };
++    Stm32l4x5UsartBaseClass *k = STM32L4X5_USART_BASE_GET_CLASS(s);
++    uint64_t hz = clock_get_hz(s->clk) / presc[s->presc & 0xF];
++    uint32_t div;
++
++    if (k->type == STM32L4x5_LPUART) {
++        /* BRR = 256 * clock / baud rate, 20 bits, 0x300 the least */
++        div = s->brr & 0xFFFFF;
++        return div < 0x300 ? 0 : hz * 256 / div;
++    }
++    div = s->brr & 0xFFFF;
++    if (div < 16) {
++        return 0;
++    }
++    if (FIELD_EX32(s->cr1, CR1, OVER8)) {
++        /*
++         * Oversampling by 8
++         * - BRR[2:0] = USARTDIV[3:0] shifted 1 bit to the right.
++         * - BRR[3] must be kept cleared.
++         * - BRR[15:4] = USARTDIV[15:4]
++         * - The frequency is multiplied by 2
++         */
++        div = ((div & 0xFFF0) | ((div & 0x0007) << 1)) / 2;
++    }
++    return hz / div;
++}
++
++/*
++ * The time of one character on the line: the start bit, the data bits (a
++ * parity bit is one of them) and the stop bits.  0: not known.
++ */
++static int64_t usart_frame_ns(Stm32l4x5UsartBaseState *s)
++{
++    uint32_t baud = usart_baud(s);
++    unsigned bits;
++
++    if (!baud) {
++        return 0;
++    }
++    switch ((FIELD_EX32(s->cr1, CR1, M1) << 1) | FIELD_EX32(s->cr1, CR1, M0)) {
++    case 1:
++        bits = 9;
++        break;
++    case 2:
++        bits = 7;
++        break;
++    default:
++        bits = 8;
++        break;
++    }
++    bits += 1 + (FIELD_EX32(s->cr2, CR2, STOP) == 2 ? 2 : 1);
++    return (int64_t)bits * NANOSECONDS_PER_SECOND / baud;
++}
++
++/*
++ * The receiver may be able to take a character again: tell the backend,
++ * which otherwise looks when the main loop next turns for a reason of its
++ * own, but not before the line could have brought one.  And when a
++ * character came and none follows it, the line is idle.
++ */
++static void usart_rx_ready(Stm32l4x5UsartBaseState *s)
++{
++    int64_t now;
++
++    if (!usart_rx_enabled(s)) {
++        /* Nobody listens, and what is on the line is lost at any speed */
++        timer_del(&s->rx_timer);
++        timer_del(&s->idle_timer);
++        s->idle_armed = false;
++        qemu_chr_fe_accept_input(&s->chr);
++        return;
++    }
++    if (s->isr & R_ISR_RXNE_MASK) {
++        return;
++    }
++    now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    if (now < s->rx_next) {
++        timer_mod(&s->rx_timer, s->rx_next);
++        return;
++    }
++    qemu_chr_fe_accept_input(&s->chr);
++    if (s->idle_armed) {
++        timer_mod(&s->idle_timer,
++                  now + MAX(2 * usart_frame_ns(s), USART_IDLE_MIN_NS));
++    }
++}
++
++static void usart_rx_timer(void *opaque)
++{
++    usart_rx_ready(opaque);
++}
++
++static void usart_idle_timer(void *opaque)
++{
++    Stm32l4x5UsartBaseState *s = opaque;
++
++    if (!s->idle_armed || !usart_rx_enabled(s) ||
++        (s->isr & R_ISR_RXNE_MASK)) {
++        return;
++    }
++    /* Not again before the next character */
++    s->idle_armed = false;
++    s->isr |= R_ISR_IDLE_MASK;
++    stm32l4x5_update_irq(s);
++}
++
+ static int stm32l4x5_usart_base_can_receive(void *opaque)
+ {
+     Stm32l4x5UsartBaseState *s = opaque;
+ 
+-    if (!(s->isr & R_ISR_RXNE_MASK)) {
++    if (!usart_rx_enabled(s)) {
+         return 1;
+     }
+-
+-    return 0;
++    if (s->isr & R_ISR_RXNE_MASK) {
++        return 0;
++    }
++    /* A character at a time, and each no sooner than the line has it */
++    return qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) >= s->rx_next;
+ }
+ 
+ static void stm32l4x5_usart_base_receive(void *opaque, const uint8_t *buf,
+@@ -211,7 +350,7 @@
+ {
+     Stm32l4x5UsartBaseState *s = opaque;
+ 
+-    if (!((s->cr1 & R_CR1_UE_MASK) && (s->cr1 & R_CR1_RE_MASK))) {
++    if (!usart_rx_enabled(s)) {
+         trace_stm32l4x5_usart_receiver_not_enabled(
+             FIELD_EX32(s->cr1, CR1, UE), FIELD_EX32(s->cr1, CR1, RE));
+         return;
+@@ -232,6 +371,11 @@
+         trace_stm32l4x5_usart_rx(s->rdr);
+     }
+ 
++    /* Before the flags go out: a DMA transfer takes the character at once */
++    s->rx_next = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + usart_frame_ns(s);
++    s->idle_armed = true;
++    timer_del(&s->idle_timer);
++
+     stm32l4x5_update_irq(s);
+ }
+ 
+@@ -286,7 +430,6 @@
+ static void stm32l4x5_update_params(Stm32l4x5UsartBaseState *s)
+ {
+     int speed, parity, data_bits, stop_bits;
+-    uint32_t value, usart_div;
+     QEMUSerialSetParams ssp;
+ 
+     /* Select the parity type */
+@@ -333,32 +476,13 @@
+     }
+ 
+     /* Select the baud rate */
+-    value = FIELD_EX32(s->brr, BRR, BRR);
+-    if (value < 16) {
++    speed = usart_baud(s);
++    if (!speed) {
+         qemu_log_mask(LOG_GUEST_ERROR,
+-            "UNDEFINED: BRR less than 16: %u", value);
++            "UNDEFINED: BRR too small: %u", s->brr);
+         return;
+     }
+ 
+-    if (FIELD_EX32(s->cr1, CR1, OVER8) == 0) {
+-        /*
+-         * Oversampling by 16
+-         * BRR = USARTDIV
+-         */
+-        usart_div = value;
+-    } else {
+-        /*
+-         * Oversampling by 8
+-         * - BRR[2:0] = USARTDIV[3:0] shifted 1 bit to the right.
+-         * - BRR[3] must be kept cleared.
+-         * - BRR[15:4] = USARTDIV[15:4]
+-         * - The frequency is multiplied by 2
+-         */
+-        usart_div = ((value & 0xFFF0) | ((value & 0x0007) << 1)) / 2;
+-    }
+-
+-    speed = clock_get_hz(s->clk) / usart_div;
+-
+     ssp.speed     = speed;
+     ssp.parity    = parity;
+     ssp.data_bits = data_bits;
+@@ -382,9 +506,12 @@
+     s->isr = 0x020000C0;
+     s->rdr = 0x00000000;
+     s->tdr = 0x00000000;
++    s->presc = 0x00000000;
++    s->rx_next = 0;
+ 
+     usart_cancel_transmit(s);
+     stm32l4x5_update_irq(s);
++    usart_rx_ready(s);
+ }
+ 
+ static void usart_update_rqr(Stm32l4x5UsartBaseState *s, uint32_t value)
+@@ -398,6 +525,7 @@
+     /* SBKRQ */
+     /* ABRRQ */
+     stm32l4x5_update_irq(s);
++    usart_rx_ready(s);
+ }
+ 
+ static uint64_t stm32l4x5_usart_base_read(void *opaque, hwaddr addr,
+@@ -417,7 +545,8 @@
+         retvalue = s->cr3;
+         break;
+     case A_BRR:
+-        retvalue = FIELD_EX32(s->brr, BRR, BRR);
++        retvalue = STM32L4X5_USART_BASE_GET_CLASS(s)->type == STM32L4x5_LPUART
++                   ? s->brr & 0xFFFFF : FIELD_EX32(s->brr, BRR, BRR);
+         break;
+     case A_GTPR:
+         retvalue = s->gtpr;
+@@ -439,12 +568,18 @@
+     case A_RDR:
+         retvalue = FIELD_EX32(s->rdr, RDR, RDR);
+         /* Reset RXNE flag */
+-        s->isr &= ~R_ISR_RXNE_MASK;
+-        stm32l4x5_update_irq(s);
++        if (s->isr & R_ISR_RXNE_MASK) {
++            s->isr &= ~R_ISR_RXNE_MASK;
++            stm32l4x5_update_irq(s);
++            usart_rx_ready(s);
++        }
+         break;
+     case A_TDR:
+         retvalue = FIELD_EX32(s->tdr, TDR, TDR);
+         break;
++    case A_PRESC:
++        retvalue = s->presc;
++        break;
+     default:
+         qemu_log_mask(LOG_GUEST_ERROR,
+                       "%s: Bad offset 0x%"HWADDR_PRIx"\n", __func__, addr);
+@@ -461,15 +596,24 @@
+ {
+     Stm32l4x5UsartBaseState *s = opaque;
+     const uint32_t value = val64;
++    bool rx_was;
+ 
+     trace_stm32l4x5_usart_write(addr, value);
+ 
+     switch (addr) {
+     case A_CR1:
++        rx_was = usart_rx_enabled(s);
++        if ((s->cr1 & R_CR1_UE_MASK) && !(value & R_CR1_UE_MASK)) {
++            /* Switched off: what the receiver had is thrown away */
++            s->isr &= ~(R_ISR_RXNE_MASK | R_ISR_IDLE_MASK | R_ISR_ORE_MASK);
++        }
+         s->cr1 = value;
+         stm32l4x5_update_params(s);
+         stm32l4x5_update_isr(s);
+         stm32l4x5_update_irq(s);
++        if (rx_was != usart_rx_enabled(s)) {
++            usart_rx_ready(s);
++        }
+         return;
+     case A_CR2:
+         s->cr2 = value;
+@@ -477,6 +621,8 @@
+         return;
+     case A_CR3:
+         s->cr3 = value;
++        /* DMAR: a character that waits is the DMA's from now on */
++        stm32l4x5_update_irq(s);
+         return;
+     case A_BRR:
+         s->brr = value;
+@@ -509,6 +655,10 @@
+         s->isr &= ~R_ISR_TXE_MASK;
+         usart_transmit(NULL, G_IO_OUT, s);
+         return;
++    case A_PRESC:
++        s->presc = value & R_PRESC_PRESCALER_MASK;
++        stm32l4x5_update_params(s);
++        return;
+     default:
+         qemu_log_mask(LOG_GUEST_ERROR,
+                       "%s: Bad offset 0x%"HWADDR_PRIx"\n", __func__, addr);
+@@ -520,8 +670,12 @@
+     .write = stm32l4x5_usart_base_write,
+     .endianness = DEVICE_NATIVE_ENDIAN,
+     .valid = {
++        /*
++         * On the APB an access of one or two bytes is one of the whole
++         * register: a DMA channel reads RDR and writes TDR that way.
++         */
+         .max_access_size = 4,
+-        .min_access_size = 4,
++        .min_access_size = 1,
+         .unaligned = false
+     },
+     .impl = {
+@@ -540,6 +694,9 @@
+     Stm32l4x5UsartBaseState *s = STM32L4X5_USART_BASE(obj);
+ 
+     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
++    qdev_init_gpio_out_named(DEVICE(obj), &s->dma_rx, "dma-rx", 1);
++    timer_init_ns(&s->rx_timer, QEMU_CLOCK_VIRTUAL, usart_rx_timer, s);
++    timer_init_ns(&s->idle_timer, QEMU_CLOCK_VIRTUAL, usart_idle_timer, s);
+ 
+     memory_region_init_io(&s->mmio, obj, &stm32l4x5_usart_base_ops, s,
+                           TYPE_STM32L4X5_USART_BASE, 0x400);
+@@ -558,7 +715,7 @@
+ 
+ static const VMStateDescription vmstate_stm32l4x5_usart_base = {
+     .name = TYPE_STM32L4X5_USART_BASE,
+-    .version_id = 1,
++    .version_id = 2,
+     .minimum_version_id = 1,
+     .post_load = stm32l4x5_usart_base_post_load,
+     .fields = (VMStateField[]) {
+@@ -571,6 +728,11 @@
+         VMSTATE_UINT32(isr, Stm32l4x5UsartBaseState),
+         VMSTATE_UINT32(rdr, Stm32l4x5UsartBaseState),
+         VMSTATE_UINT32(tdr, Stm32l4x5UsartBaseState),
++        VMSTATE_UINT32_V(presc, Stm32l4x5UsartBaseState, 2),
++        VMSTATE_TIMER_V(rx_timer, Stm32l4x5UsartBaseState, 2),
++        VMSTATE_TIMER_V(idle_timer, Stm32l4x5UsartBaseState, 2),
++        VMSTATE_INT64_V(rx_next, Stm32l4x5UsartBaseState, 2),
++        VMSTATE_BOOL_V(idle_armed, Stm32l4x5UsartBaseState, 2),
+         VMSTATE_CLOCK(clk, Stm32l4x5UsartBaseState),
+         VMSTATE_END_OF_LIST()
+     }
+--- a/include/hw/char/stm32l4x5_usart.h
++++ b/include/hw/char/stm32l4x5_usart.h
+@@ -20,6 +20,7 @@
+ 
+ #include "hw/core/sysbus.h"
+ #include "chardev/char-fe.h"
++#include "qemu/timer.h"
+ #include "qom/object.h"
+ 
+ #define TYPE_STM32L4X5_USART_BASE "stm32l4x5-usart-base"
+@@ -51,11 +52,19 @@
+     /* icr is a clear register */
+     uint32_t rdr;
+     uint32_t tdr;
++    uint32_t presc;
+ 
+     Clock *clk;
+     CharFrontend chr;
+     qemu_irq irq;
++    qemu_irq dma_rx;        /* a character waits, and the DMA is to take it */
+     guint watch_tag;
++
++    /* Reception at the line's speed, and the idle line after it */
++    QEMUTimer rx_timer;
++    QEMUTimer idle_timer;
++    int64_t rx_next;        /* the line has no next character before this */
++    bool idle_armed;        /* a character came since the last idle line */
+ };
+ 
+ struct Stm32l4x5UsartBaseClass {

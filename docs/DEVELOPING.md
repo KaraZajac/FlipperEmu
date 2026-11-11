@@ -288,6 +288,10 @@ you said: hello
   bytes), and is back when the firmware has taken it. With `--expect TEXT` it then
   waits for that in the app's answer and prints what came; after five seconds
   (`--for S`) it fails, with what came instead.
+- The app gets the bytes at the baud rate it set, a frame's time for each: a
+  thousand of them take a second at 9600 baud. `uart send` waits that long, and
+  gives up only when nothing has moved for `--for S`. After the last byte the UART's
+  idle interrupt comes, as on the chip.
 - `uart wait TEXT` waits for what the app sends by itself. It reads on from where
   the wait before it found its text, so a script that looks late misses nothing.
 - `uart term` is a terminal on the port, to try a protocol by hand (Ctrl-] leaves).
@@ -307,10 +311,13 @@ you said: hello
 The example needs no build: `examples/uart/echo.js` is a script for the firmware's
 `js` command that opens the port and answers every line (the README's "The serial
 port on pins 15 and 16" has the session). What ran here is that script, on five
-firmwares; the JavaScript `serial` module is the calls above. Two limits matter for
-an app: reception by DMA is not there yet (`furi_hal_serial_dma_rx_start`, which the
-firmware's USB-UART bridge uses), and the baud rate means nothing, so a wrong one
-is not found here.
+firmwares; the JavaScript `serial` module is the calls above. Reception by DMA
+(`furi_hal_serial_dma_rx_start`) works too: the firmware's USB-UART bridge uses it,
+and passes bytes both ways here. Three limits matter for an app. A wrong baud rate
+is not found: your side of the wire has no rate, so the app is understood at any.
+What the app sends is there at once, not at its baud rate. And a byte the app does
+not read waits on the wire, where a real UART would lose the next one and set its
+overrun flag.
 
 In a test script:
 
@@ -889,9 +896,13 @@ again, and opened after a reset; then pins 13 and 14: the log read with `uart wa
 (a line, 900 characters, `uart term`, a `uart` for the other port meanwhile), and
 the firmware's log on the pins again between two runs of it; what is refused; a run
 with `--lpuart none` and `--serial pty`, with a program on the pty of pins 13 and
-14; and one with `--lpuart tcp:PORT` and a TCP client. It passes on the official
-1.5.1, the official dev build, Momentum, Unleashed and RogueMaster (54 checks). It
-has no app in C, and nothing that receives by DMA.
+14; and one with `--lpuart tcp:PORT` and a TCP client. Before those two runs, the
+port's speed (240 bytes for the script at 1200 baud take their two seconds, with a
+`--for` of one) and the firmware's USB-UART bridge, which receives by DMA: the USB
+serial port's bytes out of pin 13, a short line and 600 bytes into pin 14 at the
+host, the CLI back after Back and Exit. It passes on the official 1.5.1, the
+official dev build, Momentum, Unleashed and RogueMaster (64 checks). It has no app
+in C.
 
 `scripts/gdb_check.py FIRMWARE` does what the gdb section shows, with gdb in batch
 mode: a backtrace of the firmware with functions and lines, the breakpoint in the
