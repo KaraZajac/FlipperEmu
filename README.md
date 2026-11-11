@@ -334,7 +334,7 @@ firmware.
 | `run --unplugged` \| `run --battery PERCENT` \| `run --gtk` | start on battery (USB cable out); with this charge; in QEMU's own window (the bare LCD) |
 | `stop` | shut a running device down cleanly (saves its NVRAM) |
 | `gui [--scale N]` | the window that looks like a Flipper, for a device that runs already |
-| `status [--json]` | what is plugged into a running device and held to it; whether its firmware has halted |
+| `status [--json]` | what is plugged into a running device and held to it; whether its firmware has halted, or has started again after a crash |
 | `usb plug` \| `usb unplug` \| `usb charger` | its USB cable: into a computer, out, into a charger (no argument: show it) |
 | `battery [PERCENT] [--voltage MV] [--temperature C] [--current MA]` | its battery (no argument: show it) |
 | `sd eject` \| `sd insert` | pull its microSD card out, push it back in |
@@ -560,6 +560,12 @@ dist/my_app.fap -> /ext/apps/Tools/my_app.fap (26916 bytes)
   crashes the firmware. The firmware's own NFC app does, asked to close in the middle
   of a read. `app` and `app --close` then say `the firmware crashed ([NFC] furi_check
   failed) when the app was asked to close, and has started again`, with exit status 1.
+  The reason is from the firmware's log. A crash in the middle of another thread's
+  log line leaves none there (the firmware drops what it would print, on a real
+  Flipper too), and then the reason is from the firmware's fault register: what the
+  Flipper's screen says after the restart. `./flipperemu status` has that as well,
+  until a button is pressed there: `firmware : it started again after a crash: its
+  screen says "furi_check failed" until a button is pressed there`.
   If it is your app: when its event loop returns, stop what is still at work (a
   worker, a timer, a scan) before you free it.
 - **A debug build halts after a crash.** A release build starts again. A debug build
@@ -599,7 +605,7 @@ behind F5, with its lines in the console.
 
 `scripts/app_check.py FIRMWARE` checks this on a throwaway device with an app the
 firmware brought along, and with the firmware's NFC app closed in the middle of a
-read, for the crash: 25 checks on the four release firmwares, and 27 on the debug
+read, for the crash: 26 checks on the four release firmwares, and 27 on the debug
 build, where the firmware halts and has to be started again.
 
 ### ufbt and fbt

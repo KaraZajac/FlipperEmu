@@ -276,7 +276,8 @@ class Driver:
         The firmware's own report can be missing: what a crash prints is
         dropped while another thread is in the middle of a log line (its log
         stops there, and goes on with the next start).  Then the console has
-        what the launcher saw: the firmware started again under its request."""
+        what the launcher saw, the firmware starting again under its request,
+        with the crash from the firmware's fault register."""
         w = self.win
         begun = len(self.console())
         w.take_away("nfc")              # nothing to find: it goes on reading
@@ -330,9 +331,12 @@ class Driver:
                       "crash: it came in the middle of another thread's log "
                       "line", flush=True)
             check("crash: an app takes the firmware with it: the console "
-                  "says so (with the crash, where the firmware's log has "
-                  "it); it starts again by itself",
-                  again in new() and back and "has halted" not in new()
+                  "says so, with what the crash said (from the firmware's "
+                  "log, or from its fault register); it starts again by "
+                  "itself",
+                  re.search(r"the firmware crashed \(.*furi_check failed\) "
+                            + again, new())
+                  and back and "has halted" not in new()
                   and w.state_label.text() == "running",
                   f"crash said: {said}, back: {back}, state: "
                   f"{w.state_label.text()!r}; the console in this step:\n"

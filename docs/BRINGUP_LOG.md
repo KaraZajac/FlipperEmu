@@ -1237,6 +1237,23 @@ All three are small, self-contained, and suitable for sending upstream.
       35, update 29 (101 s, 97 of them in the updater), and 29 from 1.5.1 to it.
       1.5.1 after the change: smoke test 28, files 55, app 25, window 31, update
       29. Momentum, Unleashed and RogueMaster: app 25, window 31.
+88. **The crash that the log lost is in the fault register.** Entry 87's lost report:
+    a release build writes a pointer to its crash message into RTC backup register 4
+    before it resets, and the desktop shows it after the restart ("Flipper crashed and
+    was rebooted"). The monitor's `xp/1wx 0x40002860` read 0 before the NFC crash on
+    1.5.1 and 0x080a3bca after it, and the bytes there are "furi_check failed".
+    - `app` and `app --close` name the crash from there when the firmware started
+      again under them and its log has no `[CRASH]` since the request. They say that
+      the log has none, and why.
+    - `status` has it in its first row, and as "fault" in `--json`, until a button is
+      pressed on the Flipper: the firmware clears the register when the crash screen
+      is left. A message that is not in the flash (an app's own `furi_crash("...")`)
+      is "Check serial logs" there, as on the screen.
+    - A debug build writes nothing there: it halts (entry 87).
+    - Results. App check: 26 on 1.5.1, Momentum, Unleashed and RogueMaster, 27 on
+      the dev build. Window check: 31 on the four release firmwares. RogueMaster's
+      log lost the report in that run, and the console named the crash from the
+      register.
 
 ## Things that were right the first time (and why)
 

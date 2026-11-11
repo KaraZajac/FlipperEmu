@@ -194,6 +194,15 @@ def halted(b):
         return None
 
 
+def fault(b):
+    """What `status --json` has of a crash that the firmware started again
+    after, or None"""
+    try:
+        return json.loads(b.fe("status", "--json")[1]).get("fault")
+    except ValueError:
+        return None
+
+
 def crash_checks(b):
     """The loader's request ends an app's event loop where it is.  The NFC app
     of the official firmware frees its scanner then, which is still at work
@@ -218,6 +227,7 @@ def crash_checks(b):
                                   r"failed\)", text)
           and ("has started again" in text or "has halted" in text)
           and "Traceback" not in text, text)
+    again = "has started again" in text
     if "has halted" in text:
         st = halted(b) or {}
         code, text = b.fe("status")
@@ -245,6 +255,22 @@ def crash_checks(b):
         time.sleep(1)
     check("after it the firmware is up again: no app runs",
           code == 0 and "no app runs" in text and not halted(b), text)
+    if again:
+        # "Flipper crashed and was rebooted" on its screen, until a button is
+        # pressed there: the firmware keeps what it shows in a register
+        was = fault(b)
+        code, text = b.fe("status")
+        b.fe("press", "ok")
+        end = time.monotonic() + 8
+        while (now := fault(b)) and time.monotonic() < end:
+            time.sleep(0.5)
+        check("a release build: `status` has the crash from the firmware's "
+              "fault register for as long as the Flipper's screen shows it "
+              "(until a button is pressed there)",
+              code == 0 and "furi_check failed" in (was or "")
+              and re.search(r"^firmware +: it started again after a crash: "
+                            r'its screen says "furi_check failed"', text, re.M)
+              and not now, f"{was!r} -> {now!r}\n{text}")
 
 
 def stopped_checks(b, local):

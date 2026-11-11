@@ -795,6 +795,48 @@ def halted_at(m):
 
 
 HALT_LOOP = [0xbf30, 0xe7fd]            # wfi; b .-2
+FAULT_REGISTER = 0x40002860             # RTC backup register 4
+FLASH = range(0x08000000, 0x08100000)
+NO_REASON = "Check serial logs"         # its message was not in the flash
+
+
+def last_fault(m):
+    """What the firmware's last crash said, or None.  A release build that
+    crashes writes a pointer to its message into a register that lives through
+    the restart, shows the message on its desktop afterwards ("Flipper crashed
+    and was rebooted") and clears the register when that screen is left.
+    A message that is not in the flash (an app's own) is not kept: the
+    register then points at NO_REASON.
+
+    The log does not always have it: what a crash prints is dropped while
+    another thread is in the middle of a line there."""
+    word = re.search(r":\s*0x([0-9a-f]{8})\b",
+                     m.cmd(f"xp/1wx {FAULT_REGISTER:#x}"))
+    at = int(word.group(1), 16) if word else 0
+    if at not in FLASH:
+        return None
+    data = bytes(int(byte, 16)
+                 for line in m.cmd(f"xp/64bx {at:#x}").splitlines()
+                 for byte in re.findall(r"\b0x([0-9a-f]{2})\b",
+                                        line.partition(":")[2]))
+    text = data.split(b"\0")[0].decode("ascii", "replace").strip()
+    return text if text and text.isprintable() else None
+
+
+def firmware_fault(dev, m=None):
+    """last_fault() of a running device; None as well when the emulator did
+    not say"""
+    try:
+        if m:
+            return last_fault(m)
+        from fe_monitor import Monitor
+        m = Monitor(str(dev.monitor), timeout=2.0)
+        try:
+            return last_fault(m)
+        finally:
+            m.close()
+    except (OSError, ConnectionError):
+        return None
 
 
 def firmware_halt(dev, m=None):
@@ -978,6 +1020,7 @@ def device_status(dev):
         g = lambda path, prop: qom_get(m, path, prop)
         st["stopped"] = stopped(m) or None
         st["halted"] = firmware_halt(dev, m)
+        st["fault"] = None if st["halted"] else firmware_fault(dev, m)
         st["usb"] = read_usb(m)
         st["battery"] = read_battery(m)
         st["sd"] = {"card": dev.sd.exists(), "inserted": g("/machine", "sd-card")}
@@ -1089,6 +1132,10 @@ def cmd_status(args):
         what, todo = halt_text(dev, st["halted"])
         print(f"{'firmware':9}: it {what}")
         print(f"{'':9}  {todo}")
+    elif st["fault"]:
+        print(f"{'firmware':9}: it started again after a crash: its "
+              f"screen says \"{st['fault']}\" until a button is pressed "
+              "there")
     for name, text in rows:
         print(f"{name:9}{':' if name else ' '} {text}")
     return 0
@@ -2119,15 +2166,30 @@ def app_close(dev, cli):
         if isinstance(e, TimeoutError) and not halt:
             raise
         crash = log_trouble(dev.uart, mark)[1] if mark is not None else None
+        # its log has no report of a crash that came in the middle of another
+        # thread's line; a release build has the reason in a register then
+        fault = None if crash or halt else firmware_fault(dev)
+        reason = crash or (fault if fault != NO_REASON else None)
+        if crash:
+            report = f"`./flipperemu -d {dev.name} log` has the firmware's report"
+        elif fault or halt:
+            report = ("The firmware's log has no report of it (what a crash "
+                      "prints is lost when another thread is in the middle of "
+                      "a line there)"
+                      + (": the reason is from its fault register, and on its "
+                         "screen" if reason else ""))
+        else:
+            report = "The firmware's log has no report of a crash"
         raise fe_apps.AppError(
-            "the firmware " + (f"crashed ({crash})" if crash else "stopped")
+            "the firmware "
+            + (f"crashed ({reason})" if reason else
+               "crashed" if fault else "stopped")
             + " when the app was asked to close, and "
             + ("has halted: a debug build waits for a debugger there" if halt
                else "has started again")
             + ".  The loader's request ends an app where it is, and not every "
             "app is ready for that in the middle of its work (reading, "
-            "sending): leave that with its Back button first.  "
-            f"`./flipperemu -d {dev.name} log` has the firmware's report"
+            "sending): leave that with its Back button first.  " + report
             + (f"; {halt_text(dev, halt)[1]}" if halt else "")
         ) from None
     return [f'"{name}" closed' + (" (with its Back button: it takes no "

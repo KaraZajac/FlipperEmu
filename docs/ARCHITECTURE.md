@@ -851,6 +851,17 @@ asks `status` a second after a `[CRASH]` in the log, and then every three second
 as long as the answer is yes. The halt loop keeps the vCPU busy: an interrupt is
 pending and masked, so its `wfi` returns at once, as on the chip.
 
+**A crash without a report.** A crash prints with interrupts masked, and
+`furi_log_tx()` gives up at once in that state when another thread holds the log's
+mutex: a crash in the middle of somebody else's log line prints nothing, here and on
+the chip. A release build still writes a pointer to its message into RTC backup
+register 4 (`FuriHalRtcRegisterFaultData`, 0x40002860) before it resets; the desktop
+shows it after the restart and clears the register when that screen is left. A
+message outside the flash (an app's own) is replaced by "Check serial logs". The
+launcher's `last_fault()` reads the register and the string through the monitor
+(`xp`), for `status` ("fault" in `--json`) and for `app`, when the firmware started
+again under it and the log has no `[CRASH]` since the request.
+
 **The firmware's own tools** (the launcher's `ufbt` and `fbt`). They need nothing from
 the model: the USB serial port is a pty, and `runfap.py`, `storage.py`, `selfupdate.py`
 and miniterm open it like a `/dev/ttyACM`. What they need is its name. Their port

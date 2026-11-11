@@ -241,10 +241,11 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       `reset`); known by the halt loop's code at the PC (BRINGUP_LOG 87)
   - ☐ It keeps one host core busy (the loop's `wfi` returns at once: an interrupt is
         pending and masked); the model could let the vCPU sleep there
-  - ☐ A crash in the middle of another thread's log line leaves no report in the log
+  - ☑ A crash in the middle of another thread's log line leaves no report in the log
         (the firmware drops it; seen on Momentum). The reason is in the fault register
         (RTC backup register 4, a pointer into the flash) until the crash screen is
-        left: `app --close`, `status` and the window could read it there
+        left: `app`, `app --close` and `status` read it there (2026-11-10, BRINGUP_LOG
+        88)
   - ☐ The window learns of a halt from a `[CRASH]` in the log: one opened on a firmware
         that has halted already, or after a crash without a report, does not know it
 

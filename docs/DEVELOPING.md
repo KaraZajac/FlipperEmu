@@ -77,6 +77,10 @@ Rebooting system.
 
 The Flipper restarts and says "Flipper crashed and was rebooted" on its screen. The
 log goes on in the same place, so the crash is a few lines up in `./flipperemu log`.
+`./flipperemu status` says that it started again after a crash, with the words on
+that screen, until a button is pressed there. For a message of the firmware's own
+those are the message ("furi_check failed"); for an app's own, as here, "Check serial
+logs": the firmware keeps a pointer over the restart, and only one into its flash.
 
 That is a release build, as the release channel's packages are. A debug build (the dev
 channel's packages, and what `./fbt` builds unless `DEBUG=0` is given) ends its report
@@ -422,6 +426,14 @@ Then `./flipperemu log -f` for what the firmware says, at the level you set
   launch` and `ufbt launch` ask in the same way, so an app that crashes here crashes
   on a `launch` over itself on a real Flipper too. Stop what is at work after the loop
   returns, then free it; `./flipperemu gdb` has the place (the backtrace of the crash).
+- **The firmware started again, and its log has no `[CRASH]`.** What a crash prints
+  is dropped when another thread is in the middle of a log line at that moment (the
+  log's lock is taken, and a crash does not wait): the log stops in that line and goes
+  on with the next start. A real Flipper does the same. The reason is still on the
+  Flipper's screen, and `./flipperemu status` has it from the same place, the
+  firmware's fault register, until a button is pressed there. `app` and `app --close`
+  take it from there when the firmware started again under them and the log says
+  nothing. A debug build keeps nothing there: it halts.
 - **"no CLI: the firmware crashed (…) and has halted".** A debug build does not start
   again after a crash: it waits for a debugger, and answers nothing until then. The
   same words end the message above on such a build. `./flipperemu gdb` shows where it
@@ -491,8 +503,10 @@ An app that does not live through the request to close is the NFC app in the mid
 of a read: `scripts/app_check.py` asks it, and wants the crash named and the firmware
 back with no app running. A debug build does not come back by itself: there the check
 wants `status` and the next command at the CLI to say that the firmware has halted,
-the second within five seconds, and starts it again with `reset` (27 checks, where a
-release build has 25). `scripts/gui_check.py` has the same crash under the window: the
+the second within five seconds, and starts it again with `reset` (27 checks). On a
+release build it wants `status` to have the crash from the fault register until a
+button is pressed on the Flipper (26). `scripts/gui_check.py` has the same crash
+under the window: the
 console has to name it, a debug build has to show as halted (the state, the title,
 HALTED above the screen) and to run again after Reboot.
 
