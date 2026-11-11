@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026, Kara Zajac
 # SPDX-License-Identifier: BSD-3-Clause
-"""Check the serial port on header pins 15 and 16 (LPUART1): the launcher's
-`uart`, with a script on the Flipper that answers each line.
+"""Check the serial ports of the header, pins 15 and 16 (LPUART1) and pins
+13 and 14 (USART1): the launcher's `uart`, with a script on the Flipper that
+answers each line.
 
     scripts/uart_check.py firmware/official-1.5.1/flipper-z-f7-update-1.5.1.tgz
 
@@ -16,10 +17,14 @@ that did not wait, and does not find it twice; what does not come is exit
 status 1 after the time given.  The pins say what they are in `gpio`.  A
 program on the port's pty is answered too, and hears what `uart send` gets;
 `uart term` on a terminal of its own, with a second `uart` refused meanwhile.
-The script again, and after a reset.  The log port (pins 13 and 14): `uart
-wait` reads it, `uart send` says it cannot yet.  Last a start with --lpuart
-none (an app that opens the port still runs) and one with --lpuart tcp:PORT.
-Exit status 0 = pass.
+The script again, and after a reset.  Then pins 13 and 14, where the firmware
+logs: `uart wait --port usart` reads the log, what is sent while the firmware
+only logs is lost, and the same script on that port is answered the same way
+(a line, 900 characters, `uart term`, the two ports not in each other's way),
+with the firmware's log back on the pins when the script has closed the port.
+Last a start with --lpuart none and --serial pty (an app that opens pins 15
+and 16 still runs; pins 13 and 14 have a pty, and a program on it is answered
+beside `uart send`) and one with --lpuart tcp:PORT.  Exit status 0 = pass.
 """
 import argparse
 import os
@@ -57,7 +62,7 @@ def fe(b, *args, timeout=600):
     return r.returncode, r.stdout, r.stderr, time.time() - t0
 
 
-def start(b, timeout, *more):
+def start(b, timeout, *more, serial=None):
     """Another run of the device, with more words for `run`: (its CLI
     answers, what was said)"""
     if b.uart.exists():
@@ -66,7 +71,8 @@ def start(b, timeout, *more):
     b.log = open(b.dir / "qemu.log", "ab")
     b.proc = subprocess.Popen(
         [sys.executable, str(ROOT / "flipperemu"), "-d", b.name, "run",
-         "--headless", "--audio", "none", "--serial", f"file:{b.uart}", *more],
+         "--headless", "--audio", "none", "--serial",
+         serial or f"file:{b.uart}", *more],
         stdout=b.log, stderr=subprocess.STDOUT)
     end = time.time() + timeout
     while time.time() < end and "Startup complete" not in b.uart_text():
@@ -84,12 +90,18 @@ def row(table, pin):
     return ""
 
 
-def sent(b):
-    """What the firmware sent on the port, this run"""
+def sent(b, port="lpuart"):
+    """What the firmware sent on a port, this run"""
     try:
-        return (b.dir / "lpuart.log").read_bytes()
+        return (b.dir / ("lpuart.log" if port == "lpuart"
+                         else "uart.log")).read_bytes()
     except OSError:
         return b""
+
+
+def on(port):
+    """The words for `uart` that name a port"""
+    return () if port == "lpuart" else ("--port", port)
 
 
 def script(b, path="/ext/echo.js"):
@@ -106,13 +118,15 @@ def ended(p, seconds=60):
         return "(it did not end) " + p.communicate()[0]
 
 
-def turn(b, word, label):
+def turn(b, word, label, port="lpuart", path="/ext/echo.js"):
     """A whole run of the script: ready, a line answered, bye"""
-    p = script(b)
-    c1, o1, e1, _ = fe(b, "uart", "wait", "ready", "--for", 30)
-    c2, o2, e2, _ = fe(b, "uart", "send", word + "\\n", "--expect",
+    p = script(b, path)
+    c1, o1, e1, _ = fe(b, "uart", "wait", *on(port), "\\nready\\r\\n"
+                       if port == "usart" else "ready", "--for", 30)
+    c2, o2, e2, _ = fe(b, "uart", "send", *on(port), word + "\\n", "--expect",
                        f"you said: {word}\\r\\n")
-    c3, o3, e3, _ = fe(b, "uart", "send", "bye\\n", "--expect", "closing")
+    c3, o3, e3, _ = fe(b, "uart", "send", *on(port), "bye\\n", "--expect",
+                       "closing")
     said = ended(p)
     return check(label, (c1, c2, c3) == (0, 0, 0) and "ready" in o1
                  and "echo done" in said,
@@ -227,12 +241,13 @@ def pty_checks(b):
         os.close(fd)
 
 
-def term_checks(b):
+def term_checks(b, port="lpuart"):
     """`uart term` on a terminal of its own, a line typed there, and another
     `uart send` meanwhile"""
+    pins = "15 and 16" if port == "lpuart" else "13 and 14"
     master, slave = pty.openpty()
     p = subprocess.Popen([sys.executable, str(ROOT / "flipperemu"), "-d", b.name,
-                          "uart", "term"], stdin=slave, stdout=slave,
+                          "uart", "term", *on(port)], stdin=slave, stdout=slave,
                          stderr=slave, start_new_session=True)
     os.close(slave)
     out = b""
@@ -247,13 +262,15 @@ def term_checks(b):
                 except OSError:
                     break
 
-    other = (None, "", "", 0)
+    other = free = (None, "", "", 0)
     try:
         pump(b"quits", 20)
         pump(None, 0.5)         # (what is typed before it has the terminal
         os.write(master, b"term 1\r")           # is thrown away with the
         pump(b"you said: term 1", 10)           # terminal's line mode)
-        other = fe(b, "uart", "send", "meanwhile\\n")
+        other = fe(b, "uart", "send", *on(port), "meanwhile\\n")
+        if port != "lpuart":
+            free = fe(b, "uart", "send", "the other port\\n")
         pump(None, 0.3)
         os.write(master, b"\x1d")               # Ctrl-]
         try:
@@ -266,12 +283,16 @@ def term_checks(b):
             p.wait()
         os.close(master)
     text = out.decode(errors="replace")
-    check("`uart term`: what is typed goes out, the answer shows, Ctrl-] "
-          "leaves it", p.returncode == 0 and "you said: term 1" in text,
+    there = "" if port == "lpuart" else f" --port {port}"
+    check(f"`uart term{there}`: what is typed goes out, the answer shows, "
+          "Ctrl-] leaves it", p.returncode == 0 and "you said: term 1" in text,
           f"exit {p.returncode}\n{text}")
-    check("a second `uart` meanwhile: told who has the pins, exit 1",
-          other[0] == 1 and "pins 15 and 16 are in use" in other[2]
+    check(f"a second `uart{there}` meanwhile: told who has the pins, exit 1",
+          other[0] == 1 and f"pins {pins} are in use" in other[2]
           and "uart term" in other[2], f"{other[0]} {other[1]} {other[2]}")
+    if port != "lpuart":
+        check("... and one for pins 15 and 16 is not in its way",
+              free[0] == 0, f"{free[0]} {free[1]} {free[2]}")
 
 
 def close_checks(b, p):
@@ -287,14 +308,66 @@ def close_checks(b, p):
           f"{tx}\n{rx}\n{err}")
 
 
-def other_checks(b):
+def usart_checks(b):
+    """Pins 13 and 14 (USART1): the firmware logs there, until an app opens
+    the port"""
+    echo = "/ext/echo13.js"
     code, out, err, took = fe(b, "uart", "wait", "--port", "usart",
                               "Startup complete")
     check("the log port (pins 13 and 14): `uart wait --port usart` reads it",
           code == 0 and "Startup complete" in out, f"{code} {out[-300:]!r} {err}")
-    code, out, err, took = fe(b, "uart", "send", "--port", "usart", "x")
-    check("... `uart send` there: says it is for pins 15 and 16 so far, exit 1",
-          code == 1 and "pins 15 and 16 so far" in err, f"{code} {out} {err}")
+    code, out, err, took = fe(b, "uart", "send", "--port", "usart", "stale\\n")
+    check("a line sent there while the firmware only logs: taken (and lost), "
+          "exit 0", code == 0 and took < 5, f"{code} in {took:.1f} s\n{out}{err}")
+    local = b.dir / "echo13.js"
+    local.write_text(ECHO.read_text().replace('"lpuart"', '"usart"'))
+    code, out, err, took = fe(b, "push", local, "/ext")
+    if not check("the script, for pins 13 and 14, is on the card",
+                 code == 0 and '"usart"' in local.read_text(), out + err):
+        return
+    p = script(b, echo)
+    code, out, err, took = fe(b, "uart", "wait", "--port", "usart",
+                              "\\nready\\r\\n", "--for", 30)
+    if not check("an app opens that port: `uart wait --port usart` has its "
+                 "first line, behind the firmware's log",
+                 code == 0 and "ready" in out, f"{code} {out[-300:]!r} {err}"):
+        print("        the CLI: " + ended(p, 5))
+        return
+    code, out, err, took = fe(b, "uart", "send", "--port", "usart",
+                              "ping 13\\n", "--expect", "you said: ping 13\\r\\n")
+    check("`uart send --port usart --expect`: the line is answered",
+          code == 0 and "you said: ping 13" in out, f"{code} {out!r} {err}")
+    check("... in well under a second", took < 1.0, f"{took:.2f} s")
+    check("... and what was sent before the app had the port did not wait "
+          "for it", b"stale" not in sent(b, "usart"), sent(b, "usart")[-300:])
+    big = (string.ascii_letters + string.digits) * 15
+    big = big[:900]
+    code, out, err, took = fe(b, "uart", "send", "--port", "usart", big + "\\n",
+                              "--expect", big[-40:] + "\\r\\n", "--for", 20)
+    check("900 characters in a line there: back, in their order",
+          code == 0 and "you said: " + big in out,
+          f"{code} in {took:.1f} s\n{out!r}\n{err}")
+    code, out, err, took = fe(b, "gpio")
+    tx, rx = row(out, "PB6"), row(out, "PB7")
+    check("`gpio` while the port is open: pins 13 and 14 are the peripheral's",
+          "alternate function 7" in tx and "alternate function 7" in rx,
+          f"{tx}\n{rx}\n{err}")
+    term_checks(b, "usart")
+    code, out, err, took = fe(b, "uart", "send", "--port", "usart", "bye\\n",
+                              "--expect", "closing")
+    said = ended(p)
+    check("the script closes the port and ends",
+          code == 0 and "echo done" in said and CRASH.search(said) is None,
+          f"{code} {out!r} {err}\nthe CLI: {said}")
+    before = len(sent(b, "usart"))
+    turn(b, "again 13", "the script a second time on pins 13 and 14: ready, "
+                        "answered, closed", "usart", echo)
+    between = sent(b, "usart")[before:].partition(b"\nready\r\n")
+    check("... and between the two the firmware's log was on the pins again",
+          between[1] and b"[I][" in between[0], between[0][-400:])
+
+
+def other_checks(b):
     c1, o1, e1, _ = fe(b, "uart", "send", "--hex", "zz")
     c2, o2, e2, _ = fe(b, "uart", "send")
     c3, o3, e3, _ = fe(b, "uart", "wait")
@@ -308,8 +381,8 @@ def other_checks(b):
 
 def none_checks(b, timeout):
     b.stop()
-    ok, said = start(b, timeout, "--lpuart", "none")
-    if not check("a start with --lpuart none", ok, said):
+    ok, said = start(b, timeout, "--lpuart", "none", serial="pty")
+    if not check("a start with --lpuart none and --serial pty", ok, said):
         return
     code, out, err, took = fe(b, "uart")
     c2, o2, e2, _ = fe(b, "uart", "send", "x")
@@ -321,6 +394,41 @@ def none_checks(b, timeout):
     code, out, err, took = fe(b, "cli", "--timeout", 60, "js /ext/uart_once.js")
     check("... an app that opens the port and writes to it runs to its end",
           "once done" in out, f"{code} in {took:.1f} s\n{out}{err}")
+    link = b.dir / "usart.tty"
+    code, out, err, took = fe(b, "uart")
+    if not check("... pins 13 and 14 have a pty, with the device's usart.tty "
+                 "as its name", code == 0 and link.is_symlink()
+                 and f"pins 13 and 14 (USART1): {os.readlink(link)}" in out,
+                 out + err):
+        return
+    fd = os.open(link, os.O_RDWR | os.O_NOCTTY)
+    got = b""
+
+    def hear(want, seconds):
+        nonlocal got
+        end = time.time() + seconds
+        while time.time() < end and want not in got:
+            if select.select([fd], [], [], 0.05)[0]:
+                got += os.read(fd, 65536)
+        return want in got
+
+    try:
+        tty.setraw(fd)
+        time.sleep(1.5)         # (QEMU looks once a second who has a pty)
+        p = script(b, "/ext/echo13.js")
+        ready = hear(b"\nready\r\n", 30)
+        os.write(fd, b"pty 13\n")
+        answered = hear(b"you said: pty 13\r\n", 10)
+        check("... a program on that pty has the app's first line, and its "
+              "own line answered", ready and answered, repr(got[-400:]))
+        code, out, err, took = fe(b, "uart", "send", "--port", "usart",
+                                  "bye\\n", "--expect", "closing")
+        said = ended(p)
+        check("... and `uart send --port usart` works beside it",
+              code == 0 and hear(b"closing\r\n", 5) and "echo done" in said,
+              f"{code} {out!r} {err}\nthe pty: {got[-400:]!r}\nthe CLI: {said}")
+    finally:
+        os.close(fd)
 
 
 def tcp_checks(b, timeout):
@@ -403,6 +511,7 @@ def main():
                          (code, c2) == (0, 0), out + err + o2 + e2):
                     turn(b, "after reset", "the script after a reset: ready, "
                                            "answered, closed")
+                usart_checks(b)
                 other_checks(b)
                 none_checks(b, args.timeout)
                 tcp_checks(b, args.timeout)

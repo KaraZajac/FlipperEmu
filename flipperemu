@@ -191,6 +191,7 @@ class Device:
         self.lpuart_log = self.dir / "lpuart.log"
         self.lpuart_sock = self.dir / "lpuart.sock"     # `uart send`, `uart term`
         self.usart_tty = self.dir / "usart.tty"     # --serial pty: the same
+        self.usart_sock = self.dir / "usart.sock"   # ... for pins 13 and 14
         self.subghz_sock = self.dir / "subghz.sock"     # a radio bridge (fe_sdr.py)
         self.nfc_sock = self.dir / "nfc.sock"           # a card on the link (fe_nfc_link.py)
         self.panel_sock = self.dir / "panel.sock"       # its face: the window (fe_gui.py)
@@ -501,7 +502,8 @@ def lpuart_args(dev: Device, where):
 def serial_args(dev: Device, serial):
     """USART1: the firmware's log, and pins 13 and 14 of a real one.  Whatever
     it is connected to, what the firmware writes to it is kept in the
-    device's uart.log, for `flipperemu log` and the window."""
+    device's uart.log, for `flipperemu log` and the window.  Like LPUART1 it
+    has a second end, a socket for `flipperemu uart --port usart`."""
     log = f",logfile={chardev_path(dev.uart)},logappend=on"
     if serial in ("stdio", "pty", "null"):
         backend = serial
@@ -515,7 +517,10 @@ def serial_args(dev: Device, serial):
     else:
         return ["-serial", serial]      # QEMU's own words: no uart.log
     name, _, options = backend.partition(",")
-    return ["-chardev", f"{name},id=uart" + (f",{options}" if options else "") + log,
+    return ["-chardev", f"{name},id=uart-user" + (f",{options}" if options else ""),
+            "-chardev", f"socket,id=uart-own,"
+                        f"path={chardev_path(dev.usart_sock)},server=on,wait=off",
+            "-chardev", "hub,id=uart,chardevs.0=uart-user,chardevs.1=uart-own" + log,
             "-serial", "chardev:uart"]
 
 
@@ -762,8 +767,8 @@ class Session:
         if gauge is not None:
             self.gauge = dict(gauge)
         for stale in (dev.monitor, dev.usb_tty, dev.lpuart_tty, dev.usart_tty,
-                      dev.lpuart_sock, dev.panel_sock, dev.held_file,
-                      dev.gdb_sock):
+                      dev.lpuart_sock, dev.usart_sock, dev.panel_sock,
+                      dev.held_file, dev.gdb_sock):
             try:
                 stale.unlink()
             except FileNotFoundError:
@@ -786,7 +791,7 @@ class Session:
         """Behind a QEMU that is gone: what only meant something while it ran"""
         for stale in (self.dev.usb_tty, self.dev.lpuart_tty,
                       self.dev.usart_tty, self.dev.lpuart_sock,
-                      self.dev.held_file):
+                      self.dev.usart_sock, self.dev.held_file):
             try:
                 stale.unlink()
             except FileNotFoundError:
@@ -2178,9 +2183,10 @@ def open_cli(dev, prompt=True, timeout=15.0):
 
 
 # The serial ports of the GPIO header: (the chardev's name, its pins, what
-# the chip calls it)
+# the chip calls it), and the chardev of the launcher's own end of each
 UART_PORTS = {"lpuart": ("lpuart-user", "15 and 16", "LPUART1"),
-              "usart": ("uart", "13 and 14", "USART1")}
+              "usart": ("uart-user", "13 and 14", "USART1")}
+UART_OWN = {"lpuart": "lpuart-own", "usart": "uart-own"}
 
 
 def uart_link(dev, port):
@@ -2314,7 +2320,7 @@ def cmd_uart(args):
     m = open_monitor(dev)
     try:
         ports = {port: usb_endpoint(m, UART_PORTS[port][0]) for port in UART_PORTS}
-        own = usb_endpoint(m, "lpuart-own")
+        own = usb_endpoint(m, UART_OWN[args.port])
     finally:
         m.close()
     if not args.action:
@@ -2343,20 +2349,19 @@ def cmd_uart(args):
             print(f"[{dev.name}] pins {pins}: {' '.join(args.text)!r} did not "
                   f"come in {args.seconds:g} s", file=sys.stderr)
         return 0 if seen else 1
-    if port != "lpuart":
-        sys.exit(f"[{dev.name}] pins {pins} ({chip}): `uart {args.action}` is "
-                 "for pins 15 and 16 so far.  A run with --serial pty or "
-                 "tcp:PORT gives a program of yours these two; `uart wait "
-                 "--port usart` reads what the firmware sent on them.")
-    if not own:
+    if not own and port == "lpuart":
         sys.exit(f"[{dev.name}] pins {pins} ({chip}) go nowhere: `uart "
                  f"{args.action}` needs a run without --lpuart none")
+    if not own:
+        sys.exit(f"[{dev.name}] pins {pins} ({chip}) are as QEMU was told "
+                 f"with --serial: `uart {args.action}` needs a run with "
+                 "--serial stdio, pty, null, tcp:PORT or file:PATH")
     if args.action == "term" and args.text:
         sys.exit("uart term takes no more words")
     if args.action == "send" and not args.text:
         sys.exit("uart send: what?  uart send \"hello\\r\\n\"")
     try:
-        lock = take_port(dev.dir / "lpuart.lock", 5.0, f"pins {pins} are")
+        lock = take_port(dev.dir / f"{port}.lock", 5.0, f"pins {pins} are")
     except PortBusy as e:
         sys.exit(f"[{dev.name}] {e}")
     line = None
@@ -4096,8 +4101,9 @@ def main():
     p.set_defaults(func=cmd_gpio)
 
     p = sub.add_parser(
-        "uart", help="the serial port on pins 15 and 16 of a running device's "
-        "GPIO header: where it is, a terminal on it, bytes sent to it",
+        "uart", help="the serial ports of a running device's GPIO header "
+        "(pins 15 and 16; 13 and 14): where they are, a terminal on one, "
+        "bytes sent to it",
         description="The serial port on pins 15 (TX) and 16 (RX) of a running "
         "device's GPIO header (LPUART1), which an app opens for what is wired "
         "there.  Nothing: where the header's serial ports are.  `term`: a "
@@ -4109,12 +4115,15 @@ def main():
         "before found its text.  What is sent while no app has the port open "
         "is lost, as with nothing wired.  A program of yours has the port "
         "too, at the same time: its pty (devices/<name>/lpuart.tty), or the "
-        "TCP port of --lpuart tcp:PORT.")
+        "TCP port of --lpuart tcp:PORT.  --port usart: all of that on pins "
+        "13 (TX) and 14 (RX) instead (USART1), where the firmware logs until "
+        "an app opens the port; what it sends there is in uart.log, and a "
+        "program of yours has what --serial said.")
     p.add_argument("action", nargs="?", choices=("term", "send", "wait"))
     p.add_argument("text", nargs="*", help="send, wait: the text (or bytes)")
     p.add_argument("--port", choices=("lpuart", "usart"), default="lpuart",
                    help="usart: pins 13 and 14 instead (USART1, where the "
-                        "firmware logs by default): `wait` only, so far")
+                        "firmware logs by default)")
     p.add_argument("--hex", action="store_true",
                    help="the text is bytes in hex: 0d 0a ff")
     p.add_argument("--expect", metavar="TEXT",

@@ -1012,7 +1012,11 @@ ufbt is not run at all, and `update` sends the package without the stage (BRINGU
   the firmware knowing.
 - **The log**: the firmware logs to USART1, QEMU's first serial port. The launcher gives
   its chardev a `logfile` (`devices/NAME/uart.log`, appended to by every QEMU of a run),
-  so the log is kept whatever `--serial` connects the port to. How much the firmware
+  so the log is kept whatever `--serial` connects the port to. (The chardev is a hub
+  of two, as LPUART1's below: `uart-user`, what `--serial` said, and `uart-own`, the
+  socket `devices/NAME/usart.sock` for `flipperemu uart --port usart`. The firmware
+  logs with the receiver off, so what comes in is dropped until an app opens the
+  port.) How much the firmware
   logs is the low nibble of RTC BKP1R (`FuriLogLevel`; 0 is its default, info), which
   it reads once, when it starts. The machine property `log-level` is that nibble by
   name: `-M flipper-zero,log-level=debug` sets it before the first instruction, and
@@ -1192,6 +1196,7 @@ the emulated field.
 | `held.json` | (while it runs) the names of what the launcher held to it, for `status` and the window |
 | `uart.log`, `uart.log.1` | what a serial adapter on pins 13 and 14 would have recorded: the firmware's log of this run, and of the one before |
 | `lpuart.log` | what a serial adapter on pins 15 and 16 would have recorded: what an app sent on LPUART1 in this run |
+| `usart.tty`, `usart.sock`, `usart.mark` | (while it runs) the same three for pins 13 and 14: the pty of `--serial pty`, the launcher's own end, the mark of `uart wait --port usart` |
 | `lpuart.tty`, `lpuart.sock`, `lpuart.mark` | (while it runs) that port's pty for a program of the user's, the launcher's own end of it, and how far `uart wait` has read the log |
 | `firmware.elf` | symbols for gdb (copied when flashing an ELF) |
 | `gdb.sock`, `gdb.init` | (once `./flipperemu gdb` was run) QEMU's gdb stub, and what gdb was told: the ELF, the stub, `scripts/fe_gdb.py` |

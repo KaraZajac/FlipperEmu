@@ -1851,6 +1851,33 @@ big lock, entry 92).
       the IDLE flag, a baud rate that means something, `send` and `term` for
       pins 13 and 14.
 
+105. **Pins 13 and 14: `uart --port usart`.** USART1 got what LPUART1 has: its
+    chardev is a hub of what `--serial` said (`uart-user`: the terminal, a pty, a
+    TCP port, a file, nothing) and a socket of the launcher's (`uart-own`,
+    `devices/NAME/usart.sock`), with `uart.log` as the hub's log file. `uart send
+    --port usart` and `uart term --port usart` are the same code with another
+    socket and another lock.
+    - What was expected to be in the way was not. The firmware has USART1 on from
+      its first lines, for the log, and the model takes no second byte while the
+      first is unread: a line sent to a port that only logs would have sat in the
+      socket until the command gave up. The firmware logs with the receiver off
+      (CR1 is `0x20000009` there: UE, TE, the FIFO), and the model drops what
+      comes while RE is clear. So it is as on pins 15 and 16: what is sent while
+      no app has the port is taken and lost, and `uart send` exits 0.
+    - An app that takes the port takes it from the log (`furi_hal_serial_control`
+      stops the log on it, and starts it again at the release). `uart.log` then
+      has the app's bytes among the log's lines, which is what a serial adapter on
+      the pins has, and the check looks for a line of the log between two runs of
+      its script.
+    - A run with `--serial file:PATH` where the path is `uart.log` itself (the
+      checks start their devices so) has the file as the hub's first end and no
+      log file on the hub. A `--serial` in QEMU's own words is passed through as
+      before, without a hub, and `uart send --port usart` says what it needs.
+    - Not there: the pin. The expansion service of the firmware waits for a pulse
+      on pin 14 as a GPIO interrupt before it opens the port, and what is sent
+      here goes into the UART, not onto PB7.
+    - `scripts/uart_check.py`: 54 checks (38 before), on the five firmwares.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

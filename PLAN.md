@@ -312,8 +312,13 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         peripheral on both edges of its reset bit (an app that opened the port
         after a deep sleep hung), and QEMU patch 0006 (a chardev's log file had a
         byte twice when its backend was busy) (BRINGUP_LOG 104)
-  - ☐ The same for pins 13 and 14: `uart send` and `uart term` on USART1 (`uart`
-        says where it goes, and `uart wait --port usart` reads its log)
+  - ☑ The same for pins 13 and 14 (2026-11-11): USART1 on a hub too, what
+        `--serial` said and a socket for the launcher; `uart send --port usart`,
+        `uart term --port usart`. The firmware logs there with the receiver off,
+        so what is sent before an app has the port is lost, as on LPUART1;
+        `scripts/uart_check.py` is 54 checks now (BRINGUP_LOG 105)
+  - ☐ The pin itself: a start bit on pin 14 as an edge the firmware's expansion
+        service can see (it waits for a pulse there before it opens the port)
   - ☐ The UART model: reception by DMA and the IDLE flag (the firmware's USB-UART
         bridge sends and does not hear), bytes paced by the baud rate (about 1000
         a second now, at any), `qemu_chr_fe_accept_input()` after a read

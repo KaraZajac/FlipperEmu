@@ -45,9 +45,9 @@ official firmware to Unleashed, and from the release to the dev build.
 `scripts/gpio_check.py` (the GPIO header: a pin the firmware drives seen from outside,
 a pin held from outside read by the firmware, a record of every change of a pin with
 its time) passes on the same five.
-`scripts/uart_check.py` (the serial port on pins 15 and 16 of the header: an app that
-opens it is answered from the launcher, from a program on the port's pty, and over
-TCP) passes on the same five.
+`scripts/uart_check.py` (the two serial ports of the header, pins 15 and 16 and pins
+13 and 14: an app that opens one is answered from the launcher, from a program on the
+port's pty, and over TCP) passes on the same five.
 `scripts/ufbt_check.py` (ufbt 0.2.6 building `examples/hello`, launching it there, and
 `ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's symbols, that
 app's and a stock app's, and its debug configuration for VS Code used the way that
@@ -391,7 +391,7 @@ it runs: once with the wait given up, once to the end.
 | `sound off` \| `sound on` | mute its speaker, and back |
 | `gpio` \| `gpio PIN` \| `gpio PIN high\|low\|free` \| `gpio PIN --wait high\|low` | its GPIO header: what the firmware has the pins as; one pin's level; a pin held from outside, or let go of; wait for a level |
 | `gpio record OUT.vcd` \| `gpio record stop` \| `gpio watch [PIN,PIN]` | every change of a pin's level with its time: into a file a logic analyzer's program opens, or printed as it happens |
-| `uart` \| `uart send TEXT [--expect TEXT]` \| `uart wait TEXT` \| `uart term` | the serial port on pins 15 and 16 of its header: where it goes; send to the app that has it open, and wait for its answer; wait for what the app sends; a terminal on it |
+| `uart` \| `uart send TEXT [--expect TEXT]` \| `uart wait TEXT` \| `uart term` | the serial port on pins 15 and 16 of its header: where it goes; send to the app that has it open, and wait for its answer; wait for what the app sends; a terminal on it. `--port usart`: the one on pins 13 and 14 |
 | `reset` | reboot it, as holding Left + Back does |
 | `pause` \| `continue` | time stands still on it (screen, timers, radios), and goes on from there |
 | `run --usbip [PORT]` | export the USB device over USB/IP (then `sudo scripts/usbip_attach.py`) |
@@ -1483,6 +1483,29 @@ closing
 What a wire does, and this does too: what is sent while no app has the port open is
 lost (`uart send` takes it and exits 0).
 
+**Pins 13 and 14** (TX and RX on the case) are USART1, the other serial port:
+`FuriHalSerialIdUsart`, `serial.setup("usart", 115200)`, and the one most GPS and
+ESP32 apps take unless they are told otherwise. `--port usart` is all of the above
+for these two:
+
+```sh
+./flipperemu uart send --port usart "AT\r\n" --expect OK
+./flipperemu uart wait --port usart "ready"
+./flipperemu uart term --port usart
+```
+
+- Until an app opens that port the firmware logs on it (it is the log of
+  `flipperemu log`), with only its transmitter on: what is sent then is lost.
+- What an app sends is in `devices/NAME/uart.log`, among the log's lines, as a
+  serial adapter on the two pins would have it. When the app closes the port the
+  log is back. `uart term --port usart` shows both as they come.
+- The first `uart wait --port usart` of a run reads from the top of the log.
+- A program of yours has what `--serial` said: the terminal `run` was started in
+  (the default), a pty with `--serial pty` (then `devices/NAME/usart.tty`), a TCP
+  port with `--serial tcp:PORT`. `uart send --port usart` works beside it.
+- A `--serial` in QEMU's own words (`--serial none`, say) has no second end, and
+  `uart send --port usart` says so.
+
 What it does not do yet:
 
 - The baud rate is not modelled. The firmware receives about 1000 bytes a second
@@ -1497,18 +1520,17 @@ What it does not do yet:
   and closed at once (`echo hi > lpuart.tty`) waits for the next program that opens
   it. `uart send` and a TCP port have neither.
 - What is typed before `uart term` has printed its first line is lost.
-- Pins 13 and 14 (USART1, where the firmware logs): `uart` says where they go, and
-  `uart wait --port usart TEXT` reads what the firmware sent there; `send` and
-  `term` are for 15 and 16 so far. A run with `--serial pty` (then
-  `devices/NAME/usart.tty`) or `--serial tcp:PORT` gives a program both directions.
+- A pulse on pin 14 does not start the firmware's expansion-module handshake: the
+  pin itself is not driven by what is sent (`gpio` shows it as the firmware left
+  it).
 
-Underneath, the port is a QEMU chardev hub of two: the pty or TCP port for your
-program, and a socket (`devices/NAME/lpuart.sock`) for `uart send` and `uart term`,
-which is why the two do not take the port from each other.
+Underneath, each port is a QEMU chardev hub of two: the pty, TCP port or terminal
+for your program, and a socket (`devices/NAME/lpuart.sock`, `usart.sock`) for `uart
+send` and `uart term`, which is why the two do not take the port from each other.
 
-`scripts/uart_check.py FIRMWARE` checks it with that script on the Flipper's side: 38
-checks, on the official 1.5.1, the official dev build, Momentum, Unleashed and
-RogueMaster.
+`scripts/uart_check.py FIRMWARE` checks both ports with that script on the Flipper's
+side: 54 checks, on the official 1.5.1, the official dev build, Momentum, Unleashed
+and RogueMaster.
 
 Two bugs were in the way, and both are fixed (docs/BRINGUP_LOG.md, 104). After every
 deep sleep the firmware switches its two UARTs back on, also one that no app has: on

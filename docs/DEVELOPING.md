@@ -297,6 +297,12 @@ you said: hello
 - What the app sent is in `devices/NAME/lpuart.log`, whether or not anything
   listened. What is sent to an app that has not opened the port is lost, as it is
   on a wire.
+- An app that opens the other port, USART1 on pins 13 (TX) and 14 (RX)
+  (`FuriHalSerialIdUsart`, the default of most GPS and ESP32 apps), gets the same
+  with `--port usart`: `uart send --port usart "AT\r\n" --expect OK`. The firmware
+  logs on those pins until the app has the port and again when it has closed it,
+  so the app's bytes are in `uart.log` among the log's lines, and `uart term
+  --port usart` shows both.
 
 The example needs no build: `examples/uart/echo.js` is a script for the firmware's
 `js` command that opens the port and answers every line (the README's "The serial
@@ -878,11 +884,14 @@ typed; 900 characters back in their order; what was found once not found again; 
 answer that does not come; the two pins in `gpio` while the port is open and after;
 a program on the pty answered, with `uart send` beside it; `uart term` in a terminal
 of its own, and a second `uart` told who has the pins; the port closed, opened
-again, and opened after a reset; pins 13 and 14 read with `uart wait --port usart`;
-what is refused; a run with `--lpuart none`, and one with `--lpuart tcp:PORT` and a
-TCP client. It passes on the official 1.5.1, the official dev build, Momentum,
-Unleashed and RogueMaster (38 checks). It has no app in C, and nothing that
-receives by DMA.
+again, and opened after a reset; then pins 13 and 14: the log read with `uart wait
+--port usart`, a line sent while the firmware only logs, the script on that port
+(a line, 900 characters, `uart term`, a `uart` for the other port meanwhile), and
+the firmware's log on the pins again between two runs of it; what is refused; a run
+with `--lpuart none` and `--serial pty`, with a program on the pty of pins 13 and
+14; and one with `--lpuart tcp:PORT` and a TCP client. It passes on the official
+1.5.1, the official dev build, Momentum, Unleashed and RogueMaster (54 checks). It
+has no app in C, and nothing that receives by DMA.
 
 `scripts/gdb_check.py FIRMWARE` does what the gdb section shows, with gdb in batch
 mode: a backtrace of the firmware with functions and lines, the breakpoint in the
