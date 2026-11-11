@@ -186,6 +186,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.halt_timer = QtCore.QTimer(self)
         self.halt_timer.setSingleShot(True)
         self.halt_timer.timeout.connect(self.ask_halted)
+        self.halt_asked = False         # `status` is on its way to say
+        self.crash_said = False         # the log had this crash's report
+        self.say_fault = False          # a crash on its screen is news here
         self.recording = None           # a fe_record.Recording, while one runs
         self.recording_since = 0.0
         self.sd_none = (session is not None and session.args.no_sd) or \
@@ -618,6 +621,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log.leave.connect(lambda: self.view.setFocus())
         self.fwlog.leave.connect(lambda: self.view.setFocus())
         self.fwlog.crashed.connect(self.on_crash)
+        self.fwlog.restarted.connect(self.on_restart)
         self.fwlog.level_wanted.connect(self.set_log_level)
         self.fwlog.save_wanted.connect(self.save_fwlog)
 
@@ -727,6 +731,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.props.clear()
         self.expect_off = False
         self.set_state("on")
+        # it may have halted before this window found it, or show a crash
+        self.say_fault = True
+        self.crash_said = False
+        self.halt_timer.start(HALT_ASK_MS)
         for args in self.after_hello:
             self.command(*args, quiet=True)
         self.after_hello = []
@@ -1143,6 +1151,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_failed(self, text):
         self.log.add(text, "error")
         self.statusBar().showMessage(text, 8000)
+        if self.state == "on" and not (self.halted or self.halt_asked
+                                       or self.halt_timer.isActive()):
+            self.halt_timer.start(0)    # a halted firmware answers nothing
         if "started without -drive if=sd" in text:
             self.sd_none = True
             self.tiles_due.start()
@@ -1165,20 +1176,40 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log.add(f"{text}  (the firmware log has the rest: Ctrl+Shift+L)",
                      "error")
         self.statusBar().showMessage(text, 15000)
+        self.crash_said = True
         # a release build starts again by itself; a debug build waits for a
         # debugger, and after furi_halt() every build waits for the end
         self.halt_timer.start(HALT_ASK_MS)
 
+    def on_restart(self):
+        """The firmware started again.  After a crash, if its screen says so:
+        its log has no report of one that came in the middle of another
+        thread's line, and then this is where the window learns of it."""
+        self.say_fault = not self.crash_said
+        self.crash_said = False
+        self.halt_timer.start(HALT_ASK_MS)
+
     def ask_halted(self):
-        """After a crash, and for as long as it stands there: `status` knows
-        whether the firmware has halted"""
+        """`status` knows whether the firmware has halted, and whether it
+        started again after a crash.  Asked when the emulator is found, after
+        a crash in the log, when the firmware started again, after a command
+        that failed, and for as long as the firmware stands halted."""
         def done(code, text):
+            self.halt_asked = False
+            say, self.say_fault = self.say_fault, False
             try:
-                halted = json.loads(text)["halted"]
-            except (ValueError, KeyError, TypeError):
-                halted = None
+                st = json.loads(text)
+                halted, fault = st["halted"], st.get("fault")
+            except (ValueError, KeyError, TypeError, AttributeError):
+                halted = fault = None
             if not (halted and self.is_live()):
                 self.set_halted(False)
+                if fault and say and self.is_live():
+                    told = ("The firmware started again after a crash: its "
+                            f'screen says "{fault}"')
+                    self.log.add(f"{told}.  Any button on the Flipper leaves "
+                                 "that screen.", "error")
+                    self.statusBar().showMessage(told, 15000)
                 return
             if not self.halted:
                 why = ("its own code asked for that"
@@ -1197,6 +1228,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.closing:
             return
         if self.is_live():
+            self.halt_asked = True
             self.command("status", "--json", then=done, quiet=True)
         else:
             self.set_halted(False)

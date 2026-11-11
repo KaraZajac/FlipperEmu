@@ -777,6 +777,7 @@ class FirmwareLogDock(QtWidgets.QDockWidget):
     uart.log, and this reads that as it grows (fe_log.py: `flipperemu log`
     reads the same in a terminal)."""
     crashed = QtCore.Signal(str, str)       # CRASH or HALT, and what it said
+    restarted = QtCore.Signal()             # the firmware started again
     level_wanted = QtCore.Signal(str)       # one of the firmware's levels
     save_wanted = QtCore.Signal()
     leave = QtCore.Signal()                 # Esc in the filter line
@@ -902,6 +903,8 @@ class FirmwareLogDock(QtWidgets.QDockWidget):
             if isinstance(item, fe_log.Mark):
                 self.colour = None
                 new.append((item, None))
+                if item == fe_log.REBOOT and self.caught_up:
+                    self.restarted.emit()
                 continue
             pieces, self.colour = fe_log.segments(item.raw, self.colour)
             if not item.plain.strip():

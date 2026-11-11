@@ -296,6 +296,12 @@ class Driver:
                   "middle of a read", flush=True)
             return
         again = "when the app was asked to close, and has started again"
+
+        def lose():
+            """the window loses the emulator, and finds it again: what one
+            opened now would find"""
+            w.link.sock.abort()
+
         self.until(lambda: "The firmware crashed: " in new() or again in new(),
                    20)
         said = "The firmware crashed: " in new()
@@ -312,6 +318,21 @@ class Driver:
                      and w.view.paused == "halted"
                      and w.windowTitle().endswith("(halted)"))
             self.shot("halted")
+
+            def finds(how):
+                """the window forgets the halt; after how(): it knows again"""
+                self.until(lambda: not w.halt_asked, 10)
+                w.halt_timer.stop()
+                w.set_halted(False)
+                how()
+                return self.until(
+                    lambda: w.state_label.text() == "halted", 10)
+            found = finds(lose)
+            failed = finds(lambda: w.command("ls", "/ext"))
+            check("crash: a window that finds the firmware halted already "
+                  "shows that, with no [CRASH] going by; so does one whose "
+                  "command gets no answer from it", found and failed,
+                  f"found: {found}, after a command: {failed}")
             w.reboot()
             back = self.booted() and self.until(
                 lambda: w.state_label.text() == "running"
@@ -341,6 +362,33 @@ class Driver:
                   f"crash said: {said}, back: {back}, state: "
                   f"{w.state_label.text()!r}; the console in this step:\n"
                   f"{self.console()[begun:]}")
+            # the crash is on the Flipper's screen now, which the window says
+            # where the log did not (once), and when it finds the emulator
+            screen = ('The firmware started again after a crash: its screen '
+                      'says "furi_check failed"')
+            idle = lambda: not (w.halt_asked or w.halt_timer.isActive())
+            self.spin(fe_gui.HALT_ASK_MS / 1000 + 0.5)
+            self.until(idle, 10)
+            lost = screen in new()
+            then = len(self.console())
+            lose()
+            found = self.until(lambda: screen in self.console()[then:], 10)
+            # started again with that screen still up: nothing about a crash
+            # in the log since its last start, as after a report that was lost
+            self.until(idle, 10)
+            self.settle()
+            then = len(self.console())
+            w.reboot()
+            unsaid = self.booted() and self.until(
+                lambda: screen in self.console()[then:], 10)
+            check("crash: a window that finds the firmware after its crash "
+                  "says what the Flipper's screen says of it, and so does "
+                  "this one when the firmware starts again with no report of "
+                  "a crash in its log (by itself only then)",
+                  found and unsaid and lost == (not said),
+                  f"found: {found}, after a start without a report: {unsaid}, "
+                  f"said by itself: {lost}, the log had the report: {said}; "
+                  f"the console in this step:\n{self.console()[begun:]}")
         self.settle()
         self.spin(2)
 

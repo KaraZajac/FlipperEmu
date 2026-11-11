@@ -284,7 +284,10 @@ instead, and `--headless` no window at all.
   itself logs, in its colours, as it logs it: see [The firmware log](#the-firmware-log).
   When the firmware crashes, the window says so, and the log has the rest. A debug
   build halts after a crash: HALTED stands above the screen then, until the firmware
-  is started again (Device > Reboot, Ctrl+R).
+  is started again (Device > Reboot, Ctrl+R). A window that is opened later shows
+  that too. One that is opened after a release build's crash says what the Flipper's
+  crash screen says, and so does one whose firmware started again with no report of
+  the crash in its log.
 - **View**: zoom from 2× to 6×, a white, black or Catppuccin Mocha body, the LCD's pixel
   grid. Device > Save the screen saves the LCD as a PNG; Install firmware flashes another
   one and starts it.
@@ -321,8 +324,8 @@ program can use it too. `scripts/gui_check.py FIRMWARE` checks the window off-sc
 boots a throwaway device, clicks its buttons, records its screen, pauses it, reads the
 firmware's log and sets its level, counts the steps of the backlight's fade, copies a
 file to its card, drops an app on it and starts it again with F5, watches the LED blink
-while NFC reads, switches it off and on, reboots it, and has an app crash the
-firmware.
+while NFC reads, switches it off and on, reboots it, has an app crash the firmware,
+and loses the emulator and finds it again after that.
 
 ## The `flipperemu` tool
 

@@ -246,8 +246,12 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         (RTC backup register 4, a pointer into the flash) until the crash screen is
         left: `app`, `app --close` and `status` read it there (2026-11-10, BRINGUP_LOG
         88)
-  - ☐ The window learns of a halt from a `[CRASH]` in the log: one opened on a firmware
-        that has halted already, or after a crash without a report, does not know it
+  - ☑ The window asks `status` when it finds the emulator, when the firmware started
+        again and when a command failed, not only after a `[CRASH]` in the log: one
+        opened on a firmware that has halted shows it, and a crash without a report is
+        said from the fault register (2026-11-10, BRINGUP_LOG 89)
+  - ☐ A debug build whose crash printed nothing halts without a line in the log: the
+        window knows of it only with its next command (it does not poll `status`)
 
 ## M6: research tooling ☐
 - ☐ Snapshot workflow (`savevm` on qcow2 images; boot once, jump straight to an app)

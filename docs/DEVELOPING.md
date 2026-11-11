@@ -99,8 +99,10 @@ usb      : plugged into a computer, which sees 0483:5740 Flipper mine: CDC ACM
 
 `./flipperemu gdb` is the debugger it waits for, and `./flipperemu reset` starts it
 again. In the window HALTED stands above the screen until then, and Device > Reboot
-(Ctrl+R) is the same reset. While the firmware stands there the emulator keeps one
-core of your computer busy: the halt loop does not sleep.
+(Ctrl+R) is the same reset. A window that is opened on a firmware that has halted
+already shows it a second later, and one whose command got no answer asks at once. While
+the firmware stands there the emulator keeps one core of your computer busy: the halt
+loop does not sleep.
 
 Everything else ufbt does is passed on as it is: `./flipperemu ufbt` alone builds,
 `ufbt create APPID=my_app` makes a new app's folder, `ufbt vscode_dist` sets up VS
@@ -433,7 +435,9 @@ Then `./flipperemu log -f` for what the firmware says, at the level you set
   Flipper's screen, and `./flipperemu status` has it from the same place, the
   firmware's fault register, until a button is pressed there. `app` and `app --close`
   take it from there when the firmware started again under them and the log says
-  nothing. A debug build keeps nothing there: it halts.
+  nothing. The window's console has it then too ("The firmware started again after a
+  crash: its screen says …"), and when a window is opened while that screen is still
+  up. A debug build keeps nothing there: it halts.
 - **"no CLI: the firmware crashed (…) and has halted".** A debug build does not start
   again after a crash: it waits for a debugger, and answers nothing until then. The
   same words end the message above on such a build. `./flipperemu gdb` shows where it
@@ -508,7 +512,12 @@ release build it wants `status` to have the crash from the fault register until 
 button is pressed on the Flipper (26). `scripts/gui_check.py` has the same crash
 under the window: the
 console has to name it, a debug build has to show as halted (the state, the title,
-HALTED above the screen) and to run again after Reboot.
+HALTED above the screen) and to run again after Reboot. Then the window loses the
+emulator and finds it again, as one that is opened at that moment would: it has to
+show the halt again (and once more after a command that got no answer), or to say
+what the Flipper's crash screen says on a release build. There the check then starts
+the firmware again with that screen still up, a start after a crash with no report in
+the log: the window has to say it by itself.
 
 `scripts/update_check.py FIRMWARE` gives a running device its own update package with
 `update` (`--package PKG`: another firmware's). It wants the package on the card

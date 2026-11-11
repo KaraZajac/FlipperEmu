@@ -846,10 +846,21 @@ or `[HALT]` with its message.
 
 It is asked by `status`; before a command waits for the CLI's prompt; by the CLI
 client (`fe_cli.py`'s `gone` hook) when an answer has stayed away for two seconds; and
-after a command failed with a timeout, so that its message can say why. The window
-asks `status` a second after a `[CRASH]` in the log, and then every three seconds for
-as long as the answer is yes. The halt loop keeps the vCPU busy: an interrupt is
-pending and masked, so its `wfi` returns at once, as on the chip.
+after a command failed with a timeout, so that its message can say why.
+
+The window has no other source for this than `status`, and does not ask all the time
+(each ask is a process). It asks a second after the emulator said hello on the panel
+link, a second after a `[CRASH]` in the log, a second after the firmware started again
+(the log's timestamps went back: `fe_log.REBOOT`), and at once after a command of its
+own failed; then every three seconds for as long as the answer is "halted". The same
+answer has the fault register. The console says what is in it when the window has just
+found the emulator, and when the firmware started again with no `[CRASH]` before that;
+after a crash that the log reported, it has been said. What this leaves out: a debug
+build whose crash printed nothing halts without a line in the log, and the window knows
+of it only with its next command.
+
+The halt loop keeps the vCPU busy: an interrupt is pending and masked, so its `wfi`
+returns at once, as on the chip.
 
 **A crash without a report.** A crash prints with interrupts masked, and
 `furi_log_tx()` gives up at once in that state when another thread holds the log's

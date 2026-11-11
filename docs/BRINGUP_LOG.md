@@ -1255,6 +1255,33 @@ All three are small, self-contained, and suitable for sending upstream.
       log lost the report in that run, and the console named the crash from the
       register.
 
+89. **The window asks, where it only listened.** It learned of a halt from a `[CRASH]`
+    in the firmware's log. One opened on a firmware that had halted already showed a
+    running Flipper with a still screen, and after a crash that the log lost (entry
+    87) only the failed command said anything.
+    - It asks `status` a second after the emulator's hello, a second after the
+      firmware started again (the log's timestamps went back) and at once after a
+      command of its own failed, besides the second after a `[CRASH]`.
+    - The answer's "fault" (entry 88) becomes a line in the console, "The firmware
+      started again after a crash: its screen says …", when the window has just
+      found the emulator or the log had no report before the restart. After a
+      reported crash it stays unsaid: the console has that crash already.
+    - The status ask is a quiet command, and a quiet command that fails is still a
+      failed command to the window: the ask after a failure does not follow an ask.
+    - The window check drops the panel link's socket for this (the link finds the
+      emulator again within a quarter of a second), which is what a window opened at
+      that moment goes through, with the bench's state asked for again.
+    - No firmware lost its report in the first round of the window check, so the
+      line that the window says by itself had not been seen. The check now makes the
+      case: Reboot with the crash screen still up is a start after a crash with
+      nothing in the log about one (the register outlives a reset, and the desktop
+      shows the screen again).
+    - Not covered: a debug build whose crash printed nothing halts with no line in
+      the log. The window knows of it with its next command.
+    - Results. Window check: 32 on the dev build, 1.5.1, Momentum, Unleashed and
+      RogueMaster. RogueMaster's log lost its report for real in the last run, and
+      the window said the crash by itself there too.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
