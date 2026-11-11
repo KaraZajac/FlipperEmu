@@ -921,8 +921,12 @@ there is answered with the expansion service's heartbeat (`01 01`) and `uart sen
 says what the firmware took it as, a record of the pins has pin 14 low for the time
 of a start bit and then as the port's, a byte to the other port (off, nobody
 waiting) is a start bit on pin 16 and no more, and the firmware waits again and
-answers a second call. It passes on the official 1.5.1, the official dev build,
-Momentum, Unleashed and RogueMaster (73 checks). It has no app in C.
+answers a second call. Then `expansion`, the launcher as that module: 115200 baud
+confirmed and a second of heartbeats answered, the port at that rate and read by
+the firmware while the link is up, an RPC session with a ping through it, a baud
+rate the firmware refuses, the port it does not wait on, and the log's port as it
+was when the module is gone. It passes on the official 1.5.1, the official dev
+build, Momentum, Unleashed and RogueMaster (79 checks). It has no app in C.
 
 `scripts/gdb_check.py FIRMWARE` does what the gdb section shows, with gdb in batch
 mode: a backtrace of the firmware with functions and lines, the breakpoint in the

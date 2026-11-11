@@ -2009,6 +2009,39 @@ big lock, entry 92).
       heartbeats, an RPC session over the port).
     - `scripts/uart_check.py`: 73 checks (68 before), on the five firmwares;
       `gpio_check.py` (54) and `gui_check.py` (47) want the new words.
+109. **The launcher as an expansion module (`expansion`).** With a byte as the call
+    (entry 108) the firmware's expansion service could be woken, and no more: what
+    a module says next had to come from a program of one's own.
+    - `scripts/fe_expansion.py` is the module's side, written from the protocol's
+      description in the firmware's documentation: the five frames with their
+      checksum, the call, the baud rate, heartbeats, control commands and data
+      frames, each confirmed, and `Lost` with the reason when the firmware does
+      something else. It talks through two functions (send, and what came within a
+      time), so the launcher's socket and a pty carry it alike.
+    - `./flipperemu expansion` runs it on the port the firmware waits on
+      (`header-serial`: `edge`), prints every frame of both sides with its time,
+      and with `--rpc` starts an RPC session, sends it a ping and has the bytes
+      back. The official 1.5.1 answers the call in 2 ms, confirms 115200 baud 6 ms
+      later, and answered 12 heartbeats in a second; 9600 and 921600 baud are
+      confirmed as well, 100 baud is refused with status 2.
+    - A call right after a link has ended goes wrong: the firmware is still in
+      that link for 250 ms after its last frame, and takes the call byte as a bad
+      frame. So `expansion` waits for `edge` before it calls, and at its end until
+      the firmware waits again; two runs one after the other work.
+    - While the link is up `header-serial` has the port at 115200 baud, read by
+      interrupt. With Listen UART at LPUART the same on pins 15 and 16, found
+      without `--port`; with None `expansion` says that no port waits (both by
+      hand, on the official 1.5.1).
+    - Tried beside it: a key in the terminal of a `run` in the foreground is a
+      call (the heartbeat's two bytes come out), and so is a byte from a program
+      on the pty of a `--serial pty` run, where the module's side was answered as
+      on the launcher's socket. The first byte after a pty is opened can be late
+      (QEMU looks for that once a second).
+    - The frames are in `uart.log` between the log's lines, and `log` shows their
+      bytes in front of the next line.
+    - Not there: more of the RPC session than a ping, the 5 V commands, a module
+      that goes wrong on purpose.
+    - `scripts/uart_check.py`: 79 checks (73 before), on the five firmwares.
 
 ## Things that were right the first time (and why)
 

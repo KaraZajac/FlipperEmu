@@ -28,6 +28,9 @@ you flash stays flashed, settings and files persist across runs.
   ./flipperemu uart | uart term | uart send "AT\r\n" --expect OK
                                              the serial ports of its header: pins 15
                                              and 16, or 13 and 14 (--port usart)
+  ./flipperemu expansion | expansion --rpc   be an expansion module on its header:
+                                             the call, the baud rate, heartbeats,
+                                             an RPC session
   ./flipperemu reset                         reboot it, as Left + Back do on a real one
   ./flipperemu pause | continue              time stands still on it, and goes on
   ./flipperemu flash fw.dfu                  just program the flash
@@ -2469,7 +2472,8 @@ def cmd_uart(args):
             print(f"[{dev.name}] pins {pins}: {chip}'s receiver was off, and "
                   f"the firmware waited for a call on pin {states[chip]['rx']}"
                   ": it took that as one, as from an expansion module, and "
-                  "read none of it as text", file=sys.stderr)
+                  "read none of it as text (`expansion` is a module that "
+                  "goes on from there)", file=sys.stderr)
         if want is None:
             return 0
         seen, came = uart_seen(dev, port, start, want, args.seconds, line)
@@ -2483,6 +2487,158 @@ def cmd_uart(args):
         if line:
             line.close()
         leave_port(lock)
+
+
+def cmd_expansion(args):
+    """Be an expansion module on a serial port of the header, as far as the
+    firmware's expansion service can tell: the call, the baud rate,
+    heartbeats, and with --rpc a session that a ping goes through.  Every
+    frame is printed with its time (this computer's, from the call on)."""
+    import select
+    import fe_expansion as x
+    from fe_cli import FlipperCli, PortBusy, leave_port, take_port, usb_endpoint
+    dev = Device(args.device)
+    if args.seconds < 0:
+        sys.exit("expansion: --for is 0 seconds or more")
+    if not 0 < args.baud < 1 << 32:
+        sys.exit("expansion: --baud is a baud rate, as 115200")
+
+    def look():
+        m = open_monitor(dev)
+        try:
+            return ({p["name"]: p for p in read_serial(m) or ()},
+                    {port: usb_endpoint(m, UART_OWN[port])
+                     for port in UART_PORTS})
+        finally:
+            m.close()
+
+    def waiting(states):
+        return [port for port in ("usart", "lpuart")
+                if states.get(UART_PORTS[port][2], {}).get("hears") == "edge"]
+
+    # The port that the firmware waits on.  It may be a moment until it does:
+    # a link that has just ended is given up 250 ms after its last frame.
+    end = time.monotonic() + 1.5
+    while True:
+        states, owns = look()
+        if not states:
+            sys.exit(f"[{dev.name}] this emulator cannot tell how the "
+                     "firmware has its serial ports: `expansion` needs one "
+                     "that is built from this tree as it is now "
+                     "(scripts/setup_qemu.sh)")
+        ready = waiting(states)
+        port = args.port or (ready[0] if ready else None)
+        if port in ready:
+            break
+        if time.monotonic() >= end:
+            for name in ("usart", "lpuart") if not port else (port,):
+                _, pins, chip = UART_PORTS[name]
+                print(f"[{dev.name}] pins {pins} ({chip}): the firmware "
+                      "waits for no module there: it has the port as: "
+                      f"{fe_header.port_text(states[chip])}", file=sys.stderr)
+            if ready:
+                print(f"[{dev.name}] it waits on pin "
+                      f"{states[UART_PORTS[ready[0]][2]]['rx']}: --port "
+                      f"{ready[0]}", file=sys.stderr)
+            else:
+                print(f"[{dev.name}] (Settings, Expansion Modules, Listen "
+                      "UART is the port it waits on; an app that has the "
+                      "port open has it for itself)", file=sys.stderr)
+            return 1
+        time.sleep(0.1)
+    _, pins, chip = UART_PORTS[port]
+    own = owns[port]
+    if not own and port == "lpuart":
+        sys.exit(f"[{dev.name}] pins {pins} ({chip}) go nowhere: `expansion` "
+                 "needs a run without --lpuart none")
+    if not own:
+        sys.exit(f"[{dev.name}] pins {pins} ({chip}) are as QEMU was told "
+                 "with --serial: `expansion` needs a run with --serial "
+                 "stdio, pty, null, tcp:PORT or file:PATH")
+    try:
+        lock = take_port(dev.dir / f"{port}.lock", 5.0, f"pins {pins} are")
+    except PortBusy as e:
+        sys.exit(f"[{dev.name}] {e}")
+    line = None
+    try:
+        try:
+            line = FlipperCli(own)
+        except OSError as e:
+            sys.exit(f"[{dev.name}] pins {pins}: {e}")
+        uart_drop(line)
+        first = []
+
+        def receive(seconds):
+            if not select.select([line.fd], [], [], seconds)[0]:
+                return b""
+            data = line.sock.recv(4096)
+            if not data:
+                raise x.Lost("the device is gone (its emulator closed the "
+                             "port)")
+            return data
+
+        def said(who, data, note):
+            now = time.monotonic()
+            if not first:
+                first.append(now)
+            name, words = x.in_words(data) if data else (note, "")
+            print(f"{(now - first[0]) * 1000:9.1f} ms  {who:8} {name:10} "
+                  f"{data.hex(' '):20} {words}".rstrip(), flush=True)
+
+        module = x.Module(line.sock.sendall, receive, said)
+        print(f"[{dev.name}] pins {pins} ({chip}): a module calls, and asks "
+              f"for {args.baud} baud", flush=True)
+        try:
+            module.call()
+            module.baud(args.baud)
+            module.beat()
+            if args.rpc:
+                module.control(x.START_RPC)
+                text, sent = b"FlipperEmu", time.monotonic()
+                module.write(x.ping(1, text))
+                module.quiet = True
+                if not module.keep(2.0, lambda: x.message(module.stream)):
+                    raise x.Lost("the RPC session did not answer a ping "
+                                 "in 2 s")
+                took = time.monotonic() - sent
+                main, module.stream = x.message(module.stream)
+                if x.pong(main) != (1, 0, text):
+                    raise x.Lost("the RPC session answered the ping with "
+                                 f"something else: {main}")
+                print(f"[{dev.name}] the RPC session is there: a ping came "
+                      f"back in {took * 1000:.0f} ms", flush=True)
+            module.quiet = True
+            start, before = time.monotonic(), module.beats
+            module.keep(args.seconds)
+            held = time.monotonic() - start
+            module.quiet = False
+            if args.rpc:
+                module.control(x.STOP_RPC)
+        except (x.Lost, OSError) as e:
+            print(f"[{dev.name}] pins {pins}: {e}", file=sys.stderr)
+            return 1
+        beats = module.beats - before
+        print(f"[{dev.name}] the link held for {held:.1f} s at {args.baud} "
+              "baud" + (f": {beats} more heartbeat"
+                        f"{'' if beats == 1 else 's'}, each answered"
+                        if beats else ""), flush=True)
+    finally:
+        if line:
+            line.close()
+        leave_port(lock)
+    # The module says no more: the firmware gives the link up when it has
+    # heard nothing for 250 ms, and waits for the next call.
+    end = time.monotonic() + 2.0
+    while time.monotonic() < end:
+        time.sleep(0.1)
+        if port in waiting(look()[0]):
+            print(f"[{dev.name}] the module is gone; the firmware gave the "
+                  "link up, and waits for a call again")
+            return 0
+    print(f"[{dev.name}] pins {pins}: the module is gone, and 2 s later the "
+          "firmware does not wait for the next one: it has the port as: "
+          f"{fe_header.port_text(look()[0][chip])}", file=sys.stderr)
+    return 1
 
 
 def cmd_cli(args):
@@ -4221,6 +4377,38 @@ def main():
                         "send: give up when the firmware has taken nothing "
                         "for so long")
     p.set_defaults(func=cmd_uart)
+
+    p = sub.add_parser(
+        "expansion", help="be an expansion module on a serial port of a "
+        "running device's GPIO header: call the firmware, name a baud rate, "
+        "keep the link with heartbeats; --rpc: an RPC session over it",
+        description="What a module on the GPIO header says to the firmware's "
+        "expansion service, said here by the launcher on the port's own end: "
+        "the call (a byte, whose start bit is the low level on the RX pin "
+        "that the firmware waits for), the baud rate after the firmware's "
+        "heartbeat at 9600 baud, a heartbeat at the new rate, and then one "
+        "every 80 ms for --for seconds.  Every frame of both sides is "
+        "printed with its time, bytes and meaning (the heartbeats after the "
+        "first are counted).  --rpc: the module starts an RPC session, sends "
+        "it a ping, keeps the link, and stops the session.  At the end the "
+        "module says nothing more, and the firmware is waited for until it "
+        "has given the link up.  Exit status 1, with what happened in "
+        "words: the firmware waits for no module on that port, it refused "
+        "the baud rate, or the link was lost.  The port is the one the "
+        "firmware waits on (Settings > Expansion Modules > Listen UART): "
+        "pins 13 and 14 unless that was changed.")
+    p.add_argument("--port", choices=("lpuart", "usart"),
+                   help="that port, and no other (default: the one the "
+                        "firmware waits on)")
+    p.add_argument("--baud", type=int, default=115200, metavar="N",
+                   help="the baud rate the module asks for (default 115200)")
+    p.add_argument("--rpc", action="store_true",
+                   help="start an RPC session over the link, ping it, and "
+                        "stop it at the end")
+    p.add_argument("--for", dest="seconds", type=float, default=1.0,
+                   metavar="S", help="keep the link for so many seconds "
+                                     "(default 1)")
+    p.set_defaults(func=cmd_expansion)
 
     p = sub.add_parser("reset", help="reboot a running device, as holding Left + "
                        "Back does on a real one")

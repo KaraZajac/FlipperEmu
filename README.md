@@ -47,7 +47,8 @@ a pin held from outside read by the firmware, a record of every change of a pin 
 its time) passes on the same five.
 `scripts/uart_check.py` (the two serial ports of the header, pins 15 and 16 and pins
 13 and 14: an app that opens one is answered from the launcher, from a program on the
-port's pty, and over TCP) passes on the same five.
+port's pty, and over TCP; the firmware's expansion service answers a module that the
+launcher plays) passes on the same five.
 `scripts/ufbt_check.py` (ufbt 0.2.6 building `examples/hello`, launching it there, and
 `ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's symbols, that
 app's and a stock app's, and its debug configuration for VS Code used the way that
@@ -393,6 +394,7 @@ it runs: once with the wait given up, once to the end.
 | `gpio` \| `gpio PIN` \| `gpio PIN high\|low\|free` \| `gpio PIN --wait high\|low` | its GPIO header: what the firmware has the pins as; one pin's level; a pin held from outside, or let go of; wait for a level |
 | `gpio record OUT.vcd` \| `gpio record stop` \| `gpio watch [PIN,PIN]` | every change of a pin's level with its time: into a file a logic analyzer's program opens, or printed as it happens |
 | `uart` \| `uart send TEXT [--expect TEXT]` \| `uart wait TEXT` \| `uart term` | the serial port on pins 15 and 16 of its header: where it goes; send to the app that has it open, and wait for its answer; wait for what the app sends; a terminal on it. `--port usart`: the one on pins 13 and 14 |
+| `expansion [--rpc] [--baud N] [--for S] [--port P]` | be an expansion module on its header, to the firmware's expansion service: the call, the baud rate, heartbeats, an RPC session; every frame printed |
 | `reset` | reboot it, as holding Left + Back does |
 | `pause` \| `continue` | time stands still on it (screen, timers, radios), and goes on from there |
 | `run --usbip [PORT]` | export the USB device over USB/IP (then `sudo scripts/usbip_attach.py`) |
@@ -1598,7 +1600,7 @@ port is the call:
 
 ```
 $ ./flipperemu uart send --port usart --hex 00 --expect "\x01\x01"
-[flipper] pins 13 and 14: USART1's receiver was off, and the firmware waited for a call on pin 14: it took that as one, as from an expansion module, and read none of it as text
+[flipper] pins 13 and 14: USART1's receiver was off, and the firmware waited for a call on pin 14: it took that as one, as from an expansion module, and read none of it as text (`expansion` is a module that goes on from there)
 ```
 
 The firmware stops its log, opens the port at 9600 baud and sends its heartbeat, the
@@ -1619,13 +1621,69 @@ next call.
 - With Listen UART at LPUART (Settings, Expansion Modules) the firmware waits on pin
   16 instead, with LPUART1 off: `off (nothing has opened it); the firmware waits for
   a call on pin 16`. The heartbeat then comes out of pin 15.
-- What a module says after the heartbeat (a baud rate, then commands, each within
-  250 ms: `documentation/ExpansionModules.md` in the firmware's tree) no tool here
-  speaks yet. A program of yours on the port's pty can: one was answered there, its
-  baud rate confirmed and its heartbeats returned (a run with `--serial pty`). The
-  first byte after the pty is opened may be late (a quarter of a second in one
-  trial, more than half a second in another), as QEMU looks for a newly opened pty
-  at intervals. A second after the opening a byte was answered within 3 ms.
+- What a module says after the heartbeat is `expansion`'s part, next.
+
+**A module on the port.** `expansion` is the launcher as an expansion module: the
+call, and what the protocol has after it (`documentation/ExpansionModules.md` in the
+firmware's tree), on the port that the firmware waits on. It prints every frame of
+both sides with its time, its bytes and what they say:
+
+```
+$ ./flipperemu expansion --rpc
+[flipper] pins 13 and 14 (USART1): a module calls, and asks for 115200 baud
+      0.0 ms  module   the call
+      3.4 ms  Flipper  heartbeat  01 01
+      3.5 ms  module   baud rate  03 00 c2 01 00 c0    115200
+      9.5 ms  Flipper  status     02 00 02             OK
+     39.7 ms  module   heartbeat  01 01
+     40.3 ms  Flipper  heartbeat  01 01
+     40.3 ms  module   control    04 00 04             start RPC
+     49.7 ms  Flipper  status     02 00 02             OK
+     49.7 ms  module   data       05 11 10 08 01 2a 0c 0a 0a 46 6c 69 70 70 65 72 45 6d 75 22 17 bytes
+     52.3 ms  Flipper  status     02 00 02             OK
+     56.0 ms  Flipper  data       05 11 10 08 01 32 0c 0a 0a 46 6c 69 70 70 65 72 45 6d 75 3a 17 bytes
+     56.1 ms  module   status     02 00 02             OK
+[flipper] the RPC session is there: a ping came back in 6 ms
+   1056.2 ms  module   control    04 01 05             stop RPC
+   1057.8 ms  Flipper  status     02 00 02             OK
+[flipper] the link held for 1.0 s at 115200 baud: 12 more heartbeats, each answered
+[flipper] the module is gone; the firmware gave the link up, and waits for a call again
+```
+
+The module calls, and after the firmware's heartbeat at 9600 baud it names the baud
+rate it wants (`--baud N`; 115200 unless told). The firmware confirms, and both go on
+at that rate. From then on a side that hears nothing for 250 ms gives the link up, so
+the module sends a heartbeat every 80 ms, for a second or for `--for S`, and the
+firmware answers each one. With `--rpc` the module starts an RPC session over the
+link first (the firmware's protobuf RPC, as on its USB serial port), sends it a ping,
+has the ping's bytes back in a data frame, and stops the session at the end. Then it
+says no more, and `expansion` stays until the firmware has given the link up and
+waits for the next call. Exit status 0: all of that went as the protocol says.
+
+- Exit status 1 comes with the reason in words. A baud rate that the firmware does
+  not do is refused by the firmware (`--baud 100`: `status 02 02 00 no such baud
+  rate`). A port that it does not wait on is not called at all: `expansion` says how
+  the firmware has that port, and which one it waits on, if any. With Listen UART at
+  None it waits on neither.
+- The port is the one the firmware waits on, unnamed: pins 13 and 14, or 15 and 16
+  with Listen UART at LPUART (that one by hand, on the official 1.5.1). `--port`
+  says that it has to be this one.
+- While the link is up, `gpio` and `status` have the port as the firmware has it
+  then: `115200 baud, 8N1; what comes in is read (by interrupt)`.
+- The times are this computer's, counted from the call.
+- The firmware's frames are in the port's log file with everything else it sends
+  there (`uart.log`), between two lines of its log, which has the port before and
+  after. `log` shows them as they are: some bytes that are no text in front of the
+  next line.
+- `scripts/fe_expansion.py` is the protocol for a program of your own: a `Module`
+  with `call()`, `baud()`, `beat()`, `control()`, `write()` and `keep()`, on whatever
+  carries its bytes. One on the pty of a `--serial pty` run was answered the same
+  way. The first byte after a pty is opened can be late (the pty's ways, below): a
+  second after the opening a call was answered within 3 ms.
+- Not there: more of the RPC session than a ping (a client of your own behind the
+  link), the two commands for the header's 5 V (control 2 and 3), and a module that
+  goes wrong on purpose (a bad checksum, a late heartbeat) to see what the firmware
+  does then.
 
 What it does not do yet:
 
@@ -1652,7 +1710,7 @@ for your program, and a socket (`devices/NAME/lpuart.sock`, `usart.sock`) for `u
 send` and `uart term`, which is why the two do not take the port from each other.
 
 `scripts/uart_check.py FIRMWARE` checks both ports with that script on the Flipper's
-side, the bridge, and a module's call: 73 checks, on the official 1.5.1, the
+side, the bridge, a module's call and `expansion`: 79 checks, on the official 1.5.1, the
 official dev build, Momentum, Unleashed and RogueMaster.
 
 Two bugs were in the way, and both are fixed (docs/BRINGUP_LOG.md, 104). After every
@@ -1831,7 +1889,8 @@ qemu/patches/          fixes to upstream QEMU (SysTick, SD over SPI, open-drain 
                        the UART's reception, a byte that no receiver took)
 scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_monitor.py,
                        fe_cli.py, fe_files.py (files on the card), fe_apps.py
-                       (apps and the loader), fe_ir.py,
+                       (apps and the loader), fe_expansion.py (an expansion
+                       module's side of its protocol), fe_ir.py,
                        fe_subghz.py, fe_sdr.py (real radios),
                        fe_nfc_link.py (cards from programs), fe_pm3.py (Proxmark3),
                        fe_enclave.py (the enclave's keys and ciphers), fe_gdb.py

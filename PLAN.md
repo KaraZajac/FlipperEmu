@@ -324,8 +324,15 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         heartbeat; `gpio`, `status`, `uart` and the window say that it waits for
         one (`header-serial`: `edge`), and `uart send` what it took the byte as;
         `uart_check.py` is 73 checks (BRINGUP_LOG 108)
-  - ☐ The module's side of the expansion protocol as a tool: the call, the baud
-        rate, heartbeats, an RPC session over the port
+  - ☑ The module's side of the expansion protocol as a tool (2026-11-11):
+        `expansion` calls the firmware on the port it waits on, names a baud rate,
+        keeps the link with heartbeats, and with `--rpc` starts an RPC session and
+        has a ping answered; every frame printed with its time; a refused baud
+        rate and a port nobody waits on in words; `scripts/fe_expansion.py` for a
+        program of one's own; `uart_check.py` is 79 checks (BRINGUP_LOG 109)
+  - ☐ More of that module: an RPC client of one's own behind the link (the
+        session's stream on a pty or a TCP port), the 5 V commands, a module that
+        goes wrong on purpose; a real module on a USB serial adapter as the port
   - ☑ The UART model's reception (2026-11-11, QEMU patch 0007): the request to
         the DMA controller, the IDLE flag, bytes at the baud rate (BRR and the
         PRESC register, the LPUART's own formula), `qemu_chr_fe_accept_input()`

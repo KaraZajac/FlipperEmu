@@ -23,7 +23,11 @@ an expansion module, with the port's receiver off and an interrupt on pin 14's
 fall, and says so; a byte sent then is a module's call: pin 14 is low for a
 bit in the pins' record, the firmware answers with its heartbeat at 9600 baud,
 and waits again when no module goes on; a byte to the port that is off is a
-start bit on pin 16.  The same script on that port is answered the same way
+start bit on pin 16.  `expansion` is such a module: the call, 115200 baud
+confirmed, heartbeats answered, the port at that rate and read meanwhile, an
+RPC session with a ping through it, a baud rate the firmware refuses, the
+port it does not wait on, and the log's port as it was afterwards.  The same
+script on that port is answered the same way
 (a line, 900 characters, `uart term`, the two ports not in each other's way),
 with the firmware's log back on the pins when the script has closed the port.
 The port's speed: for a script at 1200 baud 240 bytes take the two seconds
@@ -415,6 +419,60 @@ def call_checks(b):
     time.sleep(0.6)
 
 
+def module_checks(b):
+    """`expansion`: the launcher as a module on the port the firmware waits
+    on, and what the firmware's expansion service makes of it"""
+    code, out, err, took = fe(b, "expansion")
+    beats = re.search(r"at 115200 baud: (\d+) more heartbeats, each "
+                      r"answered", out)
+    check("`expansion`: the call, the firmware's heartbeat, 115200 baud "
+          "asked for and confirmed, heartbeats answered at that rate for a "
+          "second, and the firmware waits again when the module is gone",
+          code == 0 and re.search(r"Flipper +heartbeat +01 01\n.*module +"
+                                  r"baud rate +03 00 c2 01 00 c0 +115200\n"
+                                  r".*Flipper +status +02 00 02 +OK\n", out)
+          and beats and int(beats.group(1)) >= 5
+          and "waits for a call again" in out, f"{code}\n{out}{err}")
+    p = b.bg("expansion", "--for", 5)
+    usart, end = {}, time.time() + 10
+    while time.time() < end and p.poll() is None:
+        usart = port_state(b, "USART1")
+        if usart.get("hears") not in ("edge", None):
+            break
+        time.sleep(0.1)
+    said = ended(p, 30)
+    check("... and while the link is up `status --json` has the port at the "
+          "module's baud rate, read by the firmware",
+          usart.get("baud") == 115200 and usart.get("hears") in ("irq", "dma")
+          and p.returncode == 0, f"{usart}\n{p.returncode}\n{said}")
+    code, out, err, took = fe(b, "expansion", "--rpc", "--for", 0.5)
+    check("`expansion --rpc`: an RPC session over the link: started, a "
+          "ping's bytes back from it in a data frame, stopped",
+          code == 0 and re.search(r"module +control +04 00 04 +start RPC\n"
+                                  r".*Flipper +status +02 00 02 +OK\n", out)
+          and re.search(r"Flipper +data +05 ", out)
+          and "a ping came back" in out
+          and re.search(r"module +control +04 01 05 +stop RPC\n"
+                        r".*Flipper +status +02 00 02 +OK\n", out),
+          f"{code}\n{out}{err}")
+    code, out, err, took = fe(b, "expansion", "--baud", 100)
+    check("a baud rate the firmware does not do: it says so (status 2), "
+          "`expansion` says it in words, exit 1",
+          code == 1 and re.search(r"Flipper +status +02 02 00 +no such baud "
+                                  r"rate", out)
+          and "does not do 100 baud" in err, f"{code}\n{out}{err}")
+    code, out, err, took = fe(b, "expansion", "--port", "lpuart")
+    check("`expansion --port lpuart`, where the firmware waits for no "
+          "module: refused with how it has that port and the one it waits "
+          "on, exit 1",
+          code == 1 and "waits for no module there" in err
+          and "--port usart" in err and not out, f"{code}\n{out}{err}")
+    usart = port_state(b, "USART1")
+    check("the port is the log's again: 230400 baud, a call waited for",
+          (usart.get("hears"), usart.get("baud")) == ("edge", 230400),
+          f"{usart}")
+
+
 def usart_checks(b):
     """Pins 13 and 14 (USART1): the firmware logs there, until an app opens
     the port"""
@@ -424,6 +482,7 @@ def usart_checks(b):
     check("the log port (pins 13 and 14): `uart wait --port usart` reads it",
           code == 0 and "Startup complete" in out, f"{code} {out[-300:]!r} {err}")
     call_checks(b)
+    module_checks(b)
     code, out, err, took = fe(b, "uart", "send", "--port", "usart", "stale\\n")
     check("a line sent there while the firmware only logs: taken, exit 0, "
           "and no text that anything read (a call, as `uart send` says)",

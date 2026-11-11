@@ -1070,6 +1070,20 @@ ufbt is not run at all, and `update` sends the package without the stage (BRINGU
   bits: the firmware's handshake needs the edge alone, and takes the port (at 9600
   baud, with the receiver on) before it reads anything. Connected only where the
   device has the line, as `dma-rx`.
+- **A module's side** (`scripts/fe_expansion.py`): the expansion protocol as a
+  module speaks it, written from the firmware's description of it. A frame is a
+  type, its contents and the XOR of both; `Module` takes two functions, one that
+  sends bytes and one that returns what came within a time, so that it runs on the
+  launcher's socket, a pty or a test's pipe alike. It confirms what the firmware's
+  RPC session sends (a status for each data frame), keeps the link with a heartbeat
+  every 80 ms, and raises `Lost` with the reason in words: no answer, a frame of
+  another kind than was due, a bad checksum, a refusal. The launcher's `expansion`
+  is that on the port's own end of the hub, under the port's lock as `uart send`
+  is. It reads `header-serial` first and calls only a port that says `edge` (for a
+  second and a half it waits for that: a link that has just ended is given up 250 ms
+  after its last frame), and at the end it waits for `edge` again. The RPC ping is
+  made by hand, a `PB.Main` with `system_ping_request` behind its length: the
+  launcher has no protobuf library.
 - **The ports by name**: the machine property `header-serial` (read only) is the two
   ports as the firmware has them at that moment, a word for each.
   `USART1:13:14:230215:8N1:on:edge` is the name, the TX and the RX pin by their
