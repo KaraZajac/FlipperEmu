@@ -1480,9 +1480,11 @@ big lock, entry 92).
     - `scripts/gui_check.py` updates the Flipper twice with the package it runs:
       once with the wait given up after "updater started" (the updater has to finish
       by itself), once to the end with F6, and sets the log level again that the
-      updater left. 35 checks pass on official 1.5.1, Momentum and Unleashed, and 35
-      on the official debug build: its updater leaves the level as it was, so that
-      step is not taken there, and the halt after a crash is one more.
+      updater left. 35 checks pass on official 1.5.1, Momentum, Unleashed and
+      RogueMaster (whose updater takes seven and a half minutes each time: the
+      check waits fifteen), and 35 on the official debug build: its updater leaves
+      the level as it was, so that step is not taken there, and the halt after a
+      crash is one more.
 
 ## Things that were right the first time (and why)
 
