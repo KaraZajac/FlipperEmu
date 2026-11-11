@@ -299,8 +299,11 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         prints the changes as they happen, from the file; fifteen more checks in
         `gpio_check.py` (BRINGUP_LOG 102). Times are the emulator's clock, some
         microseconds off for the shortest pulses (measured there)
-  - ☐ The record in the window (a line in the GPIO menu), and the file opened
-        once in GTKWave or PulseView (neither is installed here)
+  - ☑ The record in the window (2026-11-11): GPIO > Record what the pins do…
+        (a file dialog, then the launcher's `gpio record`), GPIO > End the record,
+        and the file with its count of changes in the status bar, from a watch of
+        `header-record`; three more checks in `gui_check.py` (BRINGUP_LOG 103)
+  - ☐ The file opened once in GTKWave or PulseView (neither is installed here)
   - ☐ What a peripheral puts on a pin: LPUART1 on 15 and 16 as a serial port, PWM,
         SPI and I2C devices on the header; a voltage for the ADC
   - ☐ An interrupt on a held pin and an open-drain output (untried: they need an

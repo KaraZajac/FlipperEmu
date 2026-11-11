@@ -53,6 +53,7 @@ WATCHES = (
     ("/machine/ir", "tx"), ("/machine/subghz", "radio"),
     ("/machine/speaker", "mute"),
     ("/machine", "log-level"), ("/machine", "header"),
+    ("/machine", "header-record"),
 )
 
 # what can come from a file: (the menu's word for them, file filter, where
@@ -183,6 +184,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.exit_code = 0
         self.props = {}                 # (path, name): value, as reported
         self.header = []                # the GPIO header's pins (fe_header)
+        self.pin_record = None          # (changes, ns, the file) while they
+        #                                 are recorded
         self.state = None
         self.expect_off = False         # it said it is switching off
         self.qemu_up = session is not None      # ours, and running
@@ -297,8 +300,11 @@ class MainWindow(QtWidgets.QMainWindow):
          else self.log).raise_()
         self.rec_label = QtWidgets.QLabel()
         self.rec_label.setStyleSheet("color: #d20f39; font-weight: bold")
+        self.pins_label = QtWidgets.QLabel()    # the record of the pins
+        self.pins_label.setStyleSheet("color: #d20f39; font-weight: bold")
         self.tone_label = QtWidgets.QLabel()
         self.state_label = QtWidgets.QLabel()
+        self.statusBar().addPermanentWidget(self.pins_label)
         self.statusBar().addPermanentWidget(self.rec_label)
         self.statusBar().addPermanentWidget(self.tone_label)
         self.statusBar().addPermanentWidget(self.state_label)
@@ -692,6 +698,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.view.set_power(state, *self.hint(state))
             self.view.set_blank(False)
             self.on_header(None)
+            self.on_pin_record(None)
             self.resetting = False
             self.on_speaker(0, 0)
             self.set_halted(False)
@@ -957,6 +964,9 @@ class MainWindow(QtWidgets.QMainWindow):
         first = key not in self.props
         old = self.props.get(key)
         self.props[key] = value
+        if key == ("/machine", "header-record"):
+            self.on_pin_record(value)   # (its time goes on at every look:
+            return                      # nothing else is due for that)
         if path == "/machine/gauge" and isinstance(value, int):
             self.gauge[name] = value
         if key == ("/machine/speaker", "mute"):
@@ -2123,6 +2133,51 @@ class MainWindow(QtWidgets.QMainWindow):
         """level: high, low or free; pin None: let go of all"""
         self.command("gpio", *([pin, level] if pin else ["free"]))
 
+    def on_pin_record(self, text):
+        """What the machine says of the record of its pins (None, or
+        nothing: none runs)"""
+        try:
+            self.pin_record = fe_header.parse_record(text)
+        except ValueError:
+            self.pin_record = None
+        rec = self.pin_record
+        if not rec:
+            self.pins_label.setText("")
+            self.pins_label.setToolTip("")
+            return
+        n = rec[0]
+        self.pins_label.setText(
+            f"● {os.path.basename(rec[2])}: "
+            + ("no change yet" if not n else "1 change" if n == 1
+               else f"{n} changes"))
+        self.pins_label.setToolTip(
+            f"Every change of a GPIO pin's level goes to {rec[2]}, with its "
+            "time (GPIO > End the record)")
+
+    def ask_pin_record(self):
+        """A file for the record of what the pins do, and its begin"""
+        start = os.path.join(self.settings.get("dir/shots",
+                                               os.path.expanduser("~")),
+                             f"{self.name}-pins-{time.strftime('%H%M%S')}.vcd")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Record what the pins do, to a file", start,
+            "Value change dump (*.vcd)")
+        if path:
+            if not os.path.splitext(path)[1]:
+                path += ".vcd"
+            self.settings.set("dir/shots", os.path.dirname(path))
+            self.start_pin_record(path)
+
+    def start_pin_record(self, path):
+        self.command("gpio", "record", path)
+
+    def end_pin_record(self):
+        rec = self.pin_record
+        self.command("gpio", "record", "stop", then=lambda code, text:
+                     self.statusBar().showMessage(
+                         f"The record of the pins is {rec[2]}", 8000)
+                     if code == 0 and rec else None)
+
     def pin_actions(self, menu, p):
         """What can be done with a pin, into a menu"""
         for text, level in (("Hold it high (a wire to 3V3)", "high"),
@@ -2180,6 +2235,19 @@ class MainWindow(QtWidgets.QMainWindow):
         a.setEnabled(any(p["held"] for p in self.header))
         a.triggered.connect(lambda _=False: self.hold_pin(None, "free"))
         self.a_gpio_free = a
+        rec = self.pin_record
+        if rec:
+            a = m.addAction(
+                f"End the record ({os.path.basename(rec[2])}, "
+                + ("no change" if not rec[0] else "1 change" if rec[0] == 1
+                   else f"{rec[0]} changes") + " so far)")
+            a.triggered.connect(lambda _=False: self.end_pin_record())
+        else:
+            a = m.addAction("Record what the pins do…")
+            a.setEnabled(bool(self.header))
+            a.triggered.connect(lambda _=False: self.ask_pin_record())
+        self.a_gpio_record = a
+        m.addSeparator()
         m.addAction("The firmware log (pins 13 and 14)").triggered.connect(
             lambda _=False: self.show_fwlog())
 

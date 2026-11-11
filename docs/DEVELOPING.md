@@ -257,6 +257,8 @@ A pin is named as the MCU has it (`PA7`), as the case has it (`A7`) or by that n
   level (amber for high, blue for low), so an app that drives one is seen driving it.
   A click on a pin holds it high or low, or lets go of it; the GPIO menu has the list.
   It is the same `gpio` command underneath, and what it answered is in the console.
+  GPIO > Record what the pins do… is `gpio record` with a file dialog, and the status
+  bar counts the changes while it runs.
 
 In a test script (see below) that is two lines:
 
@@ -817,8 +819,10 @@ official dev build, Momentum, Unleashed and RogueMaster (53 checks). It has no a
 its own: an interrupt on a held pin and an open-drain output were not tried. The
 window's pins are in `scripts/gui_check.py`: a click on pin 2 and Hold it high (the
 window has it high with a wire on it, and the launcher's `gpio PA7` from outside
-says `high`), pin 3 held low, the GPIO menu's lines, Let go of all pins, and the
-clicks on 13 and 17 that hold nothing (the firmware log, the iButton menu).
+says `high`), pin 3 held low, the GPIO menu's lines, Let go of all pins, the
+clicks on 13 and 17 that hold nothing (the firmware log, the iButton menu), and a
+record begun from the GPIO menu: the status bar counts a pin held and let go of, and
+the file read back after End the record has both changes.
 
 `scripts/gdb_check.py FIRMWARE` does what the gdb section shows, with gdb in batch
 mode: a backtrace of the firmware with functions and lines, the breakpoint in the

@@ -1758,6 +1758,23 @@ big lock, entry 92).
       over a reset, three refusals that leave nothing running, and the file whole
       after the emulator stopped under it.
 
+103. **The record of the pins, from the window.** The GPIO menu has a line for it:
+    Record what the pins do…, which asks for a file and runs the launcher's `gpio
+    record`, and End the record while one runs.
+    - The window watches `header-record` like `header`, ten times a second. While
+      a record runs that property is new at every look, since it has the time so
+      far in it; the window takes the count and the file from it and leaves the
+      rest of what a changed property sets off (the bench's tiles, the console)
+      alone.
+    - What it shows is the machine's, not its own: a record begun with
+      `./flipperemu gpio record` in a shell is in the status bar and the menu the
+      same, and the menu's End the record ends it.
+    - `gui_check.py` has three more checks (45, on all five firmwares): the menu's
+      line and the status bar once it runs, pin 2 held high and let go of with the
+      count going up by two, and after End the record the file with those two
+      changes of PA7 and nothing left that says a record runs. The file dialog is
+      not in them: the check hands the file over where the dialog would.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

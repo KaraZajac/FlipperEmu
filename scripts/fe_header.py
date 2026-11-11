@@ -125,6 +125,15 @@ def read_record(path):
     return record, changes
 
 
+def parse_record(text):
+    """What the machine says of the record (its `header-record`, as read):
+    (changes so far, ns of the Flipper's time, the file); None: none runs"""
+    if not isinstance(text, str) or not text:
+        return None
+    changes, ns, path = text.split(" ", 2)
+    return int(changes), int(ns), path
+
+
 def span(ns):
     """A length of time in words: 850 ns, 33.0 µs, 1.20 ms, 2.500 s"""
     if ns < 1000:

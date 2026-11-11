@@ -1335,10 +1335,7 @@ def header_record(m):
     text = qom_get(m, "/machine", "header-record")
     if not isinstance(text, str):
         return False
-    if not text:
-        return None
-    changes, ns, path = text.split(" ", 2)
-    return int(changes), int(ns), path
+    return fe_header.parse_record(text)
 
 
 def set_header_record(m, value):

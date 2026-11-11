@@ -19,7 +19,8 @@ does that again with F5 and closes the app, drops the same app as if it were
 built for another API (refused, or asked about on the Flipper's screen and
 then answered with a button), holds pins of the GPIO header high and low with
 a click on them (they light, and the firmware reads them so), lets go of
-them, holds an NFC tag to it from the
+them, records what a pin does to a file (GPIO > Record what the pins do),
+holds an NFC tag to it from the
 bench, unplugs USB, switches it off as a real one is (Back held for 5 s, then
 Power Off: the window stays, the emulator exits), copies a file to the card
 of the switched-off Flipper, switches
@@ -54,6 +55,7 @@ from PySide6.QtTest import QTest  # noqa: E402
 
 import fe_gui  # noqa: E402
 import fe_gui_view  # noqa: E402
+import fe_header  # noqa: E402
 from app_check import other_api  # noqa: E402
 
 CRASH = re.compile(r"\[CRASH\]|furi_check failed|HardFault|Kernel is Dead")
@@ -320,6 +322,65 @@ class Driver:
               and "Click to read the firmware's log" in v.pin_tips.get(13, "")
               and "Click for the iButton menu" in v.pin_tips.get(17, ""),
               f"log behind {behind}, in front {log}; iButton menu {ibutton}")
+
+    def pin_record(self):
+        """The record of what the pins do, from the GPIO menu (the file is
+        given here: the menu's line asks for one)"""
+        w = self.win
+        path = self.out / "window-pins.vcd"
+        name = path.name
+
+        def count():
+            return w.pin_record[0] if w.pin_record else -1
+
+        w.fill_gpio_menu()              # as the menu bar's GPIO menu opens
+        offered = (w.a_gpio_record.text() == "Record what the pins do…"
+                   and w.a_gpio_record.isEnabled()
+                   and not w.pins_label.text())
+        w.start_pin_record(str(path))
+        began = self.until(lambda: w.pin_record is not None, 15)
+        self.settle()
+        w.fill_gpio_menu()
+        line, label = w.a_gpio_record.text(), w.pins_label.text()
+        check("pin record: GPIO > Record what the pins do: it runs, and the "
+              "status bar and the menu say so",
+              offered and began and w.pin_record[2] == str(path)
+              and label.startswith(f"● {name}: ")
+              and line.startswith(f"End the record ({name}, ")
+              and "every change of a level" in self.console(),
+              f"offered {offered}; {w.pin_record}; {label!r}; {line!r}")
+
+        n = count()
+        w.hold_pin("PA7", "high")
+        self.until(lambda: count() > n, 15)
+        self.settle()
+        w.hold_pin("PA7", "free")
+        two = self.until(lambda: count() >= n + 2, 15)
+        self.settle()
+        self.shot("pin-record")
+        label = w.pins_label.text()
+        check("pin record: pin 2 held high and let go of: two changes more, "
+              "counted in the status bar",
+              two and label == f"● {name}: {count()} changes",
+              f"{n} before, {count()} after; {label!r}")
+
+        w.fill_gpio_menu()
+        w.a_gpio_record.trigger()       # End the record
+        ended = self.until(lambda: w.pin_record is None, 15)
+        self.settle()
+        try:
+            got = [level for _, pin, level, _ in
+                   fe_header.read_record(path)[1] if pin == "PA7"]
+        except (OSError, ValueError) as e:
+            got = str(e)
+        w.fill_gpio_menu()
+        check("pin record: End the record: the file has what pin 2 did, and "
+              "nothing says that a record runs",
+              ended and got == ["high", "floating"]
+              and not w.pins_label.text()
+              and w.a_gpio_record.text() == "Record what the pins do…"
+              and f"the record is {path}" in self.console(),
+              f"ended {ended}; PA7: {got}; {w.pins_label.text()!r}")
 
     def blink(self):
         """The LED chip's engines, as the window gets them: NFC > Read blinks
@@ -760,6 +821,7 @@ class Driver:
         self.files_and_apps()
         self.blink()
         self.pins()
+        self.pin_record()
 
         w.hold("nfc", ["ntag215", "04A1B2C3D4E5F6", "https://example.com"])
         w.set_cable("unplugged")

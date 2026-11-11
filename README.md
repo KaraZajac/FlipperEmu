@@ -274,8 +274,11 @@ instead, and `--headless` no window at all.
   high or low from outside, as a wire to 3V3 or to GND would (it gets a jumper wire),
   and to let go of it again. The pointer over a pin says what the firmware has it as,
   and the GPIO menu has all eighteen. Pins 13 and 14 are where a real Flipper's log
-  comes out: click them, or beside the pins, to read it. (`./flipperemu gpio` is the
-  same from a shell; more [below](#the-gpio-header).)
+  comes out: click them, or beside the pins, to read it. **GPIO > Record what the pins
+  do…** writes every change of a pin's level to a file with its time, as a logic
+  analyzer on the header would, until GPIO > End the record; the status bar counts
+  the changes meanwhile. (`./flipperemu gpio` is the same from a shell; more
+  [below](#the-gpio-header).)
 - **The lights and sounds** show on the body: the LED glows, the body shakes when the
   motor runs, and a speaker sign shows a tone (it plays through `--audio`).
 - **The bench** under it has a tile for each of USB, the microSD card, the battery, NFC,
@@ -361,7 +364,8 @@ boots a throwaway device, clicks its buttons, records its screen, pauses it, rea
 firmware's log and sets its level, counts the steps of the backlight's fade, copies a
 file to its card, drops an app on it, starts it again with F5 and once more by putting
 a new file in its place, holds two pins of the GPIO header with clicks on them and
-lets go of them, watches the LED blink
+lets go of them, records what a pin does to a file from the GPIO menu, watches the
+LED blink
 while NFC reads, switches it off and on, reboots it, has an app crash the firmware,
 loses the emulator and finds it again after that, and updates it twice with the package
 it runs: once with the wait given up, once to the end.
@@ -1392,6 +1396,10 @@ $ ./flipperemu gpio watch PA7,PA6 --for 5
 - A record goes on over a reset of the firmware, and ends with `gpio record stop` or
   with the emulator; the file is whole either way. One record runs at a time. `gpio
   watch` reads the record that runs, or keeps one of its own while it watches.
+- In the window it is GPIO > Record what the pins do…, which asks for the file, and
+  GPIO > End the record. While one runs, the status bar has its file and how many
+  changes it holds; that is so for a record begun from a shell too, and either side
+  can end the other's.
 - Pin 17, the iButton pin, has both sides in it: what the firmware drives, and what
   a key held to it with `ibutton` answers. A record of `ikey read` is the whole
   1-Wire exchange: the reset pulse, the key's presence pulse, every bit.
