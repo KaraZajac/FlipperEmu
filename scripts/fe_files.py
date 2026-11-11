@@ -70,7 +70,7 @@ class StorageError(FilesError):
         "file is already open": "an app on the Flipper has that file open",
         "internal error": "the SD card gave an error",
     }
-    # the same two in the words of firmware after 1.5.1 (RogueMaster's has them)
+    # the same two in RogueMaster's words
     SAME = {
         "file/dir doesn't exist": "file/dir not exist",
         "file/dir already exists": "file/dir already exist",

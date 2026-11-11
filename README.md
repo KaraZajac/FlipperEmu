@@ -511,8 +511,8 @@ launcher then says that there is no prompt, and that this may be why.
 `scripts/files_check.py FIRMWARE` checks all of this on a throwaway device: a folder
 copied there and back through the firmware and through the image, each reading what the
 other wrote, `push --card`, and then the interruptions above. It passes on the four
-firmwares; RogueMaster's is the one whose storage service has the newer wording of its
-errors ("file/dir doesn't exist", where 1.5.1 says "file/dir not exist").
+firmwares; RogueMaster's storage service has its own wording for two of its errors
+("file/dir doesn't exist", where the others say "file/dir not exist").
 
 ### Apps
 
