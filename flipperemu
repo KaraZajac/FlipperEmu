@@ -31,6 +31,10 @@ you flash stays flashed, settings and files persist across runs.
   ./flipperemu expansion | expansion --rpc   be an expansion module on its header:
                                              the call, the baud rate, heartbeats,
                                              an RPC session
+  ./flipperemu i2c | i2c 0x48 temperature 23.5
+                                             the I2C bus of its header, where `run
+                                             --i2c tmp105@0x48` put a sensor: the
+                                             devices' values; set one
   ./flipperemu reset                         reboot it, as Left + Back do on a real one
   ./flipperemu pause | continue              time stands still on it, and goes on
   ./flipperemu flash fw.dfu                  just program the flash
@@ -552,6 +556,198 @@ def new_log(dev: Device, serial):
             pass
 
 
+# `run --i2c`: other names for QEMU's device types, and what a type needs
+# said when the user did not
+I2C_NAMES = {"eeprom": "at24c-eeprom", "at24c": "at24c-eeprom"}
+I2C_NEEDS = {"at24c-eeprom": {"rom-size": "256"}}
+
+
+# What every device on a bus has, and is not a value of its own
+I2C_EVERY = ("type", "parent_bus", "realized", "hotplugged", "hotpluggable",
+             "address")
+
+
+def i2c_degrees(name):
+    """Is a value of that name a temperature?  QEMU's sensors have theirs in
+    thousandths of a degree; here they are read and written in °C.
+    They also forget one that is given with the device (it is set back when
+    the device is put on its bus), so it is set once the emulator runs."""
+    return name.startswith("temperature")
+
+
+def i2c_parse(specs):
+    """`run --i2c TYPE@ADDRESS[,PROPERTY=VALUE...]`, once for each device on
+    the header's I2C bus (pins 15 and 16) -> [(type, address, {property:
+    value} for QEMU's -device, {property: value} to set once it runs)].  The
+    type is a QEMU I2C device's; QEMU says so itself when it has none of
+    that name."""
+    out, seen = [], {}
+    for spec in specs or ():
+        head, *props = spec.split(",")
+        kind, at, where = head.partition("@")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", kind) or not at:
+            sys.exit(f"--i2c {spec}: a device is TYPE@ADDRESS, as "
+                     "tmp105@0x48 (and ,PROPERTY=VALUE after it)")
+        if not re.fullmatch(r"0[xX][0-9a-fA-F]{1,2}", where):
+            sys.exit(f"--i2c {spec}: an address is as 0x48 (seven bits, in "
+                     "hex)")
+        address = int(where, 16)
+        if not 0x08 <= address <= 0x77:
+            sys.exit(f"--i2c {spec}: a device's address is 0x08 to 0x77 "
+                     "(the others are not for devices)")
+        kind = I2C_NAMES.get(kind, kind)
+        if address in seen:
+            sys.exit(f"--i2c {spec}: {seen[address]} is at 0x{address:02x} "
+                     "already (two on a bus have two addresses)")
+        seen[address] = kind
+        given, later = {}, {}
+        for prop in props:
+            key, eq, value = prop.partition("=")
+            if not key or not eq:
+                sys.exit(f"--i2c {spec}: after the address come "
+                         f"PROPERTY=VALUE, not '{prop}'")
+            if key in ("bus", "address", "id"):
+                sys.exit(f"--i2c {spec}: '{key}' is not to be set (the bus "
+                         "is the header's, the address is after the @)")
+            if i2c_degrees(key):
+                if i2c_number(key, value) is None:
+                    sys.exit(f"--i2c {spec}: a temperature is in °C, "
+                             f"as {key}=23.5")
+                later[key] = value
+            else:
+                given[key] = value
+        for key, value in I2C_NEEDS.get(kind, {}).items():
+            given.setdefault(key, value)
+        if kind == "at24c-eeprom":
+            try:
+                size = int(given["rom-size"], 0)
+            except ValueError:
+                size = 0
+            if not 0 < size <= 1 << 20:
+                sys.exit(f"--i2c {spec}: rom-size is the EEPROM's bytes, 1 "
+                         "to 1048576, as rom-size=4096")
+            given["rom-size"] = str(size)
+        out.append((kind, address, given, later))
+    return out
+
+
+def i2c_rom(dev, address):
+    """Where the contents of an EEPROM at that address of the header's bus
+    are kept: an EEPROM does not forget when the emulator stops"""
+    return dev.dir / f"i2c-{address:02x}.bin"
+
+
+def i2c_roms(dev, specs):
+    """The EEPROMs of `run --i2c` whose contents are kept in the device's
+    folder (all that were given no drive of their own): [(address, the
+    file, its bytes)]"""
+    return [(address, i2c_rom(dev, address), int(given["rom-size"]))
+            for kind, address, given, _ in i2c_parse(specs)
+            if kind == "at24c-eeprom" and "drive" not in given]
+
+
+def i2c_args(specs, dev=None):
+    """QEMU's arguments for each device of `run --i2c`; dev: with the
+    files of its EEPROMs"""
+    out = []
+    kept = {address: path for address, path, _ in i2c_roms(dev, specs)} \
+        if dev else {}
+    for kind, address, given, _ in i2c_parse(specs):
+        name = f"i2c-{address:02x}"
+        if address in kept:
+            out += ["-drive", f"if=none,id={name}-rom,format=raw,"
+                              f"file={kept[address]}"]
+            given = dict(given, drive=f"{name}-rom")
+        out += ["-device", ",".join(
+            [kind, "bus=i2c3", f"address=0x{address:02x}", f"id={name}"]
+            + [f"{k}={v}" for k, v in given.items()])]
+    return out
+
+
+def i2c_number(name, value):
+    """A value as QEMU's monitor takes it (a temperature: in thousandths of
+    a degree), or None: it is none"""
+    if not i2c_degrees(name):
+        return value if re.fullmatch(r"[A-Za-z0-9_.+-]+", value) else None
+    try:
+        return str(round(float(value) * 1000))
+    except (ValueError, OverflowError):
+        return None
+
+
+def i2c_path(address):
+    return f"/machine/peripheral/i2c-{address:02x}"
+
+
+def i2c_own(m, address):
+    """The names of the values that the device at that address of the
+    header's bus has of its own"""
+    out = []
+    for line in m.cmd(f"qom-list {i2c_path(address)}").splitlines():
+        found = re.fullmatch(r"(\S+) \((.+)\)", line.strip())
+        if (found and found[1] not in I2C_EVERY
+                and not found[2].startswith(("link<", "child<"))):
+            out.append(found[1])
+    return sorted(out)
+
+
+def i2c_value(m, address, name, unit=True):
+    """A value of that device, in words"""
+    value = qom_get(m, i2c_path(address), name)
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    if i2c_degrees(name) and isinstance(value, int):
+        return f"{value / 1000:g}" + (" °C" if unit else "")
+    if isinstance(value, str):
+        return json.dumps(value) if unit else value
+    return "?" if value is None else str(value)
+
+
+def i2c_put(m, address, name, value):
+    """Set a value of that device.  None, or why it was not taken, in words"""
+    number = i2c_number(name, value)
+    if number is None:
+        return ("a temperature is in °C, as 23.5" if i2c_degrees(name)
+                else "a value is a number, or a word as on and off")
+    out = m.cmd(f"qom-set {i2c_path(address)} {name} {number}")
+    why = re.search(r"Error: *(.*)", out)
+    if not why:
+        return None
+    if "after it was realized" in why[1]:
+        return ("that is said when the device is put there (`run --i2c "
+                f"TYPE@ADDRESS,{name}=...`), and stays as it is while it "
+                "runs")
+    return why[1].strip()
+
+
+def i2c_begin(dev, proc, specs):
+    """What `run --i2c` gave a device that it takes only once it is there:
+    set as soon as the emulator answers, long before the firmware is up"""
+    from fe_monitor import Monitor
+    for _ in range(100):
+        if proc.poll() is not None:
+            return
+        if dev.monitor.exists():
+            try:
+                m = Monitor(str(dev.monitor))
+            except OSError:
+                time.sleep(0.1)
+                continue
+            try:
+                for kind, address, _, later in specs:
+                    for name, value in later.items():
+                        why = i2c_put(m, address, name, value)
+                        if why:
+                            print(f"[{dev.name}] --i2c: {kind} at "
+                                  f"0x{address:02x} did not take {name}="
+                                  f"{value}: {why}", file=sys.stderr,
+                                  flush=True)
+            finally:
+                m.close()
+            return
+        time.sleep(0.1)
+
+
 def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
     """gauge: {property: value} of /machine/gauge to start with"""
     machine = (f"flipper-zero,name={args.name or dev.name[:8]}"
@@ -617,6 +813,7 @@ def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
         cmd += ["-display", "none"]
     cmd += serial_args(dev, args.serial)
     cmd += lpuart_args(dev, args.lpuart)
+    cmd += i2c_args(args.i2c, dev)
     if args.gdb or args.wait_gdb:
         cmd += ["-gdb", f"tcp:127.0.0.1:{args.gdb_port}"]
     if args.wait_gdb:
@@ -688,6 +885,14 @@ def cmd_run(args):
         sys.exit(f"QEMU not built yet: run scripts/setup_qemu.sh ({QEMU})")
     dev = Device(args.device)
     detached = os.environ.pop(DETACHED, None)
+    i2c_args(args.i2c)          # (a wrong one is said before anything is done)
+    for address, path, size in i2c_roms(dev, args.i2c):
+        if path.exists() and path.stat().st_size != size:
+            sys.exit(f"--i2c: the EEPROM at 0x{address:02x} is to have "
+                     f"{size} bytes, and its contents, {path}, are "
+                     f"{path.stat().st_size} bytes: say rom-size="
+                     f"{path.stat().st_size}, or remove the file for a new, "
+                     "empty EEPROM")
     if not args.print_cmd:
         dev.refuse_if_running()
         if args.detach and not detached:
@@ -777,14 +982,23 @@ class Session:
                 stale.unlink()
             except FileNotFoundError:
                 pass
+        for _, path, size in i2c_roms(dev, args.i2c):
+            if not path.exists():       # a new EEPROM: every bit is 1
+                path.write_bytes(b"\xff" * size)
         self.proc = subprocess.Popen(qemu_cmd(dev, args, self.window, self.gauge))
         manifest, label = self.update
         self.update = (None, None)          # an update is started once
         args.log_level = None               # ... and its log level set once
-        if "pty" in (args.usb, args.lpuart, args.serial) or manifest:
-            threading.Thread(target=usb_helpers,
-                             args=(dev, self.proc, args.usb, manifest, label),
-                             daemon=True).start()
+        first = [spec for spec in i2c_parse(args.i2c) if spec[3]]
+        helpers = "pty" in (args.usb, args.lpuart, args.serial) or manifest
+
+        def after(proc=self.proc):
+            if first:
+                i2c_begin(dev, proc, first)
+            if helpers:
+                usb_helpers(dev, proc, args.usb, manifest, label)
+        if first or helpers:
+            threading.Thread(target=after, daemon=True).start()
         return self.proc
 
     def poll(self):
@@ -1214,6 +1428,7 @@ def device_status(dev):
         st["sound"] = {"muted": g("/machine/speaker", "mute")}
         st["gpio"] = read_header(m)
         st["serial"] = read_serial(m)
+        st["i2c"] = read_i2c(m)
         st["lights"] = {"led": g("/machine/led", "led"),
                         "blinking": g("/machine/led", "blinking"),
                         "backlight": g("/machine/led", "backlight"),
@@ -1293,6 +1508,8 @@ def cmd_status(args):
         *[("" if i else "serial",
            f"{fe_header.port_name(p)}: {fe_header.port_text(p)}")
           for i, p in enumerate(st["serial"] or ())],
+        *([("i2c", f"{fe_header.i2c_name(st['i2c'])}: "
+                   f"{fe_header.i2c_text(st['i2c'])}")] if st["i2c"] else []),
         ("lights", lights_text(st["lights"])),
         ("log", f"the firmware's level: {log_level_text(st['log']['level'])}"
                 + (f"; kept in {st['log']['file']}" if st["log"]["file"] else "")),
@@ -1391,6 +1608,16 @@ def read_header(m):
     emulator that cannot tell yet"""
     text = qom_get(m, "/machine", "header")
     return fe_header.parse(text) if isinstance(text, str) else None
+
+
+def read_i2c(m):
+    """The header's I2C bus: what is on it and what the firmware called there
+    (fe_header.parse_i2c), or None from an emulator that cannot tell yet"""
+    text = qom_get(m, "/machine", "header-i2c")
+    try:
+        return fe_header.parse_i2c(text) if isinstance(text, str) else None
+    except ValueError:
+        return None
 
 
 def read_serial(m):
@@ -1577,16 +1804,17 @@ def cmd_gpio(args):
     if args.timeout <= 0:
         sys.exit("gpio: --timeout is more than 0 seconds")
 
-    ports = None
+    ports = bus = None
 
     def now():
         # (the monitor takes one client at a time: not kept, so that a test
         # can press a button while this waits)
-        nonlocal ports
+        nonlocal ports, bus
         m = open_monitor(dev)
         try:
             pins = read_header(m)
             ports = read_serial(m)
+            bus = read_i2c(m)
         finally:
             m.close()
         if pins is None:
@@ -1624,6 +1852,8 @@ def cmd_gpio(args):
             of = fe_header.port_pin(p, ports)
             if of and not note:
                 note = f"{of[0]['name']}'s {of[1]}"
+            if fe_header.i2c_pin(p, bus):
+                note = f"{bus['name']}'s {fe_header.i2c_pin(p, bus)}"
             if p["held"]:
                 note = f"held {p['held']} from outside" + (
                     ", which does not show while the firmware drives the pin"
@@ -1639,6 +1869,10 @@ def cmd_gpio(args):
             for p in ports:
                 print(f"  {fe_header.port_name(p):{wide}}  "
                       f"{fe_header.port_text(p)}")
+        if bus:
+            print("its I2C bus, SDA on pin 15 and SCL on pin 16 (`run --i2c "
+                  "TYPE@ADDRESS` puts a device there)")
+            print(f"  {fe_header.i2c_name(bus)}  {fe_header.i2c_text(bus)}")
         return 0
 
     p = header_pin(pins, args.pin)
@@ -2487,6 +2721,82 @@ def cmd_uart(args):
         if line:
             line.close()
         leave_port(lock)
+
+
+def cmd_i2c(args):
+    """The I2C bus of a running device's GPIO header: the devices on it with
+    their values, and what the firmware called there; a device's values; one
+    value (bare, for a script); or set one."""
+    dev = Device(args.device)
+    address = None
+    if args.address is not None:
+        if not re.fullmatch(r"0[xX][0-9a-fA-F]{1,2}", args.address):
+            sys.exit(f"i2c {args.address}: an address is as 0x48 (seven "
+                     "bits, in hex)")
+        address = int(args.address, 16)
+    if args.prop is not None and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.\[\]-]*", args.prop):
+        sys.exit(f"i2c: '{args.prop}' is no name of a value")
+    m = open_monitor(dev)
+    try:
+        bus = read_i2c(m)
+        if not bus:
+            sys.exit(f"[{dev.name}] this emulator cannot tell what is on the "
+                     "header's I2C bus: `i2c` needs one that is built from "
+                     "this tree as it is now (scripts/setup_qemu.sh)")
+        there = {d["address"]: d["type"] for d in bus["devices"]}
+        wide = max(map(len, there.values()), default=0)
+
+        def value(at, name):
+            said = i2c_value(m, at, name)
+            if name != "drive" or there[at] != "at24c-eeprom":
+                return f"{name} {said}"
+            if said == f'"i2c-{at:02x}-rom"':
+                return f"kept in {i2c_rom(dev, at)}"
+            return "kept nowhere" if said == '""' else f"kept in drive {said}"
+
+        def line(at):
+            values = ", ".join(value(at, name) for name in i2c_own(m, at))
+            return (f"[{dev.name}]   0x{at:02x}  {there[at]:{wide}}  "
+                    f"{values}").rstrip()
+
+        if address is None:
+            print(f"[{dev.name}] {fe_header.i2c_name(bus)}: "
+                  f"{fe_header.i2c_text(bus)}")
+            for at in there:
+                print(line(at))
+            if not there:
+                print(f"[{dev.name}]   (`run --i2c TYPE@ADDRESS` puts a "
+                      "device there, as --i2c tmp105@0x48)")
+            return 0
+        if address not in there:
+            print(f"[{dev.name}] nothing is at 0x{address:02x} of the "
+                  "header's I2C bus (on it: "
+                  f"{fe_header.i2c_devices(bus)})", file=sys.stderr)
+            return 1
+        kind = f"{there[address]} at 0x{address:02x}"
+        own = i2c_own(m, address)
+        if args.prop is None:
+            print(line(address))
+            return 0
+        if args.prop not in own:
+            print(f"[{dev.name}] {kind} has no '{args.prop}' (it has: "
+                  f"{', '.join(own) or 'no value of its own'})",
+                  file=sys.stderr)
+            return 1
+        if args.value is None:
+            print(i2c_value(m, address, args.prop, unit=False))
+            return 0
+        why = i2c_put(m, address, args.prop, args.value)
+        if why:
+            print(f"[{dev.name}] {kind} did not take {args.prop} "
+                  f"{args.value}: {why}", file=sys.stderr)
+            return 1
+        print(f"[{dev.name}] {kind}: {args.prop} "
+              f"{i2c_value(m, address, args.prop)}")
+        return 0
+    finally:
+        m.close()
 
 
 def cmd_expansion(args):
@@ -4240,6 +4550,16 @@ def main():
                         "on it, whichever of these (but none) it is.  (With "
                         "--serial pty, pins 13 and 14 have a pty too: "
                         "usart.tty)")
+    p.add_argument("--i2c", action="append", metavar="TYPE@ADDRESS",
+                   help="a device on the I2C bus of the GPIO header (pins 15 "
+                        "SDA and 16 SCL), as tmp105@0x48 (a temperature "
+                        "sensor) or eeprom@0x50 (an AT24C of 256 bytes; "
+                        "eeprom@0x50,rom-size=4096 a larger one).  Once for "
+                        "each device.  The type is one of QEMU's I2C devices, "
+                        "with its properties after a comma (a temperature is "
+                        "in °C: tmp105@0x48,temperature=23.5); `i2c` "
+                        "says what is on the bus, with the devices' values, "
+                        "and sets one while it runs")
     p.add_argument("--log-level", metavar="LEVEL",
                    choices=("default", "none", "error", "warn", "info", "debug",
                             "trace"),
@@ -4409,6 +4729,30 @@ def main():
                    metavar="S", help="keep the link for so many seconds "
                                      "(default 1)")
     p.set_defaults(func=cmd_expansion)
+
+    p = sub.add_parser(
+        "i2c", help="the I2C bus of a running device's GPIO header: the "
+        "devices that `run --i2c` put there, with their values, and what "
+        "the firmware called; `i2c 0x48 temperature 23.5` sets a value",
+        description="The I2C bus on pins 15 (SDA) and 16 (SCL) of the GPIO "
+        "header: the firmware's external I2C bus.  Devices are put there "
+        "when the device starts (`run --i2c tmp105@0x48 --i2c "
+        "eeprom@0x50`).  Without arguments: what is on the bus, each "
+        "device's values, and how many addresses the firmware has called "
+        "since the emulator started (and whether the last one was "
+        "answered).  With an address: that device's values; with a value's "
+        "name too: that value alone, bare (for a script); with a new value "
+        "after it: set it, as the world around a sensor would.  A "
+        "temperature is in °C.  Exit status 1, with the reason in "
+        "words: nothing is at that address, the device has no such value, "
+        "or it did not take the new one.")
+    p.add_argument("address", nargs="?", metavar="ADDRESS",
+                   help="a device on the bus, by its address: 0x48")
+    p.add_argument("prop", nargs="?", metavar="NAME",
+                   help="one of its values: temperature")
+    p.add_argument("value", nargs="?", metavar="VALUE",
+                   help="set it to this: 23.5")
+    p.set_defaults(func=cmd_i2c)
 
     p = sub.add_parser("reset", help="reboot a running device, as holding Left + "
                        "Back does on a real one")

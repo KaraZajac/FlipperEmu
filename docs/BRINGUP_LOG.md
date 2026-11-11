@@ -2042,6 +2042,51 @@ big lock, entry 92).
     - Not there: more of the RPC session than a ping, the 5 V commands, a module
       that goes wrong on purpose.
     - `scripts/uart_check.py`: 79 checks (73 before), on the five firmwares.
+110. **I2C devices on the header (`run --i2c`, `i2c`; QEMU patch 0009).** I2C3 was
+    there on pins 15 and 16 with nothing on it: the firmware's scan found no
+    address, and an app for a sensor board had nobody to talk to.
+    - QEMU has the devices (`tmp105`, `at24c-eeprom`, clocks, port expanders), and
+      `-device TYPE,bus=NAME,address=N` puts one on a bus by the bus's name. Both
+      buses of the SoC were named `i2c`. They are `i2c1` (the power bus) and `i2c3`
+      now, a property of the I2C model that the SoC sets, and `run --i2c
+      TYPE@ADDRESS` is that `-device` on `i2c3`, with the id `i2c-NN`.
+    - Address 0. The firmware's scan calls all 128 addresses, and QEMU's bus has
+      every device answer the first of them, the general call. No device here
+      listens to that, so the model takes address 0 as unanswered, and does not
+      ask the bus.
+    - The model counts what the firmware did on its bus (addresses called, those
+      that nobody took, the last one), and the machine has that with the devices
+      as the property `header-i2c`. `i2c`, `gpio` and `status` say it in words. A
+      scan is `the firmware called 128 addresses, 2 answered; the last: 0x7f to
+      write, no answer`.
+    - A temperature given with the device was gone at the start: QEMU's sensors
+      set their registers when they are made, after the properties of `-device`
+      were applied. The launcher sets such a value through the monitor as soon as
+      the emulator answers. QEMU has a temperature in thousandths of a degree;
+      `i2c` takes and prints °C. (A TMP421 rounds: -12.25 reads back as -12.249.)
+    - `i2c ADDRESS NAME VALUE` is `qom-set` on `/machine/peripheral/i2c-NN`, and
+      the device's line is its properties without those every device has. What
+      QEMU refuses comes back in its words (`value 200.000 C is out of range`); a
+      property that is fixed once the device is made (`rom-size`) is said to be.
+    - The EEPROM forgot its contents with the emulator. A drive keeps them, and
+      QEMU refused the drive: `Backing file size 512 != 256`. The block layer
+      gives a raw image's length in whole sectors of 512 bytes and the model
+      wanted the EEPROM's size, so only an EEPROM of a multiple of 512 bytes could
+      have a file. `qemu/patches/0009` compares with the size rounded up to a
+      sector; the file of a 256-byte EEPROM stays 256 bytes long. The launcher
+      makes the file (`devices/NAME/i2c-NN.bin`, 0xFF throughout) and the drive,
+      and refuses a start when a file of another length is there.
+    - On Momentum `examples/i2c/sensor.js` reads 23.5 from the TMP105 (with 12
+      bits, after it wrote the configuration register), -7.5 after `i2c 0x48
+      temperature -7.5`, and counts its runs in the EEPROM's first byte: 1, 2, 3
+      after a reset of the firmware, 4 after a stop and a start.
+    - The official firmware's JavaScript (1.5.1 and the dev build) has no `i2c`
+      module (`"i2c" module load fail`): there the check has the scan alone.
+    - Not there: an app in C as the example, the bus in the window, a record of
+      the transfers, the two lines as levels, a device added while it runs.
+    - `scripts/i2c_check.py`: 35 checks on Momentum, Unleashed and RogueMaster, 31
+      and one skipped on the official 1.5.1 and the official dev build;
+      `gpio_check.py` is 55 (54 before), on the five.
 
 ## Things that were right the first time (and why)
 

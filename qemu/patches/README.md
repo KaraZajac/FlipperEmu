@@ -11,7 +11,9 @@ receive as they did (a byte a millisecond at any baud rate, nothing by DMA).
 0008 is an addition too: without it the machine runs, and a byte that comes while a
 port's receiver is off is dropped and no more (no start bit on the RX pin, so the
 firmware's expansion service never sees a module call).
-A source tree that was set up before a patch came (0006 to 0008: 2026-11-11) gets it
+0009 lifts a limit: without it the machine runs, and `run --i2c eeprom@…` is refused
+by QEMU unless the EEPROM's size is a multiple of 512 bytes.
+A source tree that was set up before a patch came (0006 to 0009: 2026-11-11) gets it
 from one more run of that script.
 
 | patch | QEMU file | bug |
@@ -24,6 +26,7 @@ from one more run of that script.
 | 0006 | `chardev/char.c` | a chardev with a `logfile` logged a byte at once when its backend could not take it yet (EAGAIN), and again when it was written: every byte that had to wait was in the log twice |
 | 0007 | `hw/char/stm32l4x5_usart.c` | reception lacked what a driver uses: no request to a DMA channel (and no byte-wide register access for it), no IDLE flag, no PRESC register, the LPUART's baud rate by the USART's formula, and bytes taken at the main loop's pace instead of the baud rate |
 | 0008 | `hw/char/stm32l4x5_usart.c` | a byte that came while the receiver was off was dropped without a word: on hardware its start bit is still a falling edge on the RX pin, which a board may wait for with an interrupt. A line `rx-unheard` tells the board |
+| 0009 | `hw/nvram/eeprom_at24c.c` | an EEPROM with a backing file wanted the image's length to be its own size, and the block layer gives lengths in whole 512-byte sectors: no file could back an EEPROM smaller than a sector (a 24C02's 256 bytes), or one that ends within a sector |
 
 **Licence:** these patches modify QEMU's own source files, which are GPL-2.0-or-later,
 so the patches are GPL-2.0-or-later too, unlike the rest of this repository (BSD-3-Clause).

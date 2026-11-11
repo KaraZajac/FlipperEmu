@@ -137,6 +137,71 @@ def port_pin(p, ports):
     return None
 
 
+# The alternate function that puts the header's I2C bus on its two pins
+I2C_FUNCTION = 4
+
+
+def parse_i2c(text):
+    """The header's I2C bus (the machine's `header-i2c`), a dict: its "name"
+    (I2C3), its pins by their numbers on the header ("sda", "scl"), how many
+    addresses the firmware called since the emulator started ("calls") and
+    how many of those nobody took ("unanswered"), the "last" one called
+    (None, or its "address", was it to "read", was it "taken"), and the
+    "devices" on the bus, each its "type" and "address", the lowest first."""
+    words = text.split()
+    name, sda, scl, calls, unanswered, last = words[0].split(":")
+    if last != "-" and (len(last) != 4 or last[2] not in "rw"
+                        or last[3] not in "+-"):
+        raise ValueError(words[0])
+    devices = []
+    for word in words[1:]:
+        kind, _, address = word.rpartition("@")
+        devices.append({"type": kind, "address": int(address, 16)})
+    return {"name": name, "sda": int(sda), "scl": int(scl),
+            "calls": int(calls), "unanswered": int(unanswered),
+            "last": None if last == "-" else {
+                "address": int(last[:2], 16), "read": last[2] == "r",
+                "taken": last[3] == "+"},
+            "devices": sorted(devices, key=lambda d: d["address"])}
+
+
+def i2c_name(bus, first="p"):
+    return f"{first}ins {bus['sda']} and {bus['scl']} ({bus['name']})"
+
+
+def i2c_devices(bus):
+    """What is on the bus, in words"""
+    return ", ".join(f"{d['type']} at 0x{d['address']:02x}"
+                     for d in bus["devices"]) or "no device"
+
+
+def i2c_text(bus):
+    """What is on the header's I2C bus and what the firmware did there, in
+    words"""
+    last, calls = bus["last"], bus["calls"]
+    if not calls:
+        did = "the firmware has called no address yet"
+    else:
+        taken = calls - bus["unanswered"]
+        did = (f"the firmware called {calls} "
+               f"address{'' if calls == 1 else 'es'}, "
+               + ("none" if not taken else "it" if calls == 1 else
+                  "all" if taken == calls else str(taken))
+               + f" answered; the last: 0x{last['address']:02x} to "
+               f"{'read' if last['read'] else 'write'}, "
+               + ("answered" if last["taken"] else "no answer"))
+    return f"{i2c_devices(bus)}; {did}"
+
+
+def i2c_pin(p, bus):
+    """Is a pin of the header one of the I2C bus's just now?  "SDA", "SCL"
+    or None.  They are the bus's while the firmware has them in its alternate
+    function: while it talks there, and no longer."""
+    if bus and p["function"] == I2C_FUNCTION and p["mode"] == "alternate":
+        return {bus["sda"]: "SDA", bus["scl"]: "SCL"}.get(p["number"])
+    return None
+
+
 def overruled(p):
     """Is something held to a pin that the firmware drives both ways?  On
     hardware the two would fight; here the firmware's level is the pin's."""

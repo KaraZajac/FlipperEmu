@@ -9,6 +9,7 @@ would be: the build tools you already use, pointed at it.
 - [The LED and the backlight](#the-led-and-the-backlight)
 - [The pins of the GPIO header](#the-pins-of-the-gpio-header)
 - [A serial port on the header](#a-serial-port-on-the-header)
+- [A sensor on the header's I2C bus](#a-sensor-on-the-headers-i2c-bus)
 - [A test that runs by itself](#a-test-that-runs-by-itself)
 - [Why `./flipperemu ufbt`, and not `ufbt` alone](#why-flipperemu-ufbt-and-not-ufbt-alone)
 - [The SDK has to be the firmware's](#the-sdk-has-to-be-the-firmwares)
@@ -247,7 +248,8 @@ A pin is named as the MCU has it (`PA7`), as the case has it (`A7`) or by that n
   that something is held to it, and that it does not show).
 - What a peripheral puts on a pin (a UART, PWM, SPI, I2C) is `unknown`: only the levels
   of plain inputs and outputs are on the header so far. The ADC reads nothing. (The
-  bytes of the UART on pins 15 and 16 are there, as bytes: the next section.)
+  bytes of the UART on pins 15 and 16 are there, as bytes: the next section. And so
+  are devices for the I2C bus on those pins: the one after it.)
 - **What your app did to a pin, edge by edge:** `gpio record pins.vcd` has the
   emulator write every change of a pin's level to a file, with its time, until `gpio
   record stop`; a pulse too short for `--wait` is in it. The file is a VCD, which
@@ -332,6 +334,70 @@ In a test script:
 ```sh
 fe uart wait "ready" --for 10                    # the app has opened the port
 fe uart send "AT+VERSION\r\n" --expect "OK"      # ... and answers
+```
+
+## A sensor on the header's I2C bus
+
+An app for a sensor board talks to I2C3, SDA on pin 15 and SCL on pin 16:
+`furi_hal_i2c_acquire(&furi_hal_i2c_handle_external)`, then
+`furi_hal_i2c_is_device_ready`, `furi_hal_i2c_tx`, `furi_hal_i2c_rx` and
+`furi_hal_i2c_trx`, and `furi_hal_i2c_release`. `run --i2c` is the board, and `i2c`
+the hand that warms the sensor:
+
+```
+$ ../../flipperemu run --detach --i2c tmp105@0x48,temperature=23.5 --i2c eeprom@0x50
+$ ../../flipperemu cli i2c
+…
+4 | - - - - - - - - # - - - - - - -
+5 | # - - - - - - - - - - - - - - -
+…
+$ ../../flipperemu i2c 0x48 temperature 30.25
+[flipper] tmp105 at 0x48: temperature 30.25 °C
+$ ../../flipperemu i2c
+[flipper] pins 15 and 16 (I2C3): tmp105 at 0x48, at24c-eeprom at 0x50; the firmware called 128 addresses, 2 answered; the last: 0x7f to write, no answer
+[flipper]   0x48  tmp105        temperature 30.25 °C
+[flipper]   0x50  at24c-eeprom  address-size 1, kept in /home/you/FlipperEmu/devices/flipper/i2c-50.bin, rom-size 256, writable on
+```
+
+- **The device** is one of QEMU's I2C devices by its name there, at its address in
+  hex (seven bits): a `tmp105` or `tmp421` temperature sensor, an `eeprom`, a
+  `ds1338` clock, a `pca9554` port expander and some more (the README's "I2C devices
+  on pins 15 and 16" has how to list them). Your chip may not be among them. One
+  with the same registers can stand in, and what the app does when nothing answers
+  is there in any case: an address with no device is a NACK, as on the wire.
+- **Did the app reach it?** The first line of `i2c` counts the addresses that the
+  firmware called and those that answered, and has the last one. The `furi_hal_i2c`
+  functions take an address as it is on the wire, shifted left by one: `0x48 << 1`.
+  An app that passes 0x48 calls 0x24, and the line says so: `the last: 0x24 to
+  write, no answer`.
+- **Another value, for a test:** `i2c 0x48 temperature -40` is a winter that the
+  desk does not have; the app's next read has it. `i2c 0x48 temperature` prints the
+  value and nothing else. What QEMU's model does not take is refused in words
+  (a TMP105's range ends below 128 °C).
+- **The EEPROM** keeps its contents in `devices/NAME/i2c-50.bin`, over a reset and
+  over `stop` and the next `run`: a test can compare the file with what the app
+  should have written, or copy a prepared image there before `run`. A new one is
+  all 0xFF.
+- What is on the bus is said with each `run`. A device cannot be added while the
+  emulator runs.
+- **In JavaScript** it is `require("i2c")` on Momentum, Unleashed and RogueMaster:
+  `examples/i2c/sensor.js` reads the sensor and counts its runs in the EEPROM. The
+  official firmware's JavaScript has no such module, so there it is an app in C.
+
+What ran here is the firmware's own scan (the CLI's `i2c`) on five firmwares, and
+that script on the three that have the module. No app in C was built against the
+bus yet. Three limits matter for an app. Nothing checks the pins: I2C3 answers here
+also when the app did not set pins 15 and 16 up for it, where a Flipper would be
+silent. A transfer takes no time, at any bus speed, and no device stretches the
+clock. And the two lines are not on the header as levels: a record of the pins has
+no bits of a transfer.
+
+In a test script:
+
+```sh
+fe run --detach --headless --i2c tmp105@0x48,temperature=23.5
+fe i2c 0x48 temperature -7.5                 # the sensor says -7.5 °C from here on
+test "$(fe i2c 0x48 temperature)" = -7.5
 ```
 
 ## A test that runs by itself
@@ -883,8 +949,9 @@ record goes on over a reset; a record of pin 17 while the firmware reads a DS199
 has the reset pulse and, right after it, the key's presence pulse; and a record the
 emulator was stopped under is whole. Beneath the pins it wants the two serial ports
 as the firmware starts with them: the log's with a baud rate, its receiver off and
-a call waited for on pin 14, the other one off. It passes on the official 1.5.1,
-the official dev build, Momentum, Unleashed and RogueMaster (54 checks). It has no
+a call waited for on pin 14, the other one off; and beneath those the I2C bus, with
+no device and no address called. It passes on the official 1.5.1,
+the official dev build, Momentum, Unleashed and RogueMaster (55 checks). It has no
 app of its own: an interrupt on a held pin and an open-drain output were not tried.
 The window's pins
 are in `scripts/gui_check.py`: a click on pin 2 and Hold it high (the window has it
@@ -927,6 +994,23 @@ the firmware while the link is up, an RPC session with a ping through it, a baud
 rate the firmware refuses, the port it does not wait on, and the log's port as it
 was when the module is gone. It passes on the official 1.5.1, the official dev
 build, Momentum, Unleashed and RogueMaster (79 checks). It has no app in C.
+
+`scripts/i2c_check.py FIRMWARE` starts a device with a TMP105 at 0x48 and an EEPROM
+at 0x50. Before that, the forms of `--i2c` that are refused, each in words and with
+no device left behind. Then: `i2c` lists both, with the temperature that was given
+at the start and the EEPROM's file, which is new and 0xFF throughout; the
+firmware's scan finds the two addresses and no other, and the bus's line has its
+128 calls, two of them answered and the last one not; `gpio`, `status` and `status
+--json` have the bus; a value read bare, a value set, and six things refused with
+the value left as it was; `examples/i2c/sensor.js` reads the temperature that was
+set and counts one in the EEPROM, reads another after that was set from outside,
+the file has the count, and after a reset of the firmware the temperature is still
+as set and the count goes on; a `run` with another `rom-size` is refused and the
+file is as it was; and a start with the EEPROM alone has no sensor in the scan or
+in the script, and the count from before. 35 checks on Momentum, Unleashed and
+RogueMaster. On the official 1.5.1 and the official dev build it is 31, with the
+script's part skipped: their JavaScript has no `i2c` module, so only the scan
+talks on the bus there. It has no app in C.
 
 `scripts/gdb_check.py FIRMWARE` does what the gdb section shows, with gdb in batch
 mode: a backtrace of the firmware with functions and lines, the breakpoint in the

@@ -1,0 +1,35 @@
+From: FlipperEmu
+Subject: [PATCH] eeprom_at24c: take a backing file that ends within a sector
+
+The EEPROM wants its backing file to be exactly as long as the EEPROM.
+The block layer gives an image's length in whole sectors, so a file of
+256 bytes is 512 bytes long to the check, and so is one of 512 bytes:
+no file can back an EEPROM that is smaller than a sector or ends within
+one. That is every AT24C01 and AT24C02, the common small ones.
+
+Compare with the EEPROM's size rounded up to a sector. Reading and
+writing the EEPROM's own size works on a shorter file as it is: the
+image reads as the sectors that hold it, and a write of 256 bytes at
+the start leaves the file 256 bytes long.
+
+Seen with the Flipper Zero machine, whose launcher keeps the contents
+of an EEPROM on the GPIO header's I2C bus in a file of the device.
+
+Signed-off-by: FlipperEmu
+---
+--- a/hw/nvram/eeprom_at24c.c
++++ b/hw/nvram/eeprom_at24c.c
+@@ -174,7 +174,12 @@
+     if (ee->blk) {
+         int64_t len = blk_getlength(ee->blk);
+ 
+-        if (len != ee->rsize) {
++        /*
++         * The length of an image comes in whole sectors: the file of an
++         * EEPROM that is smaller than one, or ends within one, is as long
++         * as the EEPROM, and reads as the sectors that hold it.
++         */
++        if (len != ROUND_UP(ee->rsize, BDRV_SECTOR_SIZE)) {
+             error_setg(errp, "%s: Backing file size %" PRId64 " != %u",
+                        TYPE_AT24C_EE, len, ee->rsize);
+             return;

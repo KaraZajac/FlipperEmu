@@ -7,7 +7,8 @@
     scripts/gpio_check.py firmware/official-1.5.1/flipper-z-f7-update-1.5.1.tgz
 
 Starts a throwaway device.  The header after a start: its thirteen signal
-pins, none an output, none held.  Then the firmware makes PA7 an output and
+pins, none an output, none held, with its serial ports and its I2C bus
+beneath them.  Then the firmware makes PA7 an output and
 sets it (`gpio mode`, `gpio set` in its CLI): the launcher sees that, as a
 table, as one word, by the pin's three names, in `status`, and a `--wait` for
 a level returns when the firmware sets it (and with exit status 1 when it
@@ -99,7 +100,13 @@ def start_checks(b):
                     r"pin 14 \(an interrupt on its fall, as for an expansion "
                     r"module\)\n"
                     r"  pins 15 and 16 \(LPUART1\) +off \(nothing has opened "
-                    r"it\)\n$", out), out)
+                    r"it\)\n", out), out)
+    check("... and the I2C bus of pins 15 and 16, with no device on it and "
+          "no address called",
+          out.endswith("its I2C bus, SDA on pin 15 and SCL on pin 16 (`run "
+                       "--i2c TYPE@ADDRESS` puts a device there)\n"
+                       "  pins 15 and 16 (I2C3)  no device; the firmware has "
+                       "called no address yet\n"), out)
     code, out, err, took = fe(b, "gpio", "PA7")
     check("a pin alone: its level as one word, and nothing else",
           code == 0 and out == "floating\n" and not err, out + err)

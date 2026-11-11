@@ -834,6 +834,39 @@ static char *flipper_get_header_serial(Object *obj, Error **errp)
     return g_string_free(out, false);
 }
 
+/*
+ * The header's I2C bus, "I2C3:SDA:SCL:CALLS:UNANSWERED:LAST" and then
+ * "TYPE@ADDRESS" for each device on it: SDA and SCL its pins by their
+ * numbers on the header; CALLS how many times the firmware called an address
+ * since the emulator started, UNANSWERED how many of those nobody took; LAST
+ * the last address called (two hex digits), r or w for what it was called
+ * for, + or - for taken or not; "-" before the first call.  The firmware
+ * has the bus on only while it uses it, so there is no on and off to tell.
+ */
+static char *flipper_get_header_i2c(Object *obj, Error **errp)
+{
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+    WB55I2cState *i = &s->soc.i2c[1];
+    GString *out = g_string_new(NULL);
+    BusChild *kid;
+
+    g_string_printf(out, "I2C3:15:16:%" PRIu64 ":%" PRIu64 ":", i->calls,
+                    i->unanswered);
+    if (i->calls) {
+        g_string_append_printf(out, "%02x%c%c", i->last,
+                               i->last_read ? 'r' : 'w',
+                               i->last_taken ? '+' : '-');
+    } else {
+        g_string_append_c(out, '-');
+    }
+    QTAILQ_FOREACH(kid, &BUS(i->bus)->children, sibling) {
+        g_string_append_printf(out, " %s@%02x",
+                               object_get_typename(OBJECT(kid->child)),
+                               I2C_SLAVE(kid->child)->address);
+    }
+    return g_string_free(out, false);
+}
+
 /* "PA7=1", "PA7=0" or "PA7=z" (let go of it); several, with blanks or
  * commas between them */
 static void flipper_set_header(Object *obj, const char *value, Error **errp)
@@ -1603,6 +1636,11 @@ static void flipper_zero_instance_init(Object *obj)
     object_property_set_description(obj, "header-serial",
         "The header's serial ports as the firmware has them: for each its "
         "name, pins, baud rate (0: off), frame, and who takes what comes in");
+    object_property_add_str(obj, "header-i2c", flipper_get_header_i2c, NULL);
+    object_property_set_description(obj, "header-i2c",
+        "The header's I2C bus: its name and pins, how many addresses the "
+        "firmware called and how many nobody took, the last one, and the "
+        "devices on it (-device TYPE,bus=i2c3,address=N)");
     object_property_add_str(obj, "header-record", flipper_get_header_record,
                             flipper_set_header_record);
     object_property_set_description(obj, "header-record",

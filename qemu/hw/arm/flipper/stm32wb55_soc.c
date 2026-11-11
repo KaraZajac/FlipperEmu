@@ -459,6 +459,9 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
     static const int i2c_irq[2] = { WB55_IRQ_I2C1_EV, WB55_IRQ_I2C3_EV };
     for (int i = 0; i < 2; i++) {
         sbd = SYS_BUS_DEVICE(&s->i2c[i]);
+        /* (by the chip's names: `-device tmp105,bus=i2c3,address=0x48` is a
+         * sensor on the header) */
+        qdev_prop_set_string(DEVICE(sbd), "bus-name", i ? "i2c3" : "i2c1");
         soc_map(sbd, i2c_addr[i], errp);
         sysbus_connect_irq(sbd, 0, NVIC(i2c_irq[i]));
         sysbus_connect_irq(sbd, 1, NVIC(i2c_irq[i] + 1));

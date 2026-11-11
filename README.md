@@ -49,6 +49,10 @@ its time) passes on the same five.
 13 and 14: an app that opens one is answered from the launcher, from a program on the
 port's pty, and over TCP; the firmware's expansion service answers a module that the
 launcher plays) passes on the same five.
+`scripts/i2c_check.py` (the I2C bus of the header: a temperature sensor and an EEPROM
+put there with `run --i2c`, found by the firmware's scan, read and written by a script,
+set from outside, the EEPROM's contents kept in a file) passes on the same five; on the
+two official ones without the script, since their JavaScript has no `i2c` module.
 `scripts/ufbt_check.py` (ufbt 0.2.6 building `examples/hello`, launching it there, and
 `ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's symbols, that
 app's and a stock app's, and its debug configuration for VS Code used the way that
@@ -395,6 +399,8 @@ it runs: once with the wait given up, once to the end.
 | `gpio record OUT.vcd` \| `gpio record stop` \| `gpio watch [PIN,PIN]` | every change of a pin's level with its time: into a file a logic analyzer's program opens, or printed as it happens |
 | `uart` \| `uart send TEXT [--expect TEXT]` \| `uart wait TEXT` \| `uart term` | the serial port on pins 15 and 16 of its header: where it goes; send to the app that has it open, and wait for its answer; wait for what the app sends; a terminal on it. `--port usart`: the one on pins 13 and 14 |
 | `expansion [--rpc] [--baud N] [--for S] [--port P]` | be an expansion module on its header, to the firmware's expansion service: the call, the baud rate, heartbeats, an RPC session; every frame printed |
+| `run --i2c TYPE@ADDRESS[,NAME=VALUE]` | start with a device on the I2C bus of its header (pins 15 and 16): `--i2c tmp105@0x48,temperature=23.5`, `--i2c eeprom@0x50`; once for each device |
+| `i2c` \| `i2c ADDRESS` \| `i2c ADDRESS NAME` \| `i2c ADDRESS NAME VALUE` | that bus: its devices with their values, and what the firmware called; one device; one value, bare; set a value while the firmware runs |
 | `reset` | reboot it, as holding Left + Back does |
 | `pause` \| `continue` | time stands still on it (screen, timers, radios), and goes on from there |
 | `run --usbip [PORT]` | export the USB device over USB/IP (then `sudo scripts/usbip_attach.py`) |
@@ -1345,6 +1351,8 @@ $ ./flipperemu gpio
 its serial ports, as the firmware has them (`uart` sends and reads there)
   pins 13 and 14 (USART1)   230400 baud, 8N1; its receiver is off, and the firmware waits for a call on pin 14 (an interrupt on its fall, as for an expansion module)
   pins 15 and 16 (LPUART1)  off (nothing has opened it)
+its I2C bus, SDA on pin 15 and SCL on pin 16 (`run --i2c TYPE@ADDRESS` puts a device there)
+  pins 15 and 16 (I2C3)  no device; the firmware has called no address yet
 ```
 
 A pin goes by the MCU's name (`PA7`), by what the case says beside it (`A7`, `C0`,
@@ -1360,6 +1368,10 @@ it waits to be read (the receiver is on, with no interrupt and no DMA for it).
 `status` has the same two lines. An app with the wrong baud rate, or one that opened
 the other port than the one your wire is on, shows here without a look at its
 source. More on the ports [below](#the-serial-port-on-pins-15-and-16).
+
+The last line is the header's I2C bus: the devices that `run --i2c` put there, and what
+the firmware did on it (how many addresses it called, how many answered, the last one).
+More on it [below](#i2c-devices-on-pins-15-and-16).
 
 In the window the pins of the drawn Flipper are the same thing by hand. A pin is lit
 amber while it is high and blue while it is low. A click on one has a menu to hold it
@@ -1441,7 +1453,7 @@ file with its whole path, or `off`; read, the changes and nanoseconds so far and
 file.
 
 `scripts/gpio_check.py FIRMWARE` checks it with the firmware's own `gpio` CLI command
-on the other side of the pins: 54 checks, on the official 1.5.1, the official dev
+on the other side of the pins: 55 checks, on the official 1.5.1, the official dev
 build, Momentum, Unleashed and RogueMaster. Not tried: an interrupt an app has on a
 held pin (the buttons' come the same way), and a pin that an app has as an open-drain
 output.
@@ -1729,6 +1741,128 @@ still runs, with the port as it was: about 1000 bytes a second at any baud rate,
 a bridge that sends and does not hear. Without 0008 it runs too, and no byte is a
 call.
 
+### I2C devices on pins 15 and 16
+
+Pins 15 and 16 are also the header's I2C bus, I2C3: SDA on 15, SCL on 16 (C1 and C0 on
+the case). A sensor board is wired there, and an app talks to it through
+`furi_hal_i2c_handle_external` in C or `require("i2c")` in JavaScript; the CLI's `i2c`
+command scans that bus. `run --i2c` puts a device on it, and `i2c` is a look at the bus
+from outside and a hand on the device:
+
+```sh
+./flipperemu run --i2c tmp105@0x48,temperature=23.5 --i2c eeprom@0x50
+./flipperemu i2c                          # the bus: its devices, their values, the calls
+./flipperemu i2c 0x48                     # one device
+./flipperemu i2c 0x48 temperature         # one value and nothing else (for a script)
+./flipperemu i2c 0x48 temperature 30.25   # set it, while the firmware runs
+```
+
+With Momentum, whose JavaScript has an `i2c` module, and `examples/i2c/sensor.js`,
+which reads the sensor and counts its runs in the EEPROM:
+
+```
+$ ./flipperemu i2c
+[flipper] pins 15 and 16 (I2C3): tmp105 at 0x48, at24c-eeprom at 0x50; the firmware has called no address yet
+[flipper]   0x48  tmp105        temperature 23.5 °C
+[flipper]   0x50  at24c-eeprom  address-size 1, kept in /home/you/FlipperEmu/devices/flipper/i2c-50.bin, rom-size 256, writable on
+$ ./flipperemu cli i2c
+Scanning external i2c on PC0(SCL)/PC1(SDA)
+Clock: 100khz, 7bit address
+
+  | 0 1 2 3 4 5 6 7 8 9 A B C D E F
+--+--------------------------------
+0 | - - - - - - - - - - - - - - - -
+1 | - - - - - - - - - - - - - - - -
+2 | - - - - - - - - - - - - - - - -
+3 | - - - - - - - - - - - - - - - -
+4 | - - - - - - - - # - - - - - - -
+5 | # - - - - - - - - - - - - - - -
+6 | - - - - - - - - - - - - - - - -
+7 | - - - - - - - - - - - - - - - -
+$ ./flipperemu push examples/i2c/sensor.js /ext
+examples/i2c/sensor.js -> /ext/sensor.js (1592 bytes)
+[flipper] 1 copied (through the firmware)
+$ ./flipperemu cli "js /ext/sensor.js"
+Running script /ext/sensor.js, press CTRL+C to stop
+temperature: 23.500000
+run number: 1
+sensor done
+Script done!
+$ ./flipperemu i2c 0x48 temperature -7.5
+[flipper] tmp105 at 0x48: temperature -7.5 °C
+$ ./flipperemu cli "js /ext/sensor.js"
+Running script /ext/sensor.js, press CTRL+C to stop
+temperature: -7.500000
+run number: 2
+sensor done
+Script done!
+$ ./flipperemu i2c
+[flipper] pins 15 and 16 (I2C3): tmp105 at 0x48, at24c-eeprom at 0x50; the firmware called 144 addresses, 18 answered; the last: 0x50 to write, answered
+[flipper]   0x48  tmp105        temperature -7.5 °C
+[flipper]   0x50  at24c-eeprom  address-size 1, kept in /home/you/FlipperEmu/devices/flipper/i2c-50.bin, rom-size 256, writable on
+```
+
+- **A device** is `TYPE@ADDRESS`: one of QEMU's I2C devices by QEMU's name for it, and
+  its address in hex, the seven bits of it, from 0x08 to 0x77. One `--i2c` for each,
+  one device to an address. `eeprom` is short for `at24c-eeprom`. After a comma come
+  the device's own settings as `NAME=VALUE` (`--i2c eeprom@0x50,rom-size=4096`). A
+  form that is wrong is refused in words, before anything is flashed.
+- **Which there are:** `build/qemu/qemu-system-arm -device help | grep i2c-bus` lists
+  them. Among them are temperature sensors (`tmp105`, with the registers of an LM75
+  or a TMP75; `tmp421`, `tmp422`, `tmp423`; `emc1413`), the EEPROM, clocks (`ds1338`,
+  `m41t80`, `rs5c372`), port expanders and an LED driver (`pca9535`, `pca9554`,
+  `pca9552`), a pressure sensor (`dps310`), a magnetometer (`lsm303dlhc_mag`) and a
+  small OLED (`ssd0303`). Tried here are the TMP105 and the EEPROM, which the check
+  has, and a TMP421's values by hand. The others are QEMU's models as they come, each
+  as complete as QEMU has it.
+- **`i2c`** has a line for the bus and one for each device with what can be set on it
+  (QEMU's properties of the device). A temperature is in °C. `i2c ADDRESS NAME`
+  prints the one value and nothing else, and `i2c ADDRESS NAME VALUE` sets it, at
+  once: the firmware's next read has it. It exits 1 with the reason: nothing is at
+  that address (and what is on the bus), the device has no such value (and which it
+  has), QEMU refuses the value (`value 200.000 C is out of range`), or the value is
+  fixed while the device runs (`rom-size`, `writable`: those are said with `--i2c`).
+- **The bus's line** counts what the firmware did since the emulator started: the
+  addresses it called, how many of them answered, and the last one. A scan is 128
+  calls. An app that calls the wrong address shows there as a call that nobody
+  answered: the JavaScript module wants the address shifted left by one (0x48 is
+  `0x90`), and C's `furi_hal_i2c` functions do too. `gpio` and `status` have the same
+  line, and `status --json` has it as `i2c`.
+- What is set from outside stays over a reset of the firmware, as the weather would.
+- **An EEPROM's contents** are a file of the device, `devices/NAME/i2c-50.bin` for the
+  one at 0x50. A new one has 0xFF in every byte, as a chip that was never written.
+  The file is written as the firmware writes, and kept over a reset, a `stop` and
+  the next `run`. Remove it for an empty chip, or put an image of your own there, as
+  long as the EEPROM. `rom-size=N` is the EEPROM's size in bytes (256 unless said, a
+  24C02; above that QEMU's model takes two address bytes, as a 24C32 does), and
+  `writable=off` one that is write-protected. A `run` whose `rom-size` is another
+  than the file's length is refused, with both numbers.
+- What is on the bus is said at each `run` and is not kept with the device: a `run`
+  without `--i2c` is a header with nothing on it.
+
+Not there:
+
+- The official firmware's JavaScript has no `i2c` module (1.5.1 and the dev build
+  alike): there the CLI's scan finds the devices, and an app in C talks to them.
+  This tree has no C example for the bus yet.
+- A device cannot be put on the bus, or taken off it, while the emulator runs.
+- The two lines are no levels: pins 15 and 16 read `unknown` on the header while the
+  firmware talks, and a record of the pins has no bits of a transfer. A transfer
+  takes no time at any bus speed, and no device stretches the clock.
+- Nothing checks that the app has the pins in the bus's function: I2C3 answers here
+  also when the app forgot to set the pins up, where a real Flipper would be silent.
+- A record of the transfers themselves (what was written to whom, what was read).
+
+`scripts/i2c_check.py FIRMWARE` checks all of it with the firmware's scan and that
+script: 35 checks on Momentum, Unleashed and RogueMaster; on the official 1.5.1 and the
+official dev build 31, with the script's part skipped.
+
+An EEPROM's file needs one fix to QEMU's model (`qemu/patches/0009`,
+docs/BRINGUP_LOG.md, 110): it wanted the file's length in whole sectors of 512 bytes
+to be the EEPROM's size, so no file could hold a 256-byte chip. **A QEMU tree that
+was set up before 2026-11-11 wants `scripts/setup_qemu.sh` once more**, for the patch
+and for the machine's side of all this (the bus by its name, what was called).
+
 ### The secure enclave
 
 A Flipper keeps its keys where its firmware cannot read them: in the key store of ST's
@@ -1882,11 +2016,13 @@ docs/PANEL_LINK.md     the protocol between the emulator and the window
 docs/DEVELOPING.md     writing an app or a firmware with it: ufbt, fbt, gdb, the loop
 examples/hello/        an app to try that with
 examples/uart/         a script for the serial port on pins 15 and 16
+examples/i2c/          a script for a sensor and an EEPROM on the header's I2C bus
 flipperemu             launcher / device manager
 qemu/hw/arm/flipper/   the QEMU machine + STM32WB55 SoC + board devices (C)
 qemu/patches/          fixes to upstream QEMU (SysTick, SD over SPI, open-drain GPIO,
                        register reads without the big lock, a chardev's log file,
-                       the UART's reception, a byte that no receiver took)
+                       the UART's reception, a byte that no receiver took, an
+                       EEPROM's file that ends within a sector)
 scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_monitor.py,
                        fe_cli.py, fe_files.py (files on the card), fe_apps.py
                        (apps and the loader), fe_expansion.py (an expansion

@@ -25,6 +25,7 @@ it; the file comments name that function. Register layouts come from RM0434 and 
    SPI2 ── st7567 (LCD, CS PC11, A0 PB1, RST PB0)   ── ssi-sd + sd-card-spi (CS PC12, CD PC10)
    SPI1 ── cc1101 (CS PD0, GDO0 → PA1)              ── st25r3916 (CS PE4, IRQ → PA2)
    I2C1 ── bq27220 @0x55   bq25896 @0x6B   lp5562 @0x30
+   I2C3 ── pins 15 (SDA) and 16 (SCL) of the header: what `run --i2c` puts there
    TIM16 CH1 (PB8) ── piezo → flipper-speaker → QEMU audio (desktop or WAV)
    PA0 + TIM2 TI1  ←─ IR receiver ← /machine/ir rx (marks/spaces)
    PA1 + TIM2 TI2  ←─ CC1101 GDO0 (async RX) ← /machine/subghz rx (the "air"),
@@ -125,7 +126,12 @@ and re-arbitrates after each (priority, then lower channel), so the SD card's DM
 fire per channel.
 
 **I2C**: I2C v2 with NBYTES, AUTOEND, SOFTEND and RELOAD, repeated start, NACK →
-NACKF+STOPF, and the zero-byte presence probe. The firmware polls it.
+NACKF+STOPF, and the zero-byte presence probe. The firmware polls it. The two buses
+go by the chip's names, `i2c1` (the power bus) and `i2c3` (the header's), so that
+`-device TYPE,bus=i2c3,address=N` puts one of QEMU's I2C devices on the header.
+Address 0, the general call, is answered by nobody: none of the devices here listens
+to it, and QEMU's bus would have every one of them answer. The model counts the
+addresses that the firmware calls and those that nobody took, and keeps the last.
 
 ## CPU2: ST FUS without a wireless stack (`stm32wb55_ipcc.c`)
 
@@ -1100,6 +1106,46 @@ ufbt is not run at all, and `update` sends the package without the stage (BRINGU
   (`parse_serial`, `port_text`: a rate within half a percent of a usual one is said
   as that one) for `gpio`, `status`, `uart` and the window, which has the property
   among those it watches on the front-panel link.
+- **The header's I2C bus**: the machine property `header-i2c` (read only) is
+  `I2C3:15:16:CALLS:UNANSWERED:LAST` and then `TYPE@ADDRESS` for each device on the
+  bus: the pins of SDA and SCL by their numbers on the header, how many addresses
+  the firmware called since the emulator started and how many of those nobody took,
+  and the last one called, as `48r+` (the address, `r` or `w`, `+` for taken and `-`
+  for not; `-` alone before the first call). The firmware has the bus on only while
+  it talks there, so there is no on and off to tell. `scripts/fe_header.py`
+  (`parse_i2c`, `i2c_text`) says it in words for `gpio`, `status` and `i2c`.
+- **A device on it**: `run --i2c TYPE@ADDRESS[,NAME=VALUE]` is `-device
+  TYPE,bus=i2c3,address=0xNN,id=i2c-NN`, a device of QEMU's own (`tmp105`,
+  `at24c-eeprom`, `pca9552` and the rest of what the build has). The launcher checks
+  the form before anything is flashed: the address in hex and from 0x08 to 0x77, one
+  device to an address, no `bus`, `address` or `id` of the user's. With the id the
+  device is `/machine/peripheral/i2c-NN`, and what it has to set are its QOM
+  properties. `i2c` lists them with `qom-list` (without those every device has, and
+  without links and children), reads one with `qom-get` and sets one with
+  `qom-set`; what QEMU refuses is said in its words. QEMU's sensors have their
+  temperatures in thousandths of a degree (properties whose names begin with
+  `temperature`): the launcher takes and prints °C. They set their registers when
+  they are made, after `-device`'s properties were applied, so a temperature given
+  with `--i2c` would be lost there: the launcher sets it through the monitor as soon
+  as the emulator answers, from a thread of `run`. A reset of the machine leaves
+  the sensors as they are (QEMU's models of them take no reset after their making,
+  and an RCC reset of I2C3 stops at the controller, as said above), so a value set
+  from outside stays, as the room's temperature would.
+- **An EEPROM's contents**: an `at24c-eeprom` without a `drive` of the user's gets
+  one, `-drive if=none,id=i2c-NN-rom,format=raw,file=devices/NAME/i2c-NN.bin`. The
+  launcher makes the file when it is not there, as long as the EEPROM (`rom-size`,
+  256 bytes unless said) and 0xFF in every byte, as a new chip is, and refuses a
+  start with a file of another length. QEMU's model writes the whole memory to the
+  file at the STOP after a write. It wanted the image to be as long as the EEPROM,
+  and the block layer gives an image's length in whole sectors of 512 bytes, so no
+  file could back a 256-byte chip: `qemu/patches/0009` has the model compare with
+  the size rounded up to a sector. On a QEMU tree without the patch the machine
+  runs, and such an EEPROM is refused by QEMU at the start.
+- **Not there** on that bus: the two lines as levels (pins 15 and 16 are `unknown`
+  on the header while the firmware talks, and the pins' record has no bits of a
+  transfer), the bus's speed (a transfer takes no time), clock stretching, 10-bit
+  addresses, a device put there or taken away while the emulator runs, and a record
+  of the transfers.
 
 ## The front panel (`flipper_panel.c`, `scripts/fe_gui*.py`)
 
@@ -1259,6 +1305,7 @@ the emulated field.
 | `lpuart.log` | what a serial adapter on pins 15 and 16 would have recorded: what an app sent on LPUART1 in this run |
 | `usart.tty`, `usart.sock`, `usart.mark` | (while it runs) the same three for pins 13 and 14: the pty of `--serial pty`, the launcher's own end, the mark of `uart wait --port usart` |
 | `lpuart.tty`, `lpuart.sock`, `lpuart.mark` | (while it runs) that port's pty for a program of the user's, the launcher's own end of it, and how far `uart wait` has read the log |
+| `i2c-NN.bin` | the contents of an EEPROM at address NN of the header's I2C bus (`run --i2c eeprom@0xNN`), as long as the EEPROM; 0xFF throughout when new |
 | `firmware.elf` | symbols for gdb (copied when flashing an ELF) |
 | `gdb.sock`, `gdb.init` | (once `./flipperemu gdb` was run) QEMU's gdb stub, and what gdb was told: the ELF, the stub, `scripts/fe_gdb.py` |
 | `gdb-apps/` | (with the stock apps' symbols beside the firmware's ELF) links to the apps' debug ELFs, the stock ones and what was built: the one folder the firmware's gdb script looks in |

@@ -9,12 +9,16 @@
  *   - a NACKed address gives NACKF + STOPF (automatic STOP)
  *   - NBYTES=0 + AUTOEND is a presence probe (furi_hal_i2c_is_device_ready)
  *
+ * Address 0, the general call, is taken by nobody: none of the devices here
+ * listens to it, and QEMU's bus would have every one of them answer.
+ *
  * Copyright (c) 2026, Kara Zajac
  * SPDX-License-Identifier: BSD-3-Clause
  */
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "wb55.h"
 
 #define CR1_PE      (1u << 0)
@@ -96,9 +100,16 @@ static void i2c_start(WB55I2cState *s)
         s->isr &= ~ISR_DIR;
     }
 
-    if (i2c_start_transfer(s->bus, addr, read)) {
+    s->calls++;
+    s->last = addr;
+    s->last_read = read;
+    s->last_taken = addr && !i2c_start_transfer(s->bus, addr, read);
+    if (!s->last_taken) {
         /* address NACK: STOP is generated automatically */
-        s->active = true;
+        s->unanswered++;
+        if (addr) {
+            s->active = true;
+        }
         s->isr |= ISR_NACKF;
         i2c_stop(s);
         return;
@@ -258,12 +269,24 @@ static void wb55_i2c_init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mmio);
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq_ev);
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq_er);
-    s->bus = i2c_init_bus(DEVICE(obj), "i2c");
 }
+
+static void wb55_i2c_realize(DeviceState *dev, Error **errp)
+{
+    WB55I2cState *s = WB55_I2C(dev);
+
+    s->bus = i2c_init_bus(dev, s->bus_name ?: "i2c");
+}
+
+static const Property wb55_i2c_props[] = {
+    DEFINE_PROP_STRING("bus-name", WB55I2cState, bus_name),
+};
 
 static void wb55_i2c_class_init(ObjectClass *klass, const void *data)
 {
     RESETTABLE_CLASS(klass)->phases.hold = wb55_i2c_reset_hold;
+    DEVICE_CLASS(klass)->realize = wb55_i2c_realize;
+    device_class_set_props(DEVICE_CLASS(klass), wb55_i2c_props);
 }
 
 static const TypeInfo wb55_i2c_info = {

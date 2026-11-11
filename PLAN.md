@@ -348,8 +348,18 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         GPIO menu and console; the two pins by the port's name; a `uart send` that
         nobody hears says so. Machine property `header-serial`; `uart_check.py`
         is 68 checks, `gpio_check.py` 54, `gui_check.py` 47 (BRINGUP_LOG 107)
-  - ☐ What other peripherals put on a pin: PWM, SPI and I2C devices on the header;
-        a voltage for the ADC
+  - ☑ I2C devices on the header (2026-11-11): `run --i2c TYPE@ADDRESS` puts one
+        of QEMU's I2C devices on I2C3, pins 15 and 16 (a `tmp105` sensor, an
+        `at24c-eeprom`, …); `i2c` shows the bus, the devices' values and what the
+        firmware called, and sets a value while it runs (a temperature in °C); an
+        EEPROM's contents are a file of the device (QEMU patch 0009); the bus is in
+        `gpio` and `status` (machine property `header-i2c`); `examples/i2c`;
+        `scripts/i2c_check.py` is 35 checks, `gpio_check.py` 55 (BRINGUP_LOG 110)
+  - ☐ More on that bus: a C app built with ufbt as the example for the official
+        firmware (its JS has no `i2c` module); the bus in the window's GPIO menu;
+        a record of the transfers (who was called, what was written and read)
+  - ☐ What other peripherals put on a pin: PWM, SPI devices on the header; a
+        voltage for the ADC
   - ☐ An interrupt on a held pin and an open-drain output (untried: they need an
         app of the check's own)
 - ☑ A recording of the screen as an animated GIF: `./flipperemu record OUT.gif`

@@ -326,10 +326,16 @@ struct WB55I2cState {
     MemoryRegion mmio;
     qemu_irq irq_ev, irq_er;
     I2CBus *bus;
+    char *bus_name;              /* the bus by name, for -device ...,bus= */
     uint32_t cr1, cr2, oar1, oar2, timingr, timeoutr, isr, pecr, rxdr, txdr;
     bool active;                 /* START sent, STOP not yet */
     bool reading;
     uint32_t count;              /* bytes moved in this NBYTES window */
+    /* What the firmware did on the bus since the emulator started: for
+     * whoever looks from outside, and no state of the chip's */
+    uint64_t calls, unanswered;  /* addresses called; those nobody took */
+    uint8_t last;                /* the last address called, */
+    bool last_read, last_taken;  /* to read or to write; and whether taken */
 };
 
 /* ----------------------------------------------------------- DMA/DMAMUX */
