@@ -63,7 +63,10 @@ NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
         1.4.3 passes all 28 steps; 1.3.4, 1.1.2 and 0.99.1 pass 23, the five NFC
         steps skipped (no `nfc` shell before 1.4)
   - ☐ 1.0.1 and 0.105.0 fail one step: `ikey read` finds a Metakom key in 8 to 10
-        tries of 15 (1.5.1: 15 of 15, with the same code in the firmware)
+        tries of 15 (1.5.1: 15 of 15, with the same code in the firmware). Every
+        edge reaches the firmware's handler once and with its exact time; deep sleep,
+        late delivery and a starved reading thread are ruled out (BRINGUP_LOG 92).
+        Next: what the decoder is fed, read out under gdb
 
 ## M4: senses ◐
 - ☑ Speaker: TIM16 CH1 PWM → QEMU audio (desktop driver or `--audio wav:FILE`); tones

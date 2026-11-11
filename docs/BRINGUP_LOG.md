@@ -1361,6 +1361,19 @@ big lock, entry 92).
       one of the 23: reading a Metakom key. `ikey read` finds it there in 8 of 15
       tries of 10 s (10 of 15 with the emulator as it was before this entry, so not
       from the fix), and in 15 of 15 on 1.5.1, whose code for it is the same. Open.
+    - That read on 1.0.1, looked at again and not found (2026-11-11). It takes 1.4 s
+      to over 30 s there (1.5.1: about 2 s every time), so nothing is stuck: each of
+      the firmware's 100-tick listening windows has poor odds. Counted in the
+      emulator: the comparator's interrupt handler takes every edge once, in order,
+      each with its exact time (two missed in a window at most). Ruled out by trying
+      it: deep sleep (`--legacy-sleep`), the key model catching up after a late
+      delivery (only at a frame's start: 0 to 3 a window, not 6 to 160), another
+      handler reading the cycle counter first (none does), and a reading thread left
+      without time (edges no closer than 60 µs: windows back to 110 to 220 ms, reads
+      no better). None of these changes was kept. The iButton library and the
+      comparator's handler are the same source in both releases; what differs in the
+      path is the 5 V supply (1.0.1 switches it on itself, 1.5.1 asks the power
+      service). Next: what the decoder is fed, read out under gdb.
 
 ## Things that were right the first time (and why)
 
