@@ -1,0 +1,12 @@
+# What scripts/gpio_check.py has a firmware do with the two PWM outputs of
+# the header that the firmware's own calls for them do not.  Not an example
+App(
+    appid="fe_pwm_check",
+    name="PWM check",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="fe_pwm_check_app",
+    stack_size=2 * 1024,
+    fap_category="Debug",
+    fap_version="1.0",
+    fap_description="PWMs on pins 2 and 4 that scripts/gpio_check.py looks at",
+)

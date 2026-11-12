@@ -20,7 +20,9 @@ built for another API (refused, or asked about on the Flipper's screen and
 then answered with a button), holds pins of the GPIO header high and low with
 a click on them (they light, and the firmware reads them so), lets go of
 them, records what a pin does to a file (GPIO > Record what the pins do),
-finds a sensor and an EEPROM on the header's I2C bus in the GPIO menu (the
+has a script in the firmware's JavaScript make a PWM on a pin (lit for the
+part of its width that it is high for, said under the pointer and in the
+console; skipped on a firmware whose JavaScript makes none), finds a sensor and an EEPROM on the header's I2C bus in the GPIO menu (the
 device starts with `--i2c tmp105@0x48 --i2c eeprom@0x50`), sets the sensor's
 temperature from there, lets the firmware scan the bus (which the console
 says), records a scan of that bus to a file (GPIO > Record what goes over the
@@ -64,6 +66,25 @@ import fe_gui_view  # noqa: E402
 import fe_header  # noqa: E402
 from app_check import other_api  # noqa: E402
 
+# a PWM on pin 2, another one when pin 3 is held high, none when it is low
+PWM_JS = """\
+let eventLoop = require("event_loop");
+let gpio = require("gpio");
+let a7 = gpio.get("pa7");
+let a6 = gpio.get("pa6");
+a6.init({ direction: "in", inMode: "plain_digital", pull: "down" });
+function until(level) {
+    while (a6.read() !== level) {
+        delay(50);
+    }
+}
+a7.pwmWrite(1000, 25);
+until(true);
+a7.pwmWrite(2000, 75);
+until(false);
+a7.pwmStop();
+print("end");
+"""
 CRASH = re.compile(r"\[CRASH\]|furi_check failed|HardFault|Kernel is Dead")
 results = []
 
@@ -656,6 +677,87 @@ class Driver:
               f"{true!r} -> {made!r}\nbefore {before}, open {open_}, anew "
               f"{anew}, after {hint()}\n{self.console()[-400:]}")
 
+    def pwm(self):
+        """A PWM on a pin of the header, which a script in the firmware's
+        JavaScript makes: the pin is lit for the part of its width that it
+        is high for, the line under the pointer says what it is, and the
+        console when it goes on and off"""
+        w, v = self.win, self.win.view
+        js = self.out / "fe-gui-pwm.js"
+        js.write_text(PWM_JS)
+        self.launcher("push", str(js), "/ext/fe-gui-pwm.js")
+        script = subprocess.Popen(
+            [sys.executable, str(w.launcher), "-d", w.name, "cli", "--timeout",
+             "90", "js /ext/fe-gui-pwm.js"], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+        def duty(part):
+            return (v.header.get(2) == ("pwm", None)
+                    and abs(v.header_duty.get(2, -1) - part) < 1e-6)
+
+        def hold(level):
+            w.hold_pin("PA6", level)
+            self.settle()
+
+        def ended():
+            try:
+                return script.communicate(timeout=60)[0]
+            except subprocess.TimeoutExpired:
+                script.kill()
+                return "(still running) " + script.communicate()[0]
+
+        on = self.until(lambda: duty(0.25), 30)
+        said = self.launcher("gpio", "PA7").stdout.strip()
+        if not on and said != "pwm":
+            hold("high")
+            self.spin(1.0)
+            hold("low")
+            text = " ".join(ended().split())[:300]
+            hold("free")
+            self.launcher("rm", "/ext/fe-gui-pwm.js")
+            print("  SKIP  pwm: this firmware's JavaScript made none: "
+                  + text, flush=True)
+            return
+        self.spin(0.3)
+        self.shot("pwm")
+        tip = v.pin_tips.get(2, "")
+        w.fill_gpio_menu()              # as the menu bar's GPIO menu opens
+        line = w.gpio_items[2]
+        line = line.title() if isinstance(line, QtWidgets.QMenu) else ""
+        what = "PWM from TIM1: 1 kHz, high 25 % of the time"
+        check("pwm: a script's PWM on pin 2 (1 kHz, high for a quarter of "
+              "the time): the pin is lit for a quarter of its width, and the "
+              "line under the pointer, the GPIO menu and the console say "
+              "what it is",
+              on and tip.startswith("Pin 2, A7 (PA7): alternate function 1, "
+                                    + what)
+              and what in line and f"Pin 2: {what}" in self.console(),
+              f"{v.header.get(2)} {v.header_duty}; gpio PA7: {said!r}; "
+              f"{tip!r}; {line!r}")
+
+        hold("high")
+        other = self.until(lambda: duty(0.75), 15)
+        tip = v.pin_tips.get(2, "")
+        check("pwm: other numbers from the script (2 kHz, 75 %): the pin and "
+              "its line have them; the console has no line for that, as the "
+              "PWM was on before",
+              other and "PWM from TIM1: 2 kHz, high 75 % of the time" in tip
+              and self.console().count("Pin 2: PWM from TIM1") == 1,
+              f"{v.header.get(2)} {v.header_duty}; {tip!r}")
+
+        hold("low")
+        off = self.until(lambda: v.header.get(2) == ("floating", None), 15)
+        text = ended()
+        tip = v.pin_tips.get(2, "")
+        check("pwm: the script stops it: the pin is dark, as one that "
+              "floats, and the console says that the PWM is off",
+              off and not v.header_duty and "PWM" not in tip
+              and "Pin 2: the PWM from TIM1 is off" in self.console()
+              and "end" in text.split(),
+              f"{v.header.get(2)} {v.header_duty}; {tip!r}; {text!r}")
+        hold("free")
+        self.launcher("rm", "/ext/fe-gui-pwm.js")
+
     def pin_record(self):
         """The record of what the pins do, from the GPIO menu (the file is
         given here: the menu's line asks for one)"""
@@ -1155,6 +1257,7 @@ class Driver:
         self.blink()
         self.pins()
         self.pin_record()
+        self.pwm()
         self.i2c_bus()
         self.i2c_record()
 

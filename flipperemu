@@ -1716,7 +1716,13 @@ def read_header(m):
     """The GPIO header's signal pins (fe_header.parse), or None from an
     emulator that cannot tell yet"""
     text = qom_get(m, "/machine", "header")
-    return fe_header.parse(text) if isinstance(text, str) else None
+    if not isinstance(text, str):
+        return None
+    pwm = qom_get(m, "/machine", "header-pwm")
+    try:
+        return fe_header.parse(text, pwm if isinstance(pwm, str) else None)
+    except ValueError:
+        return fe_header.parse(text)
 
 
 def read_i2c(m):
@@ -1989,11 +1995,13 @@ def cmd_gpio(args):
                 note = f"{of[0]['name']}'s {of[1]}"
             if fe_header.i2c_pin(p, bus):
                 note = f"{bus['name']}'s {fe_header.i2c_pin(p, bus)}"
+            if p["pwm"]:
+                note = fe_header.pwm_text(p["pwm"])
             if p["held"]:
-                note = fe_header.held_text(p) + (
+                note = (note + "; " if p["pwm"] else "") + fe_header.held_text(p) + (
                     ", which does not show while the firmware drives the pin"
                     if fe_header.overruled(p) else "")
-            elif p["label"] in ("SWC", "SIO"):
+            elif p["label"] in ("SWC", "SIO") and not p["pwm"]:
                 note = f"{p['label']} on the case"
             print(f"  {p['number']:>2}  {p['pin']:5} "
                   f"{fe_header.mode_text(p):{wide}}  {p['level']:8}  {note}".rstrip())
@@ -2021,14 +2029,15 @@ def cmd_gpio(args):
         t0 = time.time()
         while p["level"] != args.wait:
             if time.time() - t0 > args.timeout:
-                sys.exit(f"[{dev.name}] {p['pin']} is {p['level']} and not "
-                         f"{args.wait} after {args.timeout:g} s (the firmware "
+                sys.exit(f"[{dev.name}] {p['pin']} {fe_header.level_text(p)}, "
+                         f"not {args.wait} after {args.timeout:g} s (the firmware "
                          f"has it as: {fe_header.mode_text(p)}"
                          + (f"; {fe_header.held_text(p)}" if p["held"]
                             else "") + ")")
             time.sleep(0.05)
             p = header_pin(now(), p["pin"])
-        print(f"[{dev.name}] {p['pin']} is {p['level']} ({time.time() - t0:.1f} s)")
+        print(f"[{dev.name}] {p['pin']} {fe_header.level_text(p)} "
+              f"({time.time() - t0:.1f} s)")
         return 0
     if level is None:
         print(p["level"])
@@ -2041,7 +2050,7 @@ def cmd_gpio(args):
     p = header_pin(now(), p["pin"])
     print(f"[{dev.name}] {p['pin']} (pin {p['number']} of the header): "
           + (fe_header.held_text(p) if p["held"] else "let go of")
-          + f"; it is {p['level']} (the firmware has it as: "
+          + f"; it {fe_header.level_text(p)} (the firmware has it as: "
           f"{fe_header.mode_text(p)})"
           + (". The firmware drives it, and what is held to it shows when it "
              "is an input again" if fe_header.overruled(p) else "")
@@ -5048,10 +5057,13 @@ def main():
         "outside",
         description="The GPIO header of a running device.  Nothing: its pins, "
         "what the firmware has each as (input, output, ...) and its level.  A "
-        "pin: its level, as one word (high, low, floating, unknown).  A pin "
-        "and a level: held there from outside, as a wire to 3V3 or GND would, "
-        "until `free`; a reset of the firmware leaves it held.  A pin the "
-        "firmware drives as an output keeps the firmware's level.  A pin and "
+        "pin: its level, as one word (high, low, floating, pwm, unknown).  A "
+        "pin and a level: held there from outside, as a wire to 3V3 or GND "
+        "would, until `free`; a reset of the firmware leaves it held.  A pin "
+        "the firmware drives as an output keeps the firmware's level.  pwm: "
+        "a timer's PWM is on the pin (the firmware has two such outputs, pin "
+        "2 and pin 4); the list has its frequency and how much of the time "
+        "the pin is high, and its edges are not in a record.  A pin and "
         "a voltage (1.25V, 1250mV; 0 to 3.3 V): held at that, which is what "
         "the firmware's ADC converts on pins 2, 3, 4, 7, 15 and 16; as a "
         "level it is high from 1.65 V up.  "
@@ -5068,10 +5080,12 @@ def main():
                         "the pins to watch, with commas between them)")
     p.add_argument("--for", dest="seconds", type=float, metavar="S",
                    help="watch: for so many seconds (not given: until Ctrl+C)")
-    p.add_argument("--wait", choices=("high", "low"), metavar="high|low",
-                   help="wait until the pin is there (exit status 1: it was "
-                        "not, in time).  It is looked at 20 times a second: a "
-                        "shorter pulse can pass unseen")
+    p.add_argument("--wait", choices=("high", "low", "pwm"),
+                   metavar="high|low|pwm",
+                   help="wait until the pin is there (pwm: until a timer's "
+                        "PWM is on it; exit status 1: it was not, in time).  "
+                        "It is looked at 20 times a second: a shorter pulse "
+                        "can pass unseen")
     p.add_argument("--timeout", type=float, default=10.0, metavar="S",
                    help="... for so many seconds (default 10)")
     p.set_defaults(func=cmd_gpio)

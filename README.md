@@ -47,10 +47,11 @@ made-up KeeLoq and Nice Flor-S remotes that the firmware's decoders read with th
 passes on the same five.
 `scripts/gpio_check.py` (the GPIO header: a pin the firmware drives seen from outside,
 a pin held from outside read by the firmware, a record of every change of a pin with
-its time, a voltage held to a pin and measured by the firmware's ADC) passes on the
-same five; on the official release it also has two apps of its own, which measure
-with the ADC in both of its ranges, take interrupts from held pins and drive an
-open-drain output.
+its time, a voltage held to a pin and measured by the firmware's ADC, a PWM on a pin
+with its frequency) passes on the
+same five; on the official release it also has three apps of its own, which measure
+with the ADC in both of its ranges, make the PWMs that the firmware's own calls do
+not, take interrupts from held pins and drive an open-drain output.
 `scripts/uart_check.py` (the two serial ports of the header, pins 15 and 16 and pins
 13 and 14: an app that opens one is answered from the launcher, from a program on the
 port's pty, and over TCP; the firmware's expansion service answers a module that the
@@ -418,7 +419,7 @@ it runs: once with the wait given up, once to the end.
 | `battery [PERCENT] [--voltage MV] [--temperature C] [--current MA]` | its battery (no argument: show it) |
 | `sd eject` \| `sd insert` | pull its microSD card out, push it back in |
 | `sound off` \| `sound on` | mute its speaker, and back |
-| `gpio` \| `gpio PIN` \| `gpio PIN high\|low\|1.25V\|free` \| `gpio PIN --wait high\|low` | its GPIO header: what the firmware has the pins as; one pin's level; a pin held from outside (at a voltage: for the firmware's ADC), or let go of; wait for a level |
+| `gpio` \| `gpio PIN` \| `gpio PIN high\|low\|1.25V\|free` \| `gpio PIN --wait high\|low\|pwm` | its GPIO header: what the firmware has the pins as; one pin's level, or that it has a PWM; a pin held from outside (at a voltage: for the firmware's ADC), or let go of; wait for a level, or for a PWM |
 | `gpio record OUT.vcd` \| `gpio record stop` \| `gpio watch [PIN,PIN]` | every change of a pin's level with its time: into a file a logic analyzer's program opens, or printed as it happens |
 | `uart` \| `uart send TEXT [--expect TEXT]` \| `uart wait TEXT` \| `uart term` | the serial port on pins 15 and 16 of its header: where it goes; send to the app that has it open, and wait for its answer; wait for what the app sends; a terminal on it. `--port usart`: the one on pins 13 and 14 |
 | `expansion [--rpc] [--baud N] [--for S] [--port P]` | be an expansion module on its header, to the firmware's expansion service: the call, the baud rate, heartbeats, an RPC session; every frame printed |
@@ -1367,11 +1368,12 @@ a sensor's output would be:
 
 ```sh
 ./flipperemu gpio                   # the pins: what the firmware has them as, and levels
-./flipperemu gpio PA7               # one pin's level, as a word (high, low, floating)
+./flipperemu gpio PA7               # one pin's level, as a word (high, low, floating, pwm)
 ./flipperemu gpio PA6 high          # hold it high from outside (low; free: let go of it)
 ./flipperemu gpio PA7 1.25V         # ... or at a voltage, 0 to 3.3 V (1250mV is the same)
 ./flipperemu gpio free              # let go of all
 ./flipperemu gpio PA7 --wait high   # until it is high (--timeout S, then exit status 1)
+./flipperemu gpio PA7 --wait pwm    # ... or until the firmware has a PWM on it
 ./flipperemu gpio record pins.vcd   # every change of a level, with its time, into a file
 ./flipperemu gpio record stop       # ... until this (`gpio record`: does one run?)
 ./flipperemu gpio watch PA7,PA6     # the changes as they happen (--for S; else to Ctrl+C)
@@ -1404,7 +1406,8 @@ its ADC, with pins 2, 3, 4, 7, 15 and 16 as inputs (`gpio PIN 1.25V` holds a vol
 
 A pin goes by the MCU's name (`PA7`), by what the case says beside it (`A7`, `C0`,
 `SWC`) or by its number on the header (`2`). `status` has the header in one line (the
-pins that are outputs, and those held), and `status --json` all of it.
+pins that are outputs, those with a PWM, and those held), and `status --json` all of
+it.
 
 An input that the firmware has an interrupt for says on which edge: `interrupt when
 it falls`, `when it rises`, `on both edges`. Such a pin held from outside is a button
@@ -1484,8 +1487,61 @@ the result, which is its 2.048 V reference over twelve bits. The line with
 - The model is the chip's reference manual and the firmware's source. Nothing was
   compared with a real Flipper's ADC.
 
+Two of the pins are a timer's outputs when the firmware asks for a PWM: pin 2 (PA7,
+from TIM1) and pin 4 (PA4, from LPTIM2), the two of `furi_hal_pwm_start` in an app
+and of `pwmWrite()` in a script. Such a pin has no level to show. Its word is `pwm`,
+and the table has the timer, the frequency and the part of the time for which the
+pin is high:
+
+```
+$ cat dim.js
+let eventLoop = require("event_loop");
+let gpio = require("gpio");
+let pin = gpio.get("pa7");
+pin.pwmWrite(1000, 50);
+delay(60000);
+pin.pwmStop();
+$ ./flipperemu push dim.js /ext/dim.js
+$ ./flipperemu cli "js /ext/dim.js" &
+$ ./flipperemu gpio PA7 --wait pwm
+[flipper] PA7 has a PWM from TIM1: 1 kHz, high 50 % of the time (1.4 s)
+$ ./flipperemu gpio | sed -n 2p
+   2  PA7   alternate function 1                     pwm       PWM from TIM1: 1 kHz, high 50 % of the time
+$ ./flipperemu status | grep ^gpio
+gpio     : PA7 has a PWM (1 kHz, high 50 %)
+```
+
+- No edges are made. The numbers are worked out from the timer's registers as the
+  firmware set them, at the moment somebody asks: the timer's clock, what divides
+  it, the ticks of a period, and those of them for which the output is high.
+  `status --json` has them for each such pin (`"pwm"`: `timer`, `clock`,
+  `divider`, `period` and `high`, with `hz` and `duty` worked out from those), so a
+  test can ask for the exact setting. A PWM costs the emulator nothing while it
+  runs.
+- It is what the timer makes, not what was asked for. `pwmWrite(10000, 30)` on pin
+  4 comes out as 9.998 kHz, high 30.01 % of the time: the firmware gives LPTIM2 a
+  period of 6400 ticks, and that timer counts one more, 6401.
+- A pin has a PWM while the timer makes one and the pin is that timer's (its
+  alternate function 1 for TIM1 on PA7, 14 for LPTIM2 on PA4). A timer that runs
+  while the pin is something else is no PWM on the header, and a pin that is the
+  timer's while the timer is off is `unknown`.
+- A PWM that is high for none of the time is a pin that is `low`, and one that is
+  high for all of it is `high`; `--wait pwm` waits for neither.
+- What is held to such a pin does not show, as with any pin that the firmware
+  drives both ways. On an open-drain output of the timer a wire to GND wins: the
+  pin is low then.
+- A record (`gpio record`, `gpio watch`) has no edges of a PWM: the pin is unknown
+  in it, `x`, for as long as the PWM runs.
+- Only those two outputs, which are the firmware's own. Another timer on another
+  pin of the header stays `unknown`. What the firmware reads from a pin that has a
+  PWM, and such a pin as a voltage for the ADC, are not modelled.
+- The rules for what part of a period is high are the chip's reference manual
+  read, for both timers. No real Flipper's pin was measured.
+
 In the window the pins of the drawn Flipper are the same thing by hand. A pin is lit
-amber while it is high and blue while it is low. A click on one has a menu to hold it
+amber while it is high and blue while it is low, and one with a PWM is amber for the
+part of its width that it is high for, with a line in the console when a PWM begins
+and when it ends. A click on one has a menu to hold it
 high or low and to let go of it, and a held pin has a jumper wire on it. For the six
 pins of the ADC the menu has **Hold it at a voltage…** too, which asks for the
 voltage. The GPIO menu lists every pin with what the firmware has it as, and beneath
@@ -1516,8 +1572,9 @@ second, so a pin that blinks faster than that shows only some of its blinks.
   the lines above are the firmware's source read and the emulator watched. None of it
   was tried on a real Flipper.)
 - `floating` is a pin that nothing drives, holds or pulls. `unknown` is a pin a
-  peripheral has (an alternate function): what a UART, a timer's PWM or SPI puts on a
-  pin is not a level the emulator keeps, so it is not on the header yet.
+  peripheral has (an alternate function): what a UART, SPI or the I2C bus puts on a
+  pin is not a level the emulator keeps, so it is not on the header. (The firmware's
+  two PWM outputs are there as `pwm`, with a frequency in place of a level.)
 - USART1's pins (13, 14) and the iButton pin (17) are read here, and not held: they
   have `uart --port usart` (and `log`) and `ibutton`.
 - `--wait` looks at the pin twenty times a second: a shorter pulse can pass unseen.

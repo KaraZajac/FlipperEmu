@@ -17,6 +17,8 @@
  *   ADC1 (header):  PC0 (16) IN1, PC1 (15) IN2, PC3 (7) IN4, PA4 (4) IN9,
  *            PA6 (3) IN11, PA7 (2) IN12: "header" holds a voltage to a pin,
  *            /machine "header-adc" says what the firmware converted
+ *   PWM (header):   TIM1 CH1N on PA7 (2), LPTIM2's output on PA4 (4), told
+ *            as numbers and not as edges: /machine "header-pwm"
  *   I2C3 (header):  SDA PC1 (15), SCL PC0 (16), devices by -device
  *            TYPE,bus=i2c3,address=N; /machine "header-i2c" says what is
  *            there and what was called, "header-i2c-record" writes every
@@ -378,6 +380,8 @@ static void flipper_tim1_update(void *opaque, int64_t when)
  * IR transmitter, TIM1 starting (CEN) begins the first mark, and stopping
  * ends the transmission; marks and spaces between come from updates.
  */
+static void flipper_header_look(FlipperZeroState *s, int port);
+
 static void flipper_tim1_changed(void *opaque)
 {
     FlipperZeroState *s = opaque;
@@ -391,6 +395,7 @@ static void flipper_tim1_changed(void *opaque)
                  (r[0x34 / 4] & 0xFFFF);
     uint32_t hz = 0, duty = 0;
 
+    flipper_header_look(s, 0);          /* CH1N is also PA7's: the header */
     flipper_rfid_set_drive(s->rfid, field ? clock_get_hz(s->soc.rcc.hclk) /
                                             ((uint64_t)(psc + 1) * (arr + 1)) : 0);
     if (running != s->tim1_running) {
@@ -608,22 +613,121 @@ static void flipper_header_held(FlipperZeroState *s, int port)
     }
 }
 
-/* a pin's level: '0', '1', 'z' (nothing holds it: it floats) or '?' (a
- * peripheral's pin, whose signal is not kept as a level) */
+/*
+ * PWM on the header: the two outputs that the firmware's furi_hal_pwm has,
+ * TIM1's channel 1N on pin 2 (PA7, alternate function 1) and LPTIM2's output
+ * on pin 4 (PA4, alternate function 14).  A pin has a PWM while its timer
+ * makes one and the pin is in that timer's alternate function.  The signal
+ * is not made edge by edge: it is told as a period and its high part.
+ */
+typedef struct HeaderPwm {
+    uint32_t clock;             /* the timer's clock, Hz */
+    uint32_t divider;           /* what its prescaler divides that by */
+    uint32_t period, high;      /* in ticks of the divided clock */
+} HeaderPwm;
+
+enum { HDR_PWM_TIM1, HDR_PWM_LPTIM2, HDR_PWMS };
+
+static const struct {
+    const char *name;
+    uint8_t number, af;
+} header_pwms[HDR_PWMS] = {
+    [HDR_PWM_TIM1] = { "TIM1", 2, 1 },
+    [HDR_PWM_LPTIM2] = { "LPTIM2", 4, 14 },
+};
+
+/*
+ * TIM1's channel 1N as a PWM: the counter runs (CEN) and counts up, the
+ * outputs are on (BDTR.MOE), channel 1 is an output in PWM mode 1 or 2, and
+ * its complementary output is on (CC1NE).  The counter goes from 0 to ARR,
+ * ARR + 1 ticks, and the channel's reference is high while the counter is
+ * below CCR1 (mode 1) or from CCR1 on (mode 2).  CH1N has the reference as
+ * it is while CH1 itself is off (CC1E = 0: the firmware's way), and its
+ * opposite beside a CH1 that is on; CC1NP turns it (RM0434, the output
+ * control bits of complementary channels).  Dead time is not counted.
+ */
+static bool header_pwm_tim1(FlipperZeroState *s, HeaderPwm *p)
+{
+    const uint32_t *r = s->soc.tim1.regs;
+    uint32_t cr1 = r[0x00 / 4], ccmr1 = r[0x18 / 4], ccer = r[0x20 / 4];
+    int oc1m = ((ccmr1 >> 4) & 7) | ((ccmr1 >> 13) & 8);
+
+    if (!(cr1 & 1) || (cr1 & 0x70) || !(r[0x44 / 4] & (1u << 15)) ||
+        !(ccer & (1u << 2)) || (ccmr1 & 3) || (oc1m != 6 && oc1m != 7)) {
+        return false;
+    }
+    p->clock = clock_get_hz(s->soc.rcc.hclk);
+    p->divider = (r[0x28 / 4] & 0xFFFF) + 1;
+    p->period = (r[0x2C / 4] & 0xFFFF) + 1;
+    p->high = MIN(r[0x34 / 4] & 0xFFFF, p->period);
+    if ((oc1m == 7) ^ extract32(ccer, 0, 1) ^ extract32(ccer, 3, 1)) {
+        p->high = p->period - p->high;
+    }
+    return true;
+}
+
+static bool header_pwm(FlipperZeroState *s, int which, HeaderPwm *p)
+{
+    int i = header_index(header_pwms[which].number), pin = header[i].pin;
+    Stm32l4x5GpioState *g = header_port(s, i);
+
+    memset(p, 0, sizeof(*p));
+    if (extract32(g->moder, 2 * pin, 2) != 2 ||
+        extract32(pin < 8 ? g->afrl : g->afrh, 4 * (pin & 7), 4) !=
+            header_pwms[which].af) {
+        return false;
+    }
+    return which == HDR_PWM_TIM1 ? header_pwm_tim1(s, p) :
+           wb55_lptim_pwm(&s->soc.lptim[1], &p->clock, &p->divider,
+                          &p->period, &p->high);
+}
+
+/* a header pin's PWM, if it has one now */
+static bool header_pin_pwm(FlipperZeroState *s, int i, HeaderPwm *p)
+{
+    for (int which = 0; which < HDR_PWMS; which++) {
+        if (header_pwms[which].number == header[i].number) {
+            return header_pwm(s, which, p);
+        }
+    }
+    return false;
+}
+
+/* a pin's level: '0', '1', 'z' (nothing holds it: it floats), 'p' (a timer's
+ * PWM is on it) or '?' (another peripheral's pin, whose signal is not kept as
+ * a level) */
 static char header_level(FlipperZeroState *s, int i)
 {
     Stm32l4x5GpioState *g = header_port(s, i);
     int pin = header[i].pin, mode = extract32(g->moder, 2 * pin, 2);
     int pull = extract32(g->pupdr, 2 * pin, 2);
-    bool odr = extract32(g->odr, pin, 1);
+    bool odr = extract32(g->odr, pin, 1), od = extract32(g->otyper, pin, 1);
+    bool held = !extract32(g->disconnected_pins, pin, 1);
+    bool held_high = extract32(g->pins_connected_high, pin, 1);
+    HeaderPwm p;
+    bool pwm = mode == 2 && header_pin_pwm(s, i, &p);
 
-    if (mode == 1 && (!extract32(g->otyper, pin, 1) || !odr)) {
+    if (mode == 1 && (!od || !odr)) {
         return '0' + odr;               /* the firmware's own drive */
     }
-    if (!extract32(g->disconnected_pins, pin, 1)) {
-        return '0' + extract32(g->pins_connected_high, pin, 1);
+    if (pwm && (!od || p.high < p.period)) {
+        /* A timer's drive.  Push-pull, it is the pin's as the firmware's
+         * own is, whatever the outside holds.  Open drain, it pulls low for
+         * a part of the time: that shows unless the pin is held low. */
+        if (!p.high) {
+            return '0';
+        }
+        if (!od) {
+            return p.high == p.period ? '1' : 'p';
+        }
+        if (!held || held_high) {
+            return 'p';
+        }
     }
-    if (mode == 2) {
+    if (held) {
+        return '0' + held_high;
+    }
+    if (mode == 2 && !pwm) {
         return '?';
     }
     return pull == 1 ? '1' : pull == 2 ? '0' : 'z';
@@ -674,10 +778,11 @@ static uint32_t flipper_adc_input(void *opaque, int channel)
  * The record: every change of a header pin's level with its time, as a VCD
  * file, which GTKWave, PulseView and sigrok read.  Times are the virtual
  * clock's, in ns from where the record began.  A level is 0, 1, z (nothing
- * drives the pin) or x (a peripheral's pin).  Looked at where a level can
- * change: after the firmware's write to a GPIO register, after a reset,
- * when the outside holds a pin or lets go of it, and when an iButton key or
- * reader of the emulator's pulls pin 17 or lets go of it.
+ * drives the pin) or x (a peripheral's pin; a PWM too, whose edges are not
+ * made).  Looked at where a level can change: after the firmware's write to
+ * a GPIO register or to a register of a timer that has a PWM output here,
+ * after a reset, when the outside holds a pin or lets go of it, and when an
+ * iButton key or reader of the emulator's pulls pin 17 or lets go of it.
  */
 #define HDR_REC_FLUSH_MS 50
 
@@ -700,6 +805,9 @@ static void flipper_header_look(FlipperZeroState *s, int port)
             continue;
         }
         level = header_level(s, i);
+        if (level == 'p') {
+            level = '?';                /* a PWM's edges are not in it */
+        }
         if (level == s->hdr_rec_last[i]) {
             continue;
         }
@@ -712,6 +820,12 @@ static void flipper_header_look(FlipperZeroState *s, int port)
         s->hdr_rec_last[i] = level;
         s->hdr_rec_changes++;
     }
+}
+
+/* a write to a register of LPTIM2, or its reset: its output is PA4's */
+static void flipper_lptim2_changed(void *opaque)
+{
+    flipper_header_look(opaque, 0);
 }
 
 /* (for both records: the pins' and the I2C bus's) */
@@ -906,6 +1020,33 @@ static char *flipper_get_header_adc(Object *obj, Error **errp)
                                a->last_uv);
     } else {
         g_string_append_c(out, '-');
+    }
+    return g_string_free(out, false);
+}
+
+/*
+ * The header's PWM outputs, "NAME:PIN:STATE:CLOCK:DIVIDER:PERIOD:HIGH" for
+ * each: NAME the timer; PIN the output's number on the header; STATE on
+ * while the timer makes a PWM and the pin is in the timer's alternate
+ * function, else off, and the rest is 0; CLOCK the timer's clock in Hz and
+ * DIVIDER what its prescaler divides that by; PERIOD one period and HIGH
+ * the part of it for which the pin is high, in ticks of the divided clock.
+ * So the frequency is CLOCK / (DIVIDER * PERIOD), and the pin is high for
+ * HIGH / PERIOD of the time.
+ */
+static char *flipper_get_header_pwm(Object *obj, Error **errp)
+{
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+    GString *out = g_string_new(NULL);
+
+    for (int which = 0; which < HDR_PWMS; which++) {
+        HeaderPwm p;
+        bool on = header_pwm(s, which, &p);
+
+        g_string_append_printf(out, "%s%s:%d:%s:%u:%u:%u:%u",
+                               which ? " " : "", header_pwms[which].name,
+                               header_pwms[which].number, on ? "on" : "off",
+                               p.clock, p.divider, p.period, p.high);
     }
     return g_string_free(out, false);
 }
@@ -1688,6 +1829,8 @@ static void flipper_zero_init(MachineState *machine)
     s->soc.tim1.changed_opaque = s;
     s->soc.tim1.update_hook = flipper_tim1_update;  /* IR transmit */
     s->soc.tim1.update_opaque = s;
+    s->soc.lptim[1].changed = flipper_lptim2_changed;   /* PWM on PA4 */
+    s->soc.lptim[1].changed_opaque = s;
 
     /* ---- iButton: PB14, open drain with a pull-up (1-Wire keys);
      *      COMP1 with the 125 kHz field off (Cyfral, Metakom) */
@@ -1944,6 +2087,11 @@ static void flipper_zero_instance_init(Object *obj)
         "The ADC as the firmware has it: on or off, its reference in mV, "
         "how many conversions it made, and the last one: the input's "
         "number, the result, and the microvolts that were on the input");
+    object_property_add_str(obj, "header-pwm", flipper_get_header_pwm, NULL);
+    object_property_set_description(obj, "header-pwm",
+        "The header's PWM outputs as the firmware has them: for each its "
+        "timer, its pin, on or off, the timer's clock in Hz, the "
+        "prescaler's division, and a period and its high part in ticks");
     object_property_add_str(obj, "header-serial", flipper_get_header_serial,
                             NULL);
     object_property_set_description(obj, "header-serial",

@@ -55,7 +55,7 @@ WATCHES = (
     ("/machine", "log-level"), ("/machine", "header"),
     ("/machine", "header-record"), ("/machine", "header-serial"),
     ("/machine", "header-i2c"), ("/machine", "header-i2c-record"),
-    ("/machine", "header-adc"),
+    ("/machine", "header-adc"), ("/machine", "header-pwm"),
 )
 
 # what can come from a file: (the menu's word for them, file filter, where
@@ -193,6 +193,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ports = []                 # ... and its serial ports
         self.pin_record = None          # (changes, ns, the file) while they
         #                                 are recorded
+        self.pwm = []                   # its PWM outputs (fe_header)
         self.adc = None                 # the ADC, which has pins of the
         #                                 header as inputs (fe_header)
         self.a_gpio_adc = None          # ... and its line in the GPIO menu
@@ -730,6 +731,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.view.set_power(state, *self.hint(state))
             self.view.set_blank(False)
             self.ports = []
+            self.pwm = []
             self.on_adc(None)
             self.on_i2c(None)
             self.on_header(None)
@@ -1022,6 +1024,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.on_i2c(value, tell=not first)
         if key == ("/machine", "header-adc"):
             self.on_adc(value)
+        if key == ("/machine", "header-pwm"):
+            self.on_pwm(value, tell=not first)
         if not first and old != value:
             self.changed(path, name, old, value)
         self.tiles_due.start()
@@ -2147,8 +2151,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_header(self, text):
         """What the machine says of its GPIO header (None: nothing, as an
         emulator that is off, or one from before it could)"""
+        pwm = self.props.get(("/machine", "header-pwm"))
         try:
-            self.header = fe_header.parse(text) if isinstance(text, str) else []
+            self.header = fe_header.parse(
+                text, pwm if isinstance(pwm, str) and self.pwm else None) \
+                if isinstance(text, str) else []
         except ValueError:
             self.header = []
         tips = {n: f"Pin {n}: {what}" for n, what in fe_header.POWER.items()} \
@@ -2159,7 +2166,27 @@ class MainWindow(QtWidgets.QMainWindow):
                 else ". Click for the iButton menu" if p["number"] == 17
                 else ". Click to read the firmware's log")
         self.view.set_header({p["number"]: (p["level"], p["held"])
-                              for p in self.header}, tips)
+                              for p in self.header}, tips,
+                             {p["number"]: p["pwm"]["duty"] / 100
+                              for p in self.header if p["level"] == "pwm"})
+
+    def on_pwm(self, text, tell=False):
+        """What the machine says of the header's PWM outputs (None: nothing).
+        tell: one that went on or off goes to the log; not one whose
+        frequency or high part changed, which an app that fades a light does
+        again and again."""
+        try:
+            outputs = fe_header.parse_pwm(text) if isinstance(text, str) else []
+        except ValueError:
+            outputs = []
+        before = {o["timer"]: o["on"] for o in self.pwm}
+        self.pwm = outputs
+        for o in outputs if tell else ():
+            if before.get(o["timer"], o["on"]) != o["on"]:
+                self.log.add(f"Pin {o['number']}: "
+                             + (fe_header.pwm_text(o) if o["on"] else
+                                f"the PWM from {o['timer']} is off"), "flipper")
+        self.on_header(self.props.get(("/machine", "header")))
 
     def on_serial(self, text, tell=False):
         """What the machine says of the header's serial ports (None: nothing).
@@ -2200,7 +2227,10 @@ class MainWindow(QtWidgets.QMainWindow):
         elif not p["holdable"]:
             return text + fe_header.NOT_HELD.get(p["number"], "not for holding"
                                                  ).replace("`ibutton`", "iButton")
-        text += f"{fe_header.mode_text(p)}, {p['level']}"
+        said = fe_header.pwm_text(p["pwm"]) if p["pwm"] else ""
+        text += f"{fe_header.mode_text(p)}, " + (
+            said if p["level"] == "pwm" else
+            p["level"] + (f" ({said})" if said else ""))
         if p["held"]:
             text += f"; {fe_header.held_text(p)}" + (
                 ", which does not show while the firmware drives it"

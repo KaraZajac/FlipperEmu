@@ -31,14 +31,29 @@ reads what is held; the launcher says what the ADC converted, and that it is
 on while the script has it.  A voltage is a level too, high from 1.65 V up.
 (Skipped on a firmware whose JavaScript cannot do that.)
 
-Then what the firmware's `gpio` command cannot do, with two apps of the
-check's own, scripts/gpio_check_app and scripts/adc_check_app (they need
+Then PWM.  The firmware has two outputs for one, PA7 (TIM1) and PA4 (LPTIM2),
+and a script starts both (pwmWrite()) and gives them other numbers when the
+check holds PA6.  Such a pin is `pwm` in the table, with its timer, its
+frequency and the part of the time for which it is high; `--wait pwm` waits
+for one; `status --json` has the timer's numbers, which the check works out
+from the firmware's arithmetic beforehand, with and without a prescaler and
+with LPTIM2 on its 32768 Hz clock.  A PWM that is high for none or for all of
+the time is a low or a high pin, and a record has no edges of a PWM.  (Skipped
+on a firmware whose JavaScript makes none.)
+
+Then what the firmware's `gpio` command cannot do, with three apps of the
+check's own, scripts/gpio_check_app, scripts/adc_check_app and
+scripts/pwm_check_app (they need
 `ufbt` on the PATH and its SDK to be this firmware's, which is the official
 release's as ufbt comes; skipped otherwise).  The ADC with the firmware's own
 turning of a result into volts and degrees: the chip's reference, its
 temperature sensor and the battery pin, and the pins, with both of the ADC's
 reference voltages; a pin that the firmware itself drives or pulls measures
-as that.  And interrupts and an open-drain output.  The table says which edges
+as that.  The PWMs that the firmware's two calls never make: the other
+polarity of both outputs, TIM1's second PWM mode, a prescaler in LPTIM2, PA7
+as the timer's open-drain output (held low from outside it is low), a timer
+that runs while its pin is something else, and a pin that is a timer's with
+no PWM from it.  And interrupts and an open-drain output.  The table says which edges
 of a pin the firmware has an interrupt for.  A pin held low and high from
 outside gives the app its interrupt on the edge it asked for, each once, and
 none on the other; an interrupt that the app turns off gives none, and gives
@@ -69,6 +84,7 @@ from ufbt_check import ANSI, log_tail, logged, tool  # noqa: E402
 SIGNALS = "PA7 PA6 PA4 PB3 PB2 PC3 PA14 PA13 PB6 PB7 PC1 PC0 PB14".split()
 APP = ROOT / "scripts" / "gpio_check_app"
 ADC_APP = ROOT / "scripts" / "adc_check_app"
+PWM_APP = ROOT / "scripts" / "pwm_check_app"
 ADC_PINS = {"PA7": 12, "PA6": 11, "PA4": 9, "PC3": 4, "PC1": 2, "PC0": 1}
 ADC_BLOCK = ("its ADC, with pins 2, 3, 4, 7, 15 and 16 as inputs (`gpio PIN "
              "1.25V` holds a voltage to one)\n  ADC1  ")
@@ -84,6 +100,41 @@ for (let i = 0; i < names.length; i++) {
     print(names[i], pin.readAnalog(), pin.readAnalog());
 }
 delay(6000);
+print("end");
+"""
+# a PWM on each of the two pins that the firmware has one for, then other
+# numbers for them three times, then none.  Each step when what is held to
+# PA6 changes
+PWM_JS = """\
+let eventLoop = require("event_loop");
+let gpio = require("gpio");
+let a7 = gpio.get("pa7");
+let a4 = gpio.get("pa4");
+let a6 = gpio.get("pa6");
+a6.init({ direction: "in", inMode: "plain_digital", pull: "down" });
+function until(level) {
+    while (a6.read() !== level) {
+        delay(50);
+    }
+}
+print("supported", a7.isPwmSupported(), a4.isPwmSupported(), a6.isPwmSupported());
+print("running", a7.isPwmRunning(), a4.isPwmRunning());
+a7.pwmWrite(1000, 50);
+a4.pwmWrite(10000, 30);
+print("running", a7.isPwmRunning(), a4.isPwmRunning());
+until(true);
+a7.pwmWrite(440, 25);
+a4.pwmWrite(5, 50);
+until(false);
+a7.pwmWrite(100, 10);
+a4.pwmWrite(100, 10);
+until(true);
+a7.pwmWrite(1000, 0);
+a4.pwmWrite(1000, 100);
+until(false);
+a7.pwmStop();
+a4.pwmStop();
+print("running", a7.isPwmRunning(), a4.isPwmRunning());
 print("end");
 """
 skipped = []
@@ -226,7 +277,7 @@ def output_checks(b):
                               "--timeout", 2)
     check("--wait for a level that does not come: exit 1 after the timeout, "
           "with what the pin is",
-          code == 1 and "PA7 is high and not low after 2 s" in err
+          code == 1 and "PA7 is high, not low after 2 s" in err
           and "output" in err and 1.5 < took < 10, out + err)
     waiting = b.bg("gpio", "PA7", "--wait", "low", "--timeout", 60)
     time.sleep(1.0)
@@ -648,6 +699,270 @@ def adc_checks(b):
           st and not any(p.get("held") for p in st.values()), st)
 
 
+def pwms(st):
+    """The header's PWMs in what status() gave: a pin -> (its timer's clock
+    in Hz, what divides that, a period and its high part in ticks)"""
+    return {pin: tuple(p["pwm"].get(k) for k in ("clock", "divider", "period",
+                                                 "high"))
+            for pin, p in st.items() if p.get("pwm")}
+
+
+def pwm_wait(b, want, seconds=20.0):
+    """Wait until the header's PWMs are these: (are they, the status)"""
+    end = time.time() + seconds
+    while True:
+        st = status(b)
+        if pwms(st) == want or time.time() > end:
+            return pwms(st) == want, st
+        time.sleep(0.2)
+
+
+def pwm_checks(b):
+    """Nothing is held, and nothing is recorded"""
+    vcd, js = b.dir / "pwm.vcd", b.dir / "fe_pwm.js"
+    js.write_text(PWM_JS)
+    fe(b, "push", js, "/ext/fe_pwm.js")
+    code, out, err, took = fe(b, "gpio", "PA7", "--wait", "pwm",
+                              "--timeout", 2)
+    check("--wait pwm for a pin that has no PWM: exit 1 after the timeout",
+          code == 1 and re.search(r"PA7 is \w+, not pwm after 2 s", err)
+          and 1.5 < took < 10, out + err)
+    fe(b, "gpio", "record", vcd)
+    script = b.bg("cli", "--timeout", 120, "js /ext/fe_pwm.js")
+
+    def step(level, want):
+        fe(b, "gpio", "PA6", level)
+        ok, st = pwm_wait(b, want)
+        return ok, st, fe(b, "gpio")[1]
+
+    def ended():
+        try:
+            return script.communicate(timeout=60)[0]
+        except subprocess.TimeoutExpired:
+            script.kill()
+            return "(still running) " + script.communicate()[0]
+
+    def tidy():
+        fe(b, "gpio", "record", "stop")
+        fe(b, "gpio", "free")
+        fe(b, "rm", "/ext/fe_pwm.js")
+
+    code, out, err, took = fe(b, "gpio", "PA7", "--wait", "pwm",
+                              "--timeout", 30)
+    first = {"PA7": (64000000, 1, 64000, 32000),
+             "PA4": (64000000, 1, 6401, 1921)}
+    there, st = pwm_wait(b, first) if code == 0 else (False, {})
+    if not there:
+        for level in ("high", "low", "high", "low"):    # (to the script's end)
+            fe(b, "gpio", "PA6", level)
+            time.sleep(1.0)
+        text = ended()
+        tidy()
+        if "running true true" in text:
+            return check("a script's PWMs (pwmWrite) are on the header",
+                         False, text + out + err + repr(st) + log_tail(b))
+        return skip("a script in the firmware's JavaScript makes PWMs "
+                    "(pwmWrite)", "this firmware's JavaScript did not run "
+                    "it: " + " ".join(text.split())[:300])
+
+    check("a script in the firmware's JavaScript starts a PWM on each of "
+          "the two pins that the firmware has one for (pwmWrite(1000, 50) "
+          "on PA7, pwmWrite(10000, 30) on PA4): `gpio PA7 --wait pwm` is "
+          "back with exit 0 when it is there, and says what it is",
+          "PA7 has a PWM from TIM1: 1 kHz, high 50 % of the time" in out,
+          out + err)
+    table = fe(b, "gpio")[1]
+    words = [fe(b, "gpio", name)[1] for name in ("PA7", "4")]
+    check("the table has both: pin 2 as TIM1's (its alternate function 1) "
+          "and pin 4 as LPTIM2's (14), each with its frequency and the part "
+          "of the time for which it is high.  Such a pin's level is the "
+          "word `pwm`",
+          row(table, "PA7") == "2 PA7 alternate function 1 pwm PWM from "
+                               "TIM1: 1 kHz, high 50 % of the time"
+          and row(table, "PA4") == "4 PA4 alternate function 14 pwm PWM "
+                                   "from LPTIM2: 9.998 kHz, high 30.01 % of "
+                                   "the time"
+          and row(table, "PA6") == "3 PA6 input, pull-down low"
+          and words == ["pwm\n"] * 2, table + repr(words))
+    code, out, err, took = fe(b, "status")
+    a7, a4 = st["PA7"]["pwm"], st["PA4"]["pwm"]
+    check("status --json has the numbers that it comes from: a timer's "
+          "clock, what divides it, and a period with its high part, in "
+          "ticks.  TIM1: 64 MHz, 64000 ticks with 32000 high.  LPTIM2, "
+          "which counts one tick more than the firmware asks for: 6401 "
+          "ticks with 1921 high, so 9.998 kHz and 30.01 %.  `status` has "
+          "both in its line",
+          a7["timer"] == "TIM1" and a7["hz"] == 1000 and a7["duty"] == 50
+          and a4["timer"] == "LPTIM2" and abs(a4["hz"] - 64e6 / 6401) < 1e-6
+          and abs(a4["duty"] - 192100 / 6401) < 1e-6
+          and st["PA7"]["level"] == "pwm" and st["PA4"]["level"] == "pwm"
+          and st["PA6"]["pwm"] is None and st["PA6"]["level"] == "low"
+          and re.search(r"^gpio\s*: PA7 has a PWM \(1 kHz, high 50 %\); PA4 "
+                        r"has a PWM \(9\.998 kHz, high 30\.01 %\)$", out,
+                        re.M), repr(st) + out + err)
+    code, out, err, took = fe(b, "gpio", "PA7", "high")
+    table = fe(b, "gpio")[1]
+    fe(b, "gpio", "PA7", "free")
+    check("3V3 held to a pin whose PWM the firmware drives (push-pull): "
+          "the PWM stays, and the answer and the table say that what is "
+          "held does not show",
+          code == 0 and "PA7 (pin 2 of the header): held high from outside; "
+                        "it has a PWM from TIM1: 1 kHz, high 50 % of the "
+                        "time" in out and "The firmware drives it" in out
+          and row(table, "PA7") == "2 PA7 alternate function 1 pwm PWM from "
+                                   "TIM1: 1 kHz, high 50 % of the time; held "
+                                   "high from outside, which does not show "
+                                   "while the firmware drives the pin",
+          out + err + table)
+
+    ok, st, table = step("high", {"PA7": (64000000, 3, 48484, 12121),
+                                  "PA4": (32768, 1, 6554, 3277)})
+    check("other numbers for both (pwmWrite(440, 25), pwmWrite(5, 50)).  "
+          "TIM1 with a prescaler: 64 MHz over 3, and 48484 ticks, 440 Hz.  "
+          "LPTIM2, for which 5 Hz is too slow with the 64 MHz, on the "
+          "32768 Hz crystal, as the firmware has it then: 6554 ticks, 5 Hz",
+          ok and row(table, "PA7").endswith("pwm PWM from TIM1: 440 Hz, "
+                                            "high 25 % of the time")
+          and row(table, "PA4").endswith("pwm PWM from LPTIM2: 5 Hz, high "
+                                         "50 % of the time"),
+          repr(pwms(st)) + table)
+    ok, st, table = step("low", {"PA7": (64000000, 10, 64000, 6400),
+                                 "PA4": (64000000, 16, 40001, 4001)})
+    check("... and 100 Hz, 10 % for both: each timer with its prescaler "
+          "(TIM1 over 10, LPTIM2 over 16)",
+          ok and row(table, "PA7").endswith("pwm PWM from TIM1: 100 Hz, "
+                                            "high 10 % of the time")
+          and row(table, "PA4").endswith("pwm PWM from LPTIM2: 100 Hz, high "
+                                         "10 % of the time"),
+          repr(pwms(st)) + table)
+    ok, st, table = step("high", {"PA7": (64000000, 1, 64000, 0),
+                                  "PA4": (64000000, 1, 64001, 64001)})
+    code, out, err, took = fe(b, "gpio", "PA7", "--wait", "pwm",
+                              "--timeout", 1)
+    check("a PWM that is high for none of the time (pwmWrite(1000, 0)) is "
+          "a pin that is low, and one for all of it (100) a pin that is "
+          "high: no `pwm` then, for --wait either",
+          ok and row(table, "PA7") == "2 PA7 alternate function 1 low PWM "
+                                      "from TIM1: 1 kHz, high 0 % of the time"
+          and row(table, "PA4") == "4 PA4 alternate function 14 high PWM "
+                                   "from LPTIM2: 1 kHz, high 100 % of the "
+                                   "time"
+          and code == 1 and "PA7 is low, not pwm after 1 s" in err,
+          repr(pwms(st)) + table + out + err)
+    ok, st, table = step("low", {})
+    text = ended()
+    lines = [" ".join(line.split()) for line in text.splitlines()]
+    code, out, err, took = fe(b, "status")
+    check("pwmStop() for both: no PWM any more, the two pins are analog "
+          "and float, and `status` has none",
+          ok and row(table, "PA7") == "2 PA7 analog floating"
+          and row(table, "PA4") == "4 PA4 analog floating"
+          and "PWM" not in table and "PWM" not in out, repr(pwms(st)) + table
+          + out + err)
+    check("what the script itself was told: PA7 and PA4 can have a PWM and "
+          "PA6 cannot (isPwmSupported); none runs before and none after, "
+          "both in between (isPwmRunning)",
+          [x for x in lines if x.startswith(("supported", "running"))]
+          == ["supported true true false", "running false false",
+              "running true true", "running false false"]
+          and "end" in lines and "Script done!" in text,
+          text + log_tail(b))
+    code, out, err, took = fe(b, "gpio", "record", "stop")
+    changes, wrong = recorded(vcd)
+    check("a record of all that has no edges of a PWM: such a pin is "
+          "unknown (x) in it for as long as the PWM runs.  PA7: unknown, "
+          "low (0 %), floating; PA4: unknown, high (100 %), floating",
+          code == 0 and not wrong
+          and of(changes, "PA7") == ["unknown", "low", "floating"]
+          and of(changes, "PA4") == ["unknown", "high", "floating"],
+          out + err + wrong + repr(changes))
+    tidy()
+
+
+def pwm_app_checks(b, folder):
+    def rows(table):
+        return row(table, "PA7"), row(table, "PA4")
+
+    def step(level, line, want):
+        said = hold(b, "PA6", level, line, tag="FePwm")
+        ok, st = pwm_wait(b, want)
+        return ok and line in said, st, fe(b, "gpio")[1]
+
+    code, text = tool(b, folder, "launch")
+    done = logged(b, "[FePwm] 1: both as the firmware starts them", 30)
+    ok, st = pwm_wait(b, {"PA7": (64000000, 1, 64000, 12800),
+                          "PA4": (64000000, 1, 6401, 1921)})
+    check("`ufbt launch` starts the check's third app "
+          "(scripts/pwm_check_app), which starts both PWMs with the "
+          "firmware's own calls (furi_hal_pwm_start: 1 kHz and 20 %, 10 kHz "
+          "and 30 %); the firmware says that both run",
+          code == 0 and done and ok
+          and "running: 1 1" in app_lines(b, "FePwm"),
+          text[-1500:] + repr(pwms(st)) + log_tail(b))
+    ok, st, table = step("high", "2: the other polarity for both, LPTIM2 "
+                         "with a prescaler",
+                         {"PA7": (64000000, 1, 64000, 51200),
+                          "PA4": (64000000, 4, 1000, 749)})
+    check("the other polarity of each output, which the firmware's calls "
+          "do not set.  TIM1's is high for what was its low part: 80 %.  "
+          "LPTIM2, which the app sets up with its clock over 4 and 1000 "
+          "ticks for a period, is high from its compare value (250) to the "
+          "period's end: 749 ticks, at 16 kHz",
+          ok and rows(table)
+          == ("2 PA7 alternate function 1 pwm PWM from TIM1: 1 kHz, high "
+              "80 % of the time",
+              "4 PA4 alternate function 14 pwm PWM from LPTIM2: 16 kHz, "
+              "high 74.9 % of the time"), repr(pwms(st)) + table)
+    ok, st, table = step("low", "3: TIM1 in PWM mode 2, PA4 analog",
+                         {"PA7": (64000000, 1, 64000, 12800)})
+    check("TIM1's other PWM mode turns its output around once more: 20 %.  "
+          "And a timer whose pin is not its own is no PWM on the header: "
+          "PA4, analog now, floats while LPTIM2 runs on",
+          ok and rows(table)
+          == ("2 PA7 alternate function 1 pwm PWM from TIM1: 1 kHz, high "
+              "20 % of the time", "4 PA4 analog floating"),
+          repr(pwms(st)) + table)
+    ok, st, table = step("high", "4: PA7 open drain, PA4 is LPTIM2's again",
+                         {"PA7": (64000000, 1, 64000, 12800),
+                          "PA4": (64000000, 4, 1000, 749)})
+    low = fe(b, "gpio", "PA7", "low")[1]
+    table_low = fe(b, "gpio")[1]
+    high = fe(b, "gpio", "PA7", "high")[1]
+    table_high = fe(b, "gpio")[1]
+    fe(b, "gpio", "PA7", "free")
+    od = "2 PA7 alternate function 1, open drain, pull-up "
+    said = "PWM from TIM1: 1 kHz, high 20 % of the time"
+    check("PA7 as an open-drain output of the timer, with a pull-up: its "
+          "PWM shows.  A wire to GND wins there: held low from outside, the "
+          "pin is low.  With 3V3 held to it, the PWM shows again.  PA4, "
+          "LPTIM2's once more, has the PWM that ran on",
+          ok and rows(table) == (od + "pwm " + said, "4 PA4 alternate "
+                                 "function 14 pwm PWM from LPTIM2: 16 kHz, "
+                                 "high 74.9 % of the time")
+          and "held low from outside; it is low" in low
+          and row(table_low, "PA7") == od + "low " + said + "; held low "
+                                                           "from outside"
+          and "held high from outside; it has a " + said in high
+          and row(table_high, "PA7") == od + "pwm " + said + "; held high "
+                                                            "from outside",
+          repr(pwms(st)) + table + low + table_low + high + table_high)
+    ok, st, table = step("low", "5: both stopped, PA7 still TIM1's pin", {})
+    check("both stopped (furi_hal_pwm_stop): no PWM.  PA7, which the app "
+          "makes TIM1's pin once more, is `unknown` then: a peripheral's "
+          "pin with a signal that the emulator has no word for",
+          ok and rows(table) == ("2 PA7 alternate function 1 unknown",
+                                 "4 PA4 analog floating"),
+          repr(pwms(st)) + table)
+    said = hold(b, "PA6", "high", "done: 0 0", tag="FePwm")
+    st = status(b)
+    check("the app ends: the firmware says that neither runs, and the "
+          "three pins are analog",
+          "done: 0 0" in said
+          and all(st.get(p, {}).get("mode") == "analog"
+                  for p in ("PA7", "PA6", "PA4")),
+          repr(said) + repr(st) + log_tail(b))
+
+
 def app_lines(b, tag="FePins"):
     """What one of the check's apps has logged: its lines, without time and
     tag"""
@@ -656,16 +971,17 @@ def app_lines(b, tag="FePins"):
             if f"[{tag}] " in line]
 
 
-def hold(b, pin, level, line=None, quiet=1.0):
+def hold(b, pin, level, line=None, quiet=1.0, tag="FePins"):
     """Hold a header pin from outside, or let go of it.  -> the app's lines
     since: with `line`, as soon as that one is there (10 s at most); without,
     after `quiet` seconds, in which the app is to log nothing"""
-    before = len(app_lines(b))
+    before = len(app_lines(b, tag))
     fe(b, "gpio", pin, level)
     end = time.time() + (10.0 if line else quiet)
-    while time.time() < end and not (line and line in app_lines(b)[before:]):
+    while time.time() < end and not (line
+                                     and line in app_lines(b, tag)[before:]):
         time.sleep(0.1)
-    return app_lines(b)[before:]
+    return app_lines(b, tag)[before:]
 
 
 def own_app(b, label, source, appid, checks):
@@ -926,9 +1242,14 @@ def main():
             record_checks(b)
             refused_checks(b)
             adc_checks(b)
+            pwm_checks(b)
             own_app(b, "the ADC with the firmware's own turning of a result "
                     "into volts and degrees", ADC_APP, "fe_adc_check",
                     adc_app_checks)
+            own_app(b, "PWMs that the firmware's own calls do not make: the "
+                    "other polarity and PWM mode, an open-drain pin, a "
+                    "timer with no pin", PWM_APP, "fe_pwm_check",
+                    pwm_app_checks)
             own_app(b, "interrupts from held pins, and an open-drain output",
                     APP, "fe_pin_check", app_checks)
             ok, said = b.answers()

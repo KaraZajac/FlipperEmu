@@ -2720,6 +2720,92 @@ big lock, entry 92).
       and a hardware trigger are not there (said once under `-d unimp`). No
       real Flipper's ADC was asked for any of these numbers.
 
+124. **PWM on a pin.** A pin that a peripheral has was `unknown` on the
+    header, and a timer's output among them. The firmware has two PWM
+    outputs there, `furi_hal_pwm`'s: TIM1's CH1N on PA7 (pin 2) and LPTIM2's
+    output on PA4 (pin 4). A script's `pwmWrite(1000, 50)` showed nothing.
+    - No edges. A 1 kHz output as edges is two thousand events a second, and
+      whoever looks wants the frequency and the duty, not the edges. So the
+      machine works the PWM out from the timer's registers when it is asked
+      (`header_pwm`): the clock, what divides it, the ticks of a period and
+      those of them for which the output is high. `header_level` has `p` for
+      a pin with a PWM, the launcher the word `pwm` and a sentence, `PWM from
+      TIM1: 1 kHz, high 50 % of the time`.
+    - A pin has a PWM while its timer makes one and the pin is in that
+      timer's alternate function. The firmware does the two in an order
+      (pin first on start, pin first on stop), and an app may do only one of
+      them: a timer that runs with its pin analog is nothing on the header,
+      and a pin that is the timer's with the timer off is `unknown`.
+    - TIM1, from the reference manual: it is a PWM while CEN is set, the
+      counter counts up, MOE and CC1NE are set and channel 1 is an output in
+      PWM mode 1 or 2. A period is ARR + 1 ticks of HCLK over PSC + 1. The
+      channel's reference is high while the counter is below CCR1 in mode 1
+      and from CCR1 on in mode 2; CH1N has the reference as it is while CH1
+      is off, which is the firmware's way, and turned beside a CH1 that is
+      on or with CC1NP.
+    - LPTIM2: a PWM while it counts on and on (CNTSTRT) with CFGR.WAVE at 0.
+      A period is ARR + 1 ticks. The output is set when the counter is past
+      CMP and reset at the period's end, so it is high for ARR - CMP ticks,
+      and with WAVPOL, which the firmware sets, for the other CMP + 1.
+    - The firmware's arithmetic was done by hand first, and the emulator
+      asked after. TIM1 for 1 kHz and 50 %: PSC 0, ARR 63999, CCR1 32000,
+      which is 1 kHz and 50 % exactly. LPTIM2 for 10 kHz and 30 %: ARR 6400
+      and CMP 1920, where the firmware writes the period itself to ARR and
+      not one less; 6401 ticks with 1921 high, 9.998 kHz and 30.01 %. For
+      5 Hz it has no prescaler that fits and changes the timer to the
+      32768 Hz crystal: ARR 6553, 6554 ticks, 5 Hz. For 100 Hz the prescaler
+      is 16, and TIM1's 10. 100 % on LPTIM2 is CMP = ARR, high all the time.
+      0 % there would be one tick high in 64001 by the manual's rule; the
+      check does not ask for that one.
+    - For those the low-power timers needed their true clock. The model had
+      32768 Hz for both, which is LPTIM1's as the idle timer. It is what
+      RCC_CCIPR picks now, PCLK1's 64 MHz for LPTIM2 as the firmware starts
+      it. And a QEMU timer for every compare and reload, as the model had,
+      would be twenty thousand callbacks a second for a 10 kHz PWM at that
+      clock: a timer is set now only while the compare or the reload has
+      its interrupt on (LPTIM1's idle use has; a PWM has none), and the
+      counter is worked out from the time when it is read.
+    - What it costs, measured on the official 1.5.1 with the check's app
+      waiting in its 20 ms polls: 35.5 % of a host core with both PWMs on,
+      35.6 % with both stopped. An idle Flipper on USB was 24.5 % in the
+      same run.
+    - Seen on the way, and not this piece's: a CLI command that waits takes
+      a whole host core, 102 %. A script that is in `delay(25000)` does, with
+      a PWM and with none, and so does the firmware's `log` command with
+      nothing to print. Sampled, the CPU is in the idle task, in
+      `prvGetExpectedIdleTime`: the firmware does not go to sleep while such
+      a command runs. Why is not known yet. It belongs to the idle cost
+      (entry 94).
+    - The launcher: `gpio PIN --wait pwm`; the table's row and `gpio PIN`'s
+      word; `status` with `PA7 has a PWM (1 kHz, high 50 %)`; `status
+      --json` with the four numbers, and `hz` and `duty` from them. A wire
+      held to a push-pull PWM pin does not show, as with an output. On an
+      open-drain pin of the timer a wire to GND wins. A PWM at 0 % or 100 %
+      is a low or a high pin. The pins' record has `x` for a pin with a PWM
+      and is looked at after a write to either timer. In the window a pin
+      with a PWM is amber for the part of its width that it is high for
+      (never less than 15 % and never more than 85 %, so that both parts can
+      be seen), and the console has a line when a PWM begins and when it
+      ends.
+    - `gpio_check.py`: 11 checks with a script in the firmware's JavaScript
+      (`pwmWrite`, `isPwmRunning`, `pwmStop`; four settings of both outputs),
+      and 6 with an app of the check's own, `scripts/pwm_check_app`, for
+      what the firmware's two calls never set: the other polarity of each
+      output (LL calls in the app), LPTIM2 with a prescaler and regular
+      polarity, TIM1 in PWM mode 2, PA7 as the timer's open-drain output,
+      LPTIM2 running with PA4 analog, and PA7 as TIM1's pin after the stop.
+      The SDK has no `LL_LPTIM_Disable` among its functions, so the app
+      stops LPTIM2 with `furi_hal_pwm_stop` and sets it up again itself.
+      110 checks on the official 1.5.1, 81 on its dev build, Momentum,
+      Unleashed and RogueMaster. `gui_check.py`: 60, with a script's PWM on
+      pin 2.
+    - Where a Flipper could differ: the rules for the high part are the
+      reference manual read, and no real pin was measured, with a scope or
+      otherwise. Not there: any other timer's output on the header (still
+      `unknown`), a PWM's edges in the record, TIM1's dead time, what the
+      firmware reads from the input register of a pin with a PWM, and a PWM
+      as a voltage for the ADC.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

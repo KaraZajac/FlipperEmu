@@ -28,6 +28,7 @@ it; the file comments name that function. Register layouts come from RM0434 and 
    I2C1 ── bq27220 @0x55   bq25896 @0x6B   lp5562 @0x30
    I2C3 ── pins 15 (SDA) and 16 (SCL) of the header: what `run --i2c` puts there
    ADC1 ←─ pins 2, 3, 4, 7, 15 and 16 of the header: a voltage held there (`gpio PIN 1.25V`)
+   TIM1 CH1N (PA7), LPTIM2 OUT (PA4) ──→ pins 2 and 4 of the header: a PWM, as its numbers (`gpio`)
    TIM16 CH1 (PB8) ── piezo → flipper-speaker → QEMU audio (desktop or WAV)
    PA0 + TIM2 TI1  ←─ IR receiver ← /machine/ir rx (marks/spaces)
    PA1 + TIM2 TI2  ←─ CC1101 GDO0 (async RX) ← /machine/subghz rx (the "air"),
@@ -1186,6 +1187,18 @@ ufbt is not run at all, and `update` sends the package without the stage (BRINGU
   while that call is the last one. It sees the property's value at its looks and
   not every call, so it cannot leave a scan out as `i2c watch` does: a scan that
   the console is told of while it stands at such an address would get the word.
+- **Not there** on that bus: the two lines as levels (pins 15 and 16 are `unknown`
+  on the header while the firmware talks, and the pins' record has no bits of a
+  transfer), the bus's speed (a transfer takes no time, and a record's bytes have
+  the time of their START), clock stretching, 10-bit addresses, and a device put
+  there or taken away while the emulator runs. The record's `+` (a START after no
+  STOP) and `!` (a byte refused) come from a firmware in `scripts/i2c_check.py`: an
+  app of the check's own on the official 1.5.1 for both, a script on Momentum,
+  Unleashed and RogueMaster for the `!`, nothing on the dev build. The device that
+  refuses there is QEMU's `i2c-echo`. After a STOP it asks the bus to let it send
+  what it was given, as a master, and is never let: the peripheral's model is a
+  master only and offers the bus to nobody. (QEMU keeps each such asking, a few
+  bytes of the emulator's memory for every STOP to that device.)
 - **The ADC** (`stm32wb55_adc.c`): ADC1 at 0x5004_0000, as much of it as the
   firmware's `furi_hal_adc` uses. One conversion at a time, of the channel in the
   first rank of the regular sequence: ADSTART puts the result in DR at once, with
@@ -1217,18 +1230,41 @@ ufbt is not run at all, and `update` sends the package without the stage (BRINGU
   the time of a conversion, a sequence of several channels, continuous mode, DMA,
   the interrupt, a trigger from a timer, injected conversions and the analog
   watchdogs (the model says the first such use in the log under `-d unimp`).
-- **Not there** on that bus: the two lines as levels (pins 15 and 16 are `unknown`
-  on the header while the firmware talks, and the pins' record has no bits of a
-  transfer), the bus's speed (a transfer takes no time, and a record's bytes have
-  the time of their START), clock stretching, 10-bit addresses, and a device put
-  there or taken away while the emulator runs. The record's `+` (a START after no
-  STOP) and `!` (a byte refused) come from a firmware in `scripts/i2c_check.py`: an
-  app of the check's own on the official 1.5.1 for both, a script on Momentum,
-  Unleashed and RogueMaster for the `!`, nothing on the dev build. The device that
-  refuses there is QEMU's `i2c-echo`. After a STOP it asks the bus to let it send
-  what it was given, as a master, and is never let: the peripheral's model is a
-  master only and offers the bus to nobody. (QEMU keeps each such asking, a few
-  bytes of the emulator's memory for every STOP to that device.)
+- **A pin's PWM**: the firmware's `furi_hal_pwm` has two outputs, TIM1's CH1N on PA7
+  (alternate function 1) and LPTIM2's output on PA4 (14). Neither is made as edges:
+  a 1 kHz output would be two thousand events a second for nobody. The machine works
+  out what the timer makes when it is asked (`header_pwm`): the timer's clock, what
+  divides it, the ticks of a period and those of them that the output is high for.
+  A pin has a PWM while its timer makes one **and** the pin is in that timer's
+  alternate function; `header_level` gives `p` for it then (`0` and `1` with none or
+  all of the period high), which wins over what is held as the firmware's own drive
+  does, and open drain shows unless the pin is held low. TIM1's is one while the
+  counter runs, counts up, MOE and CC1NE are set, and channel 1 is an output in PWM
+  mode 1 or 2: ARR + 1 ticks of HCLK over PSC + 1, high for CCR1 of them, and for
+  the others in mode 2, with CC1NP, or beside a CH1 that is on (CC1E). LPTIM2's is
+  one while it counts on and on with CFGR.WAVE at 0: ARR + 1 ticks of its clock over
+  the prescaler, high from the tick after CMP to the period's end (ARR - CMP ticks),
+  and for the other CMP + 1 with WAVPOL. Both are the reference manual read (RM0434,
+  the complementary outputs' control bits and 30.4.10); no real Flipper's pin was
+  measured. The firmware writes ARR as the period itself and not as one less, so
+  LPTIM2's PWM is a tick longer than asked: 6401 ticks for 10 kHz.
+  The property `header-pwm` (read only) has a word for each output,
+  `NAME:PIN:on|off:CLOCK:DIVIDER:PERIOD:HIGH`; `fe_header.parse_pwm` reads it and
+  `pwm_text` says it, for `gpio`, `status` and the window, which watches the
+  property over the panel link. The pins' record looks at the header after a write
+  to either timer (`changed` hooks) and has `x` for a PWM. Not there: any other
+  timer's output on a header pin (`unknown`, as before), a PWM's edges in the
+  record, dead time, what the firmware reads from the pin's input register, and a
+  PWM as a voltage for the ADC (0 V, or 3.3 V when it is high all the time).
+- **The low-power timers' clock** (`stm32wb55_lptim.c`): it was 32768 Hz for both.
+  It is what RCC_CCIPR picks now (PCLK1, LSI, HSI16 or LSE; the SoC answers), since
+  LPTIM2 as a PWM runs from PCLK1 at 64 MHz, and from LSE where a frequency is too
+  low for that. A QEMU timer is set for the next compare or reload only while one
+  of the two has its interrupt on. LPTIM1, the idle timer, has its compare
+  interrupt on and is as before. LPTIM2 as a PWM has none: its counter is worked
+  out from the time when it is read, and it costs nothing while it runs. (A timer
+  for every reload, as it was, would be ten thousand callbacks a second for a
+  10 kHz PWM at the true clock.)
 
 ## The front panel (`flipper_panel.c`, `scripts/fe_gui*.py`)
 

@@ -312,6 +312,7 @@ class FlipperView(QtWidgets.QWidget):
         self.hover = None
         self.hover_pin = 0              # the GPIO pin under the mouse (number)
         self.header = {}                # GPIO pin number: (level, held)
+        self.header_duty = {}           # ... with a PWM: the high part, 0 to 1
         self.pin_tips = {}              # ... and what to say of it
         self.shake = 0
         self.clock = QtCore.QElapsedTimer()
@@ -375,12 +376,13 @@ class FlipperView(QtWidgets.QWidget):
     def set_sd(self, state):
         self._set(sd=state)
 
-    def set_header(self, pins, tips):
+    def set_header(self, pins, tips, duty=None):
         """The GPIO header.  pins: a pin's number there -> (its level: high,
-        low or something else; what is held to it from outside: high, low or
-        None).  tips: the number -> what to say of that pin."""
+        low, pwm or something else; what is held to it from outside: high,
+        low or None).  tips: the number -> what to say of that pin.  duty: a
+        pin with a PWM -> the part of the time for which it is high, 0 to 1."""
         self.pin_tips = dict(tips)
-        self._set(header=dict(pins))
+        self._set(header=dict(pins), header_duty=dict(duty or {}))
 
     def set_power(self, power, *hint):
         """'on', or what else it is, with what to say on the dark screen"""
@@ -711,11 +713,17 @@ class FlipperView(QtWidgets.QWidget):
                 p.setBrush(mix(t["port"], "#ffffff", 0.6))
                 p.drawRoundedRect(hole.adjusted(-1.0, -0.7, 1.0, 0.2), 0.8, 0.8)
             # a pin that is high or low shows it; one that floats, or carries
-            # a peripheral's signal, is dark
+            # a peripheral's signal, is dark; one with a PWM is both, as much
+            # of its width high as of its time (and some of each, to be seen)
             p.setBrush(QColor(PIN_HIGH) if level == "high" else
-                       mix("#050506", PIN_LOW, 0.8) if level == "low" else
-                       QColor("#050506"))
+                       mix("#050506", PIN_LOW, 0.8) if level in ("low", "pwm")
+                       else QColor("#050506"))
             p.drawRect(hole)
+            if level == "pwm":
+                part = min(max(self.header_duty.get(number, 0.5), 0.15), 0.85)
+                p.setBrush(QColor(PIN_HIGH))
+                p.drawRect(QRectF(hole.x(), hole.y(), hole.width() * part,
+                                  hole.height()))
             p.setBrush(t["pin"])                # (a glint of the contact in it)
             p.drawRect(QRectF(x - 0.8, BY + 2.6, 1.6, 1.1))
             if held:                            # a jumper wire in the socket:

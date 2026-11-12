@@ -236,8 +236,8 @@ The first column is the pin's number on the header, the third what the firmware 
 the pin as (what your app's `furi_hal_gpio_init` made of it), the fourth its level.
 A pin is named as the MCU has it (`PA7`), as the case has it (`A7`) or by that number.
 
-- **Your app drives a pin:** `gpio PA7` prints `high`, `low`, `floating` or `unknown`
-  and nothing else, for a script; `gpio PA7 --wait high --timeout 5` waits for it and
+- **Your app drives a pin:** `gpio PA7` prints `high`, `low`, `floating`, `pwm` or
+  `unknown` and nothing else, for a script; `gpio PA7 --wait high --timeout 5` waits for it and
   fails after the five seconds, with what the pin was instead. It looks twenty times a
   second, so it is for a level that stays, not for a pulse.
 - **Your app reads a pin:** `gpio PA6 high` and `gpio PA6 low` hold it from outside as
@@ -269,7 +269,20 @@ A pin is named as the MCU has it (`PA7`), as the case has it (`A7`) or by that n
   three inputs are there too (its reference, its temperature at 25 degrees, the
   battery pin at 3.3 V), with calibration values that make the firmware's
   `furi_hal_adc_convert_*` come out at those.
-- What a peripheral puts on a pin (a UART, PWM, SPI, I2C) is `unknown`: only the levels
+- **Your app makes a PWM:** the firmware's `furi_hal_pwm_start` has two outputs, pin
+  2 (PA7, from TIM1) and pin 4 (PA4, from LPTIM2). `gpio` has such a pin as `pwm`,
+  with the timer, the frequency and the part of the time that the pin is high, all
+  worked out from the timer's registers as your app left them: `PWM from TIM1: 1 kHz,
+  high 50 % of the time`. `gpio PA7 --wait pwm` waits for one, and `status --json`
+  has the numbers themselves for a test (the timer's clock, its divider, the ticks of
+  a period and those of them that the pin is high for). That is what the timer makes,
+  which is not always what was asked for: 10 kHz at 30 % on pin 4 comes out as 9.998
+  kHz at 30.01 %, since the firmware sets LPTIM2 one tick long. The pin has to be the
+  timer's too: a timer that runs while the pin is something else is no PWM in the
+  table, and neither is a pin that waits for a timer. A record has no edges of a PWM,
+  only an `x` for as long as it is one.
+- What another peripheral puts on a pin (a UART, SPI, I2C, a timer other than those
+  two outputs) is `unknown`: only the levels
   of plain inputs and outputs are on the header so far. (The
   bytes of the UART on pins 15 and 16 are there, as bytes: the next section. And so
   are devices for the I2C bus on those pins: the one after it.)
@@ -1078,16 +1091,32 @@ that it has, for 3V3); the launcher's ADC line while the script has the ADC (on,
 reference at 2.048 V) and after it (off, twelve conversions, the last one's pin,
 voltage and number); a voltage as a level, with the firmware's `gpio read` on both
 sides of 1.65 V; a voltage to a pin that is not the ADC's; and what is refused (more
-than 3.3 V, a number with no unit). It passes on the official 1.5.1,
-the official dev build, Momentum, Unleashed and RogueMaster (70 checks). Then, where
-`ufbt` is there with this firmware's SDK (the official 1.5.1; skipped otherwise), two
-apps of its own. `scripts/adc_check_app` measures with `furi_hal_adc` and logs each
+than 3.3 V, a number with no unit). Then PWM, from a script in the firmware's
+JavaScript that starts one on pin 2 and one on pin 4 with `pwmWrite()` and goes on
+to its next setting when the check holds PA6: a `--wait pwm` that fails while there
+is none and returns when the script starts; the two rows of the table and the
+pins' word; the timers' numbers in `status --json` for four settings, each worked
+out beforehand from the firmware's arithmetic (1 kHz at 50 % and 10 kHz at 30 %,
+440 Hz at 25 % and 5 Hz at 50 %, where the firmware changes LPTIM2 to its 32768 Hz
+clock, 100 Hz at 10 % with a prescaler in both timers, and 0 % and 100 %, which are
+a low and a high pin); 3V3 held to a pin that has a PWM; what the script's own
+`isPwmSupported()` and `isPwmRunning()` say; and the record, which has no line for
+a PWM's edges. It passes on the official 1.5.1,
+the official dev build, Momentum, Unleashed and RogueMaster (81 checks). Then, where
+`ufbt` is there with this firmware's SDK (the official 1.5.1; skipped otherwise),
+three apps of its own. `scripts/adc_check_app` measures with `furi_hal_adc` and logs each
 number with what the firmware's own `furi_hal_adc_convert_*` makes of it: the chip's
 reference, temperature sensor and battery pin, then the six pins of the firmware's
 `gpio_pins` table, each twice, all of it with the reference at 2.048 V and 64 samples
 for a result and again at 2.5 V with one; and one pin as the app's own output, high
 and low, and as an input with a pull-up and a pull-down. The check wants every
-number, each of which it works out from the voltage. And `scripts/gpio_check_app`:
+number, each of which it works out from the voltage. `scripts/pwm_check_app` makes
+the PWMs that the firmware's own two calls never make, with the registers set from
+the app: the other polarity on both timers, LPTIM2 with a prescaler, TIM1 in PWM
+mode 2, pin 2 as an open-drain output of the timer (held low from outside it is low,
+and a PWM again with 3V3 on it), a timer that runs with its pin given away, and a
+pin that is still the timer's after the timer was stopped (`unknown`, as before).
+And `scripts/gpio_check_app`:
 inputs with an interrupt on PA4 (both
 edges), PC0 (its fall), PC1 (its rise) and PB2, and PA7 as an open-drain output. The
 table and `status --json` have each pin's edges. A pin held low and high is one
@@ -1096,7 +1125,7 @@ turns PC0's off and on again, and none arrives or is kept while it is off; PA7 i
 while the app pulls it low, also with 3V3 held to it, high when let go of, and read
 as low by the firmware while it is held low from outside; a record has PA7's six
 levels in their order; and the NFC, whose chip has PB2's interrupt line, reads a tag
-afterwards (93 checks then).
+afterwards (110 checks then).
 The window's pins are in `scripts/gui_check.py`: a click on pin 2 and Hold it high
 (the window has it high with a wire on it, and the launcher's `gpio PA7` from outside
 says `high`), pin 3 held low, the GPIO menu's lines, Let go of all pins, the clicks
@@ -1107,7 +1136,10 @@ held and let go of, and the file read back after End the record has both changes
 I2C bus is there with a sensor and an EEPROM on it: the GPIO menu's line for the bus
 and the one for each device in `i2c`'s words, the two pins' tips, the sensor's
 temperature set through the menu's dialog (the launcher's `i2c` from outside has it
-after), and one line in the console for the firmware's scan of 128 addresses. A
+after), and one line in the console for the firmware's scan of 128 addresses. A script's
+PWM on pin 2: the pin lit for a quarter of its width at 25 %, the words under the
+pointer and in the GPIO menu, one line in the console when the PWM begins and one
+when it ends, and none for a change of its numbers in between. A
 record of the bus begun from the GPIO menu: the status bar counts a scan's 128
 addresses, the menu has the two that answered, and the file read back after End
 the record of the I2C bus has the 128 calls. A record that a shell began shows in

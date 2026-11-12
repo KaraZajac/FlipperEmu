@@ -302,7 +302,17 @@ struct WB55LptimState {
     bool running, oneshot;
     int64_t start_ns;            /* counter == 0 at this time */
     uint32_t stopped_cnt;
+    /* the SoC's: the timer's clock in Hz, as RCC_CCIPR picks it (none: LSE) */
+    uint32_t (*clock_hz)(void *opaque);
+    void *clock_opaque;
+    /* the board's: after every register write and after reset */
+    void (*changed)(void *opaque);
+    void *changed_opaque;
 };
+/* the output as a PWM, if it is one: the timer's clock in Hz, what the
+ * prescaler divides it by, and a period and its high part in ticks */
+bool wb55_lptim_pwm(WB55LptimState *s, uint32_t *clock, uint32_t *divider,
+                    uint32_t *period, uint32_t *high);
 
 /* ----------------------------------------------------------------- SPI */
 #define TYPE_WB55_SPI "stm32wb55-spi"

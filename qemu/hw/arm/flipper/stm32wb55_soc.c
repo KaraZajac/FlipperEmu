@@ -150,6 +150,37 @@ static bool soc_tim1_dma_ready(void *opaque)
 }
 
 /*
+ * A low-power timer's clock in Hz.  RCC_CCIPR picks it: LPTIM1SEL in bits
+ * 19:18, LPTIM2SEL in 21:20; 00 PCLK1 (HCLK by CFGR.PPRE1), 01 LSI, 10 HSI16,
+ * 11 LSE.  (Whether the picked oscillator is on is not looked at.)
+ */
+static uint32_t soc_lptim_clock(WB55SocState *s, int shift)
+{
+    uint32_t ppre1 = (s->rcc.regs[0x08 / 4] >> 8) & 7;
+
+    switch ((s->rcc.regs[0x88 / 4] >> shift) & 3) {
+    case 0:
+        return clock_get_hz(s->rcc.hclk) >> (ppre1 < 4 ? 0 : ppre1 - 3);
+    case 1:
+        return 32000;
+    case 2:
+        return 16000000;
+    default:
+        return 32768;
+    }
+}
+
+static uint32_t soc_lptim1_clock(void *opaque)
+{
+    return soc_lptim_clock(opaque, 18);
+}
+
+static uint32_t soc_lptim2_clock(void *opaque)
+{
+    return soc_lptim_clock(opaque, 20);
+}
+
+/*
  * VREF+, the ADC's reference, in mV.  It is the output of the chip's
  * reference buffer while that is on: 2.048 V, or 2.5 V with VREFBUF_CSR.VRS.
  * A Flipper has nothing else on the pin, and the firmware converts with the
@@ -433,6 +464,9 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
     s->rcc.rtc = DEVICE(&s->rtc);
 
     /* ---- timers */
+    s->lptim[0].clock_hz = soc_lptim1_clock;
+    s->lptim[1].clock_hz = soc_lptim2_clock;
+    s->lptim[0].clock_opaque = s->lptim[1].clock_opaque = s;
     soc_map(SYS_BUS_DEVICE(&s->lptim[0]), 0x40007C00, errp);
     soc_map(SYS_BUS_DEVICE(&s->lptim[1]), 0x40009400, errp);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->lptim[0]), 0, NVIC(WB55_IRQ_LPTIM1));

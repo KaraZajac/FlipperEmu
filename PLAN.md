@@ -87,6 +87,11 @@ NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
         of every interrupt handler takes it. A cache for parts of a page in QEMU's TLB
         would make every handler faster, which matters where microseconds do
         (BRINGUP_LOG 94)
+  - ☐ A CLI command that waits takes a whole host core: a script in `delay()`, the
+        firmware's `log` command with nothing to print. The CPU is in the idle task
+        then (`prvGetExpectedIdleTime`), which does not go to sleep while such a
+        command runs; an idle desktop on USB is a quarter of a core. Why is not known
+        (seen 2026-11-12, BRINGUP_LOG 124)
 - ☑ IR: receive (TIM2 input capture + virtual receiver; 14 protocols, raw, .ir files;
       decoded by the Infrared app and `ir rx`) and transmit capture (TIM1 with its
       repetition counter, two DMA channels on TIM1_UP; every transmission →
@@ -430,7 +435,26 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         64 on those three, 55 on the dev build (BRINGUP_LOG 116)
   - ☐ More on that bus: the C app on the other firmwares, each with its own
         SDK
-  - ☐ What other peripherals put on a pin: PWM, SPI devices on the header
+  - ☐ What other peripherals put on a pin: SPI devices on the header
+  - ☐ A PWM's edges in the pins' record (`gpio record` has `x` for a pin with a
+        PWM, and `gpio watch` no line); other timers' outputs on the header's
+        pins than the firmware's two
+  - ☑ PWM on a pin (2026-11-12): the two outputs of the firmware's
+        `furi_hal_pwm`, pin 2 (PA7, TIM1) and pin 4 (PA4, LPTIM2), are on the
+        header as what they are: `gpio` has such a pin as `pwm`, with the timer,
+        the frequency and the part of the time that the pin is high, worked out
+        from the timer's registers (no edges are made). `gpio PIN --wait pwm`,
+        the numbers in `status --json`, a line in `status`; in the window the
+        pin is lit for that part of its width. The low-power timers have the
+        clock that RCC picks for them now (LPTIM2's PWM runs from 64 MHz), and
+        one that runs with no interrupt on costs nothing. In `gpio_check.py`: a
+        script in the firmware's JavaScript on all five firmwares, and an app of
+        the check's own (`scripts/pwm_check_app`, the official 1.5.1) for what
+        the firmware's calls never set: the other polarity, PWM mode 2, a
+        prescaler in LPTIM2, an open-drain pin, a timer without its pin;
+        110 checks there, 81 on the other four; `gui_check.py` 60. The duty
+        rules are the reference manual's, not measured on a real Flipper
+        (BRINGUP_LOG 124)
   - ☑ A voltage for the ADC (2026-11-12): `gpio PA7 1.25V` holds a voltage to one
         of the six pins that the firmware's ADC has as inputs, and the firmware
         measures it. An ADC model in place of a stand-in that gave one number and

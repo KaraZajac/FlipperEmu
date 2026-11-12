@@ -7,12 +7,21 @@ for each of those, "NUMBER:PIN:MODE:PULL:LEVEL:HELD":
 
     2:PA7:out:none:1:free 3:PA6:in:up:0:low ... 13:PB6:af7:up:?:- ...
 
+(LEVEL is 0, 1, z: nothing holds the pin, p: a timer's PWM is on it, or ?:
+another peripheral's signal, which the emulator does not keep as a level)
+
 (an input that the firmware has an interrupt for is "in+r", "in+f" or
 "in+rf": when it rises, when it falls, both) and takes "PA6=1", "PA6=0" and
 "PA6=z" to hold a pin from outside, as a wire to 3V3 or to GND would, and to
 let go of it.  "PA6=1250mV" holds a voltage between those to it, which is
 "1250mV" as what is held: six of the pins are inputs of the MCU's ADC, and
 the machine's `header-adc` has what the firmware converted there (parse_adc).
+
+Two of the pins are the PWM outputs that the firmware's furi_hal_pwm has,
+each a timer's.  The machine's `header-pwm` has them,
+"NAME:PIN:STATE:CLOCK:DIVIDER:PERIOD:HIGH" (parse_pwm):
+
+    TIM1:2:on:64000000:1:64000:32000 LPTIM2:4:off:0:0:0:0
 
 The machine's `header-record` is a file that gets every change of a pin's
 level with its time, a VCD file as logic analyzers' programs read (Record).
@@ -62,20 +71,78 @@ RATES = (110, 300, 600, 1200, 2400, 4800, 9600, 14400, 19200, 28800, 31250,
          921600, 1000000, 1500000, 2000000, 3000000)
 
 
-def parse(text):
+def parse_pwm(text):
+    """The header's PWM outputs (the machine's `header-pwm`), each a dict:
+    the "timer" whose output it is (TIM1), its pin's "number" on the header,
+    is it "on" (the timer makes a PWM, and the pin is in the timer's
+    alternate function), and then, 0 while it is off: the timer's "clock" in
+    Hz, what its prescaler divides that by ("divider"), and a "period" and
+    its "high" part in ticks of the divided clock.  From those, None while it
+    is off: the frequency in Hz ("hz") and the percent of the time for which
+    the pin is high ("duty")."""
+    outputs = []
+    for word in text.split():
+        timer, number, state, clock, divider, period, high = word.split(":")
+        clock, divider, period, high = (int(n) for n in (clock, divider,
+                                                         period, high))
+        on = state == "on"
+        if state not in ("on", "off") or (on and not (
+                clock > 0 and divider > 0 and period >= high >= 0 < period)):
+            raise ValueError(word)
+        outputs.append({
+            "timer": timer, "number": int(number), "on": on, "clock": clock,
+            "divider": divider, "period": period, "high": high,
+            "hz": clock / (divider * period) if on else None,
+            "duty": 100 * high / period if on else None})
+    return outputs
+
+
+def hertz(hz):
+    """A frequency in words, to four digits: 440 Hz, 9.998 kHz, 1 kHz"""
+    hz = float(f"{hz:.4g}")     # (999.98 Hz is 1 kHz, and not 1000 Hz)
+    for unit, size in (("MHz", 1e6), ("kHz", 1e3)):
+        if hz >= size:
+            return f"{hz / size:.4g} {unit}"
+    return f"{hz:.4g} Hz"
+
+
+def pwm_text(pwm):
+    """A PWM on a pin, in words"""
+    return (f"PWM from {pwm['timer']}: {hertz(pwm['hz'])}, high "
+            f"{pwm['duty']:.4g} % of the time")
+
+
+def level_text(p):
+    """A pin's level, as a sentence about the pin goes on: "is high", or
+    "has a PWM from TIM1: 1 kHz, high 50 % of the time" for a PWM"""
+    if p["level"] == "pwm":
+        return "has a " + pwm_text(p["pwm"])
+    return f"is {p['level']}"
+
+
+def parse(text, pwm=None):
     """The header's signal pins in their order on it, each a dict: its
     "number" there, the MCU's "pin" (PA7), the "label" on the case, what the
     firmware has it as ("mode": input, output, alternate or analog;
     "function": which alternate one; "open_drain"; "pull": up, down or None;
     "interrupt": the edges of an input that it has an interrupt for, rising,
     falling, both or None), its "level" (high, low, floating: nothing holds
-    it, or unknown: a peripheral's signal, which the emulator does not keep
-    as a level), and what the outside holds on it ("held": high, low or None;
-    "held_mv": at how many mV, 3300 for high and 0 for low, and a voltage
-    between them is high or low as a level too; "holdable": may it), and
-    which input of the ADC it is ("adc": its number there, or None)."""
+    it, pwm: a timer's PWM is on it, or unknown: another peripheral's signal,
+    which the emulator does not keep as a level), and what the outside holds
+    on it ("held": high, low or None; "held_mv": at how many mV, 3300 for
+    high and 0 for low, and a voltage between them is high or low as a level
+    too; "holdable": may it), which input of the ADC it is ("adc": its number
+    there, or None), and the PWM that a timer has on it ("pwm": None, or what
+    parse_pwm has for it; one that is high all of the time or none of it is
+    a level, high or low).
+
+    pwm: the machine's `header-pwm`, as text (not given: no pin's PWM is
+    known, and such a pin's level is unknown)."""
     pins = []
     inputs = {number: channel for channel, number in ADC_PINS.items()}
+    outputs = {o["number"]: {k: v for k, v in o.items()
+                             if k not in ("number", "on")}
+               for o in parse_pwm(pwm or "") if o["on"]}
     for word in text.split():
         number, pin, mode, pull, level, held = word.split(":")
         mode, _, edges = mode.partition("+")
@@ -92,11 +159,14 @@ def parse(text):
             "pull": None if pull == "none" else pull,
             "interrupt": {"r": "rising", "f": "falling",
                           "rf": "both"}.get(edges),
-            "level": {"0": "low", "1": "high", "z": "floating"}.get(level, "unknown"),
+            "level": {"0": "low", "1": "high", "z": "floating",
+                      "p": "pwm" if int(number) in outputs else "unknown"
+                      }.get(level, "unknown"),
             "held": None if mv is None else "high" if mv >= HIGH_MV else "low",
             "held_mv": mv,
             "holdable": held != "-",
-            "adc": inputs.get(int(number))})
+            "adc": inputs.get(int(number)),
+            "pwm": outputs.get(int(number))})
     return pins
 
 
@@ -482,9 +552,11 @@ def i2c_hint(bus):
 
 
 def overruled(p):
-    """Is something held to a pin that the firmware drives both ways?  On
-    hardware the two would fight; here the firmware's level is the pin's."""
-    return bool(p["held"]) and p["mode"] == "output" and not p["open_drain"]
+    """Is something held to a pin that the firmware drives both ways, itself
+    or with a timer's PWM?  On hardware the two would fight; here the
+    firmware's level is the pin's."""
+    return bool(p["held"]) and not p["open_drain"] and (
+        p["mode"] == "output" or bool(p.get("pwm")))
 
 
 LEVELS = {"0": "low", "1": "high", "z": "floating", "x": "unknown"}
@@ -567,5 +639,7 @@ def summary(pins):
     """The header in one line: the pins that something is on"""
     parts = [f"{p['pin']} is an output, {p['level']}" for p in pins
              if p["mode"] == "output" and p["holdable"]]
+    parts += [f"{p['pin']} has a PWM ({hertz(p['pwm']['hz'])}, high "
+              f"{p['pwm']['duty']:.4g} %)" for p in pins if p.get("pwm")]
     parts += [f"{p['pin']} is held {held_word(p)}" for p in pins if p["held"]]
     return "; ".join(parts) or "none of its pins is an output, none is held"

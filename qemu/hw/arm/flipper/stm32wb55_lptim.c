@@ -1,5 +1,8 @@
 /*
- * STM32WB55 low-power timer (RM0434 chapter 30), clocked from LSE (32768 Hz)
+ * STM32WB55 low-power timer (RM0434 chapter 30)
+ *
+ * Its clock is the one RCC_CCIPR picks for it (the SoC tells: PCLK1, LSI,
+ * HSI16 or LSE), divided by CFGR.PRESC.
  *
  * LPTIM1 is the firmware's tickless-idle wakeup timer
  * (targets/f7/furi_hal/furi_hal_idle_timer.h): ENABLE, poll until enabled,
@@ -7,6 +10,13 @@
  * waking it reads CNT, checks CMPM && ARRM, and stops the timer with an RCC
  * bus reset (APB1RSTR1.LPTIM1RST) - no LPTIM1 ISR is ever installed, so the
  * reset must drop the interrupt line, which device reset does here.
+ *
+ * LPTIM2 is one of the firmware's two PWM outputs (furi_hal_pwm.c): it runs
+ * on and on from PCLK1, 64 MHz, with no interrupt.  So the counter is worked
+ * out from the time when somebody asks, and a QEMU timer is set for the next
+ * compare or reload only while one of the two has its interrupt on: a PWM
+ * costs nothing while it runs.  What is on the output is not kept as a level;
+ * wb55_lptim_pwm() tells the board the period and the high part.
  *
  * Copyright (c) 2026, Kara Zajac
  * SPDX-License-Identifier: BSD-3-Clause
@@ -26,11 +36,25 @@
 #define CR_CNTSTRT (1u << 2)
 #define CR_COUNTRST (1u << 3)
 
+#define CFGR_WAVE   (1u << 20)
+#define CFGR_WAVPOL (1u << 21)
+
 #define LSE_HZ 32768
+
+static uint32_t lptim_clock(WB55LptimState *s)
+{
+    return s->clock_hz ? s->clock_hz(s->clock_opaque) : LSE_HZ;
+}
 
 static uint32_t lptim_hz(WB55LptimState *s)
 {
-    return LSE_HZ >> ((s->cfgr >> 9) & 7);
+    return MAX(lptim_clock(s) >> ((s->cfgr >> 9) & 7), 1);
+}
+
+/* is an interrupt on that the counter can raise? */
+static bool lptim_wanted(WB55LptimState *s)
+{
+    return s->ier & (ISR_CMPM | ISR_ARRM);
 }
 
 static uint64_t lptim_ticks(WB55LptimState *s, int64_t now)
@@ -57,7 +81,7 @@ static uint32_t lptim_period(WB55LptimState *s)
 
 static void lptim_schedule(WB55LptimState *s)
 {
-    if (!s->running) {
+    if (!s->running || !lptim_wanted(s)) {
         timer_del(s->timer);
         return;
     }
@@ -179,10 +203,39 @@ static uint64_t wb55_lptim_read(void *opaque, hwaddr addr, unsigned size)
     case 0x10: return s->cr & CR_ENABLE;
     case 0x14: return s->cmp;
     case 0x18: return s->arr;
-    case 0x1C: return lptim_cnt(s);
+    case 0x1C:
+        if (s->running && !lptim_wanted(s)) {
+            lptim_timer_cb(s);          /* (a single run may be over) */
+        }
+        return lptim_cnt(s);
     case 0x20: return s->or_;
     }
     return 0;
+}
+
+/*
+ * The output as a PWM: it is one while the counter runs on and on (CNTSTRT)
+ * and CFGR.WAVE is 0.  A period is the counter's way from 0 to ARR, ARR + 1
+ * ticks.  The output is set when the counter is past CMP and reset when it
+ * is at 0 again (RM0434 30.4.10), so it is high for ARR - CMP ticks; with
+ * the polarity turned (CFGR.WAVPOL) for the other CMP + 1.
+ */
+bool wb55_lptim_pwm(WB55LptimState *s, uint32_t *clock, uint32_t *divider,
+                    uint32_t *period, uint32_t *high)
+{
+    uint32_t cmp = s->cmp & 0xFFFF, arr = s->arr & 0xFFFF;
+
+    if (!s->running || s->oneshot || (s->cfgr & CFGR_WAVE)) {
+        return false;
+    }
+    *clock = lptim_clock(s);
+    *divider = 1u << ((s->cfgr >> 9) & 7);
+    *period = arr + 1;
+    *high = cmp < arr ? arr - cmp : 0;
+    if (s->cfgr & CFGR_WAVPOL) {
+        *high = *period - *high;
+    }
+    return true;
 }
 
 static void wb55_lptim_write(void *opaque, hwaddr addr, uint64_t val64,
@@ -197,6 +250,9 @@ static void wb55_lptim_write(void *opaque, hwaddr addr, uint64_t val64,
         break;
     case 0x08:
         s->ier = val & 0x7F;
+        if (s->running) {
+            lptim_timer_cb(s);          /* flags to date; the timer set or not */
+        }
         break;
     case 0x0C:
         s->cfgr = val;
@@ -238,6 +294,9 @@ static void wb55_lptim_write(void *opaque, hwaddr addr, uint64_t val64,
                       addr);
     }
     lptim_update_irq(s);
+    if (s->changed) {
+        s->changed(s->changed_opaque);
+    }
 }
 
 static const MemoryRegionOps wb55_lptim_ops = {
@@ -260,6 +319,9 @@ static void wb55_lptim_reset_hold(Object *obj, ResetType type)
     s->stopped_cnt = 0;
     timer_del(s->timer);
     qemu_set_irq(s->irq, 0);
+    if (s->changed) {
+        s->changed(s->changed_opaque);
+    }
 }
 
 static void wb55_lptim_init(Object *obj)
