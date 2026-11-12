@@ -86,12 +86,20 @@ NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
         whole main stack and the idle task's stack in such pages, so every stack access
         of every interrupt handler takes it. A cache for parts of a page in QEMU's TLB
         would make every handler faster, which matters where microseconds do
-        (BRINGUP_LOG 94)
-  - ☐ A CLI command that waits takes a whole host core: a script in `delay()`, the
-        firmware's `log` command with nothing to print. The CPU is in the idle task
-        then (`prvGetExpectedIdleTime`), which does not go to sleep while such a
-        command runs; an idle desktop on USB is a quarter of a core. Why is not known
-        (seen 2026-11-12, BRINGUP_LOG 124)
+        (BRINGUP_LOG 94). Looked at again on 2026-11-12, and not changed: for an idle
+        Flipper that cache is worth 5 or 6 of the 24 points at most (19 % with the MPU
+        switched off), and there is no shortcut to it. An entry that is kept for such
+        a page must not carry QEMU's invalid flag, since `tlb_flush_page()` and the
+        dirty tracking pass over entries that do: it needs a state of its own, which
+        the slow path and every probe have to know (BRINGUP_LOG 129)
+  - ☑ Explained, and nothing to change (2026-11-12): a CLI command that waits takes a
+        whole host core (a script in `delay()`, the firmware's `log` command with
+        nothing to print). It is the firmware's own. The shell waits for a command's
+        thread in `furi_thread_join()`, which looks every 2 ticks, and FreeRTOS's idle
+        task goes to sleep only when nothing is due for 4. So the idle task never
+        reaches its WFI while a command runs: a real Flipper's CPU stays awake then as
+        well (by the official source; not measured on one), and an emulated CPU that
+        is awake is a host core (BRINGUP_LOG 129)
 - ☑ IR: receive (TIM2 input capture + virtual receiver; 14 protocols, raw, .ir files;
       decoded by the Infrared app and `ir rx`) and transmit capture (TIM1 with its
       repetition counter, two DMA channels on TIM1_UP; every transmission →

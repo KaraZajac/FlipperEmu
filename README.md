@@ -1474,7 +1474,10 @@ cable" screen until the cable is pulled.
 With `--usb` (the default) the virtual cable is plugged in, so the Flipper shows
 charging. As on hardware, a Flipper on USB never enters deep sleep: expect about a
 quarter of a host core while idle, against 5 % with `--usb none` or the cable pulled
-(`./flipperemu usb unplug`), and 7 % for a firmware that has halted.
+(`./flipperemu usb unplug`), and 7 % for a firmware that has halted. A CLI command that
+waits (`log`, a script in `delay()`) takes a whole core for as long as it runs: the
+firmware's shell looks every 2 ms whether the command has ended, and the Flipper's CPU
+does not sleep between two such looks.
 
 ### The GPIO header
 

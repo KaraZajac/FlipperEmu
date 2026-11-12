@@ -104,6 +104,19 @@ writes its TLB entry again (`TLB_INVALID_MASK` in `tlb_set_page_full()`). The ma
 is 1 KiB and exactly such a page (`_stack_size` and `_stack_end` in the firmware's
 linker script), and the idle task's 512 bytes lie in their guard's page: every stack
 access of an interrupt handler and of the idle task goes that way (BRINGUP_LOG 94).
+With the MPU switched off the same Flipper takes 19 % of a core, so 5 or 6 points are
+the most that a cache for parts of a page can give an idle one. It is not a small
+change. QEMU's page flush and its dirty tracking pass over entries that carry the
+invalid flag, so an entry that is kept needs a flag of its own, which the slow path
+and every probe have to know (BRINGUP_LOG 129).
+
+A firmware that does not reach its WFI takes a whole host core: nothing counts
+instructions, and an emulated CPU that is awake runs as fast as the host lets it. One
+case is the firmware's own. While a CLI command runs (`log` with nothing to print, a
+script in `delay()`), the shell waits for the command's thread in `furi_thread_join()`,
+which looks every 2 ticks, and FreeRTOS's idle task sleeps only when nothing is due for
+4 (`configEXPECTED_IDLE_TIME_BEFORE_SLEEP`). The idle task goes round its loop until
+the command ends; by the source, a real Flipper's does the same.
 
 ## Interrupts: EXTI and SYSCFG
 

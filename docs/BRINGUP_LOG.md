@@ -3068,6 +3068,90 @@ big lock, entry 92).
       root; a certificate that is the signing key's; a real Flipper to
       compare with.
 
+129. **A waiting CLI command's host core, and the idle cost once more.** Two
+    open items of the plan, looked at in a fixed time. One has its answer;
+    the other has its ceiling and the reason why there is no short way.
+    Nothing in the emulator changed. Official 1.5.1 on its desktop,
+    headless, the cable in.
+    - The command that waits (entry 124). While `log` waits with nothing
+      to print the emulator takes 101.6 % of a core, and 23.4 % after it.
+      Under gdb, both times it was stopped: the next task is due 2 ticks
+      after `xTickCount` (7075 at 7073) and the idle task is running, in
+      `prvGetExpectedIdleTime`. The task that is due is the shell, and on
+      its stack are `furi_thread_join`, `cli_shell_execute_command` and
+      `cli_command_log`.
+    - That is the firmware's own. The shell runs a command in a thread of
+      its own, unless the command asks for the shell's, and waits for it
+      (`lib/toolbox/cli/shell/cli_shell.c`), and `furi_thread_join()`
+      waits by looking: `furi_delay_tick(2)` until
+      the thread has stopped (`furi/core/thread.c`). FreeRTOS's idle task
+      calls the sleep only when nothing is due for 4 ticks
+      (`configEXPECTED_IDLE_TIME_BEFORE_SLEEP`), so with a task due every
+      2 it goes round its loop and never reaches the WFI. By the source
+      a real Flipper's CPU is awake for as long as well (not measured on
+      one). The emulator counts no instructions: a CPU that is awake runs
+      as fast as the host lets it, which is a host core. Entry 30's dead
+      end ("with a CLI session open the idle task spins") was this.
+    - Not there: the same look at the other firmwares, whose source is not
+      here.
+    - The idle cost on USB (entry 94), by the scheduler's own numbers
+      (`/proc/PID/task/*/schedstat`, 10 s): the main loop 7.1 % of a core
+      in 1006 runs a second, 71 µs a run; the vCPU's thread 18.6 % in
+      1140 runs, 163 µs a run. Between runs it was 23 to 26 % in all.
+    - The ceiling of a cache for parts of a page: the same Flipper with
+      the MPU switched off (`-global cortex-m4-arm-cpu.has-mpu=off`; it
+      boots and its CLI answers) takes 18.7 to 19.0 %, the vCPU's thread
+      11.8 to 12.0 % against 17.5 to 18.6 %. So 5 or 6 points of 24, with
+      a cache that costs nothing. That switch is a measurement and not a
+      way to run a firmware: its stack guards and its guard at address 0
+      are gone with it.
+    - 3000 samples of each thread (eu-stack). The vCPU's is awake in
+      16.6 %; of those 43 % are in `mmu_lookup` (37 % `tlb_fill_align`,
+      26 % `tlb_set_page_full`), 12 % in translated code, 10 % entering an
+      exception, 8 % looking up the next block and 8 % in
+      `cpu_io_recompile`. The main loop is outside `ppoll` in 3.9 %: a
+      third of that are the timers (SysTick's, which raises the interrupt
+      and wakes the vCPU's thread), a quarter glib's prepare, a sixth its
+      check. Nothing stands out there: it is what a turn of QEMU's main
+      loop costs, a thousand times a second.
+    - Where the slow path is taken: a breakpoint on
+      `arm_cpu_tlb_fill_align` in the emulator itself, 4000 hits. All of
+      them in the page at 0x2002fc00, at 0x2002ffa0 to 0x2002ffdc, 2002
+      stores and 1998 loads: the main stack, 18 accesses to a pass of
+      the handler. (Under that breakpoint a tick is always due, so this
+      is the handlers' side alone.) The model's regions agree with entry 94:
+      region 1 is 32 bytes at 0x2002fc00 with MSP at 0x2002ffe0, region 2
+      32 bytes at 0x20001dc0 with PSP at 0x20001f58.
+    - Why there is no short way. The plain idea: when the MPU model gives
+      the answer the page's entry was made with, keep the entry and skip
+      `tlb_set_page_full()`, which is most of the path. But such an entry
+      carries `TLB_INVALID_MASK`, and QEMU counts on never trusting those:
+      `tlb_flush_entry_mask_locked()` does not match them (a watchpoint
+      set on the page would not be seen), and
+      `tlb_reset_dirty_range_locked()` passes over them (a write to a
+      page that holds translated code would not throw the code away, and
+      the firmware runs its apps from RAM). A sound cache keeps the entry
+      valid, sends every access to the slow path with a flag of its own,
+      and asks the MPU model there; the probes (`probe_access_internal`,
+      the code fetch, the atomic helpers) have to know that flag too. That
+      is the change of entry 94, still not small, and still in the plan.
+    - Seen on the way: `cpu_io_recompile` runs with no instruction
+      counting as well. QEMU 11 allows a device register access only in
+      the last instruction of a block (`can_do_io`, set by the
+      translator for every block), so an access in the middle goes back,
+      looks up its block in a tree, and runs again as a block of one
+      instruction: every time, since the first block stays as it is. 8 %
+      of the vCPU's waking time here. Which accesses they are was not
+      looked at.
+    - What the firmware runs in a second (`log exec,nochain,int` through
+      the monitor, which slows it): 997 ticks and 210 thread switches;
+      most blocks are the desktop's drawing (`u8g2_DrawHVLine` 29 %,
+      `canvas_draw_u8g2_bitmap_int` 19 %); a tick with nothing else is 22
+      blocks; the idle task's loop runs once a tick. On an idle desktop
+      it does not spin.
+    - This host has no perf and no strace: `schedstat`, eu-stack, a
+      breakpoint and the monitor's log did it.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
