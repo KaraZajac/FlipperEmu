@@ -407,14 +407,22 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         window knew of it only with its next command. The machine says it now:
         `halted` on the panel link, and a line in the terminal of a headless `run`
         (2026-11-11, BRINGUP_LOG 93)
+- ☑ The setup script, run again (2026-11-11): on a tree that had patch 0008 it took
+      0007 for missing (0008 builds on it in the same file), applied it a second
+      time, in part, and stopped. It now takes the patches out of a copy of the
+      files, the last one first, to know what a tree has; tries what it is to apply
+      on a copy; and names a tree that was damaged that way, with the way out.
+      `scripts/setup_check.py`: 28 checks on stand-in trees, nothing built
+      (BRINGUP_LOG 113)
 
 ## M6: research tooling ☐
 - ☐ Snapshot workflow (`savevm` on qcow2 images; boot once, jump straight to an app)
 - ☐ TCG plugin for coverage/trace of firmware or a single FAP
 - ☐ Fuzzing harness (AFL++/libafl QEMU mode) for parsers in the firmware
-- ☐ Upstream the five QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:
-      register reads without the big lock under TCG, 2026-11-10); consider upstreaming
-      the machine
+- ☐ Upstream the nine QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:
+      register reads without the big lock under TCG, 2026-11-10; 0006 to 0009: a
+      chardev's log file, the UART's reception, a byte no receiver took, an EEPROM's
+      file, 2026-11-11); consider upstreaming the machine
 
 ## Non-goals (for now)
 - Running ST's radio stack on an emulated CPU2 (closed, encrypted binary)

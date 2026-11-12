@@ -2,7 +2,7 @@
 
 FlipperEmu is QEMU 11.1.3 plus an overlay directory, `qemu/hw/arm/flipper/`, which
 `scripts/setup_qemu.sh` symlinks into the QEMU tree as `hw/arm/flipper` and hooks into the
-arm build with one `subdir()` and one Kconfig `source`. Five small patches to upstream
+arm build with one `subdir()` and one Kconfig `source`. Nine small patches to upstream
 QEMU live in `qemu/patches/` (its README lists them; BRINGUP_LOG.md has how each was
 found). Nothing else in QEMU is modified.
 

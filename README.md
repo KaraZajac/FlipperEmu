@@ -792,6 +792,12 @@ scripts/enclave_check.py                 # the AES peripheral against published 
 scripts/enclave_check.py -f FIRMWARE     # and the enclave through the firmware (four boots, under a minute)
 ```
 
+And for the setup itself, `scripts/setup_check.py`: what `scripts/setup_qemu.sh` makes
+of a source tree that has all, some or none of the patches in `qemu/patches`, and
+whether the tree here has them all (28 checks in ten seconds; it builds nothing and
+starts no emulator). A tree with a `.rej` file in it is one that the script, as it was
+until 2026-11-11, patched twice: the script says so now, and how to start over.
+
 ### qFlipper, lab.flipper.net and other PC tools (USB/IP)
 
 ```sh

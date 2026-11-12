@@ -2156,6 +2156,40 @@ big lock, entry 92).
       that. `scripts/i2c_check.py` has one more (38 and one skipped; 34 and two
       skipped on the official dev build).
 
+113. **The setup script applied a patch twice (`scripts/setup_qemu.sh`).** Found
+    while looking whether the tree here had all nine patches: asked by itself
+    (`patch -R --dry-run`), 0007 did not come out of it, though the tree's files
+    were the tarball's with the nine patches, byte for byte.
+    - 0008 builds on 0007 in the same file (`hw/char/stm32l4x5_usart.c`). Lines
+      that 0007 added are no longer as it left them, so it does not come out
+      while 0008 is in. The script asked each patch that way, and applied what
+      did not come out.
+    - On a tree with 0008 it therefore applied 0007 again: two of its 21 hunks
+      went in a second time, the other 19 were refused, `.rej` and `.orig` files
+      were left, and the script stopped before the build. A checkout that ran
+      the script between 0008 and 0009 met that with 0009 (the README said "once
+      more" for it); every other one would have with the next patch.
+    - Now the patches are taken out of a copy of the files they touch, the last
+      one first. What does not come out there is what the tree lacks.
+    - Those are tried on a second copy before the tree is touched. A patch that
+      does not fit leaves nothing of itself in the tree, and nothing of the
+      patches before it in the series.
+    - A tree that the script damaged is known by the `.rej` beside a patched
+      file. The script names the file and the folder and says to remove the
+      folder and run again (the tarball is beside it: extract, nine patches,
+      build, about 6 min). It does not try to mend the tree.
+    - The patches come before the machine is hooked into `hw/arm/meson.build`
+      and `Kconfig` now, so a refusal changes nothing at all.
+    - `scripts/setup_check.py` runs the script itself on stand-in trees: the
+      patched files alone, from the tarball, and a `ninja` that prints its
+      arguments. A new tree; a second and a third run; a tree from before each
+      patch; a tree that lacks one patch (0007 has none: 0008 does not fit
+      without it); the damaged tree, which the check makes the way the script
+      did; a file that is not this QEMU's; and the tree here. 28 checks in ten
+      seconds, and a patch that is added to `qemu/patches` is in them. 14 of
+      them fail on the script as it was.
+    - The tree here was whole all along, so the emulator was not built again.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

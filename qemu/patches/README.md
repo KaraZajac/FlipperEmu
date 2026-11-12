@@ -1,7 +1,7 @@
 # Fixes to upstream QEMU
 
-`scripts/setup_qemu.sh` applies these to the QEMU 11.1.3 source tree once (it checks
-whether each patch is already applied, so a later run adds only the new ones, then
+`scripts/setup_qemu.sh` applies these to the QEMU 11.1.3 source tree once (it finds
+out which of them the tree has, so a later run adds only the new ones, then
 builds). Each patch header explains the bug, how it showed up with the Flipper firmware,
 and the fix. All are small and self-contained, written to be suitable for upstream
 submission. 0005 is less a bug than a limit: the machine builds and runs without it, and
@@ -15,6 +15,25 @@ firmware's expansion service never sees a module call).
 by QEMU unless the EEPROM's size is a multiple of 512 bytes.
 A source tree that was set up before a patch came (0006 to 0009: 2026-11-11) gets it
 from one more run of that script.
+
+How the script finds out what a tree has: it takes the patches out of a copy of the
+files they touch, the last one first, and what does not come out there is what the tree
+lacks. Asking each patch by itself is not enough: 0008 builds on 0007 in the same file,
+so 0007 alone no longer comes out of a whole tree. What is to be applied is tried on a
+second copy first, so a patch that does not fit leaves the tree as it was.
+
+**Until 2026-11-11 the script did ask each patch by itself**, and a run on a tree that
+had 0008 applied 0007 a second time, in part, and stopped before the build. Such a
+tree has `hw/char/stm32l4x5_usart.c.rej` in it. The script names it and does not try
+to mend it: remove `third_party/qemu-11.1.3` and run the script again (it extracts the
+tarball beside it, applies every patch and builds, about 6 min).
+
+`scripts/setup_check.py` checks the script on stand-in trees (the patched files alone,
+from the tarball; nothing is built): a new tree, a second and a third run, a tree from
+before each patch, a tree that lacks one patch, the damaged tree, a file that is not
+this QEMU's, and last that the tree here has every patch and nothing else in those
+files. 28 checks in ten seconds. A patch that is added to this folder is in them
+without a change to the check.
 
 | patch | QEMU file | bug |
 |---|---|---|

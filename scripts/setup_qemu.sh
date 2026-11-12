@@ -46,22 +46,69 @@ if [[ ! -d "$SRC" ]]; then
     tar -C "$TP" -xf "$TARBALL"
 fi
 
+# --- fixes to upstream QEMU (applied once; see each patch header) ----------
+# Which of them does the tree have?  A patch that a later one builds on in the
+# same file (0007 under 0008) no longer comes out by itself, so asking each
+# patch alone takes it for missing and applies it a second time.  They are
+# taken out of a copy of the files they touch instead, the last one first:
+# what does not come out there is what the tree still lacks.
+start_over() {                                      # $1: what is wrong
+    {
+        echo ">> $1"
+        echo "   $SRC"
+        echo "   is not as this script leaves it, and was not changed now. Remove"
+        echo "   that folder and run this script again: it extracts the tarball"
+        echo "   beside it, applies every patch and builds (about 6 min)."
+    } >&2
+    exit 1
+}
+patches=()
+for p in "$ROOT"/qemu/patches/*.patch; do
+    [[ -e "$p" ]] && patches+=("$p")
+done
+if ((${#patches[@]})); then
+    copy="$(mktemp -d)"                             # two copies: out/ and in/
+    trap 'rm -rf "$copy"' EXIT
+    while read -r f; do
+        # the rejects of a patch that did not fit: this script as it was until
+        # 2026-11-11 left them when it was run on a tree that had 0008
+        [[ -e "$SRC/$f.rej" ]] &&
+            start_over "$f.rej: a patch was applied to that file in part."
+        [[ -e "$SRC/$f" ]] || continue
+        for c in out in; do
+            mkdir -p "$copy/$c/$(dirname "$f")"
+            cp "$SRC/$f" "$copy/$c/$f"
+        done
+    done < <(sed -n 's|^+++ b/\([^[:space:]]*\).*|\1|p' "${patches[@]}" | sort -u)
+    todo=()
+    for ((i = ${#patches[@]} - 1; i >= 0; i--)); do
+        p="${patches[i]}"
+        if patch -d "$copy/out" -p1 -R -s -f --dry-run < "$p" >/dev/null 2>&1; then
+            patch -d "$copy/out" -p1 -R -s -f < "$p" >/dev/null
+        else
+            todo=("$p" ${todo[@]+"${todo[@]}"})
+        fi
+    done
+    # what is to be applied goes into the other copy first: a patch that does
+    # not fit must not leave the tree with half of itself, or of the series
+    for p in ${todo[@]+"${todo[@]}"}; do
+        patch -d "$copy/in" -p1 -s -f < "$p" >/dev/null 2>&1 ||
+            start_over "$(basename "$p") is not in the tree and does not fit it."
+    done
+    for p in ${todo[@]+"${todo[@]}"}; do
+        echo ">> applying $(basename "$p")"
+        patch -d "$SRC" -p1 -s -f < "$p"
+    done
+    rm -rf "$copy"
+    trap - EXIT
+fi
+
 # --- overlay: symlink our sources and hook them into the arm build ---------
 ln -sfn "$ROOT/qemu/hw/arm/flipper" "$SRC/hw/arm/flipper"
 grep -q "subdir('flipper')" "$SRC/hw/arm/meson.build" ||
     sed -i "s/^hw_common_arch += {'arm': arm_common_ss}/subdir('flipper')\n\n&/" "$SRC/hw/arm/meson.build"
 grep -q "source flipper/Kconfig" "$SRC/hw/arm/Kconfig" ||
     printf '\nsource flipper/Kconfig\n' >> "$SRC/hw/arm/Kconfig"
-
-# --- fixes to upstream QEMU (applied once; see each patch header) ----------
-for p in "$ROOT"/qemu/patches/*.patch; do
-    [[ -e "$p" ]] || continue
-    if patch -d "$SRC" -p1 -R --dry-run -s -f < "$p" >/dev/null 2>&1; then
-        continue                                    # already applied
-    fi
-    echo ">> applying $(basename "$p")"
-    patch -d "$SRC" -p1 -s -f < "$p"
-done
 
 if [[ ! -f "$BUILD/build.ninja" ]]; then
     echo ">> configuring"
