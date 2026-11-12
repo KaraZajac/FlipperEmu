@@ -595,13 +595,31 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       (BRINGUP_LOG 113)
 
 ## M6: research tooling ☐
-- ☐ Snapshot workflow (`savevm` on qcow2 images; boot once, jump straight to an app)
+- ☐ Snapshots (boot once, save, and be back at that moment later). By QEMU's migration
+      to a file, not `savevm`: the launcher's tools read and write the card's raw image,
+      and a qcow2 image would shut them out. In four parts:
+    - ☑ The first try and what stood in the way (2026-11-12). A save works as it is
+          (`stop`, `migrate file:…`: 6 ms, 1.2 MB, RAM and flash in it) and holds
+          QEMU's own models alone: none of this project's models had a saved state. A
+          load ended QEMU in an assertion of its SD card model (patch 0011). With the
+          patch the state loads, and the firmware then stops with `furi_check failed`
+          and starts again: its chip's registers are at their reset values
+          (BRINGUP_LOG 130)
+    - ☐ The chip's models save their state (clocks, timers, DMA, RTC, USB and the
+          rest), until a saved desktop answers the CLI after a load
+    - ☐ The board's models (display, power chips, LED driver, radios, RFID, iButton,
+          infrared). The rule: what is held to the Flipper (a card, a tag, a key) is
+          held to it again after a load; a signal that was in the air at the moment of
+          the save ends there
+    - ☐ A `snapshot` command in the launcher (the state, a copy of the card, the
+          run's arguments), a check for it, the docs
 - ☐ TCG plugin for coverage/trace of firmware or a single FAP
 - ☐ Fuzzing harness (AFL++/libafl QEMU mode) for parsers in the firmware
-- ☐ Upstream the nine QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:
+- ☐ Upstream the eleven QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:
       register reads without the big lock under TCG, 2026-11-10; 0006 to 0009: a
       chardev's log file, the UART's reception, a byte no receiver took, an EEPROM's
-      file, 2026-11-11); consider upstreaming the machine
+      file, 2026-11-11; 0010 and 0011: Winbond's read-ID commands, the load of a saved
+      state with an SD card on SPI, 2026-11-12); consider upstreaming the machine
 
 ## Non-goals (for now)
 - Running ST's radio stack on an emulated CPU2 (closed, encrypted binary)

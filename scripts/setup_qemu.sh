@@ -95,9 +95,11 @@ if ((${#patches[@]})); then
         patch -d "$copy/in" -p1 -s -f < "$p" >/dev/null 2>&1 ||
             start_over "$(basename "$p") is not in the tree and does not fit it."
     done
+    # (no backup of a file whose patch went in some lines from where it says:
+    # a tree that lacks an earlier patch to a file and has a later one)
     for p in ${todo[@]+"${todo[@]}"}; do
         echo ">> applying $(basename "$p")"
-        patch -d "$SRC" -p1 -s -f < "$p"
+        patch -d "$SRC" -p1 -s -f --no-backup-if-mismatch < "$p"
     done
     rm -rf "$copy"
     trap - EXIT

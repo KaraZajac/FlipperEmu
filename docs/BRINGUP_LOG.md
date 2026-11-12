@@ -3152,6 +3152,56 @@ big lock, entry 92).
     - This host has no perf and no strace: `schedstat`, eu-stack, a
       breakpoint and the monitor's log did it.
 
+130. **A saved machine state, the first try.** Snapshots were a line in the
+    plan (`savevm` on qcow2 images) and nothing had been tried. One try in a
+    fixed time, to see what stands in the way. Official 1.5.1 on its
+    desktop, headless.
+    - The way: QEMU's migration to a file, not `savevm`. `savevm` wants a
+      qcow2 image to put the state in, and the launcher's tools read and
+      write the card's image as it is (raw FAT). A state file beside a copy
+      of the card does the same and leaves the images alone.
+    - A save works as it is. `stop`, then `migrate file:PATH` through the
+      monitor: done in 6 ms, 1199249 bytes. The RAM in it is 1.29 MiB:
+      the megabyte of flash (it is a RAM region to QEMU), the SRAMs and
+      the info region. `cont` lets the machine go on.
+    - What the file holds, by QEMU's `scripts/analyze-migration.py`: the
+      CPU, the NVIC, SysTick, the six GPIO ports, the two UARTs (patch
+      0007's fields are in their state already), the two I2C buses, the
+      SD card with its SPI front, four OR gates. All of them QEMU's own
+      models. None of the models in `qemu/hw/arm/flipper` (some 35
+      devices in 20500 lines) had a `VMStateDescription`: a device
+      without one is left out without a word.
+    - The load (`-incoming file:PATH` on the same command line) ended
+      QEMU itself: `hw/sd/sd.c:409: sd_ocr_powerup: Assertion
+      '!FIELD_EX32(sd->ocr, OCR, CARD_POWER_UP)' failed`. The SD model's
+      `pre_load` powers the card up, for a state that has no OCR part,
+      and the function it calls asserts that the card is not powered up.
+      A card in SPI mode is: `sd_set_ocr()` does it at reset, since such
+      a card has no power-up delay. So no state at all can be loaded
+      into a machine with an SD card on SPI. Patch 0011: power the card
+      up in `pre_load` only when it is not powered up already.
+    - With the patch the state loads (`info migrate`: completed) and the
+      machine waits, paused. After `cont` the firmware stops with
+      `furi_check failed` and starts again. That is as it must be: its
+      RAM says the clocks, the timers and the rest are set up, and the
+      chip's registers are at their reset values.
+    - The setup script and two patches to one file that are not
+      neighbours. 0003 and 0011 both change `hw/sd/sd.c`, 1200 lines
+      apart. A tree that has 0011 and lacks 0003 gets 0003 three lines
+      from where its header says, and GNU patch keeps a backup of a
+      file whose patch went in with an offset (`sd.c.orig`), which the
+      check takes for a change to the tree. The script applies with
+      `--no-backup-if-mismatch` now. And the check's own case "a tree
+      where the last patch does not fit" cut a file short that 0003
+      changes too, so the script named 0003, rightly: the check expects
+      the first patch that touches the file. 32 checks.
+    - What follows from it, in four parts: this one; the chip's models
+      (a saved desktop that answers the CLI after a load); the board's
+      models; a `snapshot` command with a check. One rule for the board:
+      what is held to the Flipper (a card, a tag, a key) is held to it
+      again after a load, and a signal that was in the air at the
+      moment of the save ends there.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

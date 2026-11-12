@@ -1,0 +1,39 @@
+From: FlipperEmu
+Subject: [PATCH] sd: load a saved state into a card in SPI mode
+
+sd_vmstate_pre_load() powers the card up before its state is loaded,
+for a state that has no OCR subsection (the card was powered up when it
+was saved). It does so with sd_ocr_powerup(), which asserts that the
+card is not powered up yet.
+
+A card in SPI mode is: sd_set_ocr() calls sd_ocr_powerup() for it at
+reset, since such a card has no power-up delay that the host could
+see. The machine's reset comes before the incoming state, so the load
+of any saved state into a machine with an SD card on SPI ends in
+
+  hw/sd/sd.c:409: sd_ocr_powerup: Assertion
+  `!FIELD_EX32(sd->ocr, OCR, CARD_POWER_UP)' failed.
+
+Power the card up in pre_load only when it is not powered up already.
+
+Seen with the Flipper Zero machine, whose SD card is on SPI2:
+"migrate file:..." wrote a state, and no QEMU started with
+"-incoming file:..." got as far as reading it.
+
+Signed-off-by: FlipperEmu
+---
+--- a/hw/sd/sd.c
++++ b/hw/sd/sd.c
+@@ -1067,8 +1067,11 @@
+     /* If the OCR state is not included (prior versions, or not
+      * needed), then the OCR must be set as powered up. If the OCR state
+      * is included, this will be replaced by the state restore.
++     * A card in SPI mode is powered up by its reset already.
+      */
+-    sd_ocr_powerup(sd);
++    if (!FIELD_EX32(sd->ocr, OCR, CARD_POWER_UP)) {
++        sd_ocr_powerup(sd);
++    }
+ 
+     return 0;
+ }

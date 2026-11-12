@@ -183,15 +183,18 @@ def main():
               "part" in out and "Remove" in out and str(s.src) in out, out)
         check("a tree it damaged that way: not changed", s.digest() == before)
 
-        # the last patch's file cut short: the ones before it fit, it does not
+        # the last patch's file cut short: the ones before it fit, it does
+        # not (nor does an earlier one to that file, which is named then)
         s = Stand(work, "other", [])
-        cut = s.src / touched(PATCHES[-1])[0]
-        cut.write_text("".join(cut.read_text().splitlines(True)[:5]))
+        cut = touched(PATCHES[-1])[0]
+        first = next(p for p in PATCHES if cut in touched(p))
+        (s.src / cut).write_text(
+            "".join((s.src / cut).read_text().splitlines(True)[:5]))
         before = s.digest()
         code, applied, built, out = s.run()
-        check(f"a tree where {every[-1]} does not fit (its file is not this "
-              "QEMU's): exit 1, that patch named, no build",
-              code == 1 and not built and f"{PATCHES[-1].name} is not in the "
+        check(f"a tree where {number(first)} does not fit (its file is not "
+              "this QEMU's): exit 1, that patch named, no build",
+              code == 1 and not built and f"{first.name} is not in the "
               "tree and does not fit it" in out, out)
         check("that tree: not changed, also not by the patches that would "
               "have fitted", not applied and s.digest() == before, out)
