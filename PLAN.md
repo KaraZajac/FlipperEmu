@@ -365,10 +365,20 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         says what the firmware's calls came to (one line for a scan, none for
         each read of an app that reads every second); `i2c --json` for a
         program; `gui_check.py` is 50 checks, `i2c_check.py` 38 (BRINGUP_LOG 112)
-  - ☐ More on that bus: a record of the transfers (who was called, what was
-        written and read), and with it a word on an address that was not
-        shifted (a call to 0x24 that nobody answers while a device is at 0x48);
-        the C app on the other firmwares, each with its own SDK
+  - ☑ A record of that bus's transfers (2026-11-11): `i2c record FILE` writes
+        a line of text for each START (its time, the address, `w` or `r`, the
+        bytes), `i2c watch [ADDRESS]` prints them as they happen; a call that
+        nobody answers while a device is at twice the address gets a word on
+        the shift (0x24, and a sensor at 0x48: pass `0x48 << 1`), in `i2c` and
+        in the watch. Machine property `header-i2c-record`. `gpio watch` and
+        `i2c watch` end on a script's `kill` as on Ctrl+C. `scripts/i2c_check.py`
+        is 63 checks (60 on the official 1.5.1, 55 on its dev build),
+        `gpio_check.py` 56 (BRINGUP_LOG 114)
+  - ☐ More on that bus: the record in the window's GPIO menu, and the word on
+        the shift in the window's console; a repeated START and a refused byte
+        from a firmware (the record's `+` and `!` were not seen: an app of the
+        check's own with `furi_hal_i2c_tx_ext`); the C app on the other
+        firmwares, each with its own SDK
   - ☐ What other peripherals put on a pin: PWM, SPI devices on the header; a
         voltage for the ADC
   - ☐ An interrupt on a held pin and an open-drain output (untried: they need an

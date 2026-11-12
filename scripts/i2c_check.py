@@ -18,21 +18,39 @@ is refused: a temperature out of the sensor's range, an address with nothing
 at it, a value the device has not, one that is fixed while it runs.  `i2c
 --json` has the bus and every device's values for a program.
 
+`i2c record FILE` writes every transfer to a text file, a line for each
+START: the scan again, and the file has its 128 calls in their order, the two
+that were answered, and what was on the bus; the record's own count is the
+file's.  `i2c watch 0x50` shows the one call of a scan that goes there, as it
+happens, and leaves no record behind; nor does a watch that a script ends
+with `kill`.  What is said wrongly is refused.  And
+the word on an address that was not shifted (a call to 0x24 that nobody
+answers while a sensor is at 0x48) is said for that call and for no other.
+A line with a mark that no firmware here makes (no STOP before the next
+START, a byte the device refused, a record that ended inside a transfer) is
+read as it is written; the machine's writing of those is not checked.
+
 Where the firmware's JS has an i2c module (Momentum, Unleashed, RogueMaster;
 the official firmware's has none, and that part is skipped), the firmware runs
 examples/i2c/sensor.js: it reads the temperature that was set, and again
 after another was; the EEPROM counts its runs, in the device's file as soon
-as written, and on after a reset.
+as written, and on after a reset.  A record of one run has every byte the
+script wrote and read; `i2c watch` shows another run as it happens, and a
+script that gives the firmware 0x48 as it is: the call to 0x24, and the word
+on it, which `i2c` has too.
 
 Where `ufbt` is on the PATH with an SDK for the firmware that is given (the
 official release, as ufbt comes; skipped otherwise), the same from an app in
 C, examples/i2c/sensor.c: built, put on the Flipper and started by
 `./flipperemu ufbt launch`, it logs the run that the EEPROM counts and the
-temperature, and logs another when the world outside has one; and the
-example's own test.sh passes on a Flipper of its own.
+temperature, and logs another when the world outside has one (a record has
+both readings, byte for byte, and the count it wrote); and the example's own
+test.sh passes on a Flipper of its own.
 
-After a stop an EEPROM of another size is refused while the file is there,
-and a start with the EEPROM alone finds its contents kept, and no sensor.
+A record that nobody ends goes on over a reset of the firmware, and its file
+is whole when the device is stopped.  After the stop an EEPROM of another
+size is refused while the file is there, and a start with the EEPROM alone
+finds its contents kept, and no sensor.
 Exit status 0 = pass.
 """
 import argparse
@@ -41,6 +59,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -49,6 +68,9 @@ import time
 from files_check import ROOT, Bench, CRASH, check, results
 from uart_check import fe, start
 from ufbt_check import log_tail, logged, tool
+
+sys.path.insert(0, str(ROOT / "scripts"))
+import fe_header                                            # noqa: E402
 
 EXAMPLE = ROOT / "examples" / "i2c"
 SENSOR = EXAMPLE / "sensor.js"
@@ -101,6 +123,214 @@ def sensor(b):
     t = re.search(r"temperature: (-?[0-9.]+)", out)
     n = re.search(r"run number: (\d+)", out)
     return (float(t[1]) if t else None, int(n[1]) if n else None), out + err
+
+
+def recorded(path):
+    """A record of the bus, read: (what was on the bus as the file says it,
+    the parts of its transfers as (address, "r" or "w", was it taken, the
+    bytes), the same as fe_header has them, what is wrong with the file)"""
+    try:
+        devices, parts = fe_header.read_i2c_record(path)
+    except (OSError, ValueError) as e:
+        return [], [], [], f"{path}: {e!r}"
+    return devices, [(p["address"], "r" if p["read"] else "w", p["taken"],
+                      p["data"]) for p in parts], parts, ""
+
+
+def count(parts):
+    """What the record itself should have counted for those parts, in the
+    launcher's words"""
+    return fe_header.i2c_recorded({
+        "calls": len(parts), "unanswered": sum(not p["taken"] for p in parts),
+        "written": sum(len(p["data"]) - p["refused"] for p in parts
+                       if not p["read"]),
+        "read": sum(len(p["data"]) for p in parts if p["read"])})
+
+
+def watched(watch, wait=60):
+    """What an `i2c watch` printed, once it ended: (all of it, its lines of
+    the bus without their times, each with one blank between its words)"""
+    try:
+        out = watch.communicate(timeout=wait)[0]
+    except subprocess.TimeoutExpired:
+        watch.kill()
+        out = "(still watching)" + watch.communicate()[0]
+    return out, [" ".join(line.split()[1:]) for line in out.splitlines()
+                 if re.match(r"\s*\d+\.\d{6}\s", line)]
+
+
+def record_checks(b):
+    """Every transfer into a file, and as it happens: the firmware's scan"""
+    rec, other = b.dir / "bus.txt", b.dir / "bus2.txt"
+    code, out, err, _ = fe(b, "i2c", "record")
+    c2, o2, e2, _ = fe(b, "i2c", "record", "stop")
+    check("`i2c record` while none runs: says so; `i2c record stop`: exit "
+          "1, there is none to end",
+          code == 0 and "not being recorded" in out and c2 == 1 and not o2
+          and "nothing is being recorded" in e2, out + err + o2 + e2)
+    code, out, err, _ = fe(b, "i2c", "record", rec)
+    c2, o2, e2, _ = fe(b, "i2c", "record", other)
+    check("`i2c record FILE` begins one; another is refused while it runs, "
+          "with the file it records to, and makes none",
+          code == 0 and str(rec) in out and c2 == 1 and not o2
+          and "already" in e2 and str(rec) in e2 and not other.exists(),
+          out + err + o2 + e2)
+    found, said = scan(b)
+    time.sleep(0.3)
+    _, growing, _, wrong = recorded(rec)        # the file while it records
+    code, out, err, _ = fe(b, "i2c", "record")
+    check("the firmware's scan: its 128 calls are in the file while the "
+          "record runs, and `i2c record` has counted them, 2 answered",
+          found == [0x48, 0x50] and not wrong and len(growing) == 128
+          and code == 0 and "128 addresses called, 2 answered; 0 bytes "
+          "written, 0 read" in out and str(rec) in out,
+          said + wrong + out + err + f"\n{len(growing)} parts")
+    code, out, err, _ = fe(b, "i2c", "record", "stop")
+    devices, short, parts, wrong = recorded(rec)
+    check("`i2c record stop`: says the file and what is in it, which is "
+          "what the file has; the file says what was on the bus",
+          code == 0 and str(rec) in out and not wrong and count(parts) in out
+          and devices == [{"type": "tmp105", "address": 0x48},
+                          {"type": "at24c-eeprom", "address": 0x50}],
+          out + err + wrong + f"\n{count(parts)}\n{devices}")
+    check("the record: every address from 0x00 to 0x7f, once and in that "
+          "order, each called to write, with no byte and a STOP; 0x48 and "
+          "0x50 answered, no other",
+          short == [(at, "w", at in (0x48, 0x50), b"") for at in range(128)]
+          and all(p["stop"] and p["whole"] for p in parts),
+          wrong + "\n".join(map(str, short[:12])))
+    times = [p["ns"] for p in parts]
+    check("... each with its time, none before the one that it follows",
+          times and all(a <= z for a, z in zip(times, times[1:]))
+          and 0 <= times[0] and times[-1] < 120e9, repr(times[:12]))
+    size = rec.stat().st_size if rec.exists() else 0
+
+    # as it happens: of a scan, the one call to the EEPROM
+    watch = b.bg("i2c", "watch", "0x50", "--for", 8)
+    first = watch.stdout.readline()             # it watches now
+    scan(b)
+    out, lines = watched(watch)
+    code, out2, err2, _ = fe(b, "i2c", "record")
+    check("`i2c watch 0x50 --for 8`: of another scan the one call to that "
+          "address, with the device's type; it ends by itself, and leaves "
+          "no record running and no file",
+          watch.returncode == 0 and "the calls to 0x50" in first
+          and "tmp105 at 0x48, at24c-eeprom at 0x50" in first
+          and lines == ["0x50 at24c-eeprom to write: answered, and no byte"]
+          and "1 START in" in out and "not being recorded" in out2
+          and not (b.dir / "i2c-watch.txt").exists(), first + out + out2 + err2)
+    check("... and nothing was written to the record that had ended",
+          size and rec.stat().st_size == size, f"{size}")
+    # a script that has a watch in its background ends it with `kill`
+    watch = b.bg("i2c", "watch")
+    first = watch.stdout.readline()
+    scan(b)
+    time.sleep(1.0)
+    watch.terminate()
+    out, lines = watched(watch)
+    code, out2, err2, _ = fe(b, "i2c", "record")
+    check("`i2c watch` that is ended with `kill`, as a script ends what it "
+          "began: a third scan's 128 calls and their count, exit 0, no "
+          "record left running and no file",
+          watch.returncode == 0 and "Ctrl+C ends it" in first
+          and len(lines) == 128 and "128 STARTs in" in out
+          and "not being recorded" in out2
+          and not (b.dir / "i2c-watch.txt").exists(),
+          f"{watch.returncode}\n{first}{out[-600:]}{out2}{err2}")
+
+    for words, said, what in (
+            (("record", rec, "more"), "a file, or `stop`",
+             "two files to record to"),
+            (("--json", "record"), "not with --json", "a record as JSON"),
+            (("record", "/nowhere-fe/bus.txt"), "cannot write "
+             "/nowhere-fe/bus.txt", "a file that cannot be written"),
+            (("watch", "48"), "as 0x48", "an address that is not in hex"),
+            (("watch", "0x48", "0x50"), "one address, or none",
+             "two addresses to watch"),
+            (("--for", "5"), "--for goes with watch", "--for with no watch"),
+            (("watch", "--for", "0"), "more than 0 seconds",
+             "a watch for no time")):
+        code, out, err, _ = fe(b, "i2c", *words)
+        check(f"`i2c`, {what}: exit 1, said in words",
+              code == 1 and said in err and not out, f"{code}\n{out}{err}")
+    code, out, err, _ = fe(b, "i2c", "record")
+    check("... and none of that began a record",
+          code == 0 and "not being recorded" in out, out + err)
+
+
+def shifted_checks():
+    """The word on an address that was not shifted: when it is said.  (The
+    launcher's own doing, the same on every firmware; a firmware whose JS
+    can call the bus is given such a script further on.)"""
+    on = [{"type": "tmp105", "address": 0x48},
+          {"type": "at24c-eeprom", "address": 0x51}]
+    said = {at: fe_header.i2c_shifted(at, on) for at in range(128)}
+    last = {"address": 0x24, "read": False, "taken": False}
+    bus = {"devices": on, "last": last}
+    check("a call to 0x24 that nobody takes while a sensor is at 0x48: a "
+          "word on the shift, with the address to give the firmware (0x90); "
+          "the same for 0x28 and a device at 0x51; for no other address, "
+          "and not when the call was answered",
+          sorted(at for at in said if said[at]) == [0x24, 0x28]
+          and "nobody is at 0x24. If the tmp105 at 0x48 was meant" in said[0x24]
+          and "0x48 << 1 (0x90)" in said[0x24]
+          and "the at24c-eeprom at 0x51" in said[0x28]
+          and "0x51 << 1 (0xa2)" in said[0x28]
+          and fe_header.i2c_hint(bus) == said[0x24]
+          and fe_header.i2c_hint(dict(bus, last=dict(last, taken=True)))
+          is None and fe_header.i2c_hint(dict(bus, last=None)) is None,
+          repr({at: said[at] for at in said if said[at]}))
+
+
+def marks_checks():
+    """The marks at a record's line that no firmware here has the machine
+    write: its calls end every START with a STOP, and neither device refuses
+    a byte.  How the launcher reads such a line, and what a watch says of
+    it.  (The launcher's own doing; the machine's writing of them is not
+    checked.)"""
+    def read(line):
+        try:
+            part = fe_header.i2c_part(line)
+        except ValueError:
+            return "no line"
+        return part and (part["address"], "wr"[part["read"]], part["taken"],
+                         part["data"].hex(), part["refused"], part["stop"],
+                         part["whole"], part["ns"],
+                         fe_header.i2c_part_text(part))
+    many = " ".join(f"{x:02x}" for x in range(20))
+    got = [read(x) for x in (
+        "0.000000100 0x48 w 00 +",
+        "2.500000000 0x50 w 00 ff!",
+        "3.000000007 0x50 r 01 02 ...",
+        "4.000000000 0x24 r no answer",
+        "5.000000000 0x50 w 00 ff! +",
+        f"6.000000000 0x50 r {many}")]
+    want = [
+        (0x48, "w", True, "00", False, False, True, 100,
+         "wrote 00 (no STOP: the next one follows at once)"),
+        (0x50, "w", True, "00ff", True, True, True, 2500000000,
+         "wrote 00 ff (the last one refused)"),
+        (0x50, "r", True, "0102", False, True, False, 3000000007,
+         "read 01 02 (the record ended there)"),
+        (0x24, "r", False, "", False, True, True, 4000000000,
+         "to read: no answer"),
+        (0x50, "w", True, "00ff", True, False, True, 5000000000,
+         "wrote 00 ff (the last one refused) (no STOP: the next one follows "
+         "at once)"),
+        (0x50, "r", True, many.replace(" ", ""), False, True, True,
+         6000000000, "read " + many[:47] + " ... (20 bytes)")]
+    none = [read(x) for x in ("", "# on the bus: nothing", "   ")]
+    wrong = [read(x) for x in (
+        "hello", "1.0 0x48 w", "1.000000000 48 w", "1.000000000 0x48 x",
+        "1.000000000 0x48 r 17!", "1.000000000 0x24 w no answer 00",
+        "1.000000000 0x48 w 0", "1.000000000 0x48")]
+    check("a record's line with a mark that no firmware here makes (`+`: no "
+          "STOP, `!`: a byte refused, `...`: the record ended there): read "
+          "as it is written and said in words, 20 bytes as 16 and their "
+          "number; a comment is no part, and what is no line of a record "
+          "is not taken for one",
+          got == want and none == [None] * 3 and wrong == ["no line"] * 8,
+          "\n".join(map(repr, got + none + wrong)))
 
 
 def wrong_checks(name):
@@ -243,20 +473,76 @@ def script_checks(b, timeout):
           code == 0 and (t, n) == (30.25, 1) and "sensor done" in said,
           out + err + said)
     code, out, err, _ = fe(b, "i2c", "0x48", "temperature", "-7.5")
+    rec = b.dir / "script.txt"
+    fe(b, "i2c", "record", rec)
     (t, n), said = sensor(b)
+    c2, o2, e2, _ = fe(b, "i2c", "record", "stop")
     check("another temperature from outside, below zero: the script reads "
           "it; its second run", code == 0 and (t, n) == (-7.5, 2),
           out + err + said)
+    _, short, parts, wrong = recorded(rec)
+    check("the record of that run: the sensor asked for (no byte), set to "
+          "12 bits (01 60), its register 0 named and read (f8 80, which is "
+          "-7.5); the EEPROM asked for, its byte 0 read (01) and written "
+          "(00 02); and the record's own count is the file's",
+          c2 == 0 and not wrong and short == [
+              (0x48, "w", True, b""), (0x48, "w", True, b"\x01\x60"),
+              (0x48, "w", True, b"\x00"), (0x48, "r", True, b"\xf8\x80"),
+              (0x50, "w", True, b""), (0x50, "w", True, b"\x00"),
+              (0x50, "r", True, b"\x01"), (0x50, "w", True, b"\x00\x02")]
+          and count(parts) in o2 and "8 addresses called, all answered; 6 "
+          "bytes written, 3 read" in o2,
+          o2 + e2 + wrong + "\n".join(map(str, short)))
     kept = rom.read_bytes()
     check("the EEPROM's file has the count while the device runs, and "
           "nothing else changed",
           kept == b"\x02" + b"\xff" * 255, kept[:16].hex(" "))
     code, out, err, _ = fe(b, "reset")
     c2, o2, e2, _ = fe(b, "wait", "--timeout", timeout)
+    watch = b.bg("i2c", "watch")
+    first = watch.stdout.readline()             # it watches now
     (t, n), said = sensor(b)
     check("after a reset: the third run, and the temperature the world has",
           (code, c2) == (0, 0) and (t, n) == (-7.5, 3),
           out + err + o2 + e2 + said)
+    # a script that gives the firmware the sensor's address as it is
+    plain = b.dir / "plain.js"
+    plain.write_text('let i2c = require("i2c");\n'
+                     'print("there:", i2c.isDeviceReady(0x48, 50));\n')
+    fe(b, "push", plain, "/ext")
+    code, said, err, _ = fe(b, "cli", "--timeout", 60, "js /ext/plain.js")
+    time.sleep(0.3)
+    watch.send_signal(signal.SIGINT)            # as Ctrl+C does
+    out, lines = watched(watch)
+    word = ("nobody is at 0x24. If the tmp105 at 0x48 was meant: the "
+            "firmware takes an address shifted left by one bit, 0x48 << 1 "
+            "(0x90)")
+    check("`i2c watch` meanwhile: that run as it happened, a line for each "
+          "START with the device's type and the bytes; Ctrl+C ends it, and "
+          "it leaves no record running",
+          watch.returncode == 0 and "the header's I2C bus as the firmware "
+          "talks there" in first and "Ctrl+C ends it" in first
+          and lines[:8] == [
+              "0x48 tmp105 to write: answered, and no byte",
+              "0x48 tmp105 wrote 01 60", "0x48 tmp105 wrote 00",
+              "0x48 tmp105 read f8 80",
+              "0x50 at24c-eeprom to write: answered, and no byte",
+              "0x50 at24c-eeprom wrote 00", "0x50 at24c-eeprom read 02",
+              "0x50 at24c-eeprom wrote 00 03"]
+          and "not being recorded" in fe(b, "i2c", "record")[1]
+          and not (b.dir / "i2c-watch.txt").exists(), first + out)
+    after = [x.strip() for x in out.splitlines()]
+    check("a script that gives the firmware 0x48 as it is: nobody answers "
+          "(it called 0x24), and the watch has that call with a word on "
+          "the shift under it",
+          code == 0 and "there: false" in said
+          and lines[8:] == ["0x24 to write: no answer"]
+          and after.count(word) == 1 and "9 STARTs in" in out,
+          said + err + out)
+    code, out, err, _ = fe(b, "i2c")
+    check("... and `i2c` has it for the last call",
+          code == 0 and "the last: 0x24 to write, no answer" in out
+          and f"({word})" in out, out + err)
     return 3
 
 
@@ -290,7 +576,9 @@ def app_checks(b, firmware, runs):
             return None
 
         now = (runs or 0) + 1
+        rec = b.dir / "app.txt"
         fe(b, "i2c", "0x48", "temperature", "21.25")
+        fe(b, "i2c", "record", rec)
         code, text = tool(b, folder, "launch")
         check("`ufbt launch`: the app is built, put on the Flipper and "
               "started; it logs the run that the EEPROM counts, and the "
@@ -310,6 +598,21 @@ def app_checks(b, firmware, runs):
               "count", code == 0 and logged(b, "[FeSensor] left")
               and rom.read_bytes()[:2] == bytes([now, 255]),
               out + err + log_tail(b) + rom.read_bytes()[:16].hex(" "))
+        code, out, err, _ = fe(b, "i2c", "record", "stop")
+        _, short, parts, wrong = recorded(rec)
+        reads = [p[3] for p in short if p[:2] == (0x48, "r")]
+        check("the record of the app's run: the EEPROM's byte 0 read and "
+              "the run's number written there (00 %02x), the sensor set to "
+              "12 bits (01 60), and both temperatures read byte for byte "
+              "(15 40, then ff 80); every call answered" % now,
+              code == 0 and not wrong and count(parts) in out
+              and (0x50, "r", True, bytes([now - 1 or 255])) in short
+              and (0x50, "w", True, bytes([0, now])) in short
+              and (0x48, "w", True, b"\x01\x60") in short
+              and reads and reads[0] == b"\x15\x40"
+              and reads[-1] == b"\xff\x80" and set(reads) ==
+              {b"\x15\x40", b"\xff\x80"} and all(p[2] for p in short),
+              out + err + wrong + "\n".join(map(str, short[:40])))
 
         began = time.time()
         try:
@@ -337,7 +640,27 @@ def again_checks(b, timeout, runs, script, app):
     has counted (None: nothing wrote to it); script, app: what there is to
     read it with"""
     rom = b.dir / "i2c-50.bin"
+    # a record that nobody ends: over a reset, and until the device stops
+    left = b.dir / "left.txt"
+    fe(b, "i2c", "record", left)
+    code, out, err, _ = fe(b, "reset")
+    c2, o2, e2, _ = fe(b, "wait", "--timeout", timeout)
+    found, said = scan(b)
+    c3, o3, e3, _ = fe(b, "i2c", "record")
+    check("a record goes on over a reset of the firmware: the scan after it "
+          "is counted",
+          (code, c2, c3) == (0, 0, 0) and found == [0x48, 0x50]
+          and f"recording the header's I2C bus to {left}: 128 addresses "
+          "called, 2 answered" in o3, out + err + o2 + e2 + said + o3 + e3)
     b.stop()
+    _, short, parts, wrong = recorded(left)
+    check("a record that runs as the device is stopped: its file is whole, "
+          "the scan's 128 calls and no line cut",
+          not wrong and [p[0] for p in short] == list(range(128))
+          and all(p["whole"] and p["stop"] for p in parts)
+          and left.read_bytes().endswith(b"0x7f w no answer\n"),
+          wrong + left.read_text(errors="replace")[-400:]
+          if left.exists() else "no file")
     kept = rom.read_bytes() if rom.exists() else b""
     code, out, err, _ = fe(b, "run", "--headless", "--audio", "none", "--i2c",
                            "eeprom@0x50,rom-size=512", timeout=60)
@@ -405,6 +728,9 @@ def main():
                  said + b.uart_text()[-2000:]):
             bus_checks(b)
             value_checks(b)
+            record_checks(b)
+            shifted_checks()
+            marks_checks()
             runs = script_checks(b, args.timeout)
             ran = app_checks(b, args.firmware, runs)
             again_checks(b, args.timeout, ran or runs, runs is not None,

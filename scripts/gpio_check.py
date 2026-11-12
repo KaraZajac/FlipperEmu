@@ -18,8 +18,9 @@ firmware drives it keeps the firmware's level, and has what is held when it
 is an input again.  What is held stays so over a reset of the firmware.  Then
 the record (`gpio record FILE.vcd`): what the firmware does to PA7 and what
 is held to PA6 are in the file in their order, each with its time, also over
-a reset; `gpio watch` prints changes as they happen; a record of pin 17 while
-the firmware reads a 1-Wire key has both sides of the line.  Last what is
+a reset; `gpio watch` prints changes as they happen, and one that a script
+ends with `kill` leaves no record behind; a record of pin 17 while the
+firmware reads a 1-Wire key has both sides of the line.  Last what is
 refused: the pins with their own use, power pins, pins that are not there,
 levels that are none.  At the end the emulator is stopped while it records,
 and the file has what was recorded.  Exit status 0 = pass.
@@ -337,6 +338,29 @@ def record_checks(b):
           and "2 changes of a pin's level" in out
           and "not being recorded" in out2
           and not (b.dir / "gpio-watch.vcd").exists(), out + said + out2)
+    # a script that has a watch in its background ends it with `kill`
+    watch = b.bg("gpio", "watch", "A7")
+    first = watch.stdout.readline()             # it watches now
+    said = firmware(b, "gpio set PA7 1", "gpio set PA7 0")
+    time.sleep(1.0)
+    watch.terminate()
+    try:
+        out = watch.communicate(timeout=60)[0]
+    except subprocess.TimeoutExpired:
+        watch.kill()
+        out = "(still watching)" + watch.communicate()[0]
+    lines = [" ".join(line.split()[1:]) for line in out.splitlines()
+             if re.match(r"\s*\d+\.\d{6}\s", line)]
+    code, out2, err2, took = fe(b, "gpio", "record")
+    check("`gpio watch A7` that is ended with `kill`, as a script ends what "
+          "it began: the two changes and their count, exit 0, no record "
+          "left running and no file",
+          watch.returncode == 0 and "Ctrl+C ends it" in first
+          and [x.split(" (")[0] for x in lines] == ["PA7 high", "PA7 low"]
+          and "2 changes of a pin's level" in out
+          and "not being recorded" in out2
+          and not (b.dir / "gpio-watch.vcd").exists(),
+          f"{watch.returncode}\n{first}{out}{said}{out2}")
 
     # pin 17, the iButton pin, has two sides: the firmware's, and a key's
     ow = b.dir / "ow.vcd"

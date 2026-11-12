@@ -1141,11 +1141,39 @@ ufbt is not run at all, and `update` sends the package without the stage (BRINGU
   file could back a 256-byte chip: `qemu/patches/0009` has the model compare with
   the size rounded up to a sector. On a QEMU tree without the patch the machine
   runs, and such an EEPROM is refused by QEMU at the start.
+- **A record of its transfers**: the I2C model (`stm32wb55_i2c.c`) has a tap, a
+  function the machine gives it, called at three places: a START with the address
+  byte and whether a device took it (`i2c_start`), each byte written, with whether
+  the device took it, or read (`i2c_fetch` and the write to TXDR), and the end of
+  what the START began, with whether a STOP ended it: a STOP, a START that follows
+  with none, the peripheral switched off (PE=0) or reset. Only I2C3 gets one; I2C1,
+  the Flipper's own bus, has none. `flipper_i2c_tap()` in `flipper_zero.c` writes a
+  line of text for each such part, with the virtual clock at its START, and counts.
+  The machine property `header-i2c-record` begins and ends it: written, a file with
+  its whole path, or `off`; read, `CALLS UNANSWERED WRITTEN READ NS PATH` while one
+  runs and nothing while none does. A transfer takes no time in the model, so a
+  line is whole as soon as it is written; a part that was open when the record
+  ended has ` ...` for its end. The file is flushed with the pins' record, by one
+  timer on the real clock every 50 ms while either runs, and closed when the
+  machine goes. The devices in the file's second line are in the order of their
+  addresses: QEMU's list of a bus's children has the last one made first.
+  `scripts/fe_header.py` reads the file (`read_i2c_record`, a part for each line:
+  time, address, direction, answered, bytes, refused, whole, stop) and says a part
+  in words (`i2c_part_text`) for `i2c watch`, which follows the file as it grows.
+  A watch with no record running begins one of its own in the device's folder
+  (`i2c-watch.txt`) and ends and removes it when it is done.
+- **An address that was not shifted** (`i2c_hint` in `fe_header.py`): a call that
+  nobody took, to an address A while a device is at 2A or 2A+1, is what an app
+  makes that passes a device's address as it is to a function that wants it
+  shifted left. The launcher says so, with the address to pass. It is a guess from
+  the two numbers, said as one ("if the tmp105 at 0x48 was meant").
 - **Not there** on that bus: the two lines as levels (pins 15 and 16 are `unknown`
   on the header while the firmware talks, and the pins' record has no bits of a
-  transfer), the bus's speed (a transfer takes no time), clock stretching, 10-bit
-  addresses, a device put there or taken away while the emulator runs, and a record
-  of the transfers.
+  transfer), the bus's speed (a transfer takes no time, and a record's bytes have
+  the time of their START), clock stretching, 10-bit addresses, and a device put
+  there or taken away while the emulator runs. Not seen from a firmware: the
+  record's `+` (a START after no STOP) and `!` (a byte refused). The model has
+  both, and the firmware's calls that were tried make neither.
 
 ## The front panel (`flipper_panel.c`, `scripts/fe_gui*.py`)
 
@@ -1306,6 +1334,7 @@ the emulated field.
 | `usart.tty`, `usart.sock`, `usart.mark` | (while it runs) the same three for pins 13 and 14: the pty of `--serial pty`, the launcher's own end, the mark of `uart wait --port usart` |
 | `lpuart.tty`, `lpuart.sock`, `lpuart.mark` | (while it runs) that port's pty for a program of the user's, the launcher's own end of it, and how far `uart wait` has read the log |
 | `i2c-NN.bin` | the contents of an EEPROM at address NN of the header's I2C bus (`run --i2c eeprom@0xNN`), as long as the EEPROM; 0xFF throughout when new |
+| `gpio-watch.vcd`, `i2c-watch.txt` | (while `gpio watch` or `i2c watch` runs with no record of the user's) the record that the watch keeps and reads |
 | `firmware.elf` | symbols for gdb (copied when flashing an ELF) |
 | `gdb.sock`, `gdb.init` | (once `./flipperemu gdb` was run) QEMU's gdb stub, and what gdb was told: the ELF, the stub, `scripts/fe_gdb.py` |
 | `gdb-apps/` | (with the stock apps' symbols beside the firmware's ELF) links to the apps' debug ELFs, the stock ones and what was built: the one folder the firmware's gdb script looks in |

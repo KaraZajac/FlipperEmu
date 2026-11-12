@@ -2190,6 +2190,68 @@ big lock, entry 92).
       them fail on the script as it was.
     - The tree here was whole all along, so the emulator was not built again.
 
+114. **A record of the I2C bus's transfers; a watch that would not end.** `i2c`
+    counted the firmware's calls and had the last one. What an app wrote to a
+    device and what it read back was nowhere.
+    - The I2C model got a tap: the machine gives it a function, and the model
+      calls it at a START (the address, and whether a device took it), for each
+      byte written or read, and at the end of what the START began (a STOP, or a
+      START that follows with none). Only I2C3 has one. The machine writes a line
+      of text for each such part to a file, with the virtual clock at the START:
+      `1.281528054 0x48 w 01 60`. The property `header-i2c-record` begins and
+      ends it, as `header-record` does for the pins, and both files are flushed
+      by the same timer.
+    - Text, and not a VCD as the pins' record is: the model has transfers and no
+      levels, so there are no bits to draw, and a line can be compared with
+      `grep` and `cut` in a test.
+    - `i2c record FILE`, `i2c record stop`, `i2c record` (does one run, and what
+      it has counted), and `i2c watch [ADDRESS] [--for S]`, which follows the
+      file as it grows and has the device's type beside each address. With no
+      record running the watch keeps one of its own and removes it.
+    - The file's second line names what is on the bus. It had the devices in the
+      wrong order, the EEPROM at 0x50 before the sensor at 0x48: QEMU's list of a
+      bus's children has the last one made first. They are written in the order
+      of their addresses now.
+    - Seen in the first record: the script's `writeRead` and C's
+      `furi_hal_i2c_trx` are a write with its STOP and then a read with its own
+      START, two lines. The firmware makes no repeated START there (it has
+      `furi_hal_i2c_tx_ext` for one, which neither example uses).
+    - The word on an address that was not shifted, left over from entry 112: a
+      call that nobody took, to an address while a device is at twice that or
+      one above, is what an app makes that passes 0x48 where `0x48 << 1` is
+      wanted. `i2c` has it beneath the bus's line, and the watch beneath the
+      call, once for an address and not in a scan, where every address is
+      called. `gpio`, `status` and the window's console do not have it yet.
+    - **The watch that would not end.** The check on five firmwares at once:
+      three passed, and on Unleashed and RogueMaster two checks failed, both of
+      a watch that the check ends with Ctrl+C (SIGINT). Their output had `(still
+      watching)`. Nothing differed between the firmwares. Those two runs had
+      been started as `( … &)` from a shell that was not interactive, and such
+      a shell starts its background jobs with SIGINT ignored; that is inherited,
+      and Python installs its KeyboardInterrupt only where SIGINT is not
+      ignored. The watch never saw the signal.
+    - `gpio watch` had been shipped that way: a test that begins one in its
+      background and ends it with `kill -INT` waits for ever, and with plain
+      `kill` (SIGTERM) the watch went and left its record running in the
+      emulator, with its file. Both watches now take SIGINT and SIGTERM as their
+      end, whatever they inherited (`watch_ends()` in the launcher): the count
+      is said, the record ended, the file removed, exit 0.
+    - `scripts/gpio_check.py` and `scripts/i2c_check.py` each have a watch with
+      no `--for` that is ended with `kill` (SIGTERM). For this entry the five
+      runs of each were started as a script's background jobs on purpose, with
+      SIGINT ignored: the checks that end a watch with Ctrl+C pass there too.
+    - A record goes on over a reset of the firmware (the tap is the machine's,
+      and a reset of I2C3 ends an open line) and is whole when the emulator is
+      stopped under it: both are checks.
+    - Not seen from a firmware: a line with `+` (no STOP before the next START),
+      a byte with `!` (the device refused it) and a line with `...` (the record
+      ended inside a transfer). The check gives the launcher such lines to read,
+      and that is all: the machine's writing of them was not tried.
+    - `scripts/i2c_check.py`: 63 checks and one skipped on Momentum, Unleashed
+      and RogueMaster (the app), 60 and one skipped on the official 1.5.1 (the
+      script), 55 and two skipped on the official dev build.
+      `scripts/gpio_check.py`: 56 on the five.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

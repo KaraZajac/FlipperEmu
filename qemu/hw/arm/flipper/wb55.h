@@ -321,6 +321,16 @@ struct WB55SpiState {
 /* ----------------------------------------------------------------- I2C */
 #define TYPE_WB55_I2C "stm32wb55-i2c"
 OBJECT_DECLARE_SIMPLE_TYPE(WB55I2cState, WB55_I2C)
+/* What happens on a bus, as a board is told it (WB55I2cState.tap).  A part
+ * of a transfer is what lies between a START and the next START or STOP. */
+typedef enum WB55I2cTap {
+    WB55_I2C_TAP_CALL,           /* START and the address byte as it is on
+                                  * the wire (bit 0: to read); ok: taken */
+    WB55_I2C_TAP_BYTE,           /* a byte written (ok: the device took it)
+                                  * or read */
+    WB55_I2C_TAP_END,            /* the part is over; ok: with a STOP (not
+                                  * ok: another START follows) */
+} WB55I2cTap;
 struct WB55I2cState {
     SysBusDevice parent_obj;
     MemoryRegion mmio;
@@ -336,6 +346,11 @@ struct WB55I2cState {
     uint64_t calls, unanswered;  /* addresses called; those nobody took */
     uint8_t last;                /* the last address called, */
     bool last_read, last_taken;  /* to read or to write; and whether taken */
+    /* ... and every part of every transfer, for a board that records them
+     * (NULL: none does) */
+    void (*tap)(void *opaque, WB55I2cTap what, uint8_t value, bool ok);
+    void *tap_opaque;
+    bool tap_open;               /* a part was told of, and not yet its end */
 };
 
 /* ----------------------------------------------------------- DMA/DMAMUX */

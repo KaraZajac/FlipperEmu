@@ -18,6 +18,12 @@ as the firmware has set them up, "NAME:TX:RX:BAUD:FRAME:SENDS:HEARS":
 
     USART1:13:14:230215:8N1:on:edge LPUART1:15:16:0:8N1:off:off
 
+Two more are an I2C bus, the firmware's external one.  The machine's
+`header-i2c` has what is on it and what the firmware called there
+(parse_i2c), and its `header-i2c-record` is a file that gets every transfer:
+a line of text for each part of one, with the address and the bytes
+(i2c_part).
+
 Copyright (c) 2026, Kara Zajac
 SPDX-License-Identifier: BSD-3-Clause
 """
@@ -238,6 +244,133 @@ def i2c_pin(p, bus):
     if bus and p["function"] == I2C_FUNCTION and p["mode"] == "alternate":
         return {bus["sda"]: "SDA", bus["scl"]: "SCL"}.get(p["number"])
     return None
+
+
+def parse_i2c_record(text):
+    """What the machine says of the record of the I2C bus (its
+    `header-i2c-record`, as read), a dict: the addresses called since it
+    began ("calls") and how many of them nobody took ("unanswered"), the
+    bytes "written" and "read", "ns" of the Flipper's time, the "path" of
+    the file; None: none runs"""
+    if not isinstance(text, str) or not text:
+        return None
+    calls, unanswered, written, read, ns, path = text.split(" ", 5)
+    return {"calls": int(calls), "unanswered": int(unanswered),
+            "written": int(written), "read": int(read), "ns": int(ns),
+            "path": path}
+
+
+def i2c_recorded(record):
+    """What a record of the I2C bus has so far, in words"""
+    calls, taken = record["calls"], record["calls"] - record["unanswered"]
+    if not calls:
+        return "no address called"
+    return (f"{calls} address{'' if calls == 1 else 'es'} called, "
+            + ("none" if not taken else "it" if calls == 1 else
+               "all" if taken == calls else str(taken)) + " answered; "
+            f"{record['written']} byte{'' if record['written'] == 1 else 's'}"
+            f" written, {record['read']} read")
+
+
+def i2c_part(line):
+    """A line of a record of the I2C bus (a text file the machine writes): a
+    part of a transfer, which is what lies between a START and the next
+    START or STOP.  A dict: "ns" of the Flipper's time at its START, from
+    where the record began; the "address" called (its seven bits), to "read"
+    or not, was it "taken"; the bytes written or read ("data"; "refused":
+    the device did not take the last one written); "stop": it ended with a
+    STOP (not: the next part's START follows with none); "whole": the record
+    did not end inside it.  None: a line that is no part (a comment, an
+    empty one).  ValueError: no line of such a file."""
+    words = line.split()
+    if not words or words[0].startswith("#"):
+        return None
+    try:
+        s, ns = words[0].split(".")
+        if len(ns) != 9 or len(words[1]) != 4 or words[1][:2] != "0x":
+            raise ValueError
+        part = {"ns": int(s) * 1000000000 + int(ns),
+                "address": int(words[1], 16), "read": "wr".index(words[2]) == 1,
+                "taken": True, "data": b"", "refused": False, "stop": True,
+                "whole": True}
+        rest = words[3:]
+        if rest[:2] == ["no", "answer"]:
+            part["taken"], rest = False, rest[2:]
+        if rest[-1:] == ["+"]:
+            part["stop"], rest = False, rest[:-1]
+        elif rest[-1:] == ["..."]:
+            part["whole"], rest = False, rest[:-1]
+        if rest and rest[-1].endswith("!"):
+            part["refused"], rest[-1] = True, rest[-1][:-1]
+        if any(len(w) != 2 for w in rest) or (rest and not part["taken"]) \
+                or (part["refused"] and part["read"]) or len(words[2]) != 1:
+            raise ValueError
+        part["data"] = bytes(int(w, 16) for w in rest)
+    except (ValueError, IndexError):
+        raise ValueError(line.strip()) from None
+    return part
+
+
+def read_i2c_record(path):
+    """A whole record of the I2C bus: (what was on the bus as it began, as
+    the file says it: each device's "type" and "address"; its parts)"""
+    devices, parts = [], []
+    with open(path, encoding="ascii") as f:
+        for line in f:
+            if line.startswith("# on the bus:"):
+                devices = [{"type": kind, "address": int(at, 16)}
+                           for kind, at in re.findall(r"(\S+) at (0x[0-9a-f]{2})",
+                                                      line)]
+            part = i2c_part(line)
+            if part:
+                parts.append(part)
+    return devices, parts
+
+
+def i2c_part_text(part, most=16):
+    """A part of a transfer in words: what was written or read (of many
+    bytes the first `most`, and how many there were)"""
+    to = "read" if part["read"] else "write"
+    data = part["data"]
+    if not part["taken"]:
+        said = f"to {to}: no answer"
+    elif not data:
+        said = f"to {to}: answered, and no byte"
+    else:
+        shown = data if len(data) <= most else data[:most]
+        said = (("read " if part["read"] else "wrote ") + shown.hex(" ")
+                + (f" ... ({len(data)} bytes)" if len(shown) < len(data)
+                   else ""))
+        if part["refused"]:
+            said += " (the last one refused)"
+    if not part["whole"]:
+        said += " (the record ended there)"
+    elif not part["stop"]:
+        said += " (no STOP: the next one follows at once)"
+    return said
+
+
+def i2c_shifted(address, devices):
+    """A call that nobody took, while a device is at twice that address: the
+    firmware's calls (furi_hal_i2c_*, the JS module's) take the address
+    shifted left by one bit, the bit above the one that says read or write,
+    and an app that gives them 0x48 calls 0x24.  A word on that, or None."""
+    for d in devices:
+        if d["address"] >> 1 == address and d["address"] != address:
+            at = d["address"]
+            return (f"nobody is at 0x{address:02x}. If the {d['type']} at "
+                    f"0x{at:02x} was meant: the firmware takes an address "
+                    f"shifted left by one bit, 0x{at:02x} << 1 "
+                    f"(0x{at << 1:02x})")
+    return None
+
+
+def i2c_hint(bus):
+    """That word for the last call on the bus, as `header-i2c` has it"""
+    last = bus["last"]
+    if not last or last["taken"]:
+        return None
+    return i2c_shifted(last["address"], bus["devices"])
 
 
 def overruled(p):

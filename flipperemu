@@ -35,6 +35,9 @@ you flash stays flashed, settings and files persist across runs.
                                              the I2C bus of its header, where `run
                                              --i2c tmp105@0x48` put a sensor: the
                                              devices' values; set one
+  ./flipperemu i2c record OUT.txt | i2c watch
+                                             every transfer on that bus: the address
+                                             called, the bytes written and read
   ./flipperemu reset                         reboot it, as Left + Back do on a real one
   ./flipperemu pause | continue              time stands still on it, and goes on
   ./flipperemu flash fw.dfu                  just program the flash
@@ -1802,6 +1805,14 @@ def gpio_record(dev, what):
         m.close()
 
 
+def watch_ends():
+    """What ends a watch: Ctrl+C, and the `kill` of a script that started it
+    in its background.  There SIGINT comes ignored and SIGTERM would end us
+    with our record still running: each is a KeyboardInterrupt from here on."""
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, signal.default_int_handler)
+
+
 def gpio_watch(dev, pins, words, seconds):
     """gpio watch [PIN,PIN...]: the header's changes as they happen.  They
     are read from the record: its own, in the device's directory, unless one
@@ -1828,6 +1839,7 @@ def gpio_watch(dev, pins, words, seconds):
     record, since, shown, rest, idle = fe_header.Record(), {}, 0, "", 0.0
     began = time.time()
     try:
+        watch_ends()
         with open(path, encoding="ascii") as f:
             while True:
                 text = f.read()
@@ -2815,12 +2827,176 @@ def cmd_uart(args):
         leave_port(lock)
 
 
+I2C_RECORD_OLD = ("this emulator cannot record its I2C bus: it was started "
+                  "before it could (`stop`, and `run` again)")
+
+
+def i2c_recording(m):
+    """The record of the header's I2C bus that runs
+    (fe_header.parse_i2c_record).  None: none runs.  False: an emulator that
+    cannot record."""
+    text = qom_get(m, "/machine", "header-i2c-record")
+    if not isinstance(text, str):
+        return False
+    return fe_header.parse_i2c_record(text)
+
+
+def set_i2c_record(m, value):
+    err = m.cmd(f"qom-set /machine header-i2c-record {value}").strip()
+    if err:
+        sys.exit("i2c: " + re.sub(r"^Error: (header-i2c-record: )?", "", err))
+
+
+def i2c_record(dev, what):
+    """i2c record FILE: every transfer on the header's I2C bus, into a text
+    file: the address called, the bytes written and read.  i2c record stop:
+    the end of that.  i2c record: does one run?"""
+    if what and "\n" in what:
+        sys.exit("i2c: a file's name in one line")
+    m = open_monitor(dev)
+    try:
+        was = i2c_recording(m)
+        if was is False:
+            sys.exit(f"[{dev.name}] {I2C_RECORD_OLD}")
+        so_far = was and (f"{fe_header.i2c_recorded(was)} in "
+                          f"{was['ns'] / 1e9:.1f} s")
+        if what is None:
+            print(f"[{dev.name}] " + (
+                f"recording the header's I2C bus to {was['path']}: {so_far} "
+                "so far (`i2c record stop` ends it)" if was else
+                "the header's I2C bus is not being recorded "
+                "(i2c record FILE)"))
+            return 0
+        if what.lower() == "stop":
+            if not was:
+                sys.exit("i2c: nothing is being recorded (i2c record FILE)")
+            set_i2c_record(m, "off")
+            print(f"[{dev.name}] the record is {was['path']}: {so_far} of "
+                  "the Flipper's time (a text file, a line for each START)")
+            return 0
+        if was:
+            sys.exit(f"i2c: it records to {was['path']} already (`i2c "
+                     "record stop` ends that)")
+        set_i2c_record(m, os.path.abspath(what))
+        print(f"[{dev.name}] recording the header's I2C bus to {what}: "
+              "every address called, with the bytes written and read (`i2c "
+              "record stop` ends it)")
+        return 0
+    finally:
+        m.close()
+
+
+def i2c_watch(dev, word, seconds):
+    """i2c watch [ADDRESS]: what the firmware does on the header's I2C bus,
+    as it happens.  It is read from the record: its own, in the device's
+    directory, unless one runs already."""
+    only = None
+    if word is not None:
+        if not re.fullmatch(r"0[xX][0-9a-fA-F]{1,2}", word):
+            sys.exit(f"i2c watch {word}: an address is as 0x48 (seven bits, "
+                     "in hex)")
+        only = int(word, 16)
+    m = open_monitor(dev)
+    try:
+        was = i2c_recording(m)
+        if was is False:
+            sys.exit(f"[{dev.name}] {I2C_RECORD_OLD}")
+        bus = read_i2c(m)
+        path = (pathlib.Path(was["path"]) if was
+                else dev.dir / "i2c-watch.txt")
+        if not was:
+            set_i2c_record(m, path)
+    finally:
+        m.close()
+    there = {d["address"]: d["type"] for d in bus["devices"]}
+    wide = max(map(len, there.values()), default=0)
+    t0 = was["ns"] if was else 0        # the record's time as the watch begins
+    print(f"[{dev.name}] " + (
+        f"the calls to 0x{only:02x} on the header's I2C bus"
+        if only is not None else "the header's I2C bus")
+          + " as the firmware talks there (on it: "
+          f"{fe_header.i2c_devices(bus)})"
+          + (f", for {seconds:g} s" if seconds else "; Ctrl+C ends it")
+          + (f" (from the record that runs: {path})" if was else ""),
+          flush=True)
+    shown, rest, idle, before, told = 0, "", 0.0, None, set()
+    began = time.time()
+    try:
+        watch_ends()
+        with open(path, encoding="ascii") as f:
+            while True:
+                text = f.read()
+                if text:
+                    *lines, rest = (rest + text).split("\n")
+                    for line in lines:
+                        part = fe_header.i2c_part(line)
+                        if not part:
+                            continue
+                        at, last, before = part["address"], before, part
+                        if part["ns"] < t0 or only not in (None, at):
+                            continue
+                        print(f"{(part['ns'] - t0) / 1e9:12.6f}  0x{at:02x}  "
+                              + (f"{there.get(at, ''):{wide}}  " if wide else "")
+                              + fe_header.i2c_part_text(part), flush=True)
+                        shown += 1
+                        # (a scan calls every address: no word on each)
+                        hint = None if part["taken"] or at in told or (
+                            last and abs(last["address"] - at) == 1
+                        ) else fe_header.i2c_shifted(at, bus["devices"])
+                        if hint:
+                            told.add(at)
+                            print(f"{'':14}{hint}", flush=True)
+                    idle = 0.0
+                    continue
+                if seconds and time.time() - began >= seconds:
+                    break
+                time.sleep(0.05)
+                idle += 0.05
+                if idle >= 1.0:
+                    idle = 0.0
+                    if not dev.running():
+                        print(f"[{dev.name}] it stopped", flush=True)
+                        break
+    except KeyboardInterrupt:
+        print()
+    finally:
+        if not was:
+            try:
+                m = open_monitor(dev)
+                try:
+                    if i2c_recording(m):
+                        m.cmd("qom-set /machine header-i2c-record off")
+                finally:
+                    m.close()
+            except (SystemExit, OSError):
+                pass                    # the emulator is gone, and its record
+            path.unlink(missing_ok=True)
+    print(f"[{dev.name}] {shown} START{'' if shown == 1 else 's'} in "
+          f"{time.time() - began:.1f} s")
+    return 0
+
+
 def cmd_i2c(args):
     """The I2C bus of a running device's GPIO header: the devices on it with
     their values, and what the firmware called there; a device's values; one
     value (bare, for a script); or set one.  --json: the bus, or a device,
-    for a program."""
+    for a program.  record, watch: every transfer, into a file or as it
+    happens."""
     dev = Device(args.device)
+    word = (args.address or "").lower()
+    if args.seconds is not None and (word != "watch" or args.seconds <= 0):
+        sys.exit("i2c: --for goes with watch, and is more than 0 seconds: "
+                 "i2c watch --for 5")
+    if word in ("record", "watch"):
+        if args.json:
+            sys.exit(f"i2c {word}: not with --json (the record is a text "
+                     "file, a line for each START)")
+        if args.value is not None:
+            sys.exit("i2c record: a file, or `stop`" if word == "record" else
+                     "i2c watch: one address, or none: i2c watch 0x48")
+        if word == "record":
+            return i2c_record(dev, args.prop)
+        return i2c_watch(dev, args.prop, args.seconds)
     if args.json and args.prop is not None:
         sys.exit("i2c --json: the bus, or a device (`i2c --json 0x48`); one "
                  "value comes bare without it (`i2c 0x48 temperature`)")
@@ -2861,6 +3037,9 @@ def cmd_i2c(args):
         if address is None:
             print(f"[{dev.name}] {fe_header.i2c_name(bus)}: "
                   f"{fe_header.i2c_text(bus)}")
+            hint = fe_header.i2c_hint(bus)
+            if hint:
+                print(f"[{dev.name}]   ({hint})")
             for at in there:
                 print(line(at))
             if not there:
@@ -4843,13 +5022,22 @@ def main():
         "after it: set it, as the world around a sensor would.  A "
         "temperature is in °C.  Exit status 1, with the reason in "
         "words: nothing is at that address, the device has no such value, "
-        "or it did not take the new one.")
+        "or it did not take the new one.  `record FILE`: every transfer on "
+        "the bus into a text file, a line for each START with its time, "
+        "the address called and the bytes written or read, until `record "
+        "stop`; `record`: does one run.  `watch [ADDRESS]`: the same as it "
+        "happens, with the device's type beside the address.")
     p.add_argument("address", nargs="?", metavar="ADDRESS",
-                   help="a device on the bus, by its address: 0x48")
+                   help="a device on the bus, by its address: 0x48 (or "
+                        "`record`, `watch`: see above)")
     p.add_argument("prop", nargs="?", metavar="NAME",
-                   help="one of its values: temperature")
+                   help="one of its values: temperature (after `record`: "
+                        "the file, or `stop`; after `watch`: the one "
+                        "address to watch)")
     p.add_argument("value", nargs="?", metavar="VALUE",
                    help="set it to this: 23.5")
+    p.add_argument("--for", dest="seconds", type=float, metavar="S",
+                   help="watch: for so many seconds (not given: until Ctrl+C)")
     p.add_argument("--json", action="store_true",
                    help="for a program: the bus as `status --json` has it, "
                         "each device with its values (a temperature in °C; "

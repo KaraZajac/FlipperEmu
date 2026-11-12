@@ -14,6 +14,10 @@
  *            12 PA13 (SWDIO), 13 PB6 (TX), 14 PB7 (RX), 15 PC1, 16 PC0,
  *            17 PB14 (iButton); /machine "header" shows them and holds them,
  *            "header-record" writes every change of their levels to a file
+ *   I2C3 (header):  SDA PC1 (15), SCL PC0 (16), devices by -device
+ *            TYPE,bus=i2c3,address=N; /machine "header-i2c" says what is
+ *            there and what was called, "header-i2c-record" writes every
+ *            transfer to a file
  *
  * Usage:
  *   qemu-system-arm -M flipper-zero -kernel firmware.elf \
@@ -140,6 +144,13 @@ struct FlipperZeroState {
     int64_t hdr_rec_at;          /* ... and the last time written to it */
     uint64_t hdr_rec_changes;
     QEMUTimer *hdr_rec_flush;    /* what was recorded reaches the file */
+    FILE *i2c_rec;               /* the record of the header's I2C bus (text) */
+    char *i2c_rec_path;
+    int64_t i2c_rec_t0;          /* ... when it began (virtual clock, ns) */
+    bool i2c_rec_part;           /* ... a line is begun; of bytes read */
+    bool i2c_rec_reads;
+    uint64_t i2c_rec_calls, i2c_rec_unanswered;
+    uint64_t i2c_rec_written, i2c_rec_read;     /* bytes */
     Notifier exit_notifier;
 };
 
@@ -635,15 +646,58 @@ static void flipper_header_look(FlipperZeroState *s, int port)
     }
 }
 
+/* (for both records: the pins' and the I2C bus's) */
 static void flipper_header_rec_flush(void *opaque)
 {
     FlipperZeroState *s = opaque;
 
     if (s->hdr_rec) {
         fflush(s->hdr_rec);
+    }
+    if (s->i2c_rec) {
+        fflush(s->i2c_rec);
+    }
+    if (s->hdr_rec || s->i2c_rec) {
         timer_mod(s->hdr_rec_flush,
                   qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + HDR_REC_FLUSH_MS);
     }
+}
+
+/* a record began: what it gets reaches its file within 50 ms */
+static void flipper_header_rec_flushes(FlipperZeroState *s)
+{
+    if (!s->hdr_rec_flush) {
+        s->hdr_rec_flush = timer_new_ms(QEMU_CLOCK_REALTIME,
+                                        flipper_header_rec_flush, s);
+    }
+    timer_mod(s->hdr_rec_flush,
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + HDR_REC_FLUSH_MS);
+}
+
+/* a file for a record, by a property's value: NULL with the reason */
+static FILE *flipper_rec_open(const char *prop, const char *value,
+                              const char *running, Error **errp)
+{
+    FILE *f;
+
+    if (running) {
+        error_setg(errp, "%s: it records to %s already (set it to off to "
+                   "end that)", prop, running);
+        return NULL;
+    }
+    if (value[0] != '/') {
+        error_setg(errp, "%s: a file with its whole path, or off", prop);
+        return NULL;
+    }
+    if (!phase_check(PHASE_MACHINE_INITIALIZED)) {
+        error_setg(errp, "%s: set it on a machine that runs", prop);
+        return NULL;
+    }
+    f = fopen(value, "w");
+    if (!f) {
+        error_setg_errno(errp, errno, "%s: cannot write %s", prop, value);
+    }
+    return f;
 }
 
 static void flipper_header_rec_stop(FlipperZeroState *s)
@@ -660,7 +714,6 @@ static void flipper_header_rec_stop(FlipperZeroState *s)
     }
     fclose(s->hdr_rec);
     s->hdr_rec = NULL;
-    timer_del(s->hdr_rec_flush);
 }
 
 /* "CHANGES NS PATH" while it records (changes written, ns since it began,
@@ -688,24 +741,9 @@ static void flipper_set_header_record(Object *obj, const char *value,
         flipper_header_rec_stop(s);
         return;
     }
-    if (s->hdr_rec) {
-        error_setg(errp, "header-record: it records to %s already (set it "
-                   "to off to end that)", s->hdr_rec_path);
-        return;
-    }
-    if (value[0] != '/') {
-        error_setg(errp, "header-record: a file with its whole path, or "
-                   "off");
-        return;
-    }
-    if (!phase_check(PHASE_MACHINE_INITIALIZED)) {
-        error_setg(errp, "header-record: set it on a machine that runs");
-        return;
-    }
-    f = fopen(value, "w");
+    f = flipper_rec_open("header-record", value,
+                         s->hdr_rec ? s->hdr_rec_path : NULL, errp);
     if (!f) {
-        error_setg_errno(errp, errno, "header-record: cannot write %s",
-                         value);
         return;
     }
     g_free(s->hdr_rec_path);
@@ -729,12 +767,7 @@ static void flipper_set_header_record(Object *obj, const char *value,
     }
     fprintf(f, "$end\n");
     fflush(f);
-    if (!s->hdr_rec_flush) {
-        s->hdr_rec_flush = timer_new_ms(QEMU_CLOCK_REALTIME,
-                                        flipper_header_rec_flush, s);
-    }
-    timer_mod(s->hdr_rec_flush,
-              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + HDR_REC_FLUSH_MS);
+    flipper_header_rec_flushes(s);
 }
 
 /* "NUMBER:PIN:MODE:PULL:LEVEL:HELD" for each pin: MODE in, out, od (an
@@ -865,6 +898,145 @@ static char *flipper_get_header_i2c(Object *obj, Error **errp)
                                I2C_SLAVE(kid->child)->address);
     }
     return g_string_free(out, false);
+}
+
+/*
+ * The record of the header's I2C bus: every part of every transfer (what
+ * lies between a START and the next START or STOP), a line of text each:
+ *
+ *   SECONDS ADDRESS w|r [BYTE...] [no answer] [+|...]
+ *
+ * SECONDS: the virtual clock at the START, from where the record began.
+ * ADDRESS: the seven bits that were called, as 0x48; w or r: to write or to
+ * read.  Then the bytes written or read, two hex digits each, with "!"
+ * after one that the device refused (the transfer ends there).  "no
+ * answer": nobody took the address.  "+": no STOP, the next line's START
+ * follows at once.  "...": the record ended before the part did.  Lines
+ * with "#" first say what the file is and what was on the bus as it began.
+ * A transfer takes no time here, so a line is whole when it is written; a
+ * part that the firmware leaves open (no STOP yet) is in the file when it
+ * ends.
+ */
+static void flipper_i2c_tap(void *opaque, WB55I2cTap what, uint8_t value,
+                            bool ok)
+{
+    FlipperZeroState *s = opaque;
+    FILE *f = s->i2c_rec;
+    int64_t ns;
+
+    if (!f) {
+        return;
+    }
+    switch (what) {
+    case WB55_I2C_TAP_CALL:
+        ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->i2c_rec_t0;
+        fprintf(f, "%" PRId64 ".%09" PRId64 " 0x%02x %c%s",
+                (int64_t)(ns / NANOSECONDS_PER_SECOND),
+                (int64_t)(ns % NANOSECONDS_PER_SECOND),
+                value >> 1, value & 1 ? 'r' : 'w', ok ? "" : " no answer");
+        s->i2c_rec_part = true;
+        s->i2c_rec_reads = value & 1;
+        s->i2c_rec_calls++;
+        s->i2c_rec_unanswered += !ok;
+        break;
+    case WB55_I2C_TAP_BYTE:
+        if (s->i2c_rec_part) {
+            fprintf(f, " %02x%s", value, ok ? "" : "!");
+            if (s->i2c_rec_reads) {
+                s->i2c_rec_read++;
+            } else {
+                s->i2c_rec_written += ok;
+            }
+        }
+        break;
+    case WB55_I2C_TAP_END:
+        if (s->i2c_rec_part) {
+            fputs(ok ? "\n" : " +\n", f);
+            s->i2c_rec_part = false;
+        }
+        break;
+    }
+}
+
+static void flipper_i2c_rec_stop(FlipperZeroState *s)
+{
+    if (!s->i2c_rec) {
+        return;
+    }
+    if (s->i2c_rec_part) {
+        fputs(" ...\n", s->i2c_rec);
+        s->i2c_rec_part = false;
+    }
+    fclose(s->i2c_rec);
+    s->i2c_rec = NULL;
+}
+
+/* "CALLS UNANSWERED WRITTEN READ NS PATH" while it records (addresses
+ * called and how many of them nobody took, bytes written and read, ns since
+ * it began, the file), and nothing while it does not */
+static char *flipper_get_header_i2c_record(Object *obj, Error **errp)
+{
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+
+    if (!s->i2c_rec) {
+        return g_strdup("");
+    }
+    return g_strdup_printf("%" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
+                           " %" PRId64 " %s", s->i2c_rec_calls,
+                           s->i2c_rec_unanswered, s->i2c_rec_written,
+                           s->i2c_rec_read,
+                           qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) -
+                           s->i2c_rec_t0, s->i2c_rec_path);
+}
+
+/* a file to record to, with its whole path; off: the record ends */
+static void flipper_set_header_i2c_record(Object *obj, const char *value,
+                                          Error **errp)
+{
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+    WB55I2cState *i = &s->soc.i2c[1];
+    const char *sep = " ";
+    BusChild *kid;
+    unsigned address;
+    FILE *f;
+
+    if (!strcmp(value, "off")) {
+        flipper_i2c_rec_stop(s);
+        return;
+    }
+    f = flipper_rec_open("header-i2c-record", value,
+                         s->i2c_rec ? s->i2c_rec_path : NULL, errp);
+    if (!f) {
+        return;
+    }
+    g_free(s->i2c_rec_path);
+    s->i2c_rec_path = g_strdup(value);
+    s->i2c_rec_t0 = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    s->i2c_rec_part = false;
+    s->i2c_rec_calls = s->i2c_rec_unanswered = 0;
+    s->i2c_rec_written = s->i2c_rec_read = 0;
+    fprintf(f, "# FlipperEmu: the I2C bus of a Flipper Zero's GPIO header "
+               "(I2C3: SDA pin 15, SCL pin 16)\n# on the bus:");
+    for (address = 0; address < 0x80; address++) {  /* in their order */
+        QTAILQ_FOREACH(kid, &BUS(i->bus)->children, sibling) {
+            if (I2C_SLAVE(kid->child)->address == address) {
+                fprintf(f, "%s%s at 0x%02x", sep,
+                        object_get_typename(OBJECT(kid->child)), address);
+                sep = ", ";
+            }
+        }
+    }
+    fprintf(f, "%s\n"
+               "# a line: the START's time in s, the address called, w or r, "
+               "the bytes written or read\n"
+               "#   no answer: nobody took the address    "
+               "!: the device refused that byte\n"
+               "#   +: no STOP, the next line's START follows    "
+               "...: the record ended there\n",
+            QTAILQ_EMPTY(&BUS(i->bus)->children) ? " nothing" : "");
+    fflush(f);
+    s->i2c_rec = f;
+    flipper_header_rec_flushes(s);
 }
 
 /* "PA7=1", "PA7=0" or "PA7=z" (let go of it); several, with blanks or
@@ -1401,6 +1573,8 @@ static void flipper_zero_init(MachineState *machine)
     s->soc.idr_read = flipper_idr_read;
     s->soc.out_written = flipper_out_written;
     s->soc.gpio_hook_opaque = s;
+    s->soc.i2c[1].tap = flipper_i2c_tap;
+    s->soc.i2c[1].tap_opaque = s;
     s->soc.comp.en_changed = flipper_comp_en;
     s->soc.comp.en_opaque = s;
     s->soc.comp.val_read = flipper_comp_val_read;
@@ -1641,6 +1815,14 @@ static void flipper_zero_instance_init(Object *obj)
         "The header's I2C bus: its name and pins, how many addresses the "
         "firmware called and how many nobody took, the last one, and the "
         "devices on it (-device TYPE,bus=i2c3,address=N)");
+    object_property_add_str(obj, "header-i2c-record",
+                            flipper_get_header_i2c_record,
+                            flipper_set_header_i2c_record);
+    object_property_set_description(obj, "header-i2c-record",
+        "A text file that gets every transfer on the header's I2C bus: the "
+        "address called, the bytes written and read (off: the record ends)."
+        "  Read: calls, those unanswered, bytes written, bytes read, ns, "
+        "the file");
     object_property_add_str(obj, "header-record", flipper_get_header_record,
                             flipper_set_header_record);
     object_property_set_description(obj, "header-record",

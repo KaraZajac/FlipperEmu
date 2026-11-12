@@ -369,7 +369,21 @@ $ ../../flipperemu i2c
   firmware called and those that answered, and has the last one. The `furi_hal_i2c`
   functions take an address as it is on the wire, shifted left by one: `0x48 << 1`.
   An app that passes 0x48 calls 0x24, and the line says so: `the last: 0x24 to
-  write, no answer`.
+  write, no answer`, with a line beneath it that names the sensor at 0x48 and the
+  address to pass (`0x48 << 1 (0x90)`).
+- **What did it send?** `i2c record bus.txt` before the app's run and `i2c record
+  stop` after it: the file has a line for each START, with its time, the address,
+  `w` or `r` and the bytes (`1.281528054 0x48 w 01 60`: the sensor set to 12 bits;
+  `1.284154074 0x48 r 17 80`: 23.5 °C read). A test compares it with what the app
+  should have sent: `grep -v '^#' bus.txt | cut -d' ' -f2-` is the transfers
+  without their times, the same on every run. `0x24 w no answer` is a call to
+  nobody, `hh!` a byte that the device refused, and a `+` at a line's end a
+  transfer that went on with no STOP (a repeated START; the firmware's
+  `furi_hal_i2c_trx` and the JavaScript `writeRead` are a write with its STOP and
+  then a read, two lines with no `+`). `i2c watch` in a second terminal prints the
+  same while the app runs, with the device's type beside each address, and `i2c
+  watch 0x50` only the calls to the EEPROM. In a test's background it is ended with
+  `kill`, and says its count as it would after Ctrl+C.
 - **Another value, for a test:** `i2c 0x48 temperature -40` is a winter that the
   desk does not have; the app's next read has it. `i2c 0x48 temperature` prints the
   value and nothing else. What QEMU's model does not take is refused in words
@@ -1008,8 +1022,8 @@ leave no Flipper running. It passes on the official 1.5.1 with ufbt 0.2.6 and it
 (31 checks). Without `ufbt`, or with an SDK for another API than the firmware's, it
 checks nothing and its exit status is 77.
 
-`scripts/gpio_check.py FIRMWARE` has the firmware's own `gpio` command in the CLI
-on the other side of the pins: the header after a start, a pin the firmware makes an
+`scripts/gpio_check.py FIRMWARE` has the firmware's own `gpio` command in the CLI on
+the other side of the pins: the header after a start, a pin the firmware makes an
 output and sets (as a table, as a word, by its three names, in `status`, and a
 `--wait` that returns when the firmware sets it), a pin held high and low and let go
 of with the firmware's `gpio read` for each, a pin held while the firmware drives it,
@@ -1017,27 +1031,27 @@ what is held over a reset, and what is refused. Then the record: what the firmwa
 does to PA7 and what is held to PA6 are in the file in their order, each with a later
 time; a second record is refused while one runs; `gpio record stop` says the number
 of changes that the file has, and nothing is written after it; `gpio watch` prints
-the two changes the firmware makes while it watches and leaves no record behind; a
-record goes on over a reset; a record of pin 17 while the firmware reads a DS1990A
-has the reset pulse and, right after it, the key's presence pulse; and a record the
-emulator was stopped under is whole. Beneath the pins it wants the two serial ports
-as the firmware starts with them: the log's with a baud rate, its receiver off and
-a call waited for on pin 14, the other one off; and beneath those the I2C bus, with
-no device and no address called. It passes on the official 1.5.1,
-the official dev build, Momentum, Unleashed and RogueMaster (55 checks). It has no
+the two changes the firmware makes while it watches and leaves no record behind, also
+when it has no `--for` and is ended with `kill`, as a script ends what it began in
+its background; a record goes on over a reset; a record of pin 17 while the firmware
+reads a DS1990A has the reset pulse and, right after it, the key's presence pulse;
+and a record the emulator was stopped under is whole. Beneath the pins it wants the
+two serial ports as the firmware starts with them: the log's with a baud rate, its
+receiver off and a call waited for on pin 14, the other one off; and beneath those
+the I2C bus, with no device and no address called. It passes on the official 1.5.1,
+the official dev build, Momentum, Unleashed and RogueMaster (56 checks). It has no
 app of its own: an interrupt on a held pin and an open-drain output were not tried.
-The window's pins
-are in `scripts/gui_check.py`: a click on pin 2 and Hold it high (the window has it
-high with a wire on it, and the launcher's `gpio PA7` from outside says `high`),
-pin 3 held low, the GPIO menu's lines, Let go of all pins, the clicks on 13 and 17
-that hold nothing (the firmware log, the iButton menu), the two serial ports in the
-GPIO menu in `gpio`'s words and on pin 13, a port that opens and closes in the
-console, and a record begun from the GPIO menu: the status bar counts a pin held
-and let go of, and the file read back after End the record has both changes. The
-I2C bus is there with a sensor and an EEPROM on it: the GPIO menu's line for the
-bus and the one for each device in `i2c`'s words, the two pins' tips, the sensor's
-temperature set through the menu's dialog (the launcher's `i2c` from outside has
-it after), and one line in the console for the firmware's scan of 128 addresses.
+The window's pins are in `scripts/gui_check.py`: a click on pin 2 and Hold it high
+(the window has it high with a wire on it, and the launcher's `gpio PA7` from outside
+says `high`), pin 3 held low, the GPIO menu's lines, Let go of all pins, the clicks
+on 13 and 17 that hold nothing (the firmware log, the iButton menu), the two serial
+ports in the GPIO menu in `gpio`'s words and on pin 13, a port that opens and closes
+in the console, and a record begun from the GPIO menu: the status bar counts a pin
+held and let go of, and the file read back after End the record has both changes. The
+I2C bus is there with a sensor and an EEPROM on it: the GPIO menu's line for the bus
+and the one for each device in `i2c`'s words, the two pins' tips, the sensor's
+temperature set through the menu's dialog (the launcher's `i2c` from outside has it
+after), and one line in the console for the firmware's scan of 128 addresses.
 
 `scripts/uart_check.py FIRMWARE` has `examples/uart/echo.js` on the Flipper's side
 of pins 15 and 16: where `uart` says the ports go; a line sent while no app has the
@@ -1075,26 +1089,47 @@ build, Momentum, Unleashed and RogueMaster (79 checks). It has no app in C.
 `scripts/i2c_check.py FIRMWARE` starts a device with a TMP105 at 0x48 and an EEPROM
 at 0x50. Before that, the forms of `--i2c` that are refused, each in words and with
 no device left behind (a type that QEMU has not among them), and `run --i2c help`
-with its list. Then: `i2c` lists both, with the temperature that was given
-at the start and the EEPROM's file, which is new and 0xFF throughout; the
-firmware's scan finds the two addresses and no other, and the bus's line has its
-128 calls, two of them answered and the last one not; `gpio`, `status` and `status
---json` have the bus; a value read bare, a value set, and six things refused with
-the value left as it was; `i2c --json` has the bus, both devices and their values,
-and one device alone; `examples/i2c/sensor.js` reads the temperature that was
-set and counts one in the EEPROM, reads another after that was set from outside,
-the file has the count, and after a reset of the firmware the temperature is still
-as set and the count goes on; `examples/i2c/sensor.c`, built and started by `ufbt
-launch`, logs the run that the EEPROM counts and the temperature that was set, has
-another one within a second of its being set from outside, and leaves the count in
-the file when it is closed; `examples/i2c/test.sh` passes on a Flipper of its own;
-a `run` with another `rom-size` is refused and the file is as it was; and a start
-with the EEPROM alone has no sensor in the scan, in the script or in the app, and
-the count from before. 38 checks on Momentum, Unleashed and RogueMaster, with the
-app's part skipped: the SDK of the ufbt here is for the official 1.5.1. On that
-one it is 38 as well, with the script's part skipped, since the official
-JavaScript has no `i2c` module. On the official dev build it is 34, with both
-skipped: only the scan talks on the bus there.
+with its list. Then: `i2c` lists both, with the temperature that was given at the
+start and the EEPROM's file, which is new and 0xFF throughout; the firmware's scan
+finds the two addresses and no other, and the bus's line has its 128 calls, two of
+them answered and the last one not; `gpio`, `status` and `status --json` have the
+bus; a value read bare, a value set, and six things refused with the value left as it
+was; `i2c --json` has the bus, both devices and their values, and one device alone;
+the record: none runs at first and `i2c record stop` says so, one begins and a second
+is refused with no file made, the scan's 128 calls are in the file while it runs and
+in its count, `i2c record stop` says what the file has, the file names both devices
+and has every address from 0x00 to 0x7f once and in that order, each to write, with
+no byte and a STOP, two of them answered, each with a time not before the one it
+follows; `i2c watch 0x50 --for 8` has of another scan the one call to that address
+and ends by itself, `i2c watch` ended with `kill` has a third scan's 128 calls and
+their count, and neither leaves a record running, its own file, or a byte more in the
+record that had ended; what `i2c record` and `i2c watch` refuse, in words, and that
+none of it began a record; the word on an address that was not shifted, for 0x24 with
+a sensor at 0x48 and for 0x28 with a device at 0x51, for no other address and not
+when the call was answered; the launcher's reading of a line with a mark that no
+firmware here makes (`+`, `!`, `...`), where the emulator's writing of one is not
+checked; `examples/i2c/sensor.js` reads the temperature that was
+set and counts one in the EEPROM, reads another after that was set from outside, the
+file has the count, and after a reset of the firmware the temperature is still as set
+and the count goes on; the record of such a run has it byte for byte (the sensor
+asked for, `01 60`, register 0 named and `f8 80` read; the EEPROM asked for, `01`
+read and `00 02` written) and `i2c watch` has it as it happened, ended with Ctrl+C; a
+script that gives the firmware 0x48 as it is gets no answer, and the watch and `i2c`
+have that call to 0x24 with the word on the shift; `examples/i2c/sensor.c`, built and
+started by `ufbt launch`, logs the run that the EEPROM counts and the temperature
+that was set, has another one within a second of its being set from outside, and
+leaves the count in the file when it is closed; the record of the app's run has the
+EEPROM's byte read and the run's number written, the sensor set to 12 bits and both
+temperatures byte for byte, every call answered; `examples/i2c/test.sh` passes on a
+Flipper of its own; a `run` with another `rom-size` is refused and the file is as it
+was; and a start with the EEPROM alone has no sensor in the scan, in the script or in
+the app, and the count from before. Before that last start, a record goes on over a
+reset of the firmware, the scan after it counted, and is whole when the device is
+stopped under it: 128 calls and no line cut. 63 checks on Momentum, Unleashed and
+RogueMaster, with the app's part skipped: the SDK of the ufbt here is for the
+official 1.5.1. On that one it is 60, with the script's part skipped, since the
+official JavaScript has no `i2c` module. On the official dev build it is 55, with
+both skipped: only the scan talks on the bus there.
 
 `scripts/gdb_check.py FIRMWARE` does what the gdb section shows, with gdb in batch
 mode: a backtrace of the firmware with functions and lines, the breakpoint in the

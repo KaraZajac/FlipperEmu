@@ -51,10 +51,10 @@ port's pty, and over TCP; the firmware's expansion service answers a module that
 launcher plays) passes on the same five.
 `scripts/i2c_check.py` (the I2C bus of the header: a temperature sensor and an EEPROM
 put there with `run --i2c`, found by the firmware's scan, read and written by a script
-and by an app in C, set from outside, the EEPROM's contents kept in a file) passes on
-the same five. The script's part runs on Momentum, Unleashed and RogueMaster, whose
-JavaScript has an `i2c` module, and the app's part on the official 1.5.1, which the
-SDK of the ufbt here is for.
+and by an app in C, set from outside, the EEPROM's contents kept in a file, and every
+transfer in a record, byte for byte) passes on the same five. The script's part runs
+on Momentum, Unleashed and RogueMaster, whose JavaScript has an `i2c` module, and the
+app's part on the official 1.5.1, which the SDK of the ufbt here is for.
 `scripts/ufbt_check.py` (ufbt 0.2.6 building `examples/hello`, launching it there, and
 `ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's symbols, that
 app's and a stock app's, and its debug configuration for VS Code used the way that
@@ -408,6 +408,7 @@ it runs: once with the wait given up, once to the end.
 | `expansion [--rpc] [--baud N] [--for S] [--port P]` | be an expansion module on its header, to the firmware's expansion service: the call, the baud rate, heartbeats, an RPC session; every frame printed |
 | `run --i2c TYPE@ADDRESS[,NAME=VALUE]` | start with a device on the I2C bus of its header (pins 15 and 16): `--i2c tmp105@0x48,temperature=23.5`, `--i2c eeprom@0x50`; once for each device. `run --i2c help` lists the types |
 | `i2c` \| `i2c ADDRESS` \| `i2c ADDRESS NAME` \| `i2c ADDRESS NAME VALUE` | that bus: its devices with their values, and what the firmware called; one device; one value, bare; set a value while the firmware runs. `i2c --json`: the bus and its devices' values for a program |
+| `i2c record OUT.txt` \| `i2c record stop` \| `i2c watch [ADDRESS]` | every transfer on that bus, a line for each START with its time: the address called, the bytes written or read; into a text file, or printed as it happens |
 | `reset` | reboot it, as holding Left + Back does |
 | `pause` \| `continue` | time stands still on it (screen, timers, radios), and goes on from there |
 | `run --usbip [PORT]` | export the USB device over USB/IP (then `sudo scripts/usbip_attach.py`) |
@@ -1443,7 +1444,9 @@ $ ./flipperemu gpio watch PA7,PA6 --for 5
   its `downsample` option for a time unit this fine.
 - A record goes on over a reset of the firmware, and ends with `gpio record stop` or
   with the emulator; the file is whole either way. One record runs at a time. `gpio
-  watch` reads the record that runs, or keeps one of its own while it watches.
+  watch` reads the record that runs, or keeps one of its own while it watches. A
+  script that began a watch in its background ends it with `kill`, which is taken
+  as Ctrl+C is: the watch says its count and leaves no record behind.
 - In the window it is GPIO > Record what the pins do…, which asks for the file, and
   GPIO > End the record. While one runs, the status bar has its file and how many
   changes it holds; that is so for a record begun from a shell too, and either side
@@ -1467,7 +1470,7 @@ file with its whole path, or `off`; read, the changes and nanoseconds so far and
 file.
 
 `scripts/gpio_check.py FIRMWARE` checks it with the firmware's own `gpio` CLI command
-on the other side of the pins: 55 checks, on the official 1.5.1, the official dev
+on the other side of the pins: 56 checks, on the official 1.5.1, the official dev
 build, Momentum, Unleashed and RogueMaster. Not tried: an interrupt an app has on a
 held pin (the buttons' come the same way), and a pin that an app has as an open-drain
 output.
@@ -1770,6 +1773,10 @@ from outside and a hand on the device:
 ./flipperemu i2c 0x48 temperature         # one value and nothing else (for a script)
 ./flipperemu i2c 0x48 temperature 30.25   # set it, while the firmware runs
 ./flipperemu i2c --json                   # the bus and its devices, for a program
+./flipperemu i2c record bus.txt           # every transfer into a text file, until
+./flipperemu i2c record stop              #   this (i2c record: does one run?)
+./flipperemu i2c watch                    # the transfers as they happen (--for S; else
+./flipperemu i2c watch 0x48               #   to Ctrl+C); those to one address
 ```
 
 With Momentum, whose JavaScript has an `i2c` module, and `examples/i2c/sensor.js`,
@@ -1813,6 +1820,74 @@ sensor done
 Script done!
 $ ./flipperemu i2c
 [flipper] pins 15 and 16 (I2C3): tmp105 at 0x48, at24c-eeprom at 0x50; the firmware called 144 addresses, 18 answered; the last: 0x50 to write, answered
+[flipper]   0x48  tmp105        temperature -7.5 °C
+[flipper]   0x50  at24c-eeprom  address-size 1, kept in /home/you/FlipperEmu/devices/flipper/i2c-50.bin, rom-size 256, writable on
+```
+
+What went over the bus is `i2c record`: every transfer into a text file, a line for
+each START. Those two runs of the script again, on a new Flipper:
+
+```
+$ ./flipperemu i2c record bus.txt
+[flipper] recording the header's I2C bus to bus.txt: every address called, with the bytes written and read (`i2c record stop` ends it)
+$ ./flipperemu cli "js /ext/sensor.js"
+…
+$ ./flipperemu i2c 0x48 temperature -7.5
+[flipper] tmp105 at 0x48: temperature -7.5 °C
+$ ./flipperemu cli "js /ext/sensor.js"
+…
+$ ./flipperemu i2c record stop
+[flipper] the record is /home/you/bus.txt: 16 addresses called, all answered; 12 bytes written, 6 read in 3.2 s of the Flipper's time (a text file, a line for each START)
+$ cat bus.txt
+# FlipperEmu: the I2C bus of a Flipper Zero's GPIO header (I2C3: SDA pin 15, SCL pin 16)
+# on the bus: tmp105 at 0x48, at24c-eeprom at 0x50
+# a line: the START's time in s, the address called, w or r, the bytes written or read
+#   no answer: nobody took the address    !: the device refused that byte
+#   +: no STOP, the next line's START follows    ...: the record ended there
+1.276058543 0x48 w
+1.281528054 0x48 w 01 60
+1.284126856 0x48 w 00
+1.284154074 0x48 r 17 80
+1.297564886 0x50 w
+1.298454530 0x50 w 00
+1.298481977 0x50 r ff
+1.301943376 0x50 w 00 01
+2.836525757 0x48 w
+2.837468779 0x48 w 01 60
+2.838644991 0x48 w 00
+2.838792054 0x48 r f8 80
+2.841923806 0x50 w
+2.842865527 0x50 w 00
+2.842879553 0x50 r 01
+2.844357775 0x50 w 00 02
+```
+
+The script asks whether the sensor is there (a call with no byte), sets it to 12 bits
+(`01 60`), names its register 0 and reads two bytes: `17 80` is 23.5 °C, and `f8 80`
+is -7.5. Then the EEPROM: asked for, its byte 0 named and read (`ff` on a new chip),
+and written with the count.
+
+`i2c watch` prints the same as it happens, for a terminal beside the one you work in.
+Here the script's third run, and after it a script that gives the firmware the
+sensor's address as it is, `i2c.isDeviceReady(0x48, 50)`:
+
+```
+$ ./flipperemu i2c watch --for 7
+[flipper] the header's I2C bus as the firmware talks there (on it: tmp105 at 0x48, at24c-eeprom at 0x50), for 7 s
+    2.431411  0x48  tmp105        to write: answered, and no byte
+    2.433939  0x48  tmp105        wrote 01 60
+    2.437153  0x48  tmp105        wrote 00
+    2.437213  0x48  tmp105        read f8 80
+    2.445195  0x50  at24c-eeprom  to write: answered, and no byte
+    2.448785  0x50  at24c-eeprom  wrote 00
+    2.448817  0x50  at24c-eeprom  read 02
+    2.452687  0x50  at24c-eeprom  wrote 00 03
+    4.013620  0x24                to write: no answer
+              nobody is at 0x24. If the tmp105 at 0x48 was meant: the firmware takes an address shifted left by one bit, 0x48 << 1 (0x90)
+[flipper] 9 STARTs in 7.0 s
+$ ./flipperemu i2c
+[flipper] pins 15 and 16 (I2C3): tmp105 at 0x48, at24c-eeprom at 0x50; the firmware called 25 addresses, 24 answered; the last: 0x24 to write, no answer
+[flipper]   (nobody is at 0x24. If the tmp105 at 0x48 was meant: the firmware takes an address shifted left by one bit, 0x48 << 1 (0x90))
 [flipper]   0x48  tmp105        temperature -7.5 °C
 [flipper]   0x50  at24c-eeprom  address-size 1, kept in /home/you/FlipperEmu/devices/flipper/i2c-50.bin, rom-size 256, writable on
 ```
@@ -1864,8 +1939,27 @@ app's screen compared with a file after each
   addresses it called, how many of them answered, and the last one. A scan is 128
   calls. An app that calls the wrong address shows there as a call that nobody
   answered: the JavaScript module wants the address shifted left by one (0x48 is
-  `0x90`), and C's `furi_hal_i2c` functions do too. `gpio` and `status` have the same
-  line, and `status --json` has it as `i2c`.
+  `0x90`), and C's `furi_hal_i2c` functions do too. When the last call went to
+  nobody and a device is at twice that address, or one above it, `i2c` says so
+  beneath the bus's line. `gpio` and `status` have the bus's line without that word,
+  and `status --json` has it as `i2c`.
+- **`i2c record FILE`** writes every transfer on the bus to a text file, until `i2c
+  record stop`. A line is what lies between a START and the next START or STOP: the
+  START's time (the Flipper's clock, in seconds from where the record began), the
+  address called (its seven bits, as `i2c` has them), `w` or `r`, and the bytes
+  written or read. `no answer`: nobody took the address. `!` after a byte: the
+  device refused it, and the transfer ended there. `+` at the end: no STOP, the next
+  line's START follows at once. The lines with `#` say what the file is and what
+  was on the bus. `i2c record` alone says whether one runs and what it has counted
+  so far. A record goes on over a reset of the firmware, and ends with `i2c record
+  stop` or with the emulator; the file is whole either way. One runs at a time.
+- **`i2c watch [ADDRESS]`** prints the transfers as they happen, each with the
+  Flipper's time since the watch began and the type of the device that was called,
+  until Ctrl+C or for `--for SECONDS`. With an address it prints the calls to that
+  one. Under a call that nobody answered it has the word on the shift, once for an
+  address, and not in a scan. It reads the record that runs, or keeps one of its
+  own while it watches. A script that began a watch in its background ends it with
+  `kill`: that is taken as Ctrl+C is, and so it is for `gpio watch`.
 - **`i2c --json`** is the bus for a program: what `status --json` has as `i2c`, and
   each device with its `values` by name (a temperature in °C; an address as a number,
   72 for 0x48), an EEPROM with the `file` of its contents. `i2c --json 0x48` is that
@@ -1899,18 +1993,31 @@ Not there:
   of the ufbt here is for. It was not built for the other four.
 - A device cannot be put on the bus, or taken off it, while the emulator runs.
 - The window sets a temperature and shows the other values. `i2c ADDRESS NAME VALUE`
-  sets any value that can be set.
+  sets any value that can be set. The window has no record of the bus and no watch:
+  those are `i2c record` and `i2c watch` in a shell, also while the window is open.
 - The two lines are no levels: pins 15 and 16 read `unknown` on the header while the
-  firmware talks, and a record of the pins has no bits of a transfer. A transfer
-  takes no time at any bus speed, and no device stretches the clock.
+  firmware talks, and a record of the pins (`gpio record`) has no bits of a
+  transfer. A transfer takes no time at any bus speed, and no device stretches the
+  clock: in `i2c record` every byte of a line has the time of its START.
+- The record is of the header's bus. The Flipper's own I2C bus, with the fuel gauge,
+  the charger and the LED driver, is not recorded.
+- The record is this project's own text. No logic analyzer's program was given it.
+- Not tried with a firmware: a line with `+` and a byte with `!`. What the script
+  and the app call in the firmware ends every START with a STOP (also
+  `furi_hal_i2c_trx` and the script's `writeRead`: a write, a STOP, and a read), and
+  neither device refuses a byte. The check has the launcher read such lines; the
+  emulator's writing of them was not seen.
 - Nothing checks that the app has the pins in the bus's function: I2C3 answers here
   also when the app forgot to set the pins up, where a real Flipper would be silent.
-- A record of the transfers themselves (what was written to whom, what was read).
+
+Underneath, the record is the machine's property `header-i2c-record`: written, a file
+with its whole path, or `off`; read, the addresses called, those nobody answered, the
+bytes written and read, the nanoseconds so far and the file.
 
 `scripts/i2c_check.py FIRMWARE` checks all of it with the firmware's scan, that script
-and that app: 38 checks on Momentum, Unleashed and RogueMaster, with the app's part
-skipped (ufbt's SDK is for another firmware); 38 on the official 1.5.1, with the
-script's part skipped; 34 on the official dev build, with both skipped.
+and that app: 63 checks on Momentum, Unleashed and RogueMaster, with the app's part
+skipped (ufbt's SDK is for another firmware); 60 on the official 1.5.1, with the
+script's part skipped; 55 on the official dev build, with both skipped.
 
 An EEPROM's file needs one fix to QEMU's model (`qemu/patches/0009`,
 docs/BRINGUP_LOG.md, 110): it wanted the file's length in whole sectors of 512 bytes

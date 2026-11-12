@@ -57,11 +57,28 @@ static void i2c_update_irq(WB55I2cState *s)
     qemu_set_irq(s->irq_er, 0);
 }
 
+static void i2c_tap(WB55I2cState *s, WB55I2cTap what, uint8_t value, bool ok)
+{
+    if (s->tap) {
+        s->tap(s->tap_opaque, what, value, ok);
+    }
+}
+
+/* the part that was told of is over: with a STOP, or with another START */
+static void i2c_tap_end(WB55I2cState *s, bool stop)
+{
+    if (s->tap_open) {
+        s->tap_open = false;
+        i2c_tap(s, WB55_I2C_TAP_END, 0, stop);
+    }
+}
+
 static void i2c_stop(WB55I2cState *s)
 {
     if (s->active) {
         i2c_end_transfer(s->bus);
     }
+    i2c_tap_end(s, true);
     s->active = false;
     s->isr &= ~(ISR_BUSY | ISR_TXIS | ISR_DIR);
     s->isr |= ISR_STOPF | ISR_TXE;
@@ -83,6 +100,7 @@ static void i2c_fetch(WB55I2cState *s)
 {
     s->rxdr = i2c_recv(s->bus);
     s->isr |= ISR_RXNE;
+    i2c_tap(s, WB55_I2C_TAP_BYTE, s->rxdr, true);
 }
 
 static void i2c_start(WB55I2cState *s)
@@ -100,10 +118,13 @@ static void i2c_start(WB55I2cState *s)
         s->isr &= ~ISR_DIR;
     }
 
+    i2c_tap_end(s, false);              /* a START with no STOP before it */
     s->calls++;
     s->last = addr;
     s->last_read = read;
     s->last_taken = addr && !i2c_start_transfer(s->bus, addr, read);
+    s->tap_open = true;
+    i2c_tap(s, WB55_I2C_TAP_CALL, addr << 1 | read, s->last_taken);
     if (!s->last_taken) {
         /* address NACK: STOP is generated automatically */
         s->unanswered++;
@@ -174,6 +195,7 @@ static void wb55_i2c_write(void *opaque, hwaddr addr, uint64_t val64,
             if (s->active) {
                 i2c_end_transfer(s->bus);
             }
+            i2c_tap_end(s, true);       /* the lines are let go of */
             s->active = false;
             s->isr = ISR_TXE;
         }
@@ -219,10 +241,12 @@ static void wb55_i2c_write(void *opaque, hwaddr addr, uint64_t val64,
         if (s->active && !s->reading && (s->isr & ISR_TXIS)) {
             s->isr &= ~ISR_TXIS;
             if (i2c_send(s->bus, s->txdr)) {
+                i2c_tap(s, WB55_I2C_TAP_BYTE, s->txdr, false);
                 s->isr |= ISR_NACKF;
                 i2c_stop(s);
                 break;
             }
+            i2c_tap(s, WB55_I2C_TAP_BYTE, s->txdr, true);
             s->count++;
             if (s->count < i2c_nbytes(s)) {
                 s->isr |= ISR_TXIS;
@@ -254,6 +278,7 @@ static void wb55_i2c_reset_hold(Object *obj, ResetType type)
     if (s->active) {
         i2c_end_transfer(s->bus);
     }
+    i2c_tap_end(s, true);
     s->active = false;
     s->cr1 = s->cr2 = s->oar1 = s->oar2 = s->timingr = s->timeoutr = 0;
     s->pecr = s->rxdr = s->txdr = 0;
