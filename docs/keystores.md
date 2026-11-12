@@ -9,13 +9,14 @@ loses its manufacturer codes.
 
 The fix needs no firmware patch and no hardware key: **re-encrypt the keystore
 contents under the emulator's own key 1**. The unmodified firmware then loads
-the file in the emulator exactly as it loads the stock file on hardware.
+the file in the emulator exactly as it loads the stock file on hardware. The
+re-keyed superset ships here under `keystores/overlay/`, so a clone works out
+of the box.
 
 ## Using it
 
 `flipperemu`'s `make_sd` automatically applies `keystores/overlay/` over the
-stock resources whenever it builds a card — it is opt-in, happening only when
-that folder exists. With the overlay in place:
+stock resources whenever it builds a card:
 
 ```
 ./flipperemu -d dev run -f firmware/unleashed-unlshd-094/...tgz
@@ -31,7 +32,7 @@ One overlay serves every firmware: the manufacturer codes are universal, so a
 single superset keystore makes official, Momentum and Unleashed all work (a
 fork that ships fewer codes simply gains the extra ones, which is harmless).
 
-## Making the overlay (`scripts/rekey_keystore.py`)
+## Regenerating / extending (`scripts/rekey_keystore.py`)
 
 ```
 scripts/rekey_keystore.py keys   keys.txt        keystores/overlay/subghz/assets/keeloq_mfcodes
@@ -43,18 +44,27 @@ scripts/rekey_keystore.py verify keystores/overlay/subghz/assets/keeloq_mfcodes
 firmware's `%08lX%08lX:%hu:%s`. A RAW input is the decrypted blob as hex. The
 tool re-encrypts under the emulator's key 1, in the firmware's on-disk format
 (continuous AES-256-CBC, the `IV:` scrambled the same way — see
-`lib/subghz/subghz_keystore.c`). It self-checks every write and produces
-output byte-for-byte identical to the project's own keystore encoder
+`lib/subghz/subghz_keystore.c`). It self-checks every write and produces output
+byte-for-byte identical to the project's own keystore encoder
 (`scripts/enclave_check.py: keystore_lines`), which the firmware round-trips in
 the enclave test. A re-keyed `keeloq_mfcodes` has been loaded through the
-unmodified firmware in the emulator (all 124 codes decoded back).
+unmodified firmware in the emulator (all 124 codes decoded back). The IV is
+fixed, so re-keying is reproducible and the tracked files don't churn.
 
-## Where the keys come from, and why they aren't here
+These codes change rarely. To cover a fork exactly, decrypt its stock keystore
+once on a real device used as an enclave oracle, drop the `KEY:TYPE:NAME` list
+in `keystores/plaintext/`, and re-key.
 
-`rekey_keystore.py` needs the *decrypted* keystores as input. Those come from a
-real device used as an enclave oracle (it decrypts under the hardware key it
-holds but cannot export); this repository does not include them. **`keystores/`
-is git-ignored on purpose:** a file re-keyed to the emulator's public key is
-trivially decryptable, so committing one would publish the manufacturer codes,
-which the firmware source explicitly asks you not to share. Generate the
-overlay locally and keep it local.
+## What's tracked, and what isn't
+
+`keystores/overlay/` (the re-keyed keystores) **is** committed, the same way a
+firmware ships its keystores as encrypted assets — so the emulator is
+self-contained. The difference from real firmware: *its* key is secret
+hardware, while the emulator's key 1 is public by construction
+(`SHA-256("FlipperEmu enclave key 1")`), so these files decode with
+`rekey_keystore.py verify`. They are the stock manufacturer codes, which
+already circulate publicly; this just carries them in the emulator's own key.
+
+`keystores/plaintext/` — the decrypted key lists that *produce* the overlay —
+is **git-ignored**: there's no reason to carry a raw, greppable key list in the
+tree when the re-keyed asset already covers it.

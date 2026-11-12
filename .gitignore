@@ -15,5 +15,7 @@ research/prior-art/
 examples/*/dist/
 examples/*/.vscode/
 
-# re-keyed Sub-GHz keystores + decrypted key lists (do not publish)
-keystores/
+# decrypted Sub-GHz key lists: the private input to rekey_keystore.py. The
+# re-keyed (encrypted) keystores under keystores/overlay/ are tracked.
+keystores/plaintext/
+keystores/README.md
