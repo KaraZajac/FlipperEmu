@@ -440,7 +440,6 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         64 on those three, 55 on the dev build (BRINGUP_LOG 116)
   - ☐ More on that bus: the C app on the other firmwares, each with its own
         SDK
-  - ☐ The SPI bus in the window's GPIO menu, as the I2C bus is there (next)
   - ☐ A record of what goes over the SPI bus (`spi record`, `spi watch`), as
         `i2c record` is one for the I2C bus
   - ☐ More devices for the SPI bus: a radio module (the external CC1101 that
@@ -475,6 +474,16 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         1.5.1, 30 on Momentum, Unleashed and RogueMaster, 25 on the dev build;
         `gpio_check.py` 111 and 82; `setup_check.py` 30. No real Flipper with a
         flash on its header was asked (BRINGUP_LOG 125)
+  - ☑ That bus in the window (2026-11-12): the GPIO menu has the SPI bus beneath
+        the I2C bus, in `spi`'s words, and each device with the pin of its chip
+        select, whether it is selected, and where a flash keeps its contents
+        (asked from the launcher, `spi --json`). The pointer over a pin says
+        whose chip select it is, and MOSI, MISO or SCK while the firmware has
+        the bus. The console says what the firmware clocked there: one line for
+        a script's run of transfers, none for a chip select alone. Nothing is
+        set there: a chip select is held as any pin is. `gui_check.py` is 64
+        checks on Momentum, Unleashed and RogueMaster, and 63 on the two
+        official firmwares, whose JavaScript has no `spi` (BRINGUP_LOG 126)
   - ☑ PWM on a pin (2026-11-12): the two outputs of the firmware's
         `furi_hal_pwm`, pin 2 (PA7, TIM1) and pin 4 (PA4, LPTIM2), are on the
         header as what they are: `gpio` has such a pin as `pwm`, with the timer,

@@ -630,6 +630,13 @@ $ ../../flipperemu spi
   flash.
 - What is on the bus is said with each `run`. A device cannot be added while the
   emulator runs.
+- **By hand,** the window's GPIO menu has the bus's line and each device with its
+  chip select's pin, whether it is selected, and its file. The console says when the
+  firmware has clocked bytes there and whether a device heard them: an app with the
+  wrong chip select is a line there (`the firmware clocked 4 bytes there, none with
+  a device selected; …`) without a look at `spi`. One line for a run of transfers,
+  and the next only when the bytes are heard differently or after ten seconds of
+  silence.
 - **In JavaScript** it is `require("spi")` on Momentum, Unleashed and RogueMaster,
   which is the firmware's handle: `examples/spi/flash.js` reads the flash's IDs,
   erases a sector and writes seven bytes there (the README has its run). The
@@ -1280,7 +1287,16 @@ firmware calls a wrong address by itself, so the window is given the machine's
 word on its bus as the link gives it, with three calls to 0x24 that nobody took,
 and has to say the word under the console's line and under the bus's line in the
 menu, and to drop it when the true word comes again (`i2c_check.py` has such a
-call from a script, for `i2c` and `i2c watch`).
+call from a script, for `i2c` and `i2c watch`). The SPI bus is there with a flash on
+it (`--spi flash`): the GPIO menu's line for the bus in `spi`'s words and the flash's
+line with its pin and its file, pin 4's tip with whose chip select it is; pin 4
+held low from outside, which selects the flash in the menu, in the tip and in `spi`;
+`examples/spi/flash.js` run on the Flipper, which has to be one line in the console
+for its 63 bytes (on Momentum, Unleashed and RogueMaster; the official firmware's
+JavaScript has no `spi`, and the step says that it was skipped). Bytes that no
+device heard and pin 5 as the bus's clock are given to the window as the link gives
+them, as the wrong address is: no firmware here does the first, and a script has
+the bus for less time than the window looks at the header in.
 
 `scripts/uart_check.py FIRMWARE` has `examples/uart/echo.js` on the Flipper's side
 of pins 15 and 16: where `uart` says the ports go; a line sent while no app has the

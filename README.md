@@ -307,8 +307,11 @@ instead, and `--headless` no window at all.
   it) and the I2C bus of pins 15 and 16: the devices that `run --i2c` put there, each
   with its values, a sensor's temperature to set from the menu, and how many of the
   firmware's calls were answered (the console has that too, once the firmware has
-  talked on the bus), and last the ADC with what it converted last: which pin, the
-  voltage on it, and the number the firmware got. Pins 13 and 14 are where a real
+  talked on the bus), then the SPI bus of pins 2, 3 and 5: the devices that `run
+  --spi` put there, each with the pin of its chip select, and how many bytes the
+  firmware clocked there (the console has that as well), and last the ADC with what
+  it converted last: which pin, the voltage on it, and the number the firmware got.
+  Pins 13 and 14 are where a real
   Flipper's log comes out: click
   them, or beside the pins, to read it. **GPIO > Record what the pins do…** writes
   every change of a pin's level to a file with its time, as a logic analyzer on the
@@ -404,7 +407,9 @@ file to its card, drops an app on it, starts it again with F5 and once more by p
 a new file in its place, holds two pins of the GPIO header with clicks on them and
 lets go of them, records what a pin does to a file from the GPIO menu, sets a sensor
 on the header's I2C bus to another temperature from that menu, has the firmware
-scan the bus and records a scan to a file from the menu, watches the LED blink
+scan the bus and records a scan to a file from the menu, finds a flash on the
+header's SPI bus there, selects it with its pin held low and has a script read and
+write it (on the three firmwares whose JavaScript has `spi`), watches the LED blink
 while NFC reads, switches it off and on, reboots
 it, has an app crash the firmware,
 loses the emulator and finds it again after that, and updates it twice with the package
@@ -1561,8 +1566,8 @@ and when it ends. A click on one has a menu to hold it
 high or low and to let go of it, and a held pin has a jumper wire on it. For the six
 pins of the ADC the menu has **Hold it at a voltage…** too, which asks for the
 voltage. The GPIO menu lists every pin with what the firmware has it as, and beneath
-the pins the two serial ports, the I2C bus with its devices and the ADC with what it
-converted last. The window looks at the header ten times a
+the pins the two serial ports, the I2C bus and the SPI bus with their devices, and the
+ADC with what it converted last. The window looks at the header ten times a
 second, so a pin that blinks faster than that shows only some of its blinks.
 
 - What is held stays so over a reset of the firmware, as a wire would, and is gone with
@@ -2368,12 +2373,23 @@ chip select, speed or mode; the check's app, `scripts/spi_check_app/spi.c`, has 
   writes, and kept over a reset, a `stop` and the next `run`. Remove it for an empty
   flash, or put an image of your own there, as large as the part. A `run` with a
   type of another size than the file is refused, with both sizes.
+- **In the window** the GPIO menu has the bus beneath the I2C bus, in `spi`'s words,
+  and a line for each device: the pin of its chip select, whether it is selected at
+  that moment, and the file of its contents (the line opens to where that file is).
+  The pointer over a chip select's pin says whose it is, and when it selects. The
+  console gets a line when the firmware has clocked bytes there (`Pins 2, 3 and 5
+  (SPI1): the firmware clocked 63 bytes there, all with a device selected; the last
+  at 2 MHz, mode 0, MSB first, 8 bits`): one for a run of transfers, and another only
+  when the bytes are heard differently (all of them, some, none) or after ten
+  seconds of silence. An app that reads its flash every second is one line there,
+  and one more when its chip select stops selecting. The pointer over pin 2, 3 or 5
+  says MOSI, MISO or SCK while the firmware has the bus, which a script has for less
+  time than the window looks at the header in.
 - What is on the bus is said at each `run` and is not kept with the device: a `run`
   without `--spi` is a header with nothing on it. The files stay.
 
 Not there:
 
-- The window: its GPIO menu has no line for this bus yet.
 - A record of the transfers, as `i2c record` is one for the I2C bus.
 - Serial flashes are all there is. A radio module (a CC1101 or an NRF24 board for
   the header) and a display are not among the types.

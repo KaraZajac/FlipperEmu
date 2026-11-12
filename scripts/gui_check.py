@@ -28,7 +28,11 @@ temperature from there, lets the firmware scan the bus (which the console
 says), records a scan of that bus to a file (GPIO > Record what goes over the
 I2C bus), ends from the menu a record that a shell began, gives the window a
 call to an address that was not shifted (the word on that in the console and
-the menu), holds an NFC tag to it from the
+the menu), finds a flash on the header's SPI bus in the GPIO menu (the device
+starts with `--spi flash` as well), holds its chip select low from outside,
+has a script in the firmware's JavaScript read and write that flash (which
+the console says; skipped on a firmware whose JavaScript has no `spi`), gives
+the window bytes that no device heard, holds an NFC tag to it from the
 bench, unplugs USB, switches it off as a real one is (Back held for 5 s, then
 Power Off: the window stays, the emulator exits), copies a file to the card
 of the switched-off Flipper, switches
@@ -677,6 +681,173 @@ class Driver:
               f"{true!r} -> {made!r}\nbefore {before}, open {open_}, anew "
               f"{anew}, after {hint()}\n{self.console()[-400:]}")
 
+    def spi_bus(self):
+        """The header's SPI bus: the flash that `run --spi flash` put there
+        in the GPIO menu, its chip select held low from outside, and what
+        the firmware clocks there in the console"""
+        w, v = self.win, self.win.view
+        self.until(lambda: w.spi is not None, 5)
+        off = "Pin 4 (PA4): w25q32, not selected; kept in spi-4.bin"
+        on = "Pin 4 (PA4): w25q32, selected; kept in spi-4.bin"
+
+        def lines():                    # the GPIO menu's, as they are
+            return (w.a_gpio_spi.text() if w.a_gpio_spi else "",
+                    {pin: (m.title(), [(a.text(), a.isEnabled())
+                                       for a in m.actions()])
+                     for pin, m in w.gpio_spi.items()})
+
+        def menu():
+            w.fill_gpio_menu()          # as the menu bar's GPIO menu opens
+            self.settle()               # ... and the launcher said the file
+            return lines()
+
+        def selected():
+            return bool(w.spi and w.spi["devices"]
+                        and w.spi["devices"][0]["selected"])
+
+        def counts():
+            try:
+                bus = json.loads(self.launcher("spi", "--json").stdout)
+                return bus["heard"], bus["unheard"]
+            except (ValueError, KeyError):
+                return None
+
+        bus, devices = menu()
+        said = self.launcher("spi").stdout
+        flash = devices.get(4, ("", []))
+        kept = re.search(r"its contents are kept in \S+spi-4\.bin", said)
+        tip, pin = v.pin_tips.get(4, ""), w.gpio_items.get(4)
+        check("spi: the bus in the GPIO menu as `spi` has it: a flash with "
+              "its chip select on pin 4, not selected, and the file of its "
+              "contents; pin 4's line says whose chip select it is",
+              bus.startswith("Pins 2, 3 and 5 (SPI1): w25q32 with its chip "
+                             "select on pin 4; ")
+              and bus.split(": ", 1)[1] in said and not w.a_gpio_spi.isEnabled()
+              and len(devices) == 1 and flash[0] == off and kept
+              and flash[1] == [(kept[0][0].upper() + kept[0][1:], False)]
+              and tip.startswith("Pin 4, A4 (PA4): w25q32's chip select; ")
+              and isinstance(pin, QtWidgets.QMenu) and pin.title().startswith(
+                  "Pin 4, A4 (PA4): w25q32's chip select; "),
+              f"{bus}\n{devices}\npin 4: {tip}\n{said}")
+
+        w.hold_pin("PA4", "low")        # a chip select that is wired to GND
+        chosen = self.until(selected, 15)
+        self.settle()
+        open_, tip = lines(), v.pin_tips.get(4, "")
+        said = self.launcher("spi").stdout
+        anew = menu()
+        w.hold_pin("PA4", "free")
+        freed = self.until(lambda: not selected(), 15)
+        self.settle()
+        after = lines()
+        check("spi: pin 4 held low from outside: the flash is selected, "
+              "which its line in the GPIO menu says (a menu that was open "
+              "meanwhile too), pin 4's line under the pointer and `spi`; "
+              "let go of, it is not selected any more",
+              chosen and open_[1].get(4, ("",))[0] == on and anew == open_
+              and "w25q32's chip select, which selects it now; " in tip
+              and "held low" in tip
+              and re.search(r"pin 4 +\(PA4\) +w25q32 +selected; ", said)
+              and freed and after[1].get(4, ("",))[0] == off
+              and "selects it now" not in v.pin_tips.get(4, "x"),
+              f"open {open_}\nanew {anew}\nafter {after}\npin 4: {tip}\n{said}")
+        self.shot("spi")
+
+        news = re.compile(
+            r"  Pins 2, 3 and 5 \(SPI1\): the firmware clocked (\d+) bytes "
+            r"there, all with a device selected; the last at 2 MHz, mode 0, "
+            r"MSB first, 8 bits$", re.M)
+        before = counts()
+        self.launcher("push", str(ROOT / "examples/spi/flash.js"),
+                      "/ext/fe-gui-flash.js")
+        run = self.launcher("cli", "--timeout", "25", "js /ext/fe-gui-flash.js")
+        text = run.stdout + run.stderr
+        if "spi done" not in text and "spi" in text and re.search(
+                r"load fail|not found|no such", text, re.I):
+            print("  SKIP  spi: a script reads and writes the flash: this "
+                  "firmware's JavaScript has no `spi` ("
+                  + " / ".join(x.strip() for x in text.splitlines()
+                               if "spi" in x)[:160] + ")", flush=True)
+        else:
+            told = self.until(lambda: news.search(self.console()), 10)
+            open_ = lines()[0]          # the menu was open meanwhile
+            self.spin(1.5)              # (a second line would come by now)
+            now, said = counts(), self.launcher("spi").stdout
+            bus = menu()[0]
+            m = news.search(self.console())
+            check("spi: a script on the Flipper reads and writes the flash "
+                  "(examples/spi/flash.js): one line in the console for its "
+                  "bytes, all with a device selected, and the GPIO menu has "
+                  "them as `spi` has them, a menu that was open meanwhile too",
+                  run.returncode == 0 and "written: 46 6c 69 70 70 65 72 ff"
+                  in text and "spi done" in text and told and m
+                  and 1 <= int(m[1]) <= 63 and before and now
+                  and (now[0] - before[0], now[1] - before[1]) == (63, 0)
+                  and self.console().count("(SPI1): the firmware clocked") == 1
+                  and open_ == bus and "all with a device selected; the last "
+                  "at 2 MHz, mode 0, MSB first, 8 bits" in bus
+                  and bus.split(": ", 1)[1] in said,
+                  f"{run.returncode}: {text[-300:]}\n{before} -> {now}\n{bus}\n"
+                  f"while open: {open_}\n{self.console()[-300:]}")
+        self.launcher("rm", "/ext/fe-gui-flash.js")
+
+        # Bytes that no device heard: a firmware with the flash's chip select
+        # on another pin.  No firmware here has an app that does it, so the
+        # window gets the machine's word on its bus as the link gives it,
+        # with four such bytes more, and after that the true one again.  And
+        # the header's with pin 5 as SPI1's clock, which a script has it as
+        # for less time than the window looks at the header in.
+        pins = ("/machine", "header")
+        idle = w.props.get(pins)
+        busy, n5 = re.subn(r"(?<!\S)5:PB3:[^:\s]+:([^:\s]+):[^:\s]+:(\S+)",
+                           r"5:PB3:af5:\1:x:\2", idle or "")
+        tips = [v.pin_tips.get(5, "")]
+        if n5:
+            w.on_prop(*pins, busy)
+            tips.append(v.pin_tips.get(5, ""))
+            w.on_prop(*pins, idle)
+            tips.append(v.pin_tips.get(5, ""))
+        key = ("/machine", "header-spi")
+        true = w.props.get(key)
+        word = ("the firmware clocked 4 bytes there, none with a device "
+                "selected; the last at 1 MHz, mode 3, MSB first, 8 bits")
+        had = self.console().count("(SPI1): the firmware clocked")
+        menu()
+        made, n = re.subn(
+            r"^(\w+:\d+:\d+:\d+):(\d+):(\d+):\S+", lambda m:
+            f"{m[1]}:{m[2]}:{int(m[3]) + 4}:1000000/3/msb/8", true or "")
+        was = fe_header.parse_spi(true) if n else {"heard": 0, "unheard": 0}
+        all_ = (f"the firmware clocked {was['heard'] + was['unheard'] + 4} "
+                "bytes there, " + (f"{was['heard']} of them" if was["heard"]
+                                   else "none") + " with a device selected; "
+                "the last at 1 MHz, mode 3, MSB first, 8 bits")
+        if n:
+            w.on_prop(*key, made)
+        told = self.until(
+            lambda: f"Pins 2, 3 and 5 (SPI1): {word}" in self.console(), 5)
+        open_ = lines()[0]              # the menu was open meanwhile
+        if n:
+            w.on_prop(*key, true)
+        self.spin(1.5)
+        bus, said = menu()[0], self.launcher("spi").stdout
+        check("spi: four bytes with no device selected (the machine's word "
+              "on the bus, given to the window as the link gives it): one "
+              "line in the console that says so, and the GPIO menu's line, "
+              "in a menu that was open; the bus as it is: as `spi` has it "
+              "again, and no line more.  Pin 5 as the bus's clock (the "
+              "header's word, given so too): the pin's line under the "
+              "pointer says SPI1's SCK for as long",
+              n5 == 1 and len(tips) == 3 and "SPI1's" not in tips[0] + tips[2]
+              and tips[1].startswith("Pin 5, B3 (PB3): SPI1's SCK; "
+                                     "alternate function 5")
+              and n == 1 and told and open_ == "Pins 2, 3 and 5 (SPI1): w25q32 "
+              f"with its chip select on pin 4; {all_}" and open_ != bus
+              and bus.split(": ", 1)[1] in said
+              and self.console().count("(SPI1): the firmware clocked")
+              == had + 1,
+              f"{true!r} -> {made!r}\nopen {open_}\nafter {bus}\n"
+              f"pin 5: {tips}\n{self.console()[-400:]}")
+
     def pwm(self):
         """A PWM on a pin of the header, which a script in the firmware's
         JavaScript makes: the pin is lit for the part of its width that it
@@ -1260,6 +1431,7 @@ class Driver:
         self.pwm()
         self.i2c_bus()
         self.i2c_record()
+        self.spi_bus()
 
         w.hold("nfc", ["ntag215", "04A1B2C3D4E5F6", "https://example.com"])
         w.set_cable("unplugged")
@@ -1357,7 +1529,8 @@ def main():
         "flipperemu_launcher", str(ROOT / "flipperemu")).load_module()
     sys.argv = ["flipperemu", "-d", name, "run", "-f", args.firmware,
                 "--audio", "none", "--serial", f"file:{uart}",
-                "--i2c", "tmp105@0x48,temperature=23.5", "--i2c", "eeprom@0x50"]
+                "--i2c", "tmp105@0x48,temperature=23.5", "--i2c", "eeprom@0x50",
+                "--spi", "flash"]
     try:
         code = launcher.main()
         check("exit status of the run: 0", code == 0)

@@ -56,6 +56,7 @@ WATCHES = (
     ("/machine", "header-record"), ("/machine", "header-serial"),
     ("/machine", "header-i2c"), ("/machine", "header-i2c-record"),
     ("/machine", "header-adc"), ("/machine", "header-pwm"),
+    ("/machine", "header-spi"),
 )
 
 # what can come from a file: (the menu's word for them, file filter, where
@@ -77,6 +78,7 @@ I2C_TELL_MS = 700           # the header's I2C bus quiet for this long: what
 #                             the firmware called there goes to the log
 I2C_BURST_S = 3             # ... or once it has called for this long
 I2C_QUIET_S = 10            # the same as the last time is news after this long
+#                             (the three are the header's SPI bus's as well)
 SCALES = (2, 3, 4, 5, 6)
 POWER_ON_MS = 1500          # hold Back this long, and an off Flipper starts
 RESET_MS = 3000             # Left + Back held this long: it reboots
@@ -213,6 +215,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.a_gpio_i2c_hint = None     # ... for a word on its last call,
         self.a_gpio_i2c_record = None   # ... for its record,
         self.gpio_i2c = {}              # ... and an address: its device's menu
+        self.spi = None                 # the header's SPI bus (fe_header)
+        self.spi_kept = {}              # a chip select's pin there: its
+        #                                 device with where its contents are
+        #                                 kept (`spi --json`)
+        self.spi_asked = False          # ... which the launcher is asked for
+        self.spi_seen = (0, 0)          # its bytes, and those nobody heard,
+        #                                 that the log has been told of
+        self.spi_kind = None            # ... and who heard the last ones
+        self.spi_at = float("-inf")     # when the firmware last clocked there
+        self.spi_from = 0.0             # ... when the bytes not told of began,
+        self.spi_gap = 0.0              # and how long the bus was quiet before
+        self.a_gpio_spi = None          # the GPIO menu's line for the bus,
+        self.gpio_spi = {}              # ... and a chip select's pin: its
+        #                                 device's menu
         self.state = None
         self.expect_off = False         # it said it is switching off
         self.qemu_up = session is not None      # ours, and running
@@ -279,6 +295,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.i2c_due = QtCore.QTimer(self, singleShot=True,
                                      interval=I2C_TELL_MS)
         self.i2c_due.timeout.connect(self.tell_i2c)
+        self.spi_due = QtCore.QTimer(self, singleShot=True,
+                                     interval=I2C_TELL_MS)
+        self.spi_due.timeout.connect(self.tell_spi)
         self.poll = QtCore.QTimer(self, interval=250)
         self.poll.timeout.connect(self.tick)
         self.poll.start()
@@ -734,6 +753,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.pwm = []
             self.on_adc(None)
             self.on_i2c(None)
+            self.on_spi(None)
             self.on_header(None)
             self.on_pin_record(None)
             self.on_i2c_record(None)
@@ -1026,6 +1046,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.on_adc(value)
         if key == ("/machine", "header-pwm"):
             self.on_pwm(value, tell=not first)
+        if key == ("/machine", "header-spi"):
+            self.on_spi(value, tell=not first)
         if not first and old != value:
             self.changed(path, name, old, value)
         self.tiles_due.start()
@@ -2219,6 +2241,12 @@ class MainWindow(QtWidgets.QMainWindow):
             # there; a device on the bus is wired to them all the time)
             text += (f"{bus['name']}'s {line}, {fe_header.i2c_devices(bus)} "
                      "on it; ")
+        line = fe_header.spi_pin(p, self.spi)
+        if line:                        # (while the firmware has the bus)
+            text += f"{self.spi['name']}'s {line}; "
+        chip = fe_header.spi_chip(p, self.spi)
+        if chip:
+            text += f"{fe_header.spi_chip_text(chip)}; "
         if of:
             text += f"{of[0]['name']}'s {of[1]}, {fe_header.port_text(of[0])}"
             if not p["holdable"]:
@@ -2340,6 +2368,117 @@ class MainWindow(QtWidgets.QMainWindow):
                      "last": bus["last"]})
                 + (f"\n({hint})" if hint else ""), "flipper")
         self.i2c_kind = kind
+
+    def on_spi(self, text, tell=False):
+        """What the machine says of the header's SPI bus (None: nothing).
+        tell: what the firmware clocks there goes to the log, once the bus is
+        quiet again (tell_spi)."""
+        try:
+            bus = fe_header.parse_spi(text) if isinstance(text, str) else None
+        except ValueError:
+            bus = None
+        there = lambda b: b and [(d["type"], d["select"])
+                                 for d in b["devices"]]
+        chosen = lambda b: b and [d["selected"] for d in b["devices"]]
+        before, self.spi = self.spi, bus
+        if bus and self.a_gpio_spi:     # the GPIO menu's lines, if it is open
+            self.a_gpio_spi.setText(self.spi_line())
+            for d in bus["devices"]:
+                if d["select"] in self.gpio_spi:
+                    self.fill_spi_device(self.gpio_spi[d["select"]], d)
+        if there(bus) != there(before):
+            self.spi_kept = {}
+            self.ask_spi_kept()
+        if (there(bus), chosen(bus)) != (there(before), chosen(before)):
+            # (a pin's line says whose chip select it is, and when it selects)
+            self.on_header(self.props.get(("/machine", "header")))
+        counts = (bus["heard"] + bus["unheard"], bus["unheard"]) if bus \
+            else (0, 0)
+        if not (tell and bus) or counts[0] < self.spi_seen[0]:
+            # as it was found, or an emulator that started anew: no news
+            self.spi_due.stop()
+            self.spi_seen, self.spi_kind = counts, None
+            self.spi_at = float("-inf")
+            return
+        if counts == self.spi_seen and not self.spi_due.isActive():
+            return                      # (a chip select alone is no byte)
+        now = time.monotonic()
+        if not self.spi_due.isActive():
+            self.spi_gap, self.spi_from = now - self.spi_at, now
+        self.spi_at = now
+        if now - self.spi_from < I2C_BURST_S:
+            self.spi_due.start()        # (once more from its beginning)
+
+    def spi_line(self):
+        """The header's SPI bus in a line, as `spi` has it"""
+        return (f"{fe_header.spi_name(self.spi, 'P')}: "
+                f"{fe_header.spi_text(self.spi)}")
+
+    def tell_spi(self):
+        """The bytes that the firmware clocked on the header's SPI bus since
+        the log was last told, in a line.  An app that reads its flash again
+        and again would fill the log: bytes that were heard as the ones
+        before are told only after the bus has been quiet for a while
+        (I2C_QUIET_S)."""
+        bus = self.spi
+        if not bus:
+            return
+        total = bus["heard"] + bus["unheard"]
+        n = total - self.spi_seen[0]
+        lost = max(0, min(bus["unheard"] - self.spi_seen[1], n))
+        self.spi_seen = (total, bus["unheard"])
+        if n <= 0 or not bus["last"]:
+            return
+        kind = "all" if not lost else "none" if lost == n else "some"
+        if kind != self.spi_kind or self.spi_gap >= I2C_QUIET_S:
+            self.log.add(
+                f"{fe_header.spi_name(bus, 'P')}: " + fe_header.spi_did(
+                    {"heard": n - lost, "unheard": lost, "last": bus["last"]}),
+                "flipper")
+        self.spi_kind = kind
+
+    def ask_spi_kept(self):
+        """Where the devices on the header's SPI bus keep their contents,
+        from the launcher (`spi --json`): a file of the device's folder is
+        the launcher's to name, and no property of the machine"""
+        if (self.is_live() and self.spi and self.spi["devices"]
+                and not self.spi_asked):
+            self.spi_asked = True
+            self.command("spi", "--json", then=self.on_spi_kept, quiet=True)
+
+    def on_spi_kept(self, code, text):
+        self.spi_asked = False
+        try:
+            devices = json.loads(text)["devices"] if code == 0 else None
+            if devices is not None:
+                self.spi_kept = {d["select"]: d for d in devices
+                                 if "file" in d and "drive" in d}
+        except (ValueError, KeyError, TypeError):
+            return
+        for d in (self.spi or {}).get("devices", ()):
+            if d["select"] in self.gpio_spi:    # the menu, if it is open
+                self.fill_spi_device(self.gpio_spi[d["select"]], d)
+
+    def fill_spi_device(self, sub, d):
+        """A device on the header's SPI bus, a line of the GPIO menu: the pin
+        of its chip select, is it selected just now, and under it where its
+        contents are kept, as `spi` has it"""
+        known = self.spi_kept.get(d["select"])
+        if known and known.get("type") != d["type"]:
+            known = None
+        title = (f"Pin {d['select']} ({d['pin']}): {d['type']}, "
+                 f"{'selected' if d['selected'] else 'not selected'}")
+        if known and known["file"]:
+            title += f"; kept in {os.path.basename(known['file'])}"
+        kept = fe_header.spi_kept(known) if known else \
+            "where its contents are kept is being read"
+        kept = (kept[0].upper() + kept[1:]).replace("&", "&&")
+        title = title.replace("&", "&&")
+        if sub.title() != title:
+            sub.setTitle(title)
+        if [a.text() for a in sub.actions()] != [kept]:
+            sub.clear()
+            sub.addAction(kept).setEnabled(False)
 
     def ask_i2c_values(self):
         """The values of the devices on the header's I2C bus, from the
@@ -2552,7 +2691,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """The GPIO menu: the header as it is now"""
         m = self.menu_gpio
         m.clear()
-        for sub in self.gpio_i2c.values():
+        for sub in list(self.gpio_i2c.values()) + list(self.gpio_spi.values()):
             sub.deleteLater()           # (clear() leaves a menu under it)
         self.gpio_items = {}            # pin number: its line (a test's way in)
         if not self.header:
@@ -2611,6 +2750,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 a.triggered.connect(lambda _=False: self.ask_i2c_record())
             self.a_gpio_i2c_record = a
             self.ask_i2c_values()       # they may have changed since
+        bus = self.spi
+        self.a_gpio_spi = None          # the SPI bus's line,
+        self.gpio_spi = {}              # ... and a chip select's pin: its
+        #                                 device's menu
+        if bus:
+            m.addSeparator()
+            a = m.addAction(self.spi_line())
+            a.setEnabled(False)
+            self.a_gpio_spi = a
+            for d in bus["devices"]:
+                sub = self.gpio_spi[d["select"]] = m.addMenu("")
+                self.fill_spi_device(sub, d)
+            if not bus["devices"]:
+                m.addAction("(`run --spi TYPE@PIN` puts a device there, PIN "
+                            "its chip select, as --spi w25q32@PA4)"
+                            ).setEnabled(False)
+            if not self.spi_kept:
+                self.ask_spi_kept()     # (they do not change while it runs)
         self.a_gpio_adc = None          # the ADC's line
         if self.adc:
             m.addSeparator()

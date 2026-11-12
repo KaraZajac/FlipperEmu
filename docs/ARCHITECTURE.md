@@ -1302,9 +1302,17 @@ ufbt is not run at all, and `update` sends the package without the stage (BRINGU
   none, and how the last frame was clocked, as `2000000/0/msb/8` (PCLK2 over the
   divider of CR1.BR in Hz, CPOL and CPHA as a mode from 0 to 3, the bit that went
   first, the frame's bits; `-` before the first). `scripts/fe_header.py`
-  (`parse_spi`, `spi_text`) says it in words for `gpio`, `status` and `spi`. The
-  counts stay over a reset of the firmware. Nothing is checked against them: the
-  devices answer at any speed and in any mode.
+  (`parse_spi`, `spi_text`) says it in words for `gpio`, `status`, `spi` and the
+  window. The counts stay over a reset of the firmware. Nothing is checked against
+  them: the devices answer at any speed and in any mode. The window watches the
+  property over the front-panel link, for its GPIO menu and the pins' lines. The
+  property changes with every transfer (the counts, and a chip select that goes
+  low and high), so the console's line waits as the I2C bus's does: until the bus
+  has been quiet for 0.7 s, 3 s at most, and then only when the bytes were heard
+  differently than those of the last line, or after ten seconds of silence. A
+  chip select alone, with no byte, is no line. Where a flash's contents are kept is
+  not the machine's to say (a drive of QEMU's, and a file that the launcher named):
+  the window asks the launcher (`spi --json`) when the bus's devices change.
 - **A flash's contents**: a serial flash (QEMU's `m25p80`, a type for each part)
   without a `drive` of the user's gets one, `-drive
   if=none,id=spi-N-rom,format=raw,file=devices/NAME/spi-N.bin`. The model wants an

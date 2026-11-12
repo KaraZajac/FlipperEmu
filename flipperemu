@@ -1951,15 +1951,6 @@ def spi_device(dev, m, d):
                 file=str(spi_rom(dev, d["select"])) if own else None)
 
 
-def spi_kept(d):
-    """Where a device on that bus keeps its contents, in words"""
-    if d["file"]:
-        return f"its contents are kept in {d['file']}"
-    if d["drive"]:
-        return f"its contents are in the drive {json.dumps(d['drive'])}"
-    return "it keeps nothing when the emulator stops"
-
-
 def cmd_spi(args):
     """The SPI bus of a running device's GPIO header: the devices on it,
     with where a flash's contents are kept, and what the firmware clocked
@@ -1986,7 +1977,7 @@ def cmd_spi(args):
         print(f"[{dev.name}]   pin {d['select']:<2} ({d['pin']})  "
               f"{d['type']:{wide}}  "
               f"{'selected' if d['selected'] else 'not selected'}; "
-              f"{spi_kept(d)}")
+              f"{fe_header.spi_kept(d)}")
     if not devices:
         print(f"[{dev.name}]   (`run --spi TYPE@PIN` puts a device there, "
               "PIN its chip select: --spi w25q32@PA4, a serial flash)")

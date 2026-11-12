@@ -680,6 +680,16 @@ def spi_chip_text(d):
         ", which selects it now" if d["selected"] else "")
 
 
+def spi_kept(d):
+    """Where a device on that bus keeps its contents, in words.  d: the
+    device as `spi --json` has it, with its "drive" and its "file"."""
+    if d["file"]:
+        return f"its contents are kept in {d['file']}"
+    if d["drive"]:
+        return f"its contents are in the drive {json.dumps(d['drive'])}"
+    return "it keeps nothing when the emulator stops"
+
+
 def overruled(p):
     """Is something held to a pin that the firmware drives both ways, itself
     or with a timer's PWM?  On hardware the two would fight; here the

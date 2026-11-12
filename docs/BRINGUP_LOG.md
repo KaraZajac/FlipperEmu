@@ -2908,6 +2908,57 @@ big lock, entry 92).
       a device put on the bus while the emulator runs; the app on the other
       four firmwares.
 
+126. **The SPI bus in the window.** The window had the header's pins, its
+    serial ports, the I2C bus and the ADC, and nothing of the SPI bus: what
+    `run --spi` had put there was asked from a shell.
+    - The GPIO menu has a line for the bus beneath the I2C bus, in `spi`'s
+      words, and one for each device: the pin of its chip select, its type,
+      whether it is selected, and the file of a flash's contents. The words
+      are `fe_header.py`'s, for the launcher and the window alike.
+    - Nothing is set there. A device on this bus has no value as a sensor
+      has a temperature. Its chip select is a pin of the header, and that
+      is held from the pin's own menu as any pin is: the device's line
+      follows.
+    - The file of a flash's contents is not on the front-panel link. The
+      machine's word has a device's type, its pin and whether it is
+      selected; which drive is the launcher's own file in the device's
+      folder is the launcher's to say. The window asks it (`spi --json`)
+      when the bus's devices change, and the line says that this is being
+      read until the answer is there. `spi_kept`, the launcher's words for
+      it, moved to `fe_header.py`.
+    - The pointer over a pin says whose chip select it is and whether it
+      selects now, and MOSI, MISO or SCK while the firmware has the bus (the
+      pin in SPI1's alternate function). A script has the bus for less time
+      than the window looks at the header in (100 ms), so with a script
+      those three words are seldom seen. An app that keeps the handle has
+      them for as long.
+    - The console gets a line for what the firmware clocked, as it does for
+      the I2C bus's calls: once the bus has been quiet for 0.7 s (3 s at
+      most), and only when the bytes were heard differently than those of
+      the last line (all with a device selected, some, none) or after ten
+      seconds of silence. `header-spi` changes when a chip select does as
+      well: with no byte more, that starts no line. A total below the one
+      that was seen is an emulator that started anew: no line either.
+    - Tried with `examples/spi/flash.js` on Unleashed: one line, `Pins 2, 3
+      and 5 (SPI1): the firmware clocked 63 bytes there, all with a device
+      selected; the last at 2 MHz, mode 0, MSB first, 8 bits`.
+    - `scripts/gui_check.py` has four more checks, with a flash on the bus
+      of its device (`--spi flash`): the menu as `spi` has it; pin 4 held
+      low and let go of; the script, which has to be one line in the
+      console, with its 63 bytes in `spi --json`; and two things that no
+      script does for long enough, given to the window as the link gives
+      them (the machine's word with four bytes that nobody heard, the
+      header's word with pin 5 as the bus's clock). That is 64 checks on
+      Momentum, Unleashed and RogueMaster, and 63 on the official 1.5.1
+      and the dev build: their JavaScript has no `spi`, and the step says
+      that it was skipped.
+    - The check's first run failed at an expectation of its own. A line of
+      the console begins with its time, and the pattern began at the
+      line's start.
+    - Not there: a record of the transfers; a device put on the bus or
+      taken off it from the window. Nobody looked at it on a desktop: the
+      window was tried off-screen, as before.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

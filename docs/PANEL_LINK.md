@@ -190,6 +190,7 @@ monitor. Then what changed comes back over the link, whoever changed it.
 | `/machine log-level` | the level of the firmware's log, as the RTC's register has it |
 | `/machine header`, `header-record` | the pins of the GPIO header (what the firmware has each as, its level, what is held to it); a record of the pins and the changes it has so far |
 | `/machine header-serial`, `header-i2c`, `header-i2c-record` | the header's two serial ports (off, or the baud rate and who takes what comes in); its I2C bus (the devices on it, how many addresses the firmware called and how many answered); a record of that bus and what it has so far |
+| `/machine header-spi`, `header-adc`, `header-pwm` | the header's SPI bus (the devices on it and which of them is selected, how many bytes the firmware clocked there and how many of those a device heard); the ADC (on or off, and what it converted last); the PWM that a timer has on a pin (its frequency and the part of the time it is high) |
 
 `/machine/subghz tx` is the whole RAW recording of the latest transmission, too long to
 watch; the window looks for new files in `devices/NAME/subghz-tx/` instead. What the
@@ -197,7 +198,9 @@ launcher held to the Flipper is named in `devices/NAME/held.json` (`{"nfc": "an 
 04 A1 …"}`): the emulator has the card's bytes, not what it was called. The values of
 a device on the I2C bus (a sensor's temperature) are properties of QEMU's own devices,
 a different set for each type: the window asks the launcher for them (`i2c --json`)
-when the bus's devices change, when the GPIO menu opens and after it set one.
+when the bus's devices change, when the GPIO menu opens and after it set one. The
+file that a flash on the SPI bus keeps its contents in is asked the same way (`spi
+--json`), when that bus's devices change.
 
 ## Trying it
 
