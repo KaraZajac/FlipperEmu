@@ -37,6 +37,14 @@ Two more are an I2C bus, the firmware's external one.  The machine's
 a line of text for each part of one, with the address and the bytes
 (i2c_part).
 
+Three more are an SPI bus, the firmware's external one, and each of seven
+others may be the chip select of a device there.  The machine's `header-spi`
+has what is on it and what the firmware clocked there (parse_spi),
+"NAME:MOSI:MISO:SCK:HEARD:UNHEARD:LAST", then "TYPE@PIN:selected|idle" for
+each device:
+
+    SPI1:2:3:5:50:0:2000000/0/msb/8 w25q32@4:idle
+
 Copyright (c) 2026, Kara Zajac
 SPDX-License-Identifier: BSD-3-Clause
 """
@@ -549,6 +557,127 @@ def i2c_hint(bus):
     if not last or last["taken"]:
         return None
     return i2c_shifted(last["address"], bus["devices"])
+
+
+# The alternate function that puts the header's SPI bus on its three pins
+SPI_FUNCTION = 5
+
+# The pins that may be the chip select of a device there, by their numbers on
+# the header, with the MCU's names: 4 is the one of the firmware's own handle
+# for the bus (2, 3 and 5 are the bus)
+SPI_SELECTS = {4: "PA4", 6: "PB2", 7: "PC3", 10: "PA14", 12: "PA13",
+               15: "PC1", 16: "PC0"}
+
+
+def spi_select(word):
+    """The pin a user means as a device's chip select, by the MCU's name
+    (PA4), by what the case says (A4), or by its number on the header (4):
+    that number, or None for none that may be one"""
+    want = word.upper()
+    for number, pin in SPI_SELECTS.items():
+        if want in (pin, LABELS.get(number), str(number)):
+            return number
+    return None
+
+
+def parse_spi(text):
+    """The header's SPI bus (the machine's `header-spi`), a dict: its "name"
+    (SPI1), its pins by their numbers on the header ("mosi", "miso", "sck"),
+    how many bytes the firmware clocked there since the emulator started
+    with a device selected ("heard") and with none ("unheard"), how it
+    clocked the "last" frame (None, or its clock in "hz", the SPI "mode" 0
+    to 3, "lsb_first", and the "bits" of a frame), and the "devices" on the
+    bus, each its "type", the pin of its chip select by its number on the
+    header ("select") and by the MCU's name ("pin"), and is it "selected"
+    just now; the lowest pin first."""
+    words = text.split()
+    name, mosi, miso, sck, heard, unheard, last = words[0].split(":")
+    how = None
+    if last != "-":
+        hz, mode, order, bits = last.split("/")
+        if order not in ("msb", "lsb"):
+            raise ValueError(words[0])
+        how = {"hz": int(hz), "mode": int(mode), "lsb_first": order == "lsb",
+               "bits": int(bits)}
+    devices = []
+    for word in words[1:]:
+        kind, _, rest = word.rpartition("@")
+        number, _, state = rest.partition(":")
+        if state not in ("selected", "idle"):
+            raise ValueError(word)
+        devices.append({"type": kind, "select": int(number),
+                        "pin": SPI_SELECTS.get(int(number), "?"),
+                        "selected": state == "selected"})
+    return {"name": name, "mosi": int(mosi), "miso": int(miso),
+            "sck": int(sck), "heard": int(heard), "unheard": int(unheard),
+            "last": how,
+            "devices": sorted(devices, key=lambda d: d["select"])}
+
+
+def spi_name(bus, first="p"):
+    return (f"{first}ins {bus['mosi']}, {bus['miso']} and {bus['sck']} "
+            f"({bus['name']})")
+
+
+def spi_devices(bus):
+    """What is on the bus, in words"""
+    return ", ".join(f"{d['type']} with its chip select on pin {d['select']}"
+                     for d in bus["devices"]) or "no device"
+
+
+def spi_frame(last):
+    """How the firmware clocked a frame, in words"""
+    return (f"{hertz(last['hz'])}, mode {last['mode']}, "
+            f"{'LSB' if last['lsb_first'] else 'MSB'} first, "
+            f"{last['bits']} bits")
+
+
+def spi_did(bus):
+    """What the firmware did on the header's SPI bus, in words: how many
+    bytes it clocked there, how many of them while a device was selected
+    (the others nobody heard), and how it clocked the last frame"""
+    last, heard = bus["last"], bus["heard"]
+    total = heard + bus["unheard"]
+    if not total or not last:
+        return "the firmware has clocked nothing there yet"
+    if total == 1:
+        to = "with a device selected" if heard else "with no device selected"
+    else:
+        to = ("all" if heard == total else "none" if not heard
+              else f"{heard} of them") + " with a device selected"
+    return (f"the firmware clocked {total} byte{'' if total == 1 else 's'} "
+            f"there, {to}; the last at {spi_frame(last)}")
+
+
+def spi_text(bus):
+    """What is on the header's SPI bus and what the firmware did there, in
+    words"""
+    return f"{spi_devices(bus)}; {spi_did(bus)}"
+
+
+def spi_pin(p, bus):
+    """Is a pin of the header one of the SPI bus's just now?  "MOSI", "MISO",
+    "SCK" or None.  They are the bus's while the firmware has them in its
+    alternate function: from the moment it takes the bus until it lets go."""
+    if bus and p["function"] == SPI_FUNCTION and p["mode"] == "alternate":
+        return {bus["mosi"]: "MOSI", bus["miso"]: "MISO",
+                bus["sck"]: "SCK"}.get(p["number"])
+    return None
+
+
+def spi_chip(p, bus):
+    """The device on the SPI bus whose chip select a pin of the header is
+    (as parse_spi has it), or None"""
+    for d in (bus or {}).get("devices", ()):
+        if d["select"] == p["number"]:
+            return d
+    return None
+
+
+def spi_chip_text(d):
+    """A pin that is a device's chip select, in words"""
+    return f"{d['type']}'s chip select" + (
+        ", which selects it now" if d["selected"] else "")
 
 
 def overruled(p):

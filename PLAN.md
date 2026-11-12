@@ -230,6 +230,11 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       off-screen by `gui_check.py` on official, Momentum and Unleashed (BRINGUP_LOG 64-69)
 - ☐ The window by hand on a desktop session (it has only run on Qt's offscreen
       platform here); a USB DFU device behind the firmware's DFU mode
+- ☐ `gui_check.py`, the step that switches it off with Back held and Power Off: it
+      failed once on Momentum (2026-11-12, the Flipper still on its desktop after the
+      5.6 s), with a round of ten other checks running beside it. It passed alone
+      right after, and on Unleashed in that same round. Not known: whether the hold
+      was too short for a firmware that was slowed, or the key that follows too early
 
 ## M9: a bench for firmware developers ◐
 - ☑ The firmware log (2026-11-10): USART1 kept in `devices/NAME/uart.log` whatever
@@ -435,10 +440,41 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         64 on those three, 55 on the dev build (BRINGUP_LOG 116)
   - ☐ More on that bus: the C app on the other firmwares, each with its own
         SDK
-  - ☐ What other peripherals put on a pin: SPI devices on the header
+  - ☐ The SPI bus in the window's GPIO menu, as the I2C bus is there (next)
+  - ☐ A record of what goes over the SPI bus (`spi record`, `spi watch`), as
+        `i2c record` is one for the I2C bus
+  - ☐ More devices for the SPI bus: a radio module (the external CC1101 that
+        Momentum, Unleashed and RogueMaster have a setting for, an NRF24
+        board), a display
+  - ☐ More on the SPI bus: an example app in C beside the script, and the
+        check's app on the other firmwares, each with its own SDK
   - ☐ A PWM's edges in the pins' record (`gpio record` has `x` for a pin with a
         PWM, and `gpio watch` no line); other timers' outputs on the header's
         pins than the firmware's two
+  - ☑ SPI devices on the header (2026-11-12): `run --spi TYPE@PIN` puts one of
+        QEMU's SPI devices on SPI1 as the header has it, MOSI on pin 2, MISO on
+        pin 3 and SCK on pin 5, with a pin of the header as its chip select (4,
+        6, 7, 10, 12, 15 or 16; 4 is the one of the firmware's own handle). The
+        types are QEMU's serial flashes (`flash` is a W25Q32), each with its
+        contents in a file of the device, `spi-PIN.bin`. A device hears a byte
+        while pin 5 is SPI1's clock (the radios are on the same SPI1, on pins
+        inside) and its own pin is low, as the firmware's output or held from
+        outside. `spi` and `spi --json` say what is there, who is selected, how
+        many bytes the firmware clocked with a device selected and with none,
+        and how the last one was clocked; `gpio` and `status` have the bus's
+        line. In the machine: a device on SPI1's bus with a bus of its own,
+        `spi-header`, and the property `header-spi`. QEMU patch 0010 gives
+        Winbond's flashes the read-ID commands 90h and ABh, which the model had
+        for SST's alone (a QEMU tree that was set up before re-runs
+        `setup_qemu.sh`). `examples/spi/flash.js` for the three firmwares whose
+        JavaScript has an `spi` module, and an app of the check's own
+        (`scripts/spi_check_app`, the official 1.5.1) for what the firmware's
+        handle never sets: another chip select, mode 3, the least significant
+        bit first, frames of 16 bits, a pin of the three that is not the bus's,
+        nobody selected. `scripts/spi_check.py`: 45 checks on the official
+        1.5.1, 30 on Momentum, Unleashed and RogueMaster, 25 on the dev build;
+        `gpio_check.py` 111 and 82; `setup_check.py` 30. No real Flipper with a
+        flash on its header was asked (BRINGUP_LOG 125)
   - ☑ PWM on a pin (2026-11-12): the two outputs of the firmware's
         `furi_hal_pwm`, pin 2 (PA7, TIM1) and pin 4 (PA4, LPTIM2), are on the
         header as what they are: `gpio` has such a pin as `pwm`, with the timer,

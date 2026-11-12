@@ -10,6 +10,7 @@ would be: the build tools you already use, pointed at it.
 - [The pins of the GPIO header](#the-pins-of-the-gpio-header)
 - [A serial port on the header](#a-serial-port-on-the-header)
 - [A sensor on the header's I2C bus](#a-sensor-on-the-headers-i2c-bus)
+- [A flash on the header's SPI bus](#a-flash-on-the-headers-spi-bus)
 - [A test that runs by itself](#a-test-that-runs-by-itself)
 - [Why `./flipperemu ufbt`, and not `ufbt` alone](#why-flipperemu-ufbt-and-not-ufbt-alone)
 - [The SDK has to be the firmware's](#the-sdk-has-to-be-the-firmwares)
@@ -285,7 +286,8 @@ A pin is named as the MCU has it (`PA7`), as the case has it (`A7`) or by that n
   two outputs) is `unknown`: only the levels
   of plain inputs and outputs are on the header so far. (The
   bytes of the UART on pins 15 and 16 are there, as bytes: the next section. And so
-  are devices for the I2C bus on those pins: the one after it.)
+  are devices for the I2C bus on those pins, and for the SPI bus on pins 2, 3 and 5:
+  the two after it.)
 - **What your app did to a pin, edge by edge:** `gpio record pins.vcd` has the
   emulator write every change of a pin's level to a file, with its time, until `gpio
   record stop`; a pulse too short for `--wait` is in it. The file is a VCD, which
@@ -531,6 +533,134 @@ fe run --detach --headless --i2c tmp105@0x48,temperature=23.5
 fe i2c 0x48 temperature -7.5                 # the sensor says -7.5 °C from here on
 test "$(fe i2c 0x48 temperature)" = -7.5
 ```
+
+## A flash on the header's SPI bus
+
+An app for a board with a serial flash talks to SPI1, MOSI on pin 2, MISO on pin 3
+and SCK on pin 5, and has one more pin as the chip select. The firmware's handle for
+that is `furi_hal_spi_bus_handle_external`, with the chip select on pin 4 (A4), at 2
+MHz in mode 0: `furi_hal_spi_bus_handle_init` once, then `furi_hal_spi_acquire`,
+`furi_hal_spi_bus_tx`, `furi_hal_spi_bus_rx` and `furi_hal_spi_release` for each
+transfer, and `furi_hal_spi_bus_handle_deinit` at the app's end. `run --spi` is the
+board, and `spi` says what reached it. With these lines in an app:
+
+```c
+#include <furi_hal_spi.h>
+#include <furi_hal_spi_config.h>
+
+const FuriHalSpiBusHandle* flash = &furi_hal_spi_bus_handle_external;
+const uint8_t ask = 0x9f;
+uint8_t id[3] = {0};                     // rx sends what its buffer has: zeros
+
+furi_hal_spi_bus_handle_init(flash);     // pin 4 an output, high
+furi_hal_spi_acquire(flash);             // pins 2, 3 and 5 the bus's, pin 4 low
+furi_hal_spi_bus_tx(flash, &ask, 1, 100);
+furi_hal_spi_bus_rx(flash, id, 3, 100);  // ef 40 16
+furi_hal_spi_release(flash);             // pin 4 high, the three pins analog
+furi_hal_spi_bus_handle_deinit(flash);   // pin 4 analog
+
+FURI_LOG_I("FeFlash", "JEDEC ID: %02x %02x %02x", id[0], id[1], id[2]);
+```
+
+```
+$ ../../flipperemu run --detach --spi flash
+$ ../../flipperemu ufbt launch
+…
+$ ../../flipperemu log -g FeFlash
+13522 [I][FeFlash] JEDEC ID: ef 40 16
+$ ../../flipperemu spi
+[flipper] pins 2, 3 and 5 (SPI1): w25q32 with its chip select on pin 4; the firmware clocked 4 bytes there, all with a device selected; the last at 2 MHz, mode 0, MSB first, 8 bits
+[flipper]   pin 4  (PA4)  w25q32  not selected; its contents are kept in /home/you/FlipperEmu/devices/flipper/spi-4.bin
+```
+
+- **The device** is one of QEMU's serial flashes by its name there, and after the
+  `@` the pin of the header that is its chip select: `--spi w25q32@PA4`, or `@4`
+  by the pin's number, or `@A4` as on the case. `flash` alone is a W25Q32 on pin
+  4, where the firmware's handle has it. `run --spi help` lists the parts, more
+  than a hundred of them, and the pins that a chip select may be. Tried here are the
+  W25Q32 and the W25Q80BL. A part that is not among them has one of its maker's
+  family to stand in; the JEDEC ID is then that part's.
+- **When it does not answer,** the first line of `spi` is where to look: it counts
+  the bytes that the firmware clocked on the header, and how many of them a device
+  heard. The same app with the flash's chip select on pin 7 (`--spi w25q32@PC3`),
+  as on a board that has it wired to C3:
+
+  ```
+  $ ../../flipperemu log -g FeFlash
+  4355 [I][FeFlash] JEDEC ID: 00 00 00
+  $ ../../flipperemu spi
+  [flipper] pins 2, 3 and 5 (SPI1): w25q32 with its chip select on pin 7; the firmware clocked 4 bytes there, none with a device selected; the last at 2 MHz, mode 0, MSB first, 8 bits
+  [flipper]   pin 7  (PC3)  w25q32  not selected; its contents are kept in /home/you/FlipperEmu/devices/flipper/spi-7.bin
+  ```
+
+  `none with a device selected`: the bus works, and the pin that the app pulls low
+  is not the one that the flash is on. `the firmware has clocked nothing there
+  yet`: the app never had the bus on those pins. `all with a device selected`, and
+  the answer is still wrong: the bytes themselves, which the app's log should
+  have. The `00 00 00` is MISO's pull: the firmware's handle pulls pin 3 down, and
+  with nobody selected nothing else has it.
+- **`furi_hal_spi_bus_rx` sends while it reads,** and what it sends is what the
+  buffer has: the firmware's function is `furi_hal_spi_bus_trx` with one buffer
+  for both ways. A flash does not listen while it answers. A chip that does gets
+  the last answer back, so zero the buffer first, or use `furi_hal_spi_bus_trx`
+  with a buffer of what to send.
+- **Another chip select, speed or mode** is a handle of the app's own: a
+  `FuriHalSpiBusHandle` on `furi_hal_spi_bus_r` with a callback that makes the
+  chip select an output on Init and takes the bus and the three pins on Activate,
+  as the firmware's own in `targets/f7/furi_hal/furi_hal_spi_config.c` do.
+  `scripts/spi_check_app/spi.c` has such a handle, with its chip select on pin 7
+  at 4 MHz in mode 3, and `spi` then says `the last at 4 MHz, mode 3`. One thing
+  to know with two handles: a handle's de-initialisation makes its chip select
+  analog. Two handles with one chip select, and one of them de-initialised while
+  the other is still used, select nothing from then on.
+- **From outside:** `gpio PC3 low` holds pin 7 low, as a chip select that is wired
+  to GND, and the device there is selected for as long. `gpio PA6 high` holds
+  MISO, which is what the firmware reads when nobody is selected. While an app
+  has the bus, `gpio` has pins 2, 3 and 5 as the bus's (alternate function 5) and
+  says beside the chip select's pin that it selects now.
+- **For a program,** `spi --json` is the bus with its counts (`heard`, `unheard`),
+  how the last byte was clocked (`last`) and every device, each with its pin,
+  whether it is selected, and its file.
+- **The flash's contents** are a file, `devices/NAME/spi-4.bin` for the flash on
+  pin 4, as large as the part and 0xFF throughout when new. It is written as the
+  firmware writes, and kept over a reset, over `stop` and the next `run`. A test
+  compares it with what the app should have written (`od -A x -t x1z -j 0x1000 -N
+  16 devices/NAME/spi-4.bin` is a look at sixteen bytes from 0x1000), or puts
+  bytes there before `run`, for the app to find. Remove the file for an empty
+  flash.
+- What is on the bus is said with each `run`. A device cannot be added while the
+  emulator runs.
+- **In JavaScript** it is `require("spi")` on Momentum, Unleashed and RogueMaster,
+  which is the firmware's handle: `examples/spi/flash.js` reads the flash's IDs,
+  erases a sector and writes seven bytes there (the README has its run). The
+  official firmware's JavaScript has no such module, so there it is an app in C.
+
+In a test script:
+
+```sh
+fe run --detach --headless --spi flash
+fe wait
+fe wait --log 'FeFlash.*JEDEC ID: ef 40 16' -- ufbt launch     # the app's own word
+fe spi --json | grep -q '"unheard": 0'                         # no byte went to nobody
+fe stop
+
+# what the flash has before the app's next run: eight bytes at address 0
+printf 'Flipper!' | dd of=../../devices/NAME/spi-4.bin bs=1 seek=0 conv=notrunc
+fe run --detach --headless --spi flash
+```
+
+Those lines ran here with an app of the snippet above and one more read (03h from
+address 0), which logged `46 6c 69 70 70 65 72 21` after the second start. There
+is no example app in C for this bus yet: what ran in C is that snippet and the
+check's own app, both on the official 1.5.1, and the script on the three firmwares
+that have the module. Momentum's own example for the bus (`Examples/spi.js` on its
+card, written for a W25Q32 on these pins) was run once by hand and found the
+flash: `Found Winbond device`, `Device ID: W25Q32`. Four limits matter for an app.
+A transfer takes no time, at any speed, and the flash answers in any mode, where a
+real one wants mode 0 or 3. While a selected flash takes a command it answers 00
+here; on hardware it leaves MISO alone, and the app reads the pin's pull. The
+three pins are not on the header as levels: a record of the pins has no bits of a
+transfer. And no real Flipper with a flash on its header was asked.
 
 ## A test that runs by itself
 
@@ -1083,7 +1213,8 @@ reads a DS1990A has the reset pulse and, right after it, the key's presence puls
 and a record the emulator was stopped under is whole. Beneath the pins it wants the
 two serial ports as the firmware starts with them: the log's with a baud rate, its
 receiver off and a call waited for on pin 14, the other one off; and beneath those
-the I2C bus, with no device and no address called, and the ADC, off, with nothing
+the I2C bus, with no device and no address called, the SPI bus, with no device and
+nothing clocked (which `spi` has to say too), and the ADC, off, with nothing
 converted. Then voltages: six of them held to the ADC's six pins, in the table and in
 `status --json`; a script in the firmware's JavaScript that measures each pin twice
 in a row with `readAnalog()` and prints what is held (1250 for 1.25 V, 2047, the most
@@ -1102,7 +1233,7 @@ clock, 100 Hz at 10 % with a prescaler in both timers, and 0 % and 100 %, which 
 a low and a high pin); 3V3 held to a pin that has a PWM; what the script's own
 `isPwmSupported()` and `isPwmRunning()` say; and the record, which has no line for
 a PWM's edges. It passes on the official 1.5.1,
-the official dev build, Momentum, Unleashed and RogueMaster (81 checks). Then, where
+the official dev build, Momentum, Unleashed and RogueMaster (82 checks). Then, where
 `ufbt` is there with this firmware's SDK (the official 1.5.1; skipped otherwise),
 three apps of its own. `scripts/adc_check_app` measures with `furi_hal_adc` and logs each
 number with what the firmware's own `furi_hal_adc_convert_*` makes of it: the chip's
@@ -1125,7 +1256,7 @@ turns PC0's off and on again, and none arrives or is kept while it is off; PA7 i
 while the app pulls it low, also with 3V3 held to it, high when let go of, and read
 as low by the firmware while it is held low from outside; a record has PA7's six
 levels in their order; and the NFC, whose chip has PB2's interrupt line, reads a tag
-afterwards (110 checks then).
+afterwards (111 checks then).
 The window's pins are in `scripts/gui_check.py`: a click on pin 2 and Hold it high
 (the window has it high with a wire on it, and the launcher's `gpio PA7` from outside
 says `high`), pin 3 held low, the GPIO menu's lines, Let go of all pins, the clicks
@@ -1246,6 +1377,48 @@ goes well, and the firmware's scan finds the two devices afterwards.
 JavaScript has no `i2c` module. 64 on Momentum, Unleashed and RogueMaster, with the
 apps' part skipped: the SDK of the ufbt here is for the official 1.5.1. On the
 official dev build it is 55, with both skipped: only the scan talks on the bus there.
+
+`scripts/spi_check.py FIRMWARE` starts a device with two serial flashes on the
+header's SPI bus, a W25Q32 with its chip select on pin 4 and a W25Q80BL on pin 7.
+Before the start it wants what is refused, in words and with no device made: an `@`
+with no pin, a pin with no type, a pin of the bus itself and one that is no signal's
+as a chip select, `cs`, `bus` and `id` as a property, a property with no value, one
+of the Flipper's own chips, a type that QEMU has not, and two devices with one chip
+select; and `run --spi help`, with the pins and the flashes. After the start: `spi`
+with both devices, neither selected and nothing clocked; the two new files, as large
+as the parts and 0xFF throughout; `spi --json`; the bus and the two chip selects in
+`gpio`, and the bus in `status` and `status --json`. Then `examples/spi/flash.js`,
+where the firmware's JavaScript has an `spi` module: the flash's IDs, a sector
+erased, seven bytes written and read back, 63 bytes in the launcher's count, all
+with a device selected, and the bytes in the flash's file. Then, where `ufbt` is
+there with this firmware's SDK, the check's own app in C (`scripts/spi_check_app`,
+built and started by `ufbt launch`), which logs what it reads at each step. Through
+the firmware's handle: the JEDEC ID and Winbond's older IDs (90h, also from address
+1, and ABh), a sector erased and a page written. Through a handle of its own, with
+its chip select on pin 7, at 4 MHz and in mode 3: the other flash's ID (86 bytes so
+far, and `spi` has how the last was clocked). The least significant bit first (f9
+goes out for 9f, and f7 02 68 comes back for ef 40 16); frames of 16 bits; the
+clock's pin as something else than the bus's (nothing reaches the header), and
+MISO's (the flash is asked, and nobody hears its answer); MOSI's pin as a plain
+output, whose level the flash gets for every bit (00 ff 00 in a page, and not what
+the firmware sent); bytes with nobody selected, which read as MISO's pull (00 with
+a pull-down, ff with a pull-up); and the launcher's count of all that. The app then
+holds the bus in the middle of a read: `spi` and `gpio` have the flash on pin 4 as
+selected, pin 7 held low from outside selects the other flash too, and MISO held
+high from outside is what the firmware reads with nobody selected. The files have
+the page and the three bytes, and nothing else. A second run of the app from the
+card finds the page; a reset of the firmware while its handle has the bus leaves
+nobody selected and the count as it was, and the app runs to its end after it. Last,
+a flash of another size on pin 4 is refused while the file is there (both sizes,
+the file, what to do), and a start with that one flash has a count that began anew,
+the page that was written before the stop, and a call to pin 7, where nobody is now,
+counted as heard by none.
+
+45 checks on the official 1.5.1, with the script's part skipped, since the official
+JavaScript has no `spi` module. 30 on Momentum, Unleashed and RogueMaster, with the
+app's part skipped: the SDK of the ufbt here is for the official 1.5.1. On the
+official dev build it is 25, with both skipped: the firmware clocks nothing there,
+and what is checked is the launcher's side and the files.
 
 `scripts/gdb_check.py FIRMWARE` does what the gdb section shows, with gdb in batch
 mode: a backtrace of the firmware with functions and lines, the breakpoint in the

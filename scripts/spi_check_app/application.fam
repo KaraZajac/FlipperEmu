@@ -1,0 +1,12 @@
+# What scripts/spi_check.py has a firmware do on the header's SPI bus.  Not
+# an example
+App(
+    appid="fe_spi_check",
+    name="SPI bus check",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="fe_spi_check_app",
+    stack_size=2 * 1024,
+    fap_category="Debug",
+    fap_version="1.0",
+    fap_description="Transfers on pins 2 to 5 and 7 that scripts/spi_check.py looks at",
+)

@@ -327,6 +327,7 @@ struct WB55SpiState {
     uint8_t rxfifo[4];
     int rxcount;
 };
+unsigned wb55_spi_bits(WB55SpiState *s);    /* a frame's, as CR2.DS has it */
 
 /* ----------------------------------------------------------------- I2C */
 #define TYPE_WB55_I2C "stm32wb55-i2c"

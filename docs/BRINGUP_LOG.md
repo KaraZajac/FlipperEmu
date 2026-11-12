@@ -2806,6 +2806,108 @@ big lock, entry 92).
       firmware reads from the input register of a pin with a PWM, and a PWM
       as a voltage for the ADC.
 
+125. **SPI devices on the header.** The last of the header's buses with
+    nothing on it. The firmware's handle for it,
+    `furi_hal_spi_bus_handle_external`, is SPI1, the two radios' bus, on
+    three other pins: MOSI on PA7 (pin 2), MISO on PA6 (pin 3) and SCK on
+    PB3 (pin 5), with PA4 (pin 4) as its chip select, at 2 MHz in mode 0.
+    The JavaScript `spi` module of Momentum, Unleashed and RogueMaster is
+    that handle; the official firmware's JavaScript has no such module.
+    - One bus, two sets of pins. The model has one SSI bus for SPI1, and a
+      device there gets a frame when its chip select says so, whatever pins
+      the bus is on. So the header's side is one more device on that bus,
+      `flipper-header-spi`, with no chip select of its own, which has a
+      second bus, `spi-header`, and passes a frame on only while PB3 is in
+      SPI1's alternate function. A radio's frames never reach the header
+      that way, and QEMU's own SPI devices sit on the second bus as they
+      come: `-device TYPE,bus=spi-header,cs=N`.
+    - `cs` is the pin. An SSI device's `cs` is its index on the bus, a number
+      that the board gives a meaning to. Here it is the number of the
+      header's pin that is the device's chip select, and the launcher's
+      `TYPE@PIN` is that. The pins for it are those that can be held from
+      outside and are not the bus's own: 4, 6, 7, 10, 12, 15 and 16. The
+      machine ends a start with any other, and the launcher refuses one
+      before that, in words.
+    - A chip select is a level. The device's select line is set from
+      `header_level()` of its pin, which is what the header's table has:
+      after every write to an output register of that port, after a hold
+      from outside, and after a reset. So a pin that is held low from
+      outside selects, as a chip select that is wired to GND; an analog pin
+      selects nobody; and after a reset in the middle of a transfer, where
+      every pin is an input again, nobody is selected.
+    - What the wire has. A frame of 8 bits is a byte and one of 16 bits two,
+      the high one first. With LSBFIRST each byte is turned around on its
+      way out and on its way back: a flash that is asked 9f that way hears
+      f9, and its ef 40 16 is read as f7 02 68. MOSI's pin as a plain output
+      of the app gives its level for every bit; MISO's pin that is not the
+      bus's reads 0. With nobody selected MISO has what holds it, the
+      outside's level on pin 3 or else the pin's pull: 00 with the
+      firmware's handle, which pulls it down, ff with a handle that pulls it
+      up.
+    - What was clocked. The machine counts the bytes that went to the header
+      with a device selected and with none, and keeps how the last frame
+      was clocked (PCLK2 over the divider, CPOL and CPHA, the first bit, the
+      frame's bits): the property `header-spi`. Those are the three things
+      to ask when a device is silent: was anything clocked, was anybody
+      selected, and at what speed and in which mode. Nothing is checked
+      against the speed or the mode, and a device answers at any.
+    - The flash's size. QEMU's m25p80 wants a drive as large as the part,
+      and refuses another with the number ("requires N bytes"). The launcher
+      has no table of parts: it starts the machine once with an empty drive
+      for that type, with no firmware, reads the number from the refusal,
+      and makes the file, 0xFF in every byte. A file of another size is the
+      launcher's to refuse, with both sizes and what to do.
+    - 90h and ABh (QEMU patch 0010). The firmwares' own example for the bus
+      (`Examples/spi.js` on Momentum's and RogueMaster's cards) is written
+      for a W25Q32: it sends 90h and five more bytes, and tells the flash by
+      ef and 15 in the fifth and sixth that come back. QEMU's model has 90h
+      and ABh for SST's parts alone, and a Winbond flash answered zeros.
+      With the patch Winbond's W25X and W25Q have both: 90h gives the maker
+      and the device's ID, again and again, the device first from address 1;
+      ABh the device's ID alone. That ID is no byte of the JEDEC ID: it is
+      one less than the capacity byte there (16 and 15 for a W25Q32), and 19
+      at 512 Mbit, where the capacity byte is 20. The three bytes after the
+      command are three in the 4-byte address mode too. That is why `flash`
+      is short for `w25q32`. Momentum's example, run once by hand on that
+      flash, says `Found Winbond device` and `Device ID: W25Q32`, and so
+      for the JEDEC ID. RogueMaster's has the same lines and was not run.
+    - While a selected flash takes a command, the model answers 00. A real
+      flash leaves MISO alone then, and the firmware reads the pin's pull.
+      With the firmware's handle that is 00 as well; with a handle that
+      pulls MISO up it would be ff on hardware and is 00 here.
+    - The check's app (`scripts/spi_check_app`) has a handle of its own on
+      `furi_hal_spi_bus_r`, for what the firmware's handle never sets:
+      another chip select, 4 MHz in mode 3, the least significant bit first,
+      frames of 16 bits, a pin of the three as something else, a pull-up on
+      MISO. One thing in it is for an app on a Flipper too: a handle's
+      de-initialisation makes its chip select analog. An app that has two
+      handles with the same chip select (PA4 here) and de-initialises one of
+      them while it still uses the other selects nothing from then on: the
+      second handle's writes to the pin go to a pin that is no output. The
+      app's first version did that.
+    - The launcher: `run --spi TYPE[@PIN][,PROPERTY=VALUE]` and `run --spi
+      help`; `spi` and `spi --json`; the bus's line in `gpio` and `status`,
+      and beside a pin in the table whose chip select it is and when it
+      selects. The types are those that QEMU has on an SSI bus, less the
+      Flipper's own chips and a display that wants one more pin: on this
+      build the serial flashes. A flash's contents are `devices/NAME/
+      spi-PIN.bin`, kept over a reset, a `stop` and the next `run`.
+    - `scripts/spi_check.py`: 45 checks on the official 1.5.1 (the app; no
+      script, since its JavaScript has no module), 30 on Momentum, Unleashed
+      and RogueMaster (the script, `examples/spi/flash.js`; no app, since
+      ufbt's SDK is the official 1.5.1's), 25 on the official dev build
+      (neither). `gpio_check.py` has the bus with no device on it: 111 and
+      82. `setup_check.py` has the tenth patch: 30.
+    - Where a Flipper could differ: no real Flipper with a flash on its
+      header was asked. What a byte reads with nobody selected, and that the
+      header has no byte while pin 5 is not the clock, are the model's
+      reasoning from the pins. Not there: the bus in the window; a record of
+      the transfers; a radio module or a display as a device; any timing
+      (a transfer takes no time, and no mode or speed is refused); the three
+      pins as levels (they read `unknown` while the firmware has the bus);
+      a device put on the bus while the emulator runs; the app on the other
+      four firmwares.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

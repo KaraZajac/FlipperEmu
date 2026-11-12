@@ -63,6 +63,13 @@ transfer in a record, byte for byte, a byte that a device refuses and a START wi
 STOP before it among them) passes on the same five. The scripts' part runs on
 Momentum, Unleashed and RogueMaster, whose JavaScript has an `i2c` module, and the
 apps' part on the official 1.5.1, which the SDK of the ufbt here is for.
+`scripts/spi_check.py` (the SPI bus of the header, pins 2, 3 and 5: two serial flashes
+put there with `run --spi`, each with a pin of the header as its chip select, read,
+erased and written by a script and by an app in C, their contents kept in files, and
+the launcher's count of what the firmware clocked there, with a device selected and
+with none) passes on the same five. The script's part runs on Momentum, Unleashed and
+RogueMaster, whose JavaScript has an `spi` module, and the app's part on the official
+1.5.1.
 `scripts/ufbt_check.py` (ufbt 0.2.6 building `examples/hello`, launching it there, and
 `ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's symbols, that
 app's and a stock app's, and its debug configuration for VS Code used the way that
@@ -426,6 +433,8 @@ it runs: once with the wait given up, once to the end.
 | `run --i2c TYPE@ADDRESS[,NAME=VALUE]` | start with a device on the I2C bus of its header (pins 15 and 16): `--i2c tmp105@0x48,temperature=23.5`, `--i2c eeprom@0x50`; once for each device. `run --i2c help` lists the types |
 | `i2c` \| `i2c ADDRESS` \| `i2c ADDRESS NAME` \| `i2c ADDRESS NAME VALUE` | that bus: its devices with their values, and what the firmware called; one device; one value, bare; set a value while the firmware runs. `i2c --json`: the bus and its devices' values for a program |
 | `i2c record OUT.txt` \| `i2c record stop` \| `i2c watch [ADDRESS]` | every transfer on that bus, a line for each START with its time: the address called, the bytes written or read; into a text file, or printed as it happens |
+| `run --spi TYPE@PIN` | start with a device on the SPI bus of its header (pins 2, 3 and 5), PIN its chip select: `--spi flash` (a W25Q32, its chip select on pin 4), `--spi w25q80bl@PC3`; once for each device. `run --spi help` lists the types |
+| `spi` | that bus: its devices, which of them is selected, how many bytes the firmware clocked there and how many of them a device heard, and how the last was clocked. `spi --json`: the same for a program |
 | `reset` | reboot it, as holding Left + Back does |
 | `pause` \| `continue` | time stands still on it (screen, timers, radios), and goes on from there |
 | `run --usbip [PORT]` | export the USB device over USB/IP (then `sudo scripts/usbip_attach.py`) |
@@ -812,7 +821,7 @@ scripts/enclave_check.py -f FIRMWARE     # and the enclave through the firmware 
 
 And for the setup itself, `scripts/setup_check.py`: what `scripts/setup_qemu.sh` makes
 of a source tree that has all, some or none of the patches in `qemu/patches`, and
-whether the tree here has them all (28 checks in ten seconds; it builds nothing and
+whether the tree here has them all (30 checks in ten seconds; it builds nothing and
 starts no emulator). A tree with a `.rej` file in it is one that the script, as it was
 until 2026-11-11, patched twice: the script says so now, and how to start over.
 
@@ -1400,6 +1409,8 @@ its serial ports, as the firmware has them (`uart` sends and reads there)
   pins 15 and 16 (LPUART1)  off (nothing has opened it)
 its I2C bus, SDA on pin 15 and SCL on pin 16 (`run --i2c TYPE@ADDRESS` puts a device there)
   pins 15 and 16 (I2C3)  no device; the firmware has called no address yet
+its SPI bus, MOSI on pin 2, MISO on pin 3 and SCK on pin 5 (`run --spi TYPE@PIN` puts a device there, PIN its chip select)
+  pins 2, 3 and 5 (SPI1)  no device; the firmware has clocked nothing there yet
 its ADC, with pins 2, 3, 4, 7, 15 and 16 as inputs (`gpio PIN 1.25V` holds a voltage to one)
   ADC1  off (nothing uses it now); the firmware has converted nothing yet
 ```
@@ -1429,6 +1440,11 @@ source. More on the ports [below](#the-serial-port-on-pins-15-and-16).
 Then the header's I2C bus: the devices that `run --i2c` put there, and what the
 firmware did on it (how many addresses it called, how many answered, the last one).
 More on it [below](#i2c-devices-on-pins-15-and-16).
+
+And its SPI bus: the devices that `run --spi` put there, each with the pin of its
+chip select, and how many bytes the firmware clocked there, with a device selected
+and with none. A pin that is a device's chip select says so in its row, and when it
+selects. More on it [below](#spi-devices-on-pins-2-3-and-5).
 
 The last line is the firmware's ADC, which has six of the pins as inputs: 2, 3, 4, 7,
 15 and 16 (PA7, PA6, PA4, PC3, PC1, PC0). `gpio PA7 1.25V` holds a voltage to one, as
@@ -1642,13 +1658,16 @@ file with its whole path, or `off`; read, the changes and nanoseconds so far and
 file.
 
 `scripts/gpio_check.py FIRMWARE` checks it with the firmware's own `gpio` CLI command
-on the other side of the pins: 56 checks, on the official 1.5.1, the official dev
-build, Momentum, Unleashed and RogueMaster. What that command cannot do, interrupts
-and an open-drain output, it has an app of its own for (`scripts/gpio_check_app`,
-built with ufbt): four pins with an interrupt, held low and high from outside, each
-edge that was asked for counted once and no other, an interrupt turned off and on
-again, and a line that the app and the outside pull low in turn. Those are 16 checks
-more, on the official 1.5.1 alone: ufbt's SDK is that firmware's.
+on the other side of the pins, and with scripts in the firmware's JavaScript for the
+ADC and the PWMs: 82 checks, on the official 1.5.1, the official dev build, Momentum,
+Unleashed and RogueMaster. What neither can do, it has three apps of its own for,
+built with ufbt. `scripts/gpio_check_app`: four pins with an interrupt, held low and
+high from outside, each edge that was asked for counted once and no other, an
+interrupt turned off and on again, and a line that the app and the outside pull low
+in turn. `scripts/adc_check_app`: the firmware's ADC in both of its ranges, and the
+chip's own channels. `scripts/pwm_check_app`: the PWMs that the firmware's own calls
+never make. Those are 29 checks more, on the official 1.5.1 alone: ufbt's SDK is that
+firmware's.
 
 ### The serial port on pins 15 and 16
 
@@ -2223,6 +2242,178 @@ was set up before 2026-11-12 wants `scripts/setup_qemu.sh` once more**, for the 
 and for the machine's side of all this (the bus by its name, what was called, the
 record, a START for another address inside a transfer).
 
+### SPI devices on pins 2, 3 and 5
+
+Pins 2, 3 and 5 are also the header's SPI bus, SPI1: MOSI on 2, MISO on 3, SCK on 5
+(A7, A6 and B3 on the case). A flash or a radio module is wired there, with its chip
+select on one more pin, and an app talks to it through
+`furi_hal_spi_bus_handle_external` in C, which has the chip select on pin 4 (A4), or
+`require("spi")` in JavaScript, which is that handle. `run --spi` puts a device on the
+bus, and `spi` is a look at the bus from outside:
+
+```sh
+./flipperemu run --spi flash          # a W25Q32, its chip select on pin 4
+./flipperemu run --spi w25q32@PA4 --spi w25q80bl@PC3    # two, a pin for each
+./flipperemu run --spi help           # the types there are
+./flipperemu spi                      # the bus: its devices, who is selected, the bytes
+./flipperemu spi --json               # the same, for a program
+```
+
+With Momentum, whose JavaScript has an `spi` module, and `examples/spi/flash.js`,
+which reads the flash's IDs, erases a sector and writes seven bytes there:
+
+```
+$ ./flipperemu spi
+[flipper] pins 2, 3 and 5 (SPI1): w25q32 with its chip select on pin 4; the firmware has clocked nothing there yet
+[flipper]   pin 4  (PA4)  w25q32  not selected; its contents are kept in /home/you/FlipperEmu/devices/flipper/spi-4.bin
+$ ./flipperemu push examples/spi/flash.js /ext
+examples/spi/flash.js -> /ext/flash.js (2233 bytes)
+[flipper] 1 copied (through the firmware)
+$ ./flipperemu cli "js /ext/flash.js"
+Running script /ext/flash.js, press CTRL+C to stop
+kept: ff ff ff ff ff ff ff ff
+jedec: ef 40 16
+id90: 00 00 00 00 ef 15
+erased: ff ff ff ff ff ff ff ff
+written: 46 6c 69 70 70 65 72 ff
+spi done
+Script done!
+$ ./flipperemu spi
+[flipper] pins 2, 3 and 5 (SPI1): w25q32 with its chip select on pin 4; the firmware clocked 63 bytes there, all with a device selected; the last at 2 MHz, mode 0, MSB first, 8 bits
+[flipper]   pin 4  (PA4)  w25q32  not selected; its contents are kept in /home/you/FlipperEmu/devices/flipper/spi-4.bin
+```
+
+`ef 40 16` is the JEDEC ID of a W25Q32 (Winbond, 4 MiB). `id90` is the answer to
+Winbond's older command: six bytes went out and six came in, the first four while the
+flash took the command and its address (00), then the maker and the device, `ef 15`.
+The seven bytes are "Flipper". The script's next run finds them, and so does a look
+at the flash's file:
+
+```
+$ ./flipperemu cli "js /ext/flash.js"
+Running script /ext/flash.js, press CTRL+C to stop
+kept: 46 6c 69 70 70 65 72 ff
+…
+$ od -A x -t x1z -j 0x1000 -N 16 devices/flipper/spi-4.bin
+001000 46 6c 69 70 70 65 72 ff ff ff ff ff ff ff ff ff  >Flipper.........<
+```
+
+The official firmware's JavaScript has no such module, and there it is an app in C.
+The firmware's handle for the header is used like this:
+
+```c
+#include <furi_hal_spi.h>
+#include <furi_hal_spi_config.h>
+
+const FuriHalSpiBusHandle* flash = &furi_hal_spi_bus_handle_external;
+const uint8_t ask = 0x9f;
+uint8_t id[3] = {0};                     // rx sends what its buffer has: zeros
+
+furi_hal_spi_bus_handle_init(flash);     // pin 4 an output, high
+furi_hal_spi_acquire(flash);             // pins 2, 3 and 5 the bus's, pin 4 low
+furi_hal_spi_bus_tx(flash, &ask, 1, 100);
+furi_hal_spi_bus_rx(flash, id, 3, 100);  // ef 40 16
+furi_hal_spi_release(flash);             // pin 4 high, the three pins analog
+furi_hal_spi_bus_handle_deinit(flash);   // pin 4 analog
+```
+
+That handle is 2 MHz, mode 0, the most significant bit first. A handle of the app's
+own (a `FuriHalSpiBusHandle` on `furi_hal_spi_bus_r` with a callback) has another
+chip select, speed or mode; the check's app, `scripts/spi_check_app/spi.c`, has one.
+
+- **A device** is `TYPE@PIN`: one of QEMU's SPI devices by QEMU's name for it, and
+  the pin of the header that is its chip select, by its number there (`4`), by the
+  MCU's name (`PA4`) or as on the case (`A4`). The pins for it are 4, 6, 7, 10, 12,
+  15 and 16; with no `@PIN` it is 4, the one of the firmware's handle. One `--spi`
+  for each device, one device to a pin. After a comma come the device's own settings
+  as `PROPERTY=VALUE`. A form that is wrong is refused in words, before anything is
+  flashed.
+- **Which there are:** `./flipperemu run --spi help` lists them. They are serial
+  flashes, the parts that QEMU's model has by name (Winbond's W25Q and W25X,
+  Macronix's MX25L, Micron's N25Q, and many more), each as large as the part.
+  `flash` is short for `w25q32`, 4 MiB. Tried here are the W25Q32 and the W25Q80BL,
+  which the check has; the others are QEMU's model as it comes. The Flipper's own
+  SPI chips (its radios, its display, its card slot) are refused, and a display
+  that wants one more pin; so is a type that QEMU has not, with where the list is.
+- **The chip select.** A device is selected while its pin is low: as an output of
+  the firmware, or held low from outside (`gpio PC3 low`), as a chip select that is
+  wired to GND. A pin that nothing drives selects nobody. `gpio` says beside such a
+  pin whose chip select it is, and when it selects.
+- **`spi`** has a line for the bus and one for each device: its pin, its type, is it
+  selected at that moment, and where its contents are. `spi --json` is that for a
+  program: the bus's three pins, `heard` and `unheard` (the bytes with a device
+  selected and with none), `last` (`hz`, `mode`, `lsb_first`, `bits`; null before the
+  first byte) and the `devices`, each with its `type`, its `select` (the pin's number
+  on the header), its `pin`, `selected`, and a flash with its `file`.
+- **The bus's line** counts what the firmware clocked there since the emulator
+  started, how many of those bytes a device heard, and how the last one was clocked:
+  the speed, the mode (0 to 3) and the bit that went first. It is the first place to
+  look when a device does not answer. `clocked nothing`: the app never had the bus
+  on those pins. Bytes, and `none with a device selected`: the bus works, and the
+  chip select is another pin than the device's, or is not low. `all with a device
+  selected`, and the answer is still wrong: the bytes themselves, which the app's
+  log has. `gpio` and `status` have the bus's line, and `status --json` has it as
+  `spi`.
+- **What a device hears.** The header has a byte only while pin 5 is SPI1's clock:
+  the Flipper's radios are on the same SPI1 with pins of their own inside, and their
+  bytes are not the header's. An app that makes MOSI's pin a plain output gives the
+  device that pin's level for every bit. MISO's pin that is not the bus's reads 0.
+  With nobody selected the firmware reads what holds MISO: what is held to pin 3
+  from outside, or else the pin's pull (the firmware's handle pulls it down: 00).
+  The least significant bit first and frames of 16 bits reach the device as the
+  wire has them.
+- **A flash's contents** are a file of the device, `devices/NAME/spi-4.bin` for the
+  one whose chip select is pin 4, as large as the flash. A new one has 0xFF in every
+  byte, as a part that was never written. The file is written as the firmware
+  writes, and kept over a reset, a `stop` and the next `run`. Remove it for an empty
+  flash, or put an image of your own there, as large as the part. A `run` with a
+  type of another size than the file is refused, with both sizes.
+- What is on the bus is said at each `run` and is not kept with the device: a `run`
+  without `--spi` is a header with nothing on it. The files stay.
+
+Not there:
+
+- The window: its GPIO menu has no line for this bus yet.
+- A record of the transfers, as `i2c record` is one for the I2C bus.
+- Serial flashes are all there is. A radio module (a CC1101 or an NRF24 board for
+  the header) and a display are not among the types.
+- A transfer takes no time at any speed, and a device answers whatever the mode and
+  the speed are, where a real flash wants mode 0 or 3. `spi` says how the last byte
+  was clocked, for the eye.
+- While a selected flash takes a command it answers 00 here. On hardware it leaves
+  MISO alone then, and the firmware reads the pin's pull: 00 as well with the
+  firmware's handle, which pulls MISO down, and ff with a handle that pulls it up.
+- The three pins are no levels: they read `unknown` on the header while the firmware
+  has the bus, and a record of the pins (`gpio record`) has no bits of a transfer.
+- A device cannot be put on the bus, or taken off it, while the emulator runs.
+- Two devices selected at once both answer, and the firmware reads their bytes ORed
+  together. On hardware they would fight over MISO.
+- The official firmware's JavaScript has no `spi` module (1.5.1 and the dev build
+  alike): there it is an app in C.
+- The check's app ran on the official 1.5.1 alone, the firmware that the SDK of the
+  ufbt here is for. On the other four no app in C was tried on this bus.
+- No real Flipper with a flash on its header was asked: what a byte reads with
+  nobody selected is the emulator's answer.
+
+`scripts/spi_check.py FIRMWARE` checks all of it with two flashes, that script and
+an app of its own (another chip select, mode 3 at 4 MHz, the least significant bit
+first, frames of 16 bits, a pin of the three that is not the bus's, bytes with nobody
+selected, a reset of the firmware in the middle of a read): 45 checks on the official
+1.5.1, with the script's part skipped; 30 on Momentum, Unleashed and RogueMaster,
+with the app's part skipped (ufbt's SDK is for another firmware); 25 on the official
+dev build, with both skipped.
+
+The read-ID commands 90h and ABh need one addition to QEMU's model
+(`qemu/patches/0010`, docs/BRINGUP_LOG.md, 125): it answered them for SST's flashes
+alone, and a Winbond flash read zeros. Momentum's own example for the bus
+(`Examples/spi.js` on its card) asks with 90h; run once by hand with `--spi flash`,
+it says `Found Winbond device` and `Device ID: W25Q32`.
+
+**A QEMU tree that was set up before this came (2026-11-12) wants
+`scripts/setup_qemu.sh` once more**, for the patch and for the machine's side of all
+this (the bus by its name, the chip selects, what was clocked). On an emulator that
+was built before, `spi` says that it needs a newer one.
+
 ### The secure enclave
 
 A Flipper keeps its keys where its firmware cannot read them: in the key store of ST's
@@ -2385,12 +2576,14 @@ docs/DEVELOPING.md     writing an app or a firmware with it: ufbt, fbt, gdb, the
 examples/hello/        an app to try that with
 examples/uart/         a script for the serial port on pins 15 and 16
 examples/i2c/          a script and an app for a sensor and an EEPROM on the I2C bus
+examples/spi/          a script for a serial flash on the SPI bus
 flipperemu             launcher / device manager
 qemu/hw/arm/flipper/   the QEMU machine + STM32WB55 SoC + board devices (C)
 qemu/patches/          fixes to upstream QEMU (SysTick, SD over SPI, open-drain GPIO,
                        register reads without the big lock, a chardev's log file,
                        the UART's reception, a byte that no receiver took, an
-                       EEPROM's file that ends within a sector)
+                       EEPROM's file that ends within a sector, a Winbond flash's
+                       older IDs)
 scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_monitor.py,
                        fe_cli.py, fe_files.py (files on the card), fe_apps.py
                        (apps and the loader), fe_expansion.py (an expansion

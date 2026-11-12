@@ -19,6 +19,11 @@
  *            /machine "header-adc" says what the firmware converted
  *   PWM (header):   TIM1 CH1N on PA7 (2), LPTIM2's output on PA4 (4), told
  *            as numbers and not as edges: /machine "header-pwm"
+ *   SPI1 (header):  the radio's bus again, on MOSI PA7 (2), MISO PA6 (3),
+ *            SCK PB3 (5) while those are its pins; devices by -device
+ *            TYPE,bus=spi-header,cs=N, N the header pin of the chip select
+ *            (4: PA4, the firmware's own); /machine "header-spi" says what
+ *            is there and what was clocked
  *   I2C3 (header):  SDA PC1 (15), SCL PC0 (16), devices by -device
  *            TYPE,bus=i2c3,address=N; /machine "header-i2c" says what is
  *            there and what was called, "header-i2c-record" writes every
@@ -104,6 +109,50 @@ static void flipper_sd_slot_class_init(ObjectClass *oc, const void *data)
     k->cs_polarity = SSI_CS_LOW;
 }
 
+/*
+ * SPI on the GPIO header.  The firmware's "external" SPI handle is SPI1, the
+ * radio's bus, on other pins: MOSI on PA7 (pin 2), MISO on PA6 (pin 3) and
+ * SCK on PB3 (pin 5), each in alternate function 5 while the handle is in
+ * use, and a chip select that is a pin like any other, which the firmware
+ * drives itself (PA4, pin 4, for its own handle).
+ *
+ * What is wired to those pins is on a bus of its own, "spi-header", where a
+ * device's chip select is its pin's number on the header:
+ * -device w25q32,bus=spi-header,cs=4.  This is that bus's other end: a
+ * device on SPI1's bus that takes every frame of it and passes on what the
+ * header's pins carry (flipper_header_spi_transfer, below).
+ */
+#define TYPE_FLIPPER_HEADER_SPI "flipper-header-spi"
+OBJECT_DECLARE_SIMPLE_TYPE(FlipperHeaderSpi, FLIPPER_HEADER_SPI)
+
+struct FlipperHeaderSpi {
+    SSIPeripheral parent_obj;
+    SSIBus *bus;
+    uint64_t heard, unheard;    /* bytes clocked: with a device selected,
+                                 * and with none */
+    uint32_t last_hz;           /* the last frame's clock ... */
+    uint8_t last_mode;          /* ... CPOL and CPHA as a mode, 0 to 3 ... */
+    uint8_t last_bits;          /* ... and width */
+    bool last_lsb;              /* ... least significant bit first */
+};
+
+static uint32_t flipper_header_spi_transfer(SSIPeripheral *dev, uint32_t tx);
+
+static void flipper_header_spi_realize(SSIPeripheral *dev, Error **errp)
+{
+    FLIPPER_HEADER_SPI(dev)->bus = ssi_create_bus(DEVICE(dev), "spi-header");
+}
+
+static void flipper_header_spi_class_init(ObjectClass *oc, const void *data)
+{
+    SSIPeripheralClass *k = SSI_PERIPHERAL_CLASS(oc);
+
+    k->realize = flipper_header_spi_realize;
+    k->transfer = flipper_header_spi_transfer;
+    k->cs_polarity = SSI_CS_NONE;
+    DEVICE_CLASS(oc)->user_creatable = false;
+}
+
 struct FlipperZeroState {
     MachineState parent_obj;
     WB55SocState soc;
@@ -133,6 +182,8 @@ struct FlipperZeroState {
     bool sd_cs;                  /* PC12: the slot's chip select */
     DeviceState *sd_spi;         /* the card's SPI side */
     FlipperSdSlot *sd_slot;      /* what the slot answers without a card */
+    FlipperHeaderSpi *hdr_spi;   /* SPI1 on the header's pins */
+    Notifier done_notifier;
     char *nvram;                 /* battery-backed state file */
     char *enclave;               /* the FUS's key store (flipper_enclave.c) */
     QEMUTimer *halt_watch;       /* has the firmware halted? */
@@ -568,6 +619,29 @@ static int header_index(int number)
     g_assert_not_reached();
 }
 
+/* ... or -1: the header has no signal pin of that number */
+static int header_find(int number)
+{
+    for (int i = 0; i < HDR_PINS; i++) {
+        if (header[i].number == number) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* the alternate function that a header pin is in, or -1: it is in none */
+static int header_af(FlipperZeroState *s, int i)
+{
+    Stm32l4x5GpioState *g = header_port(s, i);
+    int pin = header[i].pin;
+
+    if (extract32(g->moder, 2 * pin, 2) != 2) {
+        return -1;
+    }
+    return extract32(pin < 8 ? g->afrl : g->afrh, 4 * (pin & 7), 4);
+}
+
 enum { HDR_RISE = 1, HDR_FALL = 2 };
 
 /*
@@ -668,13 +742,9 @@ static bool header_pwm_tim1(FlipperZeroState *s, HeaderPwm *p)
 
 static bool header_pwm(FlipperZeroState *s, int which, HeaderPwm *p)
 {
-    int i = header_index(header_pwms[which].number), pin = header[i].pin;
-    Stm32l4x5GpioState *g = header_port(s, i);
-
     memset(p, 0, sizeof(*p));
-    if (extract32(g->moder, 2 * pin, 2) != 2 ||
-        extract32(pin < 8 ? g->afrl : g->afrh, 4 * (pin & 7), 4) !=
-            header_pwms[which].af) {
+    if (header_af(s, header_index(header_pwms[which].number)) !=
+        header_pwms[which].af) {
         return false;
     }
     return which == HDR_PWM_TIM1 ? header_pwm_tim1(s, p) :
@@ -753,6 +823,215 @@ static uint32_t header_mv(FlipperZeroState *s, int i)
         return s->hdr_mv[i];
     }
     return header_level(s, i) == '1' ? WB55_VDD_MV : 0;
+}
+
+/* ------------------------------------------------ SPI on the header */
+
+enum { HDR_SPI_MOSI = 2, HDR_SPI_MISO = 3, HDR_SPI_SCK = 5 };  /* pins */
+#define HDR_SPI_AF 5
+
+/* is that pin of the header SPI1's now? */
+static bool header_spi_pin(FlipperZeroState *s, int number)
+{
+    return header_af(s, header_index(number)) == HDR_SPI_AF;
+}
+
+/* may a device on the header's SPI bus have its chip select on that pin?
+ * One that the outside may hold, and that is none of the bus's own. */
+static bool header_spi_cs(int number)
+{
+    int i = header_find(number);
+
+    return i >= 0 && header[i].holds && number != HDR_SPI_MOSI &&
+           number != HDR_SPI_MISO && number != HDR_SPI_SCK;
+}
+
+static bool header_spi_selected(SSIPeripheral *p)
+{
+    SSIPeripheralClass *k = SSI_PERIPHERAL_GET_CLASS(p);
+
+    return k->cs_polarity == SSI_CS_NONE ||
+           p->cs == (k->cs_polarity == SSI_CS_HIGH);
+}
+
+/*
+ * The chip selects of what is on the header's SPI bus, after a level of a
+ * pin of that port may have changed (-1: of any).  A device is selected
+ * while its pin is low (or high, for one whose select is that way): by the
+ * firmware's drive, or by the outside's hold (a chip select that is wired
+ * to GND).  A pin that nothing drives selects nothing; on hardware it has
+ * no level to speak of, and a board with such a chip has a pull-up there.
+ */
+static void flipper_header_spi_selects(FlipperZeroState *s, int port)
+{
+    BusChild *kid;
+
+    if (!s->hdr_spi) {
+        return;
+    }
+    QTAILQ_FOREACH(kid, &BUS(s->hdr_spi->bus)->children, sibling) {
+        SSIPeripheral *p = SSI_PERIPHERAL(kid->child);
+        SSIPeripheralClass *k = SSI_PERIPHERAL_GET_CLASS(p);
+        int i = header_find(p->cs_index);
+        bool high = k->cs_polarity == SSI_CS_HIGH, level;
+
+        if (k->cs_polarity == SSI_CS_NONE ||
+            (port >= 0 && i >= 0 && port != header[i].port - 'A')) {
+            continue;
+        }
+        /* (the level that selects, or the other one) */
+        level = i >= 0 && header_spi_cs(p->cs_index) &&
+                header_level(s, i) == (high ? '1' : '0') ? high : !high;
+        if (p->cs != level &&
+            object_property_find(OBJECT(p), SSI_GPIO_CS "[0]")) {
+            qemu_set_irq(qdev_get_gpio_in_named(DEVICE(p), SSI_GPIO_CS, 0),
+                         level);
+        }
+    }
+}
+
+/* SPI1's clock: PCLK2 (HCLK by RCC_CFGR.PPRE2) by the divider of CR1.BR */
+static uint32_t header_spi_hz(FlipperZeroState *s)
+{
+    int ppre2 = extract32(s->soc.rcc.regs[0x08 / 4], 11, 3);
+    uint32_t pclk2 = clock_get_hz(s->soc.rcc.hclk) >>
+                     (ppre2 < 4 ? 0 : ppre2 - 3);
+
+    return pclk2 >> (extract32(s->soc.spi[0].cr1, 3, 3) + 1);
+}
+
+/* is a pin high with no device driving it?  By what the outside holds on
+ * it, or else by the pull that the firmware gave it. */
+static bool header_rests_high(FlipperZeroState *s, int i)
+{
+    Stm32l4x5GpioState *g = header_port(s, i);
+    int pin = header[i].pin;
+
+    if (!extract32(g->disconnected_pins, pin, 1)) {
+        return extract32(g->pins_connected_high, pin, 1);
+    }
+    return extract32(g->pupdr, 2 * pin, 2) == 1;
+}
+
+/*
+ * A frame of SPI1.  The radio's chips and the header's devices are on one
+ * SPI of the chip, each on pins of its own, so the header has a frame only
+ * while the clock is on its pin: PB3 in SPI1's alternate function.  (The
+ * firmware gives the pins to the bus when it takes a handle and makes them
+ * analog again when it lets go of it.)
+ *
+ * The devices take bytes, the most significant bit first, as the wire has
+ * them: a frame of 8 bits is one, a frame of 16 bits two, and with
+ * CR1.LSBFIRST each is turned around both ways.  Frames of other widths
+ * reach no device.  MOSI that is not SPI1's pin has that pin's level for
+ * every bit; MISO that is not SPI1's reads as 0.  With no device selected
+ * MISO has what holds it: the outside, or the pin's pull (the firmware pulls
+ * it down).  A selected device drives it, whatever the outside holds.
+ */
+static uint32_t flipper_header_spi_transfer(SSIPeripheral *dev, uint32_t tx)
+{
+    FlipperHeaderSpi *h = FLIPPER_HEADER_SPI(dev);
+    FlipperZeroState *s = FLIPPER_ZERO(qdev_get_machine());
+    WB55SpiState *spi = &s->soc.spi[0];
+    unsigned bits = wb55_spi_bits(spi), bytes = (bits + 7) / 8;
+    bool lsb = extract32(spi->cr1, 7, 1), any = false;
+    uint32_t rx = 0;
+    BusChild *kid;
+
+    if (!header_spi_pin(s, HDR_SPI_SCK)) {
+        return 0;
+    }
+    h->last_hz = header_spi_hz(s);
+    h->last_mode = extract32(spi->cr1, 0, 2);
+    h->last_mode = (h->last_mode & 1) << 1 | h->last_mode >> 1;
+    h->last_bits = bits;
+    h->last_lsb = lsb;
+    if (bits == 8 || bits == 16) {
+        QTAILQ_FOREACH(kid, &BUS(h->bus)->children, sibling) {
+            any |= header_spi_selected(SSI_PERIPHERAL(kid->child));
+        }
+    }
+    if (!any) {
+        h->unheard += bytes;
+        rx = header_rests_high(s, header_index(HDR_SPI_MISO)) ? ~0u : 0;
+    } else {
+        if (!header_spi_pin(s, HDR_SPI_MOSI)) {
+            tx = header_level(s, header_index(HDR_SPI_MOSI)) == '1' ? ~0u : 0;
+        }
+        for (unsigned n = 0; n < bytes; n++) {
+            /* (the first byte on the wire has the bits that go first) */
+            int shift = lsb ? 8 * n : 8 * (bytes - 1 - n);
+            uint8_t out = tx >> shift, in;
+
+            in = ssi_transfer(h->bus, lsb ? revbit8(out) : out);
+            rx |= (uint32_t)(lsb ? revbit8(in) : in) << shift;
+        }
+        h->heard += bytes;
+    }
+    return header_spi_pin(s, HDR_SPI_MISO) ? rx & ((1u << bits) - 1) : 0;
+}
+
+/*
+ * The header's SPI bus, "SPI1:MOSI:MISO:SCK:HEARD:UNHEARD:LAST" and then
+ * "TYPE@PIN:STATE" for each device on it: MOSI, MISO and SCK its pins by
+ * their numbers on the header; HEARD how many bytes the firmware clocked
+ * there with a device selected since the emulator started, UNHEARD how many
+ * with none; LAST the last frame's clock in Hz, its mode (0 to 3: CPOL and
+ * CPHA), msb or lsb for the bit that went first, and its bits, as
+ * 2000000/0/msb/8, "-" before the first.  A device's PIN is its chip
+ * select's number on the header, STATE selected or idle.  The firmware has
+ * the bus on those pins only while it uses it, so there is no on and off to
+ * tell.
+ */
+static char *flipper_get_header_spi(Object *obj, Error **errp)
+{
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+    FlipperHeaderSpi *h = s->hdr_spi;
+    GString *out = g_string_new(NULL);
+    BusChild *kid;
+
+    if (!h) {
+        return g_string_free(out, false);
+    }
+    g_string_printf(out, "SPI1:%d:%d:%d:%" PRIu64 ":%" PRIu64 ":",
+                    HDR_SPI_MOSI, HDR_SPI_MISO, HDR_SPI_SCK, h->heard,
+                    h->unheard);
+    if (h->heard || h->unheard) {
+        g_string_append_printf(out, "%u/%d/%s/%d", h->last_hz, h->last_mode,
+                               h->last_lsb ? "lsb" : "msb", h->last_bits);
+    } else {
+        g_string_append_c(out, '-');
+    }
+    QTAILQ_FOREACH(kid, &BUS(h->bus)->children, sibling) {
+        SSIPeripheral *p = SSI_PERIPHERAL(kid->child);
+
+        g_string_append_printf(out, " %s@%d:%s",
+                               object_get_typename(OBJECT(p)), p->cs_index,
+                               header_spi_selected(p) ? "selected" : "idle");
+    }
+    return g_string_free(out, false);
+}
+
+/* The machine is whole, with the devices of the command line: is each of
+ * the header's SPI bus on a pin that can be its chip select? */
+static void flipper_machine_done(Notifier *n, void *data)
+{
+    FlipperZeroState *s = container_of(n, FlipperZeroState, done_notifier);
+    BusChild *kid;
+
+    QTAILQ_FOREACH(kid, &BUS(s->hdr_spi->bus)->children, sibling) {
+        SSIPeripheral *p = SSI_PERIPHERAL(kid->child);
+
+        if (!header_spi_cs(p->cs_index)) {
+            error_report("flipper-zero: %s on spi-header has cs=%d: a chip "
+                         "select there is a pin of the GPIO header by its "
+                         "number, 4 (PA4, the one of the firmware's own SPI "
+                         "handle), 6, 7, 10, 12, 15 or 16",
+                         object_get_typename(OBJECT(p)), p->cs_index);
+            exit(1);
+        }
+    }
+    flipper_header_spi_selects(s, -1);
 }
 
 /* ADC1's inputs that are on the header, by the header's pin numbers
@@ -974,9 +1253,7 @@ static char *flipper_get_header(Object *obj, Error **errp)
         g_string_append_printf(out, "%s%d:P%c%d:", i ? " " : "",
                                header[i].number, header[i].port, pin);
         if (mode == 2) {
-            g_string_append_printf(out, "af%d%s",
-                                   extract32(pin < 8 ? g->afrl : g->afrh,
-                                             4 * (pin & 7), 4),
+            g_string_append_printf(out, "af%d%s", header_af(s, i),
                                    od ? "od" : "");
         } else {
             g_string_append(out, mode == 0 ? "in" : mode == 3 ? "analog" :
@@ -1365,6 +1642,7 @@ static void flipper_set_header(Object *obj, const char *value, Error **errp)
     }
     if (phase_check(PHASE_MACHINE_INITIALIZED)) {
         flipper_header_held(s, -1);
+        flipper_header_spi_selects(s, -1);
         flipper_header_look(s, -1);
     }
 }
@@ -1434,6 +1712,7 @@ static void flipper_drive_pins(FlipperZeroState *s)
         s->hdr_rx_low[n] = false;
     }
     flipper_header_held(s, -1);         /* the header: as the outside has it */
+    flipper_header_spi_selects(s, -1);  /* ... and its SPI chip selects */
     flipper_sd_detect(s);
     qemu_set_irq(soc_in(s, 'C', 2), 0);     /* SPI2 MISO idle low */
     qemu_set_irq(soc_in(s, 'B', 4), 0);     /* SPI1 MISO: CC1101 CHIP_RDYn */
@@ -1487,6 +1766,7 @@ static void flipper_out_written(void *opaque, int port, hwaddr reg,
     if (reg == 0x00) {                  /* MODER: a header pin may be an */
         flipper_header_held(s, port);   /* input again, for what holds it */
     }
+    flipper_header_spi_selects(s, port);
     flipper_header_look(s, port);
     if (reg == 0x04 || reg == 0x0c) {
         return;                         /* OTYPER, PUPDR: the header's only */
@@ -1755,6 +2035,10 @@ static void flipper_zero_init(MachineState *machine)
     dev = spi_named(machine, spi1, TYPE_ST25R3916, 1, "nfc");
     soc_out(s, 'E', 4, qdev_get_gpio_in_named(dev, SSI_GPIO_CS, 0));
     qdev_connect_gpio_out_named(dev, "irq", 0, soc_in(s, 'A', 2));
+    /* ... and what is wired to the header's pins (-device ...,bus=spi-header) */
+    s->hdr_spi = FLIPPER_HEADER_SPI(spi_dev(spi1, TYPE_FLIPPER_HEADER_SPI, 2));
+    s->done_notifier.notify = flipper_machine_done;
+    qemu_add_machine_init_done_notifier(&s->done_notifier);
 
     /* ---- I2C1: power management */
     I2CBus *i2c1 = s->soc.i2c[0].bus;
@@ -2097,6 +2381,13 @@ static void flipper_zero_instance_init(Object *obj)
     object_property_set_description(obj, "header-serial",
         "The header's serial ports as the firmware has them: for each its "
         "name, pins, baud rate (0: off), frame, and who takes what comes in");
+    object_property_add_str(obj, "header-spi", flipper_get_header_spi, NULL);
+    object_property_set_description(obj, "header-spi",
+        "The header's SPI bus: its name and pins, how many bytes the "
+        "firmware clocked there with a device selected and with none, the "
+        "last frame's clock, mode, bit order and width, and the devices on "
+        "it with their chip selects' pins (-device TYPE,bus=spi-header,"
+        "cs=PIN)");
     object_property_add_str(obj, "header-i2c", flipper_get_header_i2c, NULL);
     object_property_set_description(obj, "header-i2c",
         "The header's I2C bus: its name and pins, how many addresses the "
@@ -2175,6 +2466,11 @@ static const TypeInfo flipper_zero_type[] = {
         .parent = TYPE_SSI_PERIPHERAL,
         .instance_size = sizeof(FlipperSdSlot),
         .class_init = flipper_sd_slot_class_init,
+    }, {
+        .name = TYPE_FLIPPER_HEADER_SPI,
+        .parent = TYPE_SSI_PERIPHERAL,
+        .instance_size = sizeof(FlipperHeaderSpi),
+        .class_init = flipper_header_spi_class_init,
     },
 };
 DEFINE_TYPES(flipper_zero_type)

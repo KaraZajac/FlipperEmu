@@ -1,0 +1,93 @@
+From: FlipperEmu
+Subject: [PATCH] m25p80: answer Winbond's read ID commands 90h and ABh
+
+The model answers the commands 90h and ABh for SST's flashes alone. For
+every other maker it logs "Read id (command 0x90/0xAB) is not supported
+by device" and the host reads zeros.
+
+Winbond's W25X and W25Q have both. 90h takes two dummy bytes and an
+address byte, then gives the manufacturer's ID (EFh) and the device's
+ID, in that order for address 0 and the other way round for address 1,
+again and again for as long as the host clocks. ABh, the release from
+power-down, takes three dummy bytes and gives the device's ID alone.
+That ID is not a byte of the JEDEC ID: it is one less than the capacity
+byte there (a W25Q32 has 16h there and 15h here), except at 512 Mbit,
+where the capacity byte is 20h and this ID is 19h. The three bytes
+after the command are three in the 4-byte address mode too.
+
+Answer both for Winbond's flashes. SST's keep their own way, and the
+other makers are refused as before.
+
+Seen with the Flipper Zero machine and a W25Q32 on its GPIO header:
+the example script of a firmware's SPI module tells that a flash is
+there by EFh and 15h in the answer to 90h, and found none.
+
+Signed-off-by: FlipperEmu
+---
+--- a/hw/block/m25p80.c
++++ b/hw/block/m25p80.c
+@@ -556,6 +556,19 @@
+     }
+ }
+ 
++/*
++ * Winbond's device ID, as the commands 90h and ABh give it (ID7-ID0 in the
++ * data sheets): one less than the capacity byte of the JEDEC ID (a W25Q32
++ * has 16h there and 15h here).  The capacity byte goes from 19h to 20h at
++ * 512 Mbit, and this ID does not: it is 19h there.
++ */
++static uint8_t winbond_device_id(Flash *s)
++{
++    uint8_t capacity = s->pi->id[2];
++
++    return capacity == 0x20 ? 0x19 : capacity - 1;
++}
++
+ static void blk_sync_complete(void *opaque, int ret)
+ {
+     QEMUIOVector *iov = opaque;
+@@ -871,6 +884,27 @@
+                 qemu_log_mask(LOG_GUEST_ERROR,
+                               "M25P80: Invalid read id address\n");
+             }
++        } else if (get_man(s) == MAN_WINBOND) {
++            /*
++             * 90h: two dummy bytes and an address, whose lowest bit says
++             * which of the two IDs comes first.  ABh (the release from
++             * power-down, which is no state of this model): three dummy
++             * bytes, and the device's ID alone.  Either repeats for as
++             * long as it is clocked.
++             */
++            int maker_at = s->data[2] & 1;
++
++            if (s->cmd_in_progress == RDID_AB) {
++                s->data[0] = winbond_device_id(s);
++                s->len = 1;
++            } else {
++                s->data[maker_at] = s->pi->id[0];
++                s->data[maker_at ^ 1] = winbond_device_id(s);
++                s->len = 2;
++            }
++            s->pos = 0;
++            s->data_read_loop = true;
++            s->state = STATE_READING_DATA;
+         } else {
+             qemu_log_mask(LOG_GUEST_ERROR,
+                           "M25P80: Read id (command 0x90/0xAB) is not supported"
+@@ -1223,9 +1257,15 @@
+     case PP:
+     case PP4:
+     case DIE_ERASE:
++        s->needed_bytes = get_addr_length(s);
++        s->pos = 0;
++        s->len = 0;
++        s->state = STATE_COLLECTING_DATA;
++        break;
+     case RDID_90:
+     case RDID_AB:
+-        s->needed_bytes = get_addr_length(s);
++        /* (Winbond: three bytes after the command, in 4-byte mode too) */
++        s->needed_bytes = get_man(s) == MAN_WINBOND ? 3 : get_addr_length(s);
+         s->pos = 0;
+         s->len = 0;
+         s->state = STATE_COLLECTING_DATA;

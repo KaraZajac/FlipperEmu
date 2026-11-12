@@ -13,8 +13,10 @@ port's receiver is off is dropped and no more (no start bit on the RX pin, so th
 firmware's expansion service never sees a module call).
 0009 lifts a limit: without it the machine runs, and `run --i2c eeprom@…` is refused
 by QEMU unless the EEPROM's size is a multiple of 512 bytes.
-A source tree that was set up before a patch came (0006 to 0009: 2026-11-11) gets it
-from one more run of that script.
+0010 is an addition: without it the machine runs, and a Winbond flash on the header's
+SPI bus (`run --spi`) answers the read-ID commands 90h and ABh with zeros.
+A source tree that was set up before a patch came (0006 to 0009: 2026-11-11; 0010:
+2026-11-12) gets it from one more run of that script.
 
 How the script finds out what a tree has: it takes the patches out of a copy of the
 files they touch, the last one first, and what does not come out there is what the tree
@@ -32,7 +34,7 @@ tarball beside it, applies every patch and builds, about 6 min).
 from the tarball; nothing is built): a new tree, a second and a third run, a tree from
 before each patch, a tree that lacks one patch, the damaged tree, a file that is not
 this QEMU's, and last that the tree here has every patch and nothing else in those
-files. 28 checks in ten seconds. A patch that is added to this folder is in them
+files. 30 checks in ten seconds. A patch that is added to this folder is in them
 without a change to the check.
 
 | patch | QEMU file | bug |
@@ -46,6 +48,7 @@ without a change to the check.
 | 0007 | `hw/char/stm32l4x5_usart.c` | reception lacked what a driver uses: no request to a DMA channel (and no byte-wide register access for it), no IDLE flag, no PRESC register, the LPUART's baud rate by the USART's formula, and bytes taken at the main loop's pace instead of the baud rate |
 | 0008 | `hw/char/stm32l4x5_usart.c` | a byte that came while the receiver was off was dropped without a word: on hardware its start bit is still a falling edge on the RX pin, which a board may wait for with an interrupt. A line `rx-unheard` tells the board |
 | 0009 | `hw/nvram/eeprom_at24c.c` | an EEPROM with a backing file wanted the image's length to be its own size, and the block layer gives lengths in whole 512-byte sectors: no file could back an EEPROM smaller than a sector (a 24C02's 256 bytes), or one that ends within a sector |
+| 0010 | `hw/block/m25p80.c` | the read-ID commands 90h and ABh were answered for SST's flashes alone; Winbond's W25X and W25Q have both (90h: the maker and the device's ID, the device first from address 1; ABh: the device alone), and a host that tells a flash by them read zeros |
 
 **Licence:** these patches modify QEMU's own source files, which are GPL-2.0-or-later,
 so the patches are GPL-2.0-or-later too, unlike the rest of this repository (BSD-3-Clause).

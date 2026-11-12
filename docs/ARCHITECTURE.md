@@ -25,6 +25,7 @@ it; the file comments name that function. Register layouts come from RM0434 and 
         │
    SPI2 ── st7567 (LCD, CS PC11, A0 PB1, RST PB0)   ── ssi-sd + sd-card-spi (CS PC12, CD PC10)
    SPI1 ── cc1101 (CS PD0, GDO0 → PA1)              ── st25r3916 (CS PE4, IRQ → PA2)
+        └─ pins 2 (MOSI), 3 (MISO) and 5 (SCK) of the header: what `run --spi` puts there
    I2C1 ── bq27220 @0x55   bq25896 @0x6B   lp5562 @0x30
    I2C3 ── pins 15 (SDA) and 16 (SCL) of the header: what `run --i2c` puts there
    ADC1 ←─ pins 2, 3, 4, 7, 15 and 16 of the header: a voltage held there (`gpio PIN 1.25V`)
@@ -1265,6 +1266,55 @@ ufbt is not run at all, and `update` sends the package without the stage (BRINGU
   out from the time when it is read, and it costs nothing while it runs. (A timer
   for every reload, as it was, would be ten thousand callbacks a second for a
   10 kHz PWM at the true clock.)
+- **The header's SPI bus** (`flipper_zero.c`): the firmware's handle for the header
+  is SPI1, the radios' bus, on other pins: MOSI on PA7, MISO on PA6 and SCK on PB3,
+  each in alternate function 5 from the moment the handle takes the bus until it
+  lets go, and a chip select that is a plain output (PA4 for the firmware's own
+  handle). The model has one SSI bus for SPI1. The header's side is one more device
+  on it, `flipper-header-spi`, with no chip select (it gets every frame, as the
+  radios' chips get every frame while theirs is low), which owns a second bus,
+  `spi-header`, for what is wired to the pins. Its `transfer` passes a frame on only
+  while PB3 is SPI1's clock, so a frame for a radio never reaches the header, and
+  answers 0 otherwise (`ssi_transfer` ORs the answers of a bus's devices). The
+  devices take bytes as the wire has them: a frame of 8 bits is one, a frame of 16
+  bits two (`wb55_spi_bits`, CR2.DS), and with CR1.LSBFIRST each is turned around on
+  its way out and on its way back. Frames of other widths reach no device. MOSI
+  that is not in the alternate function has that pin's level for every bit; MISO
+  that is not reads 0. With no device selected MISO has what holds it: the level
+  the outside holds on pin 3, or the pin's pull.
+- **A device on it**: `run --spi TYPE@PIN[,PROPERTY=VALUE]` is `-device
+  TYPE,bus=spi-header,cs=N,id=spi-N`, a device of QEMU's own, where `cs`, an SSI
+  device's index on its bus, is the number of the header's pin that is its chip
+  select: 4, 6, 7, 10, 12, 15 or 16 (a pin that can be held from outside and is
+  none of the bus's three; the machine ends a start with any other). The select
+  itself is the device's `ssi-gpio-cs` line, which the machine sets from the pin's
+  level as `header_level()` has it (`flipper_header_spi_selects`): after every
+  write to an output register of that port, after a hold from outside, and after a
+  reset, where every pin is an input again and nobody is selected. A pin that
+  nothing drives selects nobody. The launcher checks the form before anything is
+  flashed (a pin that may be one, one device to a pin, no `bus`, `cs` or `id` of
+  the user's, none of the Flipper's own SPI chips) and asks QEMU for the types it
+  has (`-device help`, those on the SSI bus).
+- **What was clocked there**: the machine property `header-spi` (read only) is
+  `SPI1:2:3:5:HEARD:UNHEARD:LAST` and then `TYPE@PIN:selected|idle` for each device:
+  the pins of MOSI, MISO and SCK by their numbers on the header, how many bytes the
+  firmware clocked there since the emulator started with a device selected and with
+  none, and how the last frame was clocked, as `2000000/0/msb/8` (PCLK2 over the
+  divider of CR1.BR in Hz, CPOL and CPHA as a mode from 0 to 3, the bit that went
+  first, the frame's bits; `-` before the first). `scripts/fe_header.py`
+  (`parse_spi`, `spi_text`) says it in words for `gpio`, `status` and `spi`. The
+  counts stay over a reset of the firmware. Nothing is checked against them: the
+  devices answer at any speed and in any mode.
+- **A flash's contents**: a serial flash (QEMU's `m25p80`, a type for each part)
+  without a `drive` of the user's gets one, `-drive
+  if=none,id=spi-N-rom,format=raw,file=devices/NAME/spi-N.bin`. The model wants an
+  image as large as the part, so the launcher asks QEMU how large that is (a start
+  of the machine with an empty drive for that type, which QEMU refuses with the
+  size it wants) and makes the file when it is not there, 0xFF in every byte. A
+  start with a file of another size is refused by the launcher, with both sizes.
+  `qemu/patches/0010` adds Winbond's read-ID commands 90h and ABh to the model,
+  which had them for SST's parts alone. On a QEMU tree without the patch the
+  machine runs, and a Winbond flash answers those two with zeros.
 
 ## The front panel (`flipper_panel.c`, `scripts/fe_gui*.py`)
 
@@ -1424,6 +1474,7 @@ the emulated field.
 | `lpuart.log` | what a serial adapter on pins 15 and 16 would have recorded: what an app sent on LPUART1 in this run |
 | `usart.tty`, `usart.sock`, `usart.mark` | (while it runs) the same three for pins 13 and 14: the pty of `--serial pty`, the launcher's own end, the mark of `uart wait --port usart` |
 | `lpuart.tty`, `lpuart.sock`, `lpuart.mark` | (while it runs) that port's pty for a program of the user's, the launcher's own end of it, and how far `uart wait` has read the log |
+| `spi-N.bin` | the contents of a serial flash whose chip select is pin N of the header (`run --spi flash@N`), as large as the flash; 0xFF throughout when new |
 | `i2c-NN.bin` | the contents of an EEPROM at address NN of the header's I2C bus (`run --i2c eeprom@0xNN`), as long as the EEPROM; 0xFF throughout when new |
 | `gpio-watch.vcd`, `i2c-watch.txt` | (while `gpio watch` or `i2c watch` runs with no record of the user's) the record that the watch keeps and reads |
 | `firmware.elf` | symbols for gdb (copied when flashing an ELF) |

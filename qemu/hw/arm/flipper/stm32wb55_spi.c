@@ -31,7 +31,7 @@
 #define SR_TXE     (1u << 1)
 #define SR_OVR     (1u << 6)
 
-static unsigned spi_ds_bits(WB55SpiState *s)
+unsigned wb55_spi_bits(WB55SpiState *s)
 {
     unsigned ds = (s->cr2 >> 8) & 0xF;
     return ds < 3 ? 8 : ds + 1;
@@ -39,7 +39,7 @@ static unsigned spi_ds_bits(WB55SpiState *s)
 
 static bool spi_rxne(WB55SpiState *s)
 {
-    if (spi_ds_bits(s) > 8) {
+    if (wb55_spi_bits(s) > 8) {
         return s->rxcount >= 2;
     }
     return (s->cr2 & CR2_FRXTH) ? s->rxcount >= 1 : s->rxcount >= 2;
@@ -145,8 +145,8 @@ static void wb55_spi_write(void *opaque, hwaddr addr, uint64_t val64,
         if (!(s->cr1 & CR1_SPE)) {
             qemu_log_mask(LOG_GUEST_ERROR, "wb55-spi: DR write while SPE=0\n");
         }
-        if (spi_ds_bits(s) > 8) {
-            spi_xfer_frame(s, val, spi_ds_bits(s));
+        if (wb55_spi_bits(s) > 8) {
+            spi_xfer_frame(s, val, wb55_spi_bits(s));
         } else if (size == 1) {
             spi_xfer_frame(s, val, 8);
         } else {

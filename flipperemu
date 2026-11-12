@@ -38,6 +38,9 @@ you flash stays flashed, settings and files persist across runs.
   ./flipperemu i2c record OUT.txt | i2c watch
                                              every transfer on that bus: the address
                                              called, the bytes written and read
+  ./flipperemu spi                           the SPI bus of its header, where `run
+                                             --spi w25q32@PA4` put a serial flash:
+                                             the devices, what the firmware clocked
   ./flipperemu reset                         reboot it, as Left + Back do on a real one
   ./flipperemu pause | continue              time stands still on it, and goes on
   ./flipperemu flash fw.dfu                  just program the flash
@@ -610,9 +613,10 @@ I2C_EVERY = ("type", "parent_bus", "realized", "hotplugged", "hotpluggable",
              "address")
 
 
-def i2c_types():
-    """The I2C devices that this build of QEMU has: [(its name there, what
-    QEMU says it is, or '')]; none: QEMU did not say"""
+def bus_types(bus):
+    """The devices that this build of QEMU has for a kind of bus, as its
+    `-device help` names that (i2c-bus, SSI): [(its name there, what QEMU
+    says it is, or '')]; none: QEMU did not say"""
     try:
         said = subprocess.run([str(QEMU), "-device", "help"],
                               capture_output=True, text=True, timeout=30,
@@ -620,7 +624,13 @@ def i2c_types():
     except (OSError, subprocess.SubprocessError):
         return []
     return sorted(re.findall(
-        r'^name "([^"]+)", bus i2c-bus(?:, desc "([^"]*)")?', said, re.M))
+        r'^name "([^"]+)", bus %s(?![\w-])(?:, desc "([^"]*)")?'
+        % re.escape(bus), said, re.M))
+
+
+def i2c_types():
+    """The I2C devices that this build of QEMU has, as bus_types has them"""
+    return bus_types("i2c-bus")
 
 
 def i2c_help():
@@ -850,6 +860,173 @@ def i2c_begin(dev, proc, specs):
         time.sleep(0.1)
 
 
+# `run --spi`: another name for one of QEMU's device types,
+SPI_NAMES = {"flash": "w25q32"}
+# ... the SPI devices of QEMU that are not for the header: the Flipper's own,
+# and a display that wants one more pin, for data or command,
+SPI_NOT = ("st7567", "cc1101", "flipper-sd-slot", "st25r3916", "ssd0323")
+# ... and the chip select of a device that names none: the pin of the
+# firmware's own handle for that bus (PA4)
+SPI_PIN = 4
+
+
+def spi_types():
+    """The SPI devices that this build of QEMU has for the header: [(its
+    name there, what QEMU says it is, or '')]; none: QEMU did not say"""
+    return [(name, what) for name, what in bus_types("SSI")
+            if name not in SPI_NOT]
+
+
+def spi_selects():
+    """The header's pins that may be a chip select, in words"""
+    pins = [f"{n} ({pin})" for n, pin in fe_header.SPI_SELECTS.items()]
+    return ", ".join(pins[:-1]) + f" and {pins[-1]}"
+
+
+def spi_help():
+    """`run --spi help`: what there is to put on the header's bus"""
+    import textwrap
+    types = spi_types()
+    if not types:
+        sys.exit(f"flipperemu: {QEMU} did not list its devices (`-device "
+                 "help`)")
+    print(textwrap.fill(
+        "QEMU's SPI devices, each a TYPE for `run --spi TYPE@PIN` (the bus "
+        "of pins 2, 3 and 5).  PIN is the device's chip select, a pin of "
+        f"the header: {spi_selects()}.  Not said, it is {SPI_PIN}, the one "
+        "of the firmware's own handle for that bus.  "
+        + "  ".join(f"`{name}` is {kind} for short."
+                    for name, kind in SPI_NAMES.items()), 78))
+    kinds = {}
+    for name, what in types:
+        kinds.setdefault(what or "other devices", []).append(name)
+    for what, names in sorted(kinds.items()):
+        print("Serial flashes, each as large as the part of that name; "
+              "contents are kept:" if what == "Serial Flash" else f"{what}:")
+        print(textwrap.fill(", ".join(names), 78, initial_indent="  ",
+                            subsequent_indent="  "))
+    return 0
+
+
+def spi_parse(specs):
+    """`run --spi TYPE[@PIN][,PROPERTY=VALUE...]`, once for each device on
+    the header's SPI bus (pins 2, 3 and 5) -> [(type, the pin of its chip
+    select by its number on the header, {property: value} for QEMU's
+    -device)].  The type is a QEMU SPI device's: spi_known refuses one that
+    it has not."""
+    out, seen = [], {}
+    for spec in specs or ():
+        head, *props = spec.split(",")
+        kind, at, where = head.partition("@")
+        if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", kind)
+                or (at and not where)):
+            sys.exit(f"--spi {spec}: a device is TYPE@PIN, as w25q32@PA4 "
+                     "(and ,PROPERTY=VALUE after it); PIN is its chip "
+                     f"select, and {SPI_PIN} when it is not said")
+        pin = fe_header.spi_select(where) if at else SPI_PIN
+        if pin is None:
+            sys.exit(f"--spi {spec}: '{where}' is no pin for a chip select. "
+                     f"Those are {spi_selects()} of the header, each by its "
+                     "number there, by that name, or as on the case (A4); "
+                     "2, 3 and 5 are the bus itself")
+        kind = SPI_NAMES.get(kind, kind)
+        if pin in seen:
+            sys.exit(f"--spi {spec}: {seen[pin]} has its chip select on pin "
+                     f"{pin} already (two on a bus have two)")
+        seen[pin] = kind
+        given = {}
+        for prop in props:
+            key, eq, value = prop.partition("=")
+            if not key or not eq:
+                sys.exit(f"--spi {spec}: after the pin come "
+                         f"PROPERTY=VALUE, not '{prop}'")
+            if key in ("bus", "cs", "id"):
+                sys.exit(f"--spi {spec}: '{key}' is not to be set (the bus "
+                         "is the header's, the chip select is after the @)")
+            given[key] = value
+        out.append((kind, pin, given))
+    return out
+
+
+def spi_known(specs):
+    """Refuses a type that this build of QEMU has not for the header"""
+    parsed = spi_parse(specs)
+    types = [name for name, _ in spi_types()] if parsed else []
+    for kind, pin, _ in parsed:
+        if kind in SPI_NOT:
+            sys.exit(f"--spi {kind}@{pin}: {kind} is no device for the "
+                     "header here (`run --spi help` lists those that are)")
+        if types and kind not in types:
+            sys.exit(f"--spi {kind}@{pin}: QEMU has no SPI device '{kind}' "
+                     "(`run --spi help` lists those it has; `flash` is "
+                     f"{SPI_NAMES['flash']}, a serial flash of 4 MiB)")
+
+
+SPI_SIZES = {}
+
+
+def spi_size(kind):
+    """How many bytes a flash of that type has.  QEMU is asked: it refuses
+    an empty drive for one with the size that it wants (a start without a
+    firmware, which ends at once).  0: a device that keeps nothing, or QEMU
+    did not say."""
+    if kind not in SPI_SIZES:
+        try:
+            said = subprocess.run(
+                [str(QEMU), "-M", "flipper-zero", "-display", "none", "-S",
+                 "-monitor", "none", "-serial", "none", "-drive",
+                 f"if=none,id=probe,format=raw,file={os.devnull},"
+                 "read-only=on", "-device",
+                 f"{kind},bus=spi-header,cs={SPI_PIN},drive=probe"],
+                capture_output=True, text=True, timeout=10,
+                stdin=subprocess.DEVNULL).stderr
+        except (OSError, subprocess.SubprocessError):
+            said = ""
+        hit = re.search(r"requires (\d+) bytes", said)
+        SPI_SIZES[kind] = int(hit[1]) if hit else 0
+    return SPI_SIZES[kind]
+
+
+def spi_rom(dev, pin):
+    """Where the contents of a flash with its chip select on that pin of the
+    header are kept: a flash does not forget when the emulator stops"""
+    return dev.dir / f"spi-{pin}.bin"
+
+
+def spi_roms(dev, specs):
+    """The flashes of `run --spi` whose contents are kept in the device's
+    folder (all that were given no drive of their own): [(the pin of its
+    chip select, its type, the file, its bytes)]"""
+    return [(pin, kind, spi_rom(dev, pin), spi_size(kind))
+            for kind, pin, given in spi_parse(specs)
+            if "drive" not in given and spi_size(kind)]
+
+
+def spi_new(path, size):
+    """A new flash: every bit is 1"""
+    with open(path, "wb") as f:
+        for at in range(0, size, 1 << 20):
+            f.write(b"\xff" * min(1 << 20, size - at))
+
+
+def spi_args(specs, dev=None):
+    """QEMU's arguments for each device of `run --spi`; dev: with the
+    files of its flashes"""
+    out = []
+    kept = {pin: path for pin, _, path, _ in spi_roms(dev, specs)} \
+        if dev else {}
+    for kind, pin, given in spi_parse(specs):
+        name = f"spi-{pin}"
+        if pin in kept:
+            out += ["-drive", f"if=none,id={name}-rom,format=raw,"
+                              f"file={kept[pin]}"]
+            given = dict(given, drive=f"{name}-rom")
+        out += ["-device", ",".join(
+            [kind, "bus=spi-header", f"cs={pin}", f"id={name}"]
+            + [f"{k}={v}" for k, v in given.items()])]
+    return out
+
+
 def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
     """gauge: {property: value} of /machine/gauge to start with"""
     machine = (f"flipper-zero,name={args.name or dev.name[:8]}"
@@ -916,6 +1093,7 @@ def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
     cmd += serial_args(dev, args.serial)
     cmd += lpuart_args(dev, args.lpuart)
     cmd += i2c_args(args.i2c, dev)
+    cmd += spi_args(args.spi, dev)
     if args.gdb or args.wait_gdb:
         cmd += ["-gdb", f"tcp:127.0.0.1:{args.gdb_port}"]
     if args.wait_gdb:
@@ -989,6 +1167,8 @@ def cmd_run(args):
     detached = os.environ.pop(DETACHED, None)
     if "help" in (args.i2c or ()):
         return i2c_help()
+    if "help" in (args.spi or ()):
+        return spi_help()
     i2c_args(args.i2c)          # (a wrong one is said before anything is done)
     i2c_known(args.i2c)
     for address, path, size in i2c_roms(dev, args.i2c):
@@ -998,6 +1178,14 @@ def cmd_run(args):
                      f"{path.stat().st_size} bytes: say rom-size="
                      f"{path.stat().st_size}, or remove the file for a new, "
                      "empty EEPROM")
+    spi_parse(args.spi)
+    spi_known(args.spi)
+    for pin, kind, path, size in spi_roms(dev, args.spi):
+        if path.exists() and path.stat().st_size != size:
+            sys.exit(f"--spi: the {kind} on pin {pin} is a flash of {size} "
+                     f"bytes, and its contents, {path}, are "
+                     f"{path.stat().st_size} bytes: remove the file for a "
+                     "new, empty flash, or say a type of that size")
     if not args.print_cmd:
         dev.refuse_if_running()
         if args.detach and not detached:
@@ -1090,6 +1278,9 @@ class Session:
         for _, path, size in i2c_roms(dev, args.i2c):
             if not path.exists():       # a new EEPROM: every bit is 1
                 path.write_bytes(b"\xff" * size)
+        for _, _, path, size in spi_roms(dev, args.spi):
+            if not path.exists():
+                spi_new(path, size)
         self.proc = subprocess.Popen(qemu_cmd(dev, args, self.window, self.gauge))
         manifest, label = self.update
         self.update = (None, None)          # an update is started once
@@ -1535,6 +1726,7 @@ def device_status(dev):
         st["gpio"] = read_header(m)
         st["serial"] = read_serial(m)
         st["i2c"] = read_i2c(m)
+        st["spi"] = read_spi(m)
         st["adc"] = read_adc(m)
         st["lights"] = {"led": g("/machine/led", "led"),
                         "blinking": g("/machine/led", "blinking"),
@@ -1617,6 +1809,8 @@ def cmd_status(args):
           for i, p in enumerate(st["serial"] or ())],
         *([("i2c", f"{fe_header.i2c_name(st['i2c'])}: "
                    f"{fe_header.i2c_text(st['i2c'])}")] if st["i2c"] else []),
+        *([("spi", f"{fe_header.spi_name(st['spi'])}: "
+                   f"{fe_header.spi_text(st['spi'])}")] if st["spi"] else []),
         *([("adc", fe_header.adc_text(st["adc"], st["gpio"] or ()))]
           if st["adc"] else []),
         ("lights", lights_text(st["lights"])),
@@ -1733,6 +1927,70 @@ def read_i2c(m):
         return fe_header.parse_i2c(text) if isinstance(text, str) else None
     except ValueError:
         return None
+
+
+def read_spi(m):
+    """The header's SPI bus: what is on it and what the firmware clocked
+    there (fe_header.parse_spi), or None from an emulator that cannot tell
+    yet"""
+    text = qom_get(m, "/machine", "header-spi")
+    try:
+        return fe_header.parse_spi(text) if isinstance(text, str) else None
+    except ValueError:
+        return None
+
+
+def spi_device(dev, m, d):
+    """A device on the header's SPI bus as `spi --json` prints it: what
+    fe_header.parse_spi has for it, the "drive" that its contents are in
+    (None: it has none, and forgets when the emulator stops), and the "file"
+    in the device's folder if that drive is the launcher's own."""
+    drive = qom_get(m, f"/machine/peripheral/spi-{d['select']}", "drive")
+    own = drive == f"spi-{d['select']}-rom"
+    return dict(d, drive=drive or None,
+                file=str(spi_rom(dev, d["select"])) if own else None)
+
+
+def spi_kept(d):
+    """Where a device on that bus keeps its contents, in words"""
+    if d["file"]:
+        return f"its contents are kept in {d['file']}"
+    if d["drive"]:
+        return f"its contents are in the drive {json.dumps(d['drive'])}"
+    return "it keeps nothing when the emulator stops"
+
+
+def cmd_spi(args):
+    """The SPI bus of a running device's GPIO header: the devices on it,
+    with where a flash's contents are kept, and what the firmware clocked
+    there"""
+    dev = Device(args.device)
+    m = open_monitor(dev)
+    try:
+        bus = read_spi(m)
+        if not bus:
+            sys.exit(f"[{dev.name}] this emulator cannot tell what is on the "
+                     "header's SPI bus: `spi` needs one that is built from "
+                     "this tree as it is now (scripts/setup_qemu.sh)")
+        devices = [spi_device(dev, m, d) for d in bus["devices"]]
+    finally:
+        m.close()
+    if args.json:
+        print(json.dumps(dict(bus, devices=devices), indent=2,
+                         ensure_ascii=False))
+        return 0
+    print(f"[{dev.name}] {fe_header.spi_name(bus)}: "
+          f"{fe_header.spi_text(bus)}")
+    wide = max((len(d["type"]) for d in devices), default=0)
+    for d in devices:
+        print(f"[{dev.name}]   pin {d['select']:<2} ({d['pin']})  "
+              f"{d['type']:{wide}}  "
+              f"{'selected' if d['selected'] else 'not selected'}; "
+              f"{spi_kept(d)}")
+    if not devices:
+        print(f"[{dev.name}]   (`run --spi TYPE@PIN` puts a device there, "
+              "PIN its chip select: --spi w25q32@PA4, a serial flash)")
+    return 0
 
 
 def read_adc(m):
@@ -1943,18 +2201,19 @@ def cmd_gpio(args):
     if args.timeout <= 0:
         sys.exit("gpio: --timeout is more than 0 seconds")
 
-    ports = bus = adc = None
+    ports = bus = adc = spi = None
 
     def now():
         # (the monitor takes one client at a time: not kept, so that a test
         # can press a button while this waits)
-        nonlocal ports, bus, adc
+        nonlocal ports, bus, adc, spi
         m = open_monitor(dev)
         try:
             pins = read_header(m)
             ports = read_serial(m)
             bus = read_i2c(m)
             adc = read_adc(m)
+            spi = read_spi(m)
         finally:
             m.close()
         if pins is None:
@@ -1995,13 +2254,18 @@ def cmd_gpio(args):
                 note = f"{of[0]['name']}'s {of[1]}"
             if fe_header.i2c_pin(p, bus):
                 note = f"{bus['name']}'s {fe_header.i2c_pin(p, bus)}"
+            if fe_header.spi_pin(p, spi):
+                note = f"{spi['name']}'s {fe_header.spi_pin(p, spi)}"
+            chip = fe_header.spi_chip(p, spi)
+            if chip:
+                note = fe_header.spi_chip_text(chip)
             if p["pwm"]:
                 note = fe_header.pwm_text(p["pwm"])
             if p["held"]:
-                note = (note + "; " if p["pwm"] else "") + fe_header.held_text(p) + (
+                note = (note + "; " if p["pwm"] or chip else "") + fe_header.held_text(p) + (
                     ", which does not show while the firmware drives the pin"
                     if fe_header.overruled(p) else "")
-            elif p["label"] in ("SWC", "SIO") and not p["pwm"]:
+            elif p["label"] in ("SWC", "SIO") and not p["pwm"] and not chip:
                 note = f"{p['label']} on the case"
             print(f"  {p['number']:>2}  {p['pin']:5} "
                   f"{fe_header.mode_text(p):{wide}}  {p['level']:8}  {note}".rstrip())
@@ -2016,6 +2280,11 @@ def cmd_gpio(args):
             print("its I2C bus, SDA on pin 15 and SCL on pin 16 (`run --i2c "
                   "TYPE@ADDRESS` puts a device there)")
             print(f"  {fe_header.i2c_name(bus)}  {fe_header.i2c_text(bus)}")
+        if spi:
+            print(f"its SPI bus, MOSI on pin {spi['mosi']}, MISO on pin "
+                  f"{spi['miso']} and SCK on pin {spi['sck']} (`run --spi "
+                  "TYPE@PIN` puts a device there, PIN its chip select)")
+            print(f"  {fe_header.spi_name(spi)}  {fe_header.spi_text(spi)}")
         if adc:
             inputs = sorted(fe_header.ADC_PINS.values())
             print("its ADC, with pins " + ", ".join(map(str, inputs[:-1]))
@@ -4980,6 +5249,20 @@ def main():
                         "in °C: tmp105@0x48,temperature=23.5): `--i2c help` "
                         "lists them.  `i2c` says what is on the bus, with "
                         "the devices' values, and sets one while it runs")
+    p.add_argument("--spi", action="append", metavar="TYPE@PIN",
+                   help="a device on the SPI bus of the GPIO header (pins 2 "
+                        "MOSI, 3 MISO and 5 SCK), with its chip select on "
+                        "PIN, a pin of the header by its number or its name: "
+                        "w25q32@PA4, a serial flash of 4 MiB (`flash` for "
+                        "short).  Not said, the pin is 4 (PA4), the one of "
+                        "the firmware's own handle for that bus; 6, 7, 10, "
+                        "12, 15 and 16 may be one too.  Once for each "
+                        "device.  The type is one of QEMU's SPI devices, "
+                        "with its properties after a comma: `--spi help` "
+                        "lists them.  A flash's contents are kept in the "
+                        "device's folder (spi-PIN.bin, all 0xFF when new).  "
+                        "`spi` says what is on the bus and what the "
+                        "firmware clocked there")
     p.add_argument("--log-level", metavar="LEVEL",
                    choices=("default", "none", "error", "warn", "info", "debug",
                             "trace"),
@@ -5196,6 +5479,27 @@ def main():
                         "an address as a number, 72 for 0x48); with an "
                         "address: that device alone")
     p.set_defaults(func=cmd_i2c)
+
+    p = sub.add_parser(
+        "spi", help="the SPI bus of a running device's GPIO header: the "
+        "devices that `run --spi` put there, and what the firmware clocked",
+        description="The SPI bus on pins 2 (MOSI), 3 (MISO) and 5 (SCK) of "
+        "the GPIO header: the firmware's external SPI bus, which is the "
+        "MCU's SPI1 on those pins from the moment an app takes it until it "
+        "lets go.  Devices are put there when the device starts (`run --spi "
+        "w25q32@PA4`), each with its chip select on a pin of the header.  "
+        "This says what is on the bus, whether a device is selected just "
+        "now and where its contents are kept, how many bytes the firmware "
+        "has clocked there since the emulator started, how many of them "
+        "while a device was selected (the others nobody heard: the "
+        "firmware's chip select is another pin, or none), and how it "
+        "clocked the last frame: the clock's rate, the SPI mode, which bit "
+        "came first, and the bits of a frame.")
+    p.add_argument("--json", action="store_true",
+                   help="for a program: the bus as `status --json` has it, "
+                        "each device with the drive and the file that its "
+                        "contents are in")
+    p.set_defaults(func=cmd_spi)
 
     p = sub.add_parser("reset", help="reboot a running device, as holding Left + "
                        "Back does on a real one")

@@ -7,8 +7,8 @@
     scripts/gpio_check.py firmware/official-1.5.1/flipper-z-f7-update-1.5.1.tgz
 
 Starts a throwaway device.  The header after a start: its thirteen signal
-pins, none an output, none held, with its serial ports and its I2C bus
-beneath them.  Then the firmware makes PA7 an output and
+pins, none an output, none held, with its serial ports, its I2C bus and its
+SPI bus beneath them.  Then the firmware makes PA7 an output and
 sets it (`gpio mode`, `gpio set` in its CLI): the launcher sees that, as a
 table, as one word, by the pin's three names, in `status`, and a `--wait` for
 a level returns when the firmware sets it (and with exit status 1 when it
@@ -223,6 +223,17 @@ def start_checks(b):
           "--i2c TYPE@ADDRESS` puts a device there)\n"
           "  pins 15 and 16 (I2C3)  no device; the firmware has "
           "called no address yet\n" in out, out)
+    code2, out2, err2, _ = fe(b, "spi")
+    check("... and the SPI bus of pins 2, 3 and 5, with no device on it and "
+          "nothing clocked; `spi` says the same, and how a device comes there",
+          "\nits SPI bus, MOSI on pin 2, MISO on pin 3 and SCK on pin 5 (`run "
+          "--spi TYPE@PIN` puts a device there, PIN its chip select)\n"
+          "  pins 2, 3 and 5 (SPI1)  no device; the firmware has clocked "
+          "nothing there yet\n" in out
+          and code2 == 0 and "pins 2, 3 and 5 (SPI1): no device; the firmware "
+          "has clocked nothing there yet" in out2
+          and "(`run --spi TYPE@PIN` puts a device there, PIN its chip "
+          "select: --spi w25q32@PA4, a serial flash)" in out2, out + out2 + err2)
     first = adc(b)
     check("... and at the end the ADC, with the six pins that are its "
           "inputs: off, as nothing uses it, and it has converted nothing; "
