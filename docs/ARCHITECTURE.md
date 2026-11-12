@@ -263,7 +263,10 @@ What this gives and what it cannot:
   Sub-GHz keystore decrypts to noise (the firmware logs a `Failed to load line` error
   per line and has no manufacturer codes), and so does the stock U2F certificate's
   private key. For the keystores, a card gets the project's own in their place: the
-  manufacturer codes under the emulator's key 1 ([keystores.md](keystores.md)).
+  manufacturer codes under the emulator's key 1 ([keystores.md](keystores.md)). For
+  U2F nothing stands in: the firmware signs a registration with the 32 bytes that key
+  2 makes of the stock file, which are not the certificate's key
+  (`scripts/u2f_check.py` computes them on the host, and the signature is theirs).
 
 AN5185 leaves several things open, and no real device was there to ask. They are
 decided as follows, and marked in the source:
@@ -422,6 +425,10 @@ handed to the PC's kernel instead of the built-in class drivers:
   disagree on them.
 - When the firmware drops off the bus, the socket closes, so the PC sees an unplug. When
   the client disconnects, the device gets a fresh reset back on the built-in host.
+- Two clients in user space play the kernel's part, with no root: `scripts/fe_usbip.py`
+  for the serial port, and `scripts/fe_u2f.py` for the firmware's U2F token (a HID
+  device: its report descriptor over control URBs, 64-byte reports on an interrupt
+  endpoint each way).
 
 ## Resets and the OTA updater
 

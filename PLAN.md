@@ -212,9 +212,21 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       that no line is for: of 300 with random keys 37 where the first list alone
       gives 23 (official), 36 for 22 (Momentum), 87 for 73 (Unleashed). Some of its
       lines have type numbers that a firmware reads as another kind of learning
-- ☐ U2F from a host: the app starts, takes the USB port as a HID token and shows
-      "Connected!"; a registration and a login from a browser or libfido2 over USB/IP
-      have not been tried
+- ☑ U2F from a host (2026-11-12): `scripts/fe_u2f.py`, a U2F host in user space on the
+      USB/IP client (the HID interface, U2FHID's INIT, PING, WINK and MSG, the raw
+      messages VERSION, REGISTER and AUTHENTICATE, the signatures checked on P-256 in
+      plain Python), with `register` and `login` at the command line. The firmware's
+      token registers a key after OK on the Flipper and logs in with it, refuses
+      without OK, counts its logins, and keeps its key and counter on the card under
+      the device's own key. `scripts/u2f_check.py`: 39 checks on each of the five
+      firmwares, with what is on the card computed again on the host from the
+      enclave's keys (BRINGUP_LOG 128)
+    - ☐ A browser or libfido2, which reach a token through the kernel (`sudo
+      scripts/usbip_attach.py`, the token as a hidraw device): needs root, not tried
+    - ☐ A registration that a host which checks the attestation accepts. The stock
+      certificate's key is under a real Flipper's key 2, so the firmware signs with
+      another number. A certificate and key of the emulator's own would do it (the
+      firmware takes a user's `cert_key.u2f`): to be decided
 - ☑ The window (2026-11-10): `scripts/fe_gui.py` (PySide6), the default of `run`. The
       LCD in a Flipper-shaped body of its own drawing, with buttons to click or hold, the
       LED, the vibration motor, the speaker's tone and the IR window; a USB plug and a

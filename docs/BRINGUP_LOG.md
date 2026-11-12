@@ -3000,6 +3000,74 @@ big lock, entry 92).
       other firmwares' USB apps (mass storage, MIDI, a game controller)
       were not tried.
 
+128. **U2F from a host.** The U2F app had only been started, never asked.
+    `scripts/fe_u2f.py` asks: a U2F host in user space, on the USB/IP
+    client that `fe_usbip.py` has (no root, nothing plugged into this PC).
+    The HID interface and its report descriptor, U2FHID's frames on the
+    two interrupt endpoints, U2F's raw messages in them, and the
+    signatures checked on P-256 in plain Python. The emulator's side
+    needed no change: the token answered the first INIT, registered a key
+    after OK on the Flipper and logged in with it. What was found is about
+    the firmware, and about the tool:
+    - The registration's signature is not the certificate's. The firmware
+      decrypts the stock `cert_key.u2f` with factory key 2 and signs with
+      the 32 bytes that come out, whatever they are. The emulator's key 2
+      is not a real Flipper's, so they are another number than the
+      certificate's key. The check computes that number on the host from
+      the card's file and the enclave's key, and the signature is its
+      public key's: the firmware does what it does on a Flipper, with
+      another key. A host that checks the attestation would refuse it.
+    - The firmware looks for the user before it looks at the key handle.
+      A login for another application, or with a handle that is not the
+      token's, is refused as "the user is not there" until OK is pressed,
+      and only then as wrong. The tool's `login` waited its 30 seconds for
+      that and then blamed the user. It asks check-only first now (is this
+      handle yours?), which needs no user, and says at once that the
+      handle is not this token's.
+    - A check-only request puts the question on the Flipper's screen too,
+      for half a second, with the vibration: the firmware tells its screen
+      of a login before it looks at what kind of login it is.
+    - The tool leaves when it has its answer, and the emulator's own host
+      takes the port again. The firmware sees a new connection, and its
+      U2F screen stops its timer for that. So "Authentication successful!"
+      gives way to "Connected!" at once, and the LED, which that timer
+      switches off after three seconds, stays green until the next request
+      or until U2F is left. The check's own host stays, and sees the three
+      seconds. (A real Flipper that is pulled and plugged in within three
+      seconds of a login should do the same, by the source: not tried.)
+    - OK counts only while the question is shown, and then for the next
+      request whenever it comes: the firmware's note of it has no time
+      limit. The check presses OK only while a request is being repeated.
+    - With no device on the port the tool said `[Errno 111] Connection
+      refused` after a wait: Python's ConnectionRefusedError is a
+      ConnectionError, which was taken for a device that had just left the
+      bus. It says now that nothing answers USB/IP there, and asks whether
+      the device was started with `run --usbip`.
+    - The first start of U2F on a card logs two warnings (`Key loading
+      error, generating new`, `Counter loading error, resetting counter`),
+      which `app` prints: that is the firmware making the device's key and
+      its counter file.
+    - `scripts/u2f_check.py`: no token at the desktop; INIT, PING (8 bytes,
+      and 300 over six frames each way), WINK, the error for an unknown
+      command, the version; a registration refused with nobody there while
+      the screen asks, and given with OK; logins refused without OK, for
+      another application and with one bit of the handle wrong; the
+      signature and the counter of each login, and what the Flipper shows
+      after one (another screen and the LED green, then as before); the
+      tool's `info`, `register` and `login`, and its refusal at once for
+      another application. Then the card, with the device's own enclave
+      keys: the key pair is the one the device key gives for that
+      application and the handle's check sum is right (key 11), the
+      counter file has the last count, and the registration was signed
+      with what key 2 makes of the stock key file. And the handle after
+      U2F was closed and opened, and after a stop and a start. No key is
+      printed. 39 checks, a minute, on the official 1.5.1, its dev build,
+      Momentum, Unleashed and RogueMaster.
+    - Not there: a browser or libfido2 through the kernel (`sudo
+      scripts/usbip_attach.py`, the token as a hidraw device), which needs
+      root; a certificate that is the signing key's; a real Flipper to
+      compare with.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

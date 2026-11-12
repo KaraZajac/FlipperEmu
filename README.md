@@ -200,8 +200,9 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
 - Secure enclave: the key store of ST's FUS on CPU2 and the AES peripheral it loads keys
   into, with factory keys of FlipperEmu's own. The firmware's check of its ten keys
   passes, so there is no "Secure Enclave is damaged" at start. `furi_hal_crypto` and the
-  CLI's `crypto` commands work, apps can store keys, and U2F starts and makes the
-  device's own key. The keys persist in `devices/NAME/enclave.keys`;
+  CLI's `crypto` commands work, apps can store keys, and U2F makes the device's own
+  key, registers and logs in for a host (`scripts/fe_u2f.py`, over USB/IP). The keys
+  persist in `devices/NAME/enclave.keys`;
   `./flipperemu enclave` shows them and computes what the firmware encrypts.
 - CPU2 modelled as ST's FUS with no wireless stack. That's a real device state, and it
   keeps the BT paths healthy.
@@ -233,7 +234,10 @@ real Flipper, and they are not in this project. So the files a real Flipper's ke
 encrypted stay closed to an emulated one; see
 [The secure enclave](#the-secure-enclave). For the Sub-GHz keystores a card gets the
 project's own in their place, the manufacturer codes under the emulator's key
-([docs/keystores.md](docs/keystores.md)).
+([docs/keystores.md](docs/keystores.md)). The key of the stock U2F certificate is such
+a file too, and nothing stands in for it: an emulated token registers and logs in, but
+its certificate is not its key's
+([U2F](#u2f-the-flipper-as-a-security-key-usbip)).
 
 ## Quick start
 
@@ -442,7 +446,7 @@ it runs: once with the wait given up, once to the end.
 | `spi` | that bus: its devices, which of them is selected, how many bytes the firmware clocked there and how many of them a device heard, and how the last was clocked. `spi --json`: the same for a program |
 | `reset` | reboot it, as holding Left + Back does |
 | `pause` \| `continue` | time stands still on it (screen, timers, radios), and goes on from there |
-| `run --usbip [PORT]` | export the USB device over USB/IP (then `sudo scripts/usbip_attach.py`) |
+| `run --usbip [PORT]` | export the USB device over USB/IP (then `sudo scripts/usbip_attach.py`, or `scripts/fe_u2f.py` for U2F with no root) |
 | `cli ["CMD" …]` | the device's CLI over USB: interactive, or run commands and print their output |
 | `ls [-R] [PATH]` | what is on the SD card (`/ext` when no path is given); `-R`: and in every folder under it |
 | `push [-f] [--card] LOCAL… [REMOTE]` \| `pull [-f] REMOTE… [LOCAL]` | copy files and folders to the card, and from it (`--card`: a running device's card is out of its slot for the write, which is quick for megabytes) |
@@ -866,6 +870,86 @@ returns. `sudo scripts/usbip_attach.py --detach` unplugs it.
 The URB path is tested with a client that plays the kernel's part (`scripts/fe_usbip.py`):
 import, descriptors, SET_CONFIGURATION, CDC line state, bulk URBs carrying the CLI, and
 unlinks. Attaching to the real kernel needs root, so that part is yours to try.
+
+### U2F: the Flipper as a security key (USB/IP)
+
+```sh
+./flipperemu run --usbip                  # the USB device on 127.0.0.1:3240, as above
+./flipperemu app /ext/apps/USB/u2f.fap    # U2F on the Flipper: its port is a token now
+scripts/fe_u2f.py                         # what the token says it is
+scripts/fe_u2f.py register > key.txt      # then OK on the Flipper (./flipperemu press ok)
+scripts/fe_u2f.py login < key.txt         # and once more
+```
+
+The firmware's U2F app makes a FIDO U2F token of the Flipper's USB port. A site
+registers a key with such a token and later asks it for a signature with that key, and
+the token answers neither before its button was pressed: here, OK on the Flipper.
+`scripts/fe_u2f.py` is a host for that in user space. It is a USB/IP client itself, as
+`fe_usbip.py` is, so it needs no root and nothing is plugged into this PC. It reads the
+HID interface, speaks U2FHID's frames on the two interrupt endpoints (INIT, PING, WINK,
+MSG) and U2F's raw messages in them (VERSION, REGISTER, AUTHENTICATE), and checks what
+the token signed on NIST P-256, in plain Python.
+
+```console
+$ scripts/fe_u2f.py
+USB 0483:5741, a HID device with FIDO's usage (U2F), reports of 64 bytes on endpoints 1 in and 1 out
+U2FHID protocol 2, device version 1.0.1, winks; raw messages: U2F_V2
+$ scripts/fe_u2f.py register > key.txt
+Press OK on the Flipper to register.
+registered for https://flipperemu.example; the token's certificate: C=US, CN=Flipper Zero U2F; the registration's signature is NOT one of that certificate's key
+$ scripts/fe_u2f.py login < key.txt
+Press OK on the Flipper to log in.
+logged in to https://flipperemu.example: counter 1, the user was there, the signature is the registered key's
+```
+
+| | |
+|:-:|:-:|
+| ![u2f register](docs/img/33-u2f-register.png) | ![u2f login](docs/img/34-u2f-login.png) |
+| While `register` asks | While `login` asks |
+
+- **OK on the Flipper.** The Flipper shows its question while a host asks, and for
+  half a second after. OK counts only then: in the window, or with `./flipperemu press
+  ok` from another terminal. Until then the token refuses, and the tool asks again ten
+  times a second, the way a browser keeps asking. After `--wait` seconds (30) it says
+  that nobody pressed OK, with exit status 1.
+- **`key.txt`** is what a site keeps of a registration: the public key and the key
+  handle, in hex, on one line. `login` reads the two from its input, and its exit status
+  is 0 only if the signature is that key's. The counter in its line counts the logins of
+  the whole token, whatever the key, and the firmware keeps it on the card
+  (`/ext/u2f/cnt.u2f`), so it goes on after a restart.
+- **`--application ADDRESS`** says whose key it is: a site's address, whose SHA-256 is
+  U2F's application parameter. A handle that is another application's, or another
+  token's, is refused at once (`the key handle is not this token's, or not for this
+  application`). For that, `login` first asks the token whether the handle is its own,
+  as a browser does: the firmware looks for the user before it looks at the handle, and
+  would have the tool wait for an OK that cannot help. `--port` is for a device that was
+  started with another USB/IP port.
+- **The tool comes and goes.** Between its calls the emulator's own host has the port
+  again, so `status`, `press` and `shot` work as ever (there is no CLI while U2F is
+  open). To the firmware each call is a cable that was pulled and plugged in again, and
+  two things on the Flipper differ from a token that stays in its computer:
+  "Authentication successful!", which is shown for three seconds after a login, gives
+  way to "Connected!" at once, and the LED stays green from then until the next
+  request, or until U2F is left.
+- **The certificate is not the key's.** A token signs a registration with a key of its
+  maker's and sends the maker's certificate for it. The firmware reads that key from
+  `/ext/u2f/assets/cert_key.u2f`, which is encrypted with a real Flipper's factory key
+  2, and the emulator's key 2 is another ([the secure enclave](#the-secure-enclave)).
+  So the firmware signs with what comes out, which is not the certificate's key, and
+  `register` says so. A site that checks this signature would refuse the token, and one
+  that does not look at it has nothing to notice. Logins are signed with the registered
+  key, and those signatures are right.
+
+Not tried: a browser, or libfido2. They reach a token through the kernel, so the device
+has to be plugged into this PC first (`sudo scripts/usbip_attach.py --watch`, as above:
+the token is a hidraw device then). That needs root and is yours to try. And since the
+keys of an emulated Flipper are public: don't register this token with an account that
+matters.
+
+`scripts/u2f_check.py FIRMWARE` checks all of it, and what the firmware keeps on the
+card with it (the key pair is the one the device's key gives for that application, the
+counter file has the last count): 39 checks in a minute, on the official 1.5.1 and its
+dev build, Momentum, Unleashed and RogueMaster.
 
 ### Updating like qFlipper does
 
@@ -2504,7 +2588,7 @@ never leave a real Flipper and are not in this project. Every emulated Flipper g
   program can ask for.
   Nothing stands in for the stock U2F certificate's private key, which is encrypted
   the same way: the certificate of an emulated token does not match the key it signs
-  with.
+  with ([U2F](#u2f-the-flipper-as-a-security-key-usbip) shows what follows).
 
 Manufacturer codes of your own go where they go on a real Flipper: in
 `/ext/subghz/assets/keeloq_mfcodes_user`, in plain text (`keeloq_mfcodes_user.example`
@@ -2626,8 +2710,8 @@ scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_moni
                        fe_nfc_link.py (cards from programs), fe_pm3.py (Proxmark3),
                        fe_enclave.py (the enclave's keys and ciphers), fe_gdb.py
                        (gdb's side of `flipperemu gdb`), fe_record.py (the
-                       screen as a GIF), fe_usbip.py,
-                       usbip_attach.py, fe_gui.py (the window: fe_gui_view.py,
+                       screen as a GIF), fe_usbip.py, fe_u2f.py (a U2F host
+                       over USB/IP), usbip_attach.py, fe_gui.py (the window: fe_gui_view.py,
                        fe_gui_link.py, fe_gui_widgets.py), smoke_test.py, *_check.py
 devices/ firmware/ build/ third_party/    generated, git-ignored
 ```
