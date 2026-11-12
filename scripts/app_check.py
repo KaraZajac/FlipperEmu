@@ -13,7 +13,13 @@ runs; an app that takes no request to close is left with its Back button.
 Then what must not work: the same app with another API version in its
 manifest (which the loader refuses, or asks about on the screen: then the
 question is cancelled once, and answered once), a file that is no app, a name
-the firmware does not know.  Last, an app that does not live through being
+the firmware does not know.  Then apps that take the Flipper's USB port for
+themselves, and the CLI with it, so that the loader's answer cannot be heard:
+U2F, which makes a security key of the port, and Bad USB, which switches it
+off until a script runs (each skipped where the card has no such app).  The
+launcher says what the computer sees there now, and does not wait for an
+answer or press Back; the Back button gives the port back.
+Last, an app that does not live through being
 asked to close (the firmware's NFC app in the middle of a read: a check of
 its own fails, and the firmware starts again): the launcher says what
 happened.  A debug build does not start again after that: it halts and waits
@@ -35,6 +41,7 @@ import time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fe_apps                                              # noqa: E402
 from files_check import Bench, CRASH, check, results        # noqa: E402
+from gpio_check import skip, skipped                        # noqa: E402
 
 # apps that end when the loader asks them to, smallest first
 WANTED = ("gpio.fap", "ibutton.fap", "lfrfid.fap", "infrared.fap")
@@ -186,6 +193,41 @@ def app_checks(b, work):
     return local
 
 
+# apps that take the USB port: (file, name, what `app` says the computer sees)
+PORT = (("u2f.fap", "U2F", ": HID."),
+        ("bad_usb.fap", "Bad USB", "the app has switched the port off"))
+
+
+def port_checks(b):
+    """An app that takes the USB port has the CLI's serial port with it: the
+    loader's answer to `loader open` never comes."""
+    code, text = b.fe("app", "--list")
+    on_card = re.findall(r"^  (/ext/apps/\S.*\.fap)$", text, re.M)
+    for file, name, sees in PORT:
+        fap = next((p for p in on_card if p.rsplit("/", 1)[1] == file), None)
+        if not fap:
+            skip(f"an app that takes the USB port ({name})",
+                 f"this firmware's card has no {file}")
+            continue
+        began = time.time()
+        code, text = b.fe("app", fap)
+        took = time.time() - began
+        check(f"an app that takes the USB port ({name}): it says so, and "
+              "what the computer sees there, without waiting for an answer",
+              code == 0 and "has the Flipper's USB port for itself" in text
+              and sees in text and took < 30 and "Traceback" not in text,
+              f"{took:.1f} s: {text}")
+        code, text = b.fe("app")
+        check("asked alone then: no CLI, and that leaving the app gives the "
+              "port back", code != 0 and "no CLI" in text
+              and "leaving it gives the port back" in text
+              and "Traceback" not in text, text)
+        b.fe("press", "back")
+        code, text = b.fe("app")
+        check("its Back button: the CLI is there again, and no app runs",
+              code == 0 and "no app runs" in text, text)
+
+
 def halted(b):
     """What `status --json` has on a halted firmware, or None"""
     try:
@@ -301,6 +343,7 @@ def main():
                  b.uart_text()[-2000:]):
             time.sleep(2)
             local = app_checks(b, work)
+            port_checks(b)
             log = b.uart_text(every=True)
             crash = CRASH.search(log)
             check("no crash in the firmware's log", not crash,
@@ -316,6 +359,7 @@ def main():
             shutil.rmtree(b.dir, ignore_errors=True)
     bad = [label for label, ok in results if not ok]
     print(f"{len(results) - len(bad)} of {len(results)} checks passed"
+          + (f", {len(skipped)} skipped" if skipped else "")
           + (f"; device kept: {b.dir}" if args.keep else ""))
     return 1 if bad else 0
 

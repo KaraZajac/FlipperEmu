@@ -2959,6 +2959,47 @@ big lock, entry 92).
       taken off it from the window. Nobody looked at it on a desktop: the
       window was tried off-screen, as before.
 
+127. **`app` and an app that takes the USB port.** Found on the way to U2F
+    from a host: `app /ext/apps/USB/u2f.fap` waited out its time, pressed
+    Back and said `The loader did not start it:` with the CLI's welcome
+    banner. U2F had started. It makes a security key of the USB port, the
+    CLI's serial port is gone with that, and the loader's answer to
+    `loader open` is never heard. The Back press that was to cancel a
+    question on the screen closed the app, and the banner was what the
+    new CLI session said.
+    - `app` asks the emulated host what it sees in the port when the CLI
+      has been quiet for a while (the machine's `device` word, as `status`
+      has it). Another device than the serial port there: the app has the
+      port. Nothing is waited for, no Back is pressed, and the command
+      says what the computer sees and how the app is left. Exit status 0:
+      the app was started.
+    - Bad USB failed the old way after that. It makes no other device of
+      the port: it switches the port off, and on again as a keyboard when
+      a script runs. Off is also what every change of device begins with,
+      so a port that is off counts when it is seen so twice (two seconds
+      apart), and has words of its own: `the computer sees nothing there
+      now (the app has switched the port off)`.
+    - A command that needs the CLI meanwhile said `which does not see it
+      (yet), and that is no serial port` of a port that is off. It adds
+      that an app may have switched the port off, as Bad USB does.
+    - A firmware that crashed or halted is said first, as before.
+    - Seen by hand on the official 1.5.1: U2F in 3 s (`0483:5741 U2F Token:
+      HID`), the USB keyboard (`046d:c529 : HID`, a device with no product
+      name; left with a long Back), Bad USB in 5 s. On Momentum: U2F by its
+      name (`app U2F`), and Bad KB, which keeps the serial port while it
+      shows its files and so runs as any app does.
+    - `scripts/app_check.py` has the step for U2F and Bad USB, each found
+      in `app --list` by its file's name and skipped where the card has
+      none: the start, `app` asked alone (no CLI, and why), the Back
+      button, the CLI again. 32 checks on the official 1.5.1 and on
+      Unleashed, 33 on the dev build, 29 on Momentum and RogueMaster with
+      Bad USB skipped (their cards have Bad KB). `gui_check.py` on the
+      official 1.5.1, whose dropped app goes the same way: 63, as before.
+    - Not there: the window has no words of its own for such an app (the
+      launcher's line is in its console). RogueMaster's Bad KB and the
+      other firmwares' USB apps (mass storage, MIDI, a game controller)
+      were not tried.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

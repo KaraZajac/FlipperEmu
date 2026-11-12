@@ -1674,6 +1674,28 @@ def read_usb(m):
             "device": qom_get(m, "/machine/soc/usb", "device") if cable else None}
 
 
+def usb_taken(dev):
+    """What the computer sees in the Flipper's USB port while the serial port
+    is not there: another device (an app on the Flipper is a security key, a
+    keyboard, a card reader), or "none" (the port is off: for a moment while
+    the firmware makes another device of it, for longer when an app wants it
+    so).  None while the serial port is there, or the computer is finding out
+    what is"""
+    try:
+        m = open_monitor(dev)
+    except OSError:
+        return None
+    try:
+        usb = read_usb(m)
+    finally:
+        m.close()
+    seen = usb["device"] or ""
+    if (usb["cable"] != "computer" or "CDC ACM" in seen
+            or seen in ("", "enumerating", "failed", "usbip")):
+        return None
+    return seen
+
+
 def usb_text(u):
     if u["cable"] == "computer":
         return {"none": "plugged into a computer, which does not see it (yet)",
@@ -2802,6 +2824,9 @@ def usb_serial(dev):
         why = f"it is {usb_text(usb)}, and that is no serial port"
         if seen not in ("none", "enumerating", "failed"):
             why += " (an app on the Flipper has USB: leaving it gives the port back)"
+        elif seen == "none":
+            why += (" (an app on the Flipper may have switched the port off, "
+                    "as Bad USB does: leaving it gives the port back)")
     return ep, why
 
 
@@ -4346,6 +4371,10 @@ def cmd_app(args):
         sys.exit(f"[{dev.name}] {e}")
 
 
+class PortTaken(Exception):
+    """The app that was started has the Flipper's USB port: no CLI answers"""
+
+
 def app_session(dev, cli, args, local, fap):
     import fe_apps
     import fe_files
@@ -4396,7 +4425,37 @@ def app_session(dev, cli, args, local, fap):
     def logged():
         return log_trouble(dev.uart, mark) if mark is not None else ([], None)
 
+    # An app may take the USB port for itself: U2F and a USB keyboard make
+    # another device of it, Bad USB switches it off until a script runs.
+    # The loader's answer is lost with the serial port then, and the app
+    # runs.  Asked when the CLI has been quiet for a while; a port that is
+    # off is asked about twice, since every change of device begins so.
+    port, off = [], []
+    halted = cli.gone
+
+    def gone():
+        if halted and halted():
+            return True
+        seen = usb_taken(dev)
+        if seen == "none" and not off:
+            off.append(seen)
+            return False
+        if seen:
+            port[:] = [seen]
+        else:
+            del off[:]
+        return bool(seen)
+
+    cli.gone = gone
+
+    def back():
+        if port:
+            raise PortTaken()
+        press_back(dev)
+
     def waiting():
+        if port:
+            raise PortTaken()
         if firmware_halt(dev):          # nobody is asking: said below
             raise TimeoutError("the firmware gives no answer")
         left = max(0.0, args.wait - fe_apps.QUESTION)
@@ -4410,11 +4469,13 @@ def app_session(dev, cli, args, local, fap):
     try:
         said, cancelled = fe_apps.start(cli, what, " ".join(args.args),
                                         wait=args.wait, waiting=waiting,
-                                        back=lambda: press_back(dev))
+                                        back=back)
         if not said:
             time.sleep(1.0)                 # an app that fails does it at once
             if not logged()[1]:
                 now = fe_apps.running(cli)
+    except PortTaken:
+        pass
     except (ConnectionError, TimeoutError) as e:
         lost = str(e)
     lines, crash = logged()
@@ -4438,6 +4499,14 @@ def app_session(dev, cli, args, local, fap):
                + f"The loader did not start it: {said or 'it gave no reason'}")
         if not cancelled:
             why = why[0].lower() + why[1:]
+    elif port:
+        sees = ("nothing there now (the app has switched the port off)"
+                if port[0] == "none" else port[0])
+        print(f"[{dev.name}] it was started, and has the Flipper's USB port "
+              f"for itself: the computer sees {sees}.  There is no CLI "
+              "until the app is left (its Back button: "
+              f"`./flipperemu -d {dev.name} press back`).")
+        return 0
     else:
         print(f'[{dev.name}] "{now}" runs' if now
               else f"[{dev.name}] it was started, and has ended already")

@@ -253,6 +253,15 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         request), start it with arguments, say whether it runs and what the firmware
         logged; a question on the Flipper's screen is waited for and then cancelled;
         `scripts/app_check.py` (BRINGUP_LOG 77)
+  - ☑ `app` and an app that takes the USB port (2026-11-12): U2F and the USB keyboard
+        make another device of the port, Bad USB switches it off, and the loader's
+        answer is lost with the CLI's serial port. `app` waited for it, pressed Back
+        (which closed the app) and said that the loader had not started it. It asks
+        the emulated host what it sees there now and says that, with exit status 0;
+        a command that needs the CLI says that an app may have the port off.
+        `app_check.py` has the step for U2F and Bad USB: 32 checks on the official
+        1.5.1 and Unleashed, 33 on the dev build, 29 on Momentum and RogueMaster,
+        whose cards have no Bad USB (BRINGUP_LOG 127)
   - ☑ The window (2026-11-10): a dropped `.fap` is installed and started, F5 does
         it again after a build, an Apps menu; files and folders to the card from the
         microSD menu and by dropping them, also while it is off; the launcher's

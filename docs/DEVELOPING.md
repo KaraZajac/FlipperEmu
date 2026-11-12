@@ -1175,6 +1175,12 @@ Then `./flipperemu log -f` for what the firmware says, at the level you set
   tree you are in); `./flipperemu reset` starts it again.
 - **"its USB serial port is in use by …".** Another command talks to the Flipper: a
   `ufbt cli` left open, a long `push`. One at a time.
+- **"no CLI: it is plugged into a computer, which sees …, and that is no serial
+  port".** An app on the Flipper has the USB port for itself: U2F and the USB keyboard
+  make another device of it, and Bad USB switches it off until a script runs (then the
+  computer "does not see it (yet)"). `./flipperemu app` says the same when it starts
+  such an app. Leave the app (`./flipperemu press back`; held, `--hold 800`, for the
+  USB keyboard), and the CLI is there again.
 - **"no USB serial port for `ufbt launch`".** The cable is out (`./flipperemu usb
   plug`), or the firmware has the port for something else (Bad USB, U2F), or the device
   was started with `--usb unix` or `tcp:`, which the firmware's tools cannot open.

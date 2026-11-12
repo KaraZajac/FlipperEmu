@@ -597,8 +597,8 @@ it). Names are what FAT and the firmware's shell both take: ASCII, and none of
 The USB serial port carries one conversation at a time. The launcher's commands take
 turns: one that finds the port taken waits ten seconds, then says who has it. A program
 that opened the pty by itself (`screen`, a script) is not seen, so close it first. With
-the cable out, or while an app on the Flipper has turned the port into a keyboard, the
-commands say that there is no CLI and why.
+the cable out, or while an app on the Flipper has the port for itself (as a keyboard,
+as a security key, or switched off), the commands say that there is no CLI and why.
 
 When it stops in the middle:
 
@@ -706,6 +706,24 @@ dist/my_app.fap -> /ext/apps/Tools/my_app.fap (26916 bytes)
   with `./flipperemu press right` from another terminal. A question nobody answered in
   `--wait` seconds (60) is cancelled with Back, so that a script does not hang and the
   Flipper's CLI is free again.
+- **When the app takes the USB port.** U2F makes a security key of the Flipper's USB
+  port and the USB keyboard a keyboard; Bad USB switches the port off until a script
+  runs. The CLI's serial port goes with that, and the loader's answer to the start is
+  never heard. `app` then says what the computer sees in the port, with exit status 0
+  (one line, folded here):
+
+  ```
+  $ ./flipperemu app /ext/apps/USB/u2f.fap
+  [mine] it was started, and has the Flipper's USB port for itself: the computer sees
+  0483:5741 U2F Token: HID.  There is no CLI until the app is left (its Back button:
+  `./flipperemu -d mine press back`).
+  ```
+
+  For Bad USB it is `the computer sees nothing there now (the app has switched the
+  port off)`. Until the app is left, `status` has the device in its `usb` row, a
+  command that needs the CLI says why there is none, and what needs none works as
+  ever: `press`, `shot`, `log`. The USB keyboard is left with a long Back (`press back
+  --hold 800`).
 
 ARGS is what the app is started with, spaces and all: for the firmware's own apps the
 path of a file to open.
