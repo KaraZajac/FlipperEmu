@@ -300,7 +300,8 @@ class Device:
             cmd += ["--resources", str(resources)]
         # Re-keyed Sub-GHz keystores (scripts/rekey_keystore.py): applied over
         # the stock resources so the unmodified firmware decrypts its codes
-        # with the emulator's own enclave key. Opt in by creating the folder.
+        # with the emulator's own enclave key. The folder is in the project
+        # (docs/keystores.md); without it a card has the stock files.
         overlays = list(overlay or [])
         if not overlays and REKEYED_OVERLAY.is_dir():
             overlays = [REKEYED_OVERLAY]

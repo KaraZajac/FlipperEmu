@@ -18,10 +18,13 @@ the emulator exactly as it loads the stock file on hardware; drop the output
 into a firmware fork's resources (applications/.../resources/subghz/assets/).
 
     rekey_keystore.py keys   IN OUT [--slot N] [--iv TEXT] [--enclave FILE]
-    rekey_keystore.py verify FILE   [--slot N]            [--enclave FILE]
+    rekey_keystore.py raw    IN OUT [--slot N] [--iv TEXT] [--enclave FILE]
+    rekey_keystore.py verify FILE... [--slot N]           [--enclave FILE]
 
 `keys` reads IN (a decrypted key list; blank lines and `#` comments are
-skipped) and writes OUT. `verify` decrypts an encrypted keystore with the
+skipped) and writes OUT. `raw` does the same for a RAW keystore (nice_flor_s,
+alutech_at_4n, came_atomo): IN holds its decrypted bytes as hex, whole
+16-byte blocks. `verify` decrypts an encrypted keystore with the
 same key and prints the keys back, to check a file round-trips. --slot is the
 enclave slot (default 1). --iv sets the stored IV (16 bytes; ASCII, or hex
 with 0x); the default is fixed so re-keying is reproducible. --enclave reads
@@ -192,12 +195,19 @@ def verify(text: str, key: bytes) -> list:
 
 
 def main(argv) -> int:
-    ap = argparse.ArgumentParser(add_help=False)
+    ap = argparse.ArgumentParser(
+        prog="rekey_keystore.py", description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("action", choices=("keys", "raw", "verify"))
-    ap.add_argument("paths", nargs="+")
-    ap.add_argument("--slot", type=int, default=1)
-    ap.add_argument("--iv", default=None)
-    ap.add_argument("--enclave", default=None)
+    ap.add_argument("paths", nargs="+", metavar="PATH",
+                    help="keys, raw: IN and OUT; verify: the keystores")
+    ap.add_argument("--slot", type=int, default=1, metavar="N",
+                    help="the enclave's key slot (default 1)")
+    ap.add_argument("--iv", default=None, metavar="TEXT",
+                    help="the stored IV: 16 bytes, ASCII or 0x and hex")
+    ap.add_argument("--enclave", default=None, metavar="FILE",
+                    help="a device's enclave.keys, for its key and not the "
+                         "built-in one")
     try:
         args = ap.parse_args(argv[1:])
         key = enclave_key(args.slot, args.enclave)

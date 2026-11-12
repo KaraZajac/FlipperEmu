@@ -157,15 +157,15 @@ def main() -> int:
             print(f"missing {tool} (install dosfstools/mtools)", file=sys.stderr)
             return 2
 
+    for d in args.overlay:                          # (before an image is made)
+        if not pathlib.Path(d).is_dir():
+            print(f"overlay {d} is not a directory", file=sys.stderr)
+            return 2
+
     with open(img, "wb") as f:
         f.truncate(size)                            # sparse
     subprocess.run(["mkfs.vfat", "-F", "32", "-n", "FLIPPER", str(img)],
                    check=True, stdout=subprocess.DEVNULL)
-
-    for d in args.overlay:
-        if not pathlib.Path(d).is_dir():
-            print(f"overlay {d} is not a directory", file=sys.stderr)
-            return 2
 
     if args.resources or args.overlay:
         env = dict(os.environ, MTOOLS_SKIP_CHECK="1")
