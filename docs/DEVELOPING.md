@@ -392,7 +392,11 @@ $ ../../flipperemu i2c
   and a sensor's temperature is set there (`set it…`). The console says when the
   firmware has talked on the bus and how many of its calls were answered: an app
   that calls the wrong address is a line there (`the firmware called 2 addresses,
-  none answered; the last: 0x24 to write, no answer`) without a look at `i2c`.
+  none answered; the last: 0x24 to write, no answer`) without a look at `i2c`, and
+  under it the word on the shift when a device is at twice that address (`nobody
+  is at 0x24. If the tmp105 at 0x48 was meant: …`). GPIO > Record what goes over
+  the I2C bus… is `i2c record` with a file dialog: the status bar counts the
+  addresses called until GPIO > End the record of the I2C bus.
 - **For a program,** `i2c --json` is the bus and every device with its values (a
   temperature in °C; an address as a number, 72 for 0x48).
 - **The EEPROM** keeps its contents in `devices/NAME/i2c-50.bin`, over a reset and
@@ -1051,7 +1055,17 @@ held and let go of, and the file read back after End the record has both changes
 I2C bus is there with a sensor and an EEPROM on it: the GPIO menu's line for the bus
 and the one for each device in `i2c`'s words, the two pins' tips, the sensor's
 temperature set through the menu's dialog (the launcher's `i2c` from outside has it
-after), and one line in the console for the firmware's scan of 128 addresses.
+after), and one line in the console for the firmware's scan of 128 addresses. A
+record of the bus begun from the GPIO menu: the status bar counts a scan's 128
+addresses, the menu has the two that answered, and the file read back after End
+the record of the I2C bus has the 128 calls. A record that a shell began shows in
+the status bar and is ended from the menu, and a shell's `i2c watch` shows there
+with the record it keeps, for as long as it watches. The word on the shift: no
+firmware calls a wrong address by itself, so the window is given the machine's
+word on its bus as the link gives it, with three calls to 0x24 that nobody took,
+and has to say the word under the console's line and under the bus's line in the
+menu, and to drop it when the true word comes again (`i2c_check.py` has such a
+call from a script, for `i2c` and `i2c watch`).
 
 `scripts/uart_check.py FIRMWARE` has `examples/uart/echo.js` on the Flipper's side
 of pins 15 and 16: where `uart` says the ports go; a line sent while no app has the

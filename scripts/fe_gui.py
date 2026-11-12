@@ -54,7 +54,7 @@ WATCHES = (
     ("/machine/speaker", "mute"),
     ("/machine", "log-level"), ("/machine", "header"),
     ("/machine", "header-record"), ("/machine", "header-serial"),
-    ("/machine", "header-i2c"),
+    ("/machine", "header-i2c"), ("/machine", "header-i2c-record"),
 )
 
 # what can come from a file: (the menu's word for them, file filter, where
@@ -202,7 +202,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.i2c_at = float("-inf")     # when the firmware last called there
         self.i2c_from = 0.0             # ... when the calls not told of began,
         self.i2c_gap = 0.0              # and how long the bus was quiet before
-        self.a_gpio_i2c = None          # the GPIO menu's line for the bus
+        self.i2c_record = None          # the record of that bus while one
+        #                                 runs (fe_header.parse_i2c_record)
+        self.a_gpio_i2c = None          # the GPIO menu's line for the bus,
+        self.a_gpio_i2c_hint = None     # ... for a word on its last call,
+        self.a_gpio_i2c_record = None   # ... for its record,
         self.gpio_i2c = {}              # ... and an address: its device's menu
         self.state = None
         self.expect_off = False         # it said it is switching off
@@ -323,8 +327,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rec_label.setStyleSheet("color: #d20f39; font-weight: bold")
         self.pins_label = QtWidgets.QLabel()    # the record of the pins
         self.pins_label.setStyleSheet("color: #d20f39; font-weight: bold")
+        self.bus_label = QtWidgets.QLabel()     # ... and of the I2C bus
+        self.bus_label.setStyleSheet("color: #d20f39; font-weight: bold")
         self.tone_label = QtWidgets.QLabel()
         self.state_label = QtWidgets.QLabel()
+        self.statusBar().addPermanentWidget(self.bus_label)
         self.statusBar().addPermanentWidget(self.pins_label)
         self.statusBar().addPermanentWidget(self.rec_label)
         self.statusBar().addPermanentWidget(self.tone_label)
@@ -722,6 +729,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.on_i2c(None)
             self.on_header(None)
             self.on_pin_record(None)
+            self.on_i2c_record(None)
             self.resetting = False
             self.on_speaker(0, 0)
             self.set_halted(False)
@@ -990,6 +998,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if key == ("/machine", "header-record"):
             self.on_pin_record(value)   # (its time goes on at every look:
             return                      # nothing else is due for that)
+        if key == ("/machine", "header-i2c-record"):
+            self.on_i2c_record(value)   # (the same)
+            return
         if path == "/machine/gauge" and isinstance(value, int):
             self.gauge[name] = value
         if key == ("/machine/speaker", "mute"):
@@ -2206,6 +2217,7 @@ class MainWindow(QtWidgets.QMainWindow):
         before, self.i2c = self.i2c, bus
         if bus and self.a_gpio_i2c:     # the GPIO menu's line, if it is open
             self.a_gpio_i2c.setText(self.i2c_line())
+            self.show_i2c_hint()
         if there(bus) != there(before):
             self.i2c_values = {}
             self.ask_i2c_values()
@@ -2229,6 +2241,16 @@ class MainWindow(QtWidgets.QMainWindow):
         return (f"{fe_header.i2c_name(self.i2c, 'P')}: "
                 f"{fe_header.i2c_text(self.i2c)}")
 
+    def show_i2c_hint(self):
+        """The GPIO menu's line under the bus's: a word on its last call, if
+        there is one to say (an address that was not shifted), as `i2c` has
+        it"""
+        a = self.a_gpio_i2c_hint
+        if a:
+            hint = fe_header.i2c_hint(self.i2c) if self.i2c else None
+            a.setText(f"({hint})" if hint else "")
+            a.setVisible(bool(hint))
+
     def tell_i2c(self):
         """The firmware's calls on the header's I2C bus since the log was
         last told, in a line.  An app that asks a sensor again and again would
@@ -2244,10 +2266,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         kind = "all" if lost <= 0 else "none" if lost >= calls else "some"
         if kind != self.i2c_kind or self.i2c_gap >= I2C_QUIET_S:
+            # (with a word on the last call, if there is one: an address
+            # that was not shifted.  It comes as often as the line, and no
+            # more.)
+            hint = fe_header.i2c_hint(bus)
             self.log.add(
                 f"{fe_header.i2c_name(bus, 'P')}: " + fe_header.i2c_did(
                     {"calls": calls, "unanswered": max(0, min(lost, calls)),
-                     "last": bus["last"]}), "flipper")
+                     "last": bus["last"]})
+                + (f"\n({hint})" if hint else ""), "flipper")
         self.i2c_kind = kind
 
     def ask_i2c_values(self):
@@ -2373,6 +2400,50 @@ class MainWindow(QtWidgets.QMainWindow):
                          f"The record of the pins is {rec[2]}", 8000)
                      if code == 0 and rec else None)
 
+    def on_i2c_record(self, text):
+        """What the machine says of the record of the header's I2C bus
+        (None, or nothing: none runs)"""
+        try:
+            self.i2c_record = fe_header.parse_i2c_record(text)
+        except ValueError:
+            self.i2c_record = None
+        rec = self.i2c_record
+        if not rec:
+            self.bus_label.setText("")
+            self.bus_label.setToolTip("")
+            return
+        self.bus_label.setText(f"● {os.path.basename(rec['path'])}: "
+                               f"{fe_header.i2c_recorded(rec, brief=True)}")
+        self.bus_label.setToolTip(
+            "Every transfer on the header's I2C bus goes to "
+            f"{rec['path']}, a line for each START: "
+            f"{fe_header.i2c_recorded(rec)} so far (GPIO > End the record "
+            "of the I2C bus)")
+
+    def ask_i2c_record(self):
+        """A file for the record of the header's I2C bus, and its begin"""
+        start = os.path.join(self.settings.get("dir/shots",
+                                               os.path.expanduser("~")),
+                             f"{self.name}-i2c-{time.strftime('%H%M%S')}.txt")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Record what goes over the I2C bus, to a file", start,
+            "Text (*.txt)")
+        if path:
+            if not os.path.splitext(path)[1]:
+                path += ".txt"
+            self.settings.set("dir/shots", os.path.dirname(path))
+            self.start_i2c_record(path)
+
+    def start_i2c_record(self, path):
+        self.command("i2c", "record", path)
+
+    def end_i2c_record(self):
+        rec = self.i2c_record
+        self.command("i2c", "record", "stop", then=lambda code, text:
+                     self.statusBar().showMessage(
+                         f"The record of the I2C bus is {rec['path']}", 8000)
+                     if code == 0 and rec else None)
+
     def pin_actions(self, menu, p):
         """What can be done with a pin, into a menu"""
         for text, level in (("Hold it high (a wire to 3V3)", "high"),
@@ -2436,19 +2507,36 @@ class MainWindow(QtWidgets.QMainWindow):
             a.setEnabled(False)
             self.gpio_ports[port["name"]] = a
         bus = self.i2c
-        self.a_gpio_i2c = None          # the I2C bus's line
+        self.a_gpio_i2c = None          # the I2C bus's line,
+        self.a_gpio_i2c_hint = None     # ... a word on its last call,
+        self.a_gpio_i2c_record = None   # ... its record,
         self.gpio_i2c = {}              # ... and an address: its device's menu
         if bus:
             m.addSeparator()
             a = m.addAction(self.i2c_line())
             a.setEnabled(False)
             self.a_gpio_i2c = a
+            a = m.addAction("")
+            a.setEnabled(False)
+            self.a_gpio_i2c_hint = a
+            self.show_i2c_hint()
             for d in bus["devices"]:
                 sub = self.gpio_i2c[d["address"]] = m.addMenu("")
                 self.fill_i2c_device(sub, d)
             if not bus["devices"]:
                 m.addAction("(`run --i2c TYPE@ADDRESS` puts a device there, "
                             "as --i2c tmp105@0x48)").setEnabled(False)
+            rec = self.i2c_record
+            if rec:
+                a = m.addAction(
+                    "End the record of the I2C bus "
+                    f"({os.path.basename(rec['path'])}: "
+                    f"{fe_header.i2c_recorded(rec)} so far)")
+                a.triggered.connect(lambda _=False: self.end_i2c_record())
+            else:
+                a = m.addAction("Record what goes over the I2C bus…")
+                a.triggered.connect(lambda _=False: self.ask_i2c_record())
+            self.a_gpio_i2c_record = a
             self.ask_i2c_values()       # they may have changed since
         m.addSeparator()
         a = m.addAction("Let go of all pins")

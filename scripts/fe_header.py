@@ -260,11 +260,14 @@ def parse_i2c_record(text):
             "path": path}
 
 
-def i2c_recorded(record):
-    """What a record of the I2C bus has so far, in words"""
+def i2c_recorded(record, brief=False):
+    """What a record of the I2C bus has so far, in words (brief: no more
+    than the addresses called)"""
     calls, taken = record["calls"], record["calls"] - record["unanswered"]
     if not calls:
         return "no address called"
+    if brief:
+        return f"{calls} address{'' if calls == 1 else 'es'} called"
     return (f"{calls} address{'' if calls == 1 else 'es'} called, "
             + ("none" if not taken else "it" if calls == 1 else
                "all" if taken == calls else str(taken)) + " answered; "

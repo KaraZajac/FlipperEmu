@@ -23,7 +23,10 @@ them, records what a pin does to a file (GPIO > Record what the pins do),
 finds a sensor and an EEPROM on the header's I2C bus in the GPIO menu (the
 device starts with `--i2c tmp105@0x48 --i2c eeprom@0x50`), sets the sensor's
 temperature from there, lets the firmware scan the bus (which the console
-says), holds an NFC tag to it from the
+says), records a scan of that bus to a file (GPIO > Record what goes over the
+I2C bus), ends from the menu a record that a shell began, gives the window a
+call to an address that was not shifted (the word on that in the console and
+the menu), holds an NFC tag to it from the
 bench, unplugs USB, switches it off as a real one is (Back held for 5 s, then
 Power Off: the window stays, the emulator exits), copies a file to the card
 of the switched-off Flipper, switches
@@ -439,6 +442,161 @@ class Driver:
                             bus) and bus.split(": ", 1)[1] in said,
               f"{scan.returncode}: {scan.stdout[-200:]}{scan.stderr[-200:]}\n"
               f"{bus}\nwhile open: {open_}\n{self.console()[-300:]}")
+
+    def i2c_record(self):
+        """The record of the header's I2C bus, from the GPIO menu (the file
+        is given here: the menu's line asks for one), and the window's word
+        on an address that was not shifted"""
+        w = self.win
+        path = self.out / "window-i2c.txt"
+        name = path.name
+        offer = "Record what goes over the I2C bus…"
+
+        def line():                     # the menu's, as it opens
+            w.fill_gpio_menu()
+            a = w.a_gpio_i2c_record
+            return (a.text(), a.isEnabled()) if a else ("", False)
+
+        def calls():
+            return w.i2c_record["calls"] if w.i2c_record else -1
+
+        offered = line() == (offer, True) and not w.bus_label.text()
+        w.start_i2c_record(str(path))
+        began = self.until(lambda: w.i2c_record is not None, 15)
+        self.settle()
+        menu, label = line()[0], w.bus_label.text()
+        check("i2c record: GPIO > Record what goes over the I2C bus: it "
+              "runs, and the status bar and the menu say so",
+              offered and began and w.i2c_record["path"] == str(path)
+              and label == f"● {name}: no address called"
+              and menu == ("End the record of the I2C bus "
+                           f"({name}: no address called so far)")
+              and "every address called" in self.console(),
+              f"offered {offered}; {w.i2c_record}; {label!r}; {menu!r}")
+
+        scan = self.launcher("cli", "--timeout", "25", "i2c")
+        counted = self.until(lambda: calls() >= 128, 15)
+        self.settle()
+        self.shot("i2c-record")
+        menu, label = line()[0], w.bus_label.text()
+        check("i2c record: the firmware scans the bus: 128 addresses, "
+              "counted in the status bar, and in the menu with the two that "
+              "answered",
+              scan.returncode == 0 and counted
+              and label == f"● {name}: 128 addresses called"
+              and menu.startswith("End the record of the I2C bus "
+                                  f"({name}: 128 addresses called, 2 "
+                                  "answered; ")
+              and menu.endswith(" so far)")
+              and name in w.bus_label.toolTip(),
+              f"{scan.returncode}; {w.i2c_record}; {label!r}; {menu!r}")
+
+        line()
+        if w.a_gpio_i2c_record:
+            w.a_gpio_i2c_record.trigger()       # End the record of the bus
+        ended = self.until(lambda: w.i2c_record is None, 15)
+        self.settle()
+        try:
+            on, parts = fe_header.read_i2c_record(path)
+            got = (len(parts), sorted(p["address"] for p in parts
+                                      if p["taken"]),
+                   [(d["type"], d["address"]) for d in on])
+        except (OSError, ValueError) as e:
+            got = str(e)
+        check("i2c record: End the record of the I2C bus: the file has the "
+              "128 calls, the sensor's answer and the EEPROM's among them, "
+              "and nothing says that a record runs",
+              ended and got == (128, [0x48, 0x50], [("tmp105", 0x48),
+                                                    ("at24c-eeprom", 0x50)])
+              and line() == (offer, True) and not w.bus_label.text()
+              and f"the record is {path}" in self.console(),
+              f"ended {ended}; {got}; {w.bus_label.text()!r}; {line()}")
+
+        # A record that a shell began, and a watch in a shell, which keeps a
+        # record of its own for as long as it watches: the window has both,
+        # and its menu ends the first
+        other = self.out / "shell-i2c.txt"
+        shell = self.launcher("i2c", "record", str(other))
+        seen = self.until(lambda: bool(w.i2c_record)
+                          and w.i2c_record["path"] == str(other), 15)
+        label = w.bus_label.text()
+        line()
+        if seen and w.a_gpio_i2c_record:
+            w.a_gpio_i2c_record.trigger()
+        ended = self.until(lambda: w.i2c_record is None, 15)
+        self.settle()
+        after = self.launcher("i2c", "record").stdout
+        watch = subprocess.Popen(
+            [sys.executable, str(w.launcher), "-d", w.name, "i2c", "watch",
+             "--for", "4"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True)
+        own = self.until(lambda: bool(w.i2c_record) and w.i2c_record["path"]
+                         .endswith("/i2c-watch.txt"), 15)
+        watching = w.bus_label.text()
+        gone = self.until(lambda: w.i2c_record is None, 15)
+        try:
+            said = watch.communicate(timeout=15)[0]
+        except subprocess.TimeoutExpired:
+            watch.kill()
+            said = "the watch did not end: " + watch.communicate()[0]
+        check("i2c record: one that a shell began (`i2c record FILE`): the "
+              "status bar has it, and the menu's End ends it; `i2c watch` in "
+              "a shell: the record that it keeps is there for as long as it "
+              "watches",
+              shell.returncode == 0 and seen
+              and label == f"● {other.name}: no address called" and ended
+              and "not being recorded" in after and other.exists()
+              and own and watching == "● i2c-watch.txt: no address called"
+              and gone and watch.returncode == 0 and not w.bus_label.text(),
+              f"{shell.returncode}: {shell.stdout}{shell.stderr}seen {seen}, "
+              f"{label!r}, ended {ended}; {after}the watch's: {own}, "
+              f"{watching!r}, gone {gone}; {watch.returncode}: {said}")
+
+        # An address that was not shifted.  No firmware calls one by itself,
+        # and only some can from a script (i2c_check.py has that, with `i2c`
+        # and `i2c watch`).  So the window gets the machine's word on its bus
+        # as the link gives it, with three calls to 0x24 that nobody took,
+        # and after that the true one again.
+        key = ("/machine", "header-i2c")
+        true = w.props.get(key)
+        word = ("nobody is at 0x24. If the tmp105 at 0x48 was meant: the "
+                "firmware takes an address shifted left by one bit, 0x48 << 1 "
+                "(0x90)")
+        news = ("Pins 15 and 16 (I2C3): the firmware called 3 addresses, "
+                f"none answered; the last: 0x24 to write, no answer\n({word})")
+
+        def hint():                     # the menu's line under the bus's
+            a = w.a_gpio_i2c_hint
+            return (a.text(), a.isVisible(), a.isEnabled()) if a else None
+
+        w.fill_gpio_menu()
+        before = hint()
+        made, n = re.subn(
+            r"^(\w+:\d+:\d+):(\d+):(\d+):\S+", lambda m:
+            f"{m[1]}:{int(m[2]) + 3}:{int(m[3]) + 3}:24w-", true or "")
+        if n:
+            w.on_prop(*key, made)
+        told = self.until(lambda: news in self.console(), 5)
+        open_ = hint()                  # the menu was open meanwhile
+        w.fill_gpio_menu()
+        # (the console by itself: the firmware log is the tab in front)
+        w.log.grab().save(str(self.out / "window-i2c-hint.png"))
+        anew = hint()
+        if n:
+            w.on_prop(*key, true)
+        self.spin(1.5)
+        w.fill_gpio_menu()
+        check("i2c: a call to 0x24 that nobody took, while a sensor is at "
+              "0x48 (the machine's word on the bus, given to the window as "
+              "the link gives it): the console's line has the word on the "
+              "shift, once, and the GPIO menu a line under the bus's, in a "
+              "menu that was open as well; the bus as it is: no such line",
+              n == 1 and before == ("", False, False) and told
+              and open_ == (f"({word})", True, False) and anew == open_
+              and hint() == before and self.console().count(word) == 1
+              and w.i2c and w.i2c["last"]["address"] == 0x7f,
+              f"{true!r} -> {made!r}\nbefore {before}, open {open_}, anew "
+              f"{anew}, after {hint()}\n{self.console()[-400:]}")
 
     def pin_record(self):
         """The record of what the pins do, from the GPIO menu (the file is
@@ -940,6 +1098,7 @@ class Driver:
         self.pins()
         self.pin_record()
         self.i2c_bus()
+        self.i2c_record()
 
         w.hold("nfc", ["ntag215", "04A1B2C3D4E5F6", "https://example.com"])
         w.set_cable("unplugged")

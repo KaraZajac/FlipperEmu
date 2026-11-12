@@ -2252,6 +2252,39 @@ big lock, entry 92).
       script), 55 and two skipped on the official dev build.
       `scripts/gpio_check.py`: 56 on the five.
 
+115. **The I2C bus's record in the window, and the word on the shift.** Both
+    were the launcher's alone (entry 114).
+    - The window watches `header-i2c-record` over the panel link, as it does
+      the pins' `header-record`: a red label in the status bar with the file
+      and the addresses called, and in the GPIO menu, under the bus and its
+      devices, Record what goes over the I2C bus… (a file dialog) or End the
+      record of the I2C bus, with what the record has so far. Both lines are
+      the launcher's `i2c record`. So a record that a shell began is the
+      window's to show and to end, and a shell's `i2c watch` shows there with
+      the record it keeps, for as long as it watches.
+    - The property's value has the record's time in it and changes at every
+      look. The window takes it for the label and nothing more, as it does the
+      pins'.
+    - The word on the shift is `i2c_hint()`, the function that `i2c` has it
+      from: under the console's line for the firmware's calls, as often as
+      that line comes (one for a burst of calls, the next only when the calls
+      go differently or after ten seconds), and under the bus's line in the
+      GPIO menu while that call is the last one.
+    - The window cannot leave a scan out as the watch does: it has the count
+      and the last call at each of its looks, and not every call. A scan is
+      over in some ten milliseconds of the Flipper's time and ends at 0x7f, so
+      the word would need the console's line to come in the middle of one.
+    - No firmware calls an address that was not shifted by itself, and a
+      script can on three of the five only (the official firmware's JavaScript
+      has no `i2c`). The check gives the window the machine's word on its bus
+      as the link gives it, with three calls to 0x24 in it, and after that the
+      true one: the word has to come, and to go. That is the window's part of
+      it; the call itself is in `scripts/i2c_check.py`, for `i2c` and the
+      watch.
+    - The check's picture of the word was of the firmware log, the tab in
+      front at that point. It is of the console by itself now.
+    - `scripts/gui_check.py`: 55 checks on the five.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

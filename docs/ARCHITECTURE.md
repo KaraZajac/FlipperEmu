@@ -1161,12 +1161,22 @@ ufbt is not run at all, and `update` sends the package without the stage (BRINGU
   time, address, direction, answered, bytes, refused, whole, stop) and says a part
   in words (`i2c_part_text`) for `i2c watch`, which follows the file as it grows.
   A watch with no record running begins one of its own in the device's folder
-  (`i2c-watch.txt`) and ends and removes it when it is done.
+  (`i2c-watch.txt`) and ends and removes it when it is done. The window watches
+  the property over the panel link, as it does the pins' `header-record`: the
+  status bar and the GPIO menu have a record whoever began it, and the menu's two
+  lines are the launcher's `i2c record FILE` and `i2c record stop`. The value
+  changes at every look while a record runs (its time is in it), so the window
+  takes it for the label and nothing else.
 - **An address that was not shifted** (`i2c_hint` in `fe_header.py`): a call that
   nobody took, to an address A while a device is at 2A or 2A+1, is what an app
   makes that passes a device's address as it is to a function that wants it
   shifted left. The launcher says so, with the address to pass. It is a guess from
-  the two numbers, said as one ("if the tmp105 at 0x48 was meant").
+  the two numbers, said as one ("if the tmp105 at 0x48 was meant"). The window
+  says it from the same function: under the console's line for the firmware's
+  calls, as often as that line comes, and under the bus's line in the GPIO menu
+  while that call is the last one. It sees the property's value at its looks and
+  not every call, so it cannot leave a scan out as `i2c watch` does: a scan that
+  the console is told of while it stands at such an address would get the word.
 - **Not there** on that bus: the two lines as levels (pins 15 and 16 are `unknown`
   on the header while the firmware talks, and the pins' record has no bits of a
   transfer), the bus's speed (a transfer takes no time, and a record's bytes have

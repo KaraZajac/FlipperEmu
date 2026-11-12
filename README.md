@@ -292,8 +292,10 @@ instead, and `--headless` no window at all.
   them, or beside the pins, to read it. **GPIO > Record what the pins do…** writes
   every change of a pin's level to a file with its time, as a logic analyzer on the
   header would, until GPIO > End the record; the status bar counts the changes
-  meanwhile. (`./flipperemu gpio` is the same from a shell; more
-  [below](#the-gpio-header).)
+  meanwhile. **GPIO > Record what goes over the I2C bus…** writes a line for each
+  transfer on that bus, with the address and the bytes, until GPIO > End the record
+  of the I2C bus. (`./flipperemu gpio` and `./flipperemu i2c` are the same from a
+  shell; more [below](#the-gpio-header).)
 - **The lights and sounds** show on the body: the LED glows, the body shakes when the
   motor runs, and a speaker sign shows a tone (it plays through `--audio`).
 - **The bench** under it has a tile for each of USB, the microSD card, the battery, NFC,
@@ -380,8 +382,9 @@ firmware's log and sets its level, counts the steps of the backlight's fade, cop
 file to its card, drops an app on it, starts it again with F5 and once more by putting
 a new file in its place, holds two pins of the GPIO header with clicks on them and
 lets go of them, records what a pin does to a file from the GPIO menu, sets a sensor
-on the header's I2C bus to another temperature from that menu and has the firmware
-scan the bus, watches the LED blink while NFC reads, switches it off and on, reboots
+on the header's I2C bus to another temperature from that menu, has the firmware
+scan the bus and records a scan to a file from the menu, watches the LED blink
+while NFC reads, switches it off and on, reboots
 it, has an app crash the firmware,
 loses the emulator and finds it again after that, and updates it twice with the package
 it runs: once with the wait given up, once to the end.
@@ -1941,8 +1944,8 @@ app's screen compared with a file after each
   answered: the JavaScript module wants the address shifted left by one (0x48 is
   `0x90`), and C's `furi_hal_i2c` functions do too. When the last call went to
   nobody and a device is at twice that address, or one above it, `i2c` says so
-  beneath the bus's line. `gpio` and `status` have the bus's line without that word,
-  and `status --json` has it as `i2c`.
+  beneath the bus's line, and so does the window. `gpio` and `status` have the
+  bus's line without that word, and `status --json` has it as `i2c`.
 - **`i2c record FILE`** writes every transfer on the bus to a text file, until `i2c
   record stop`. A line is what lies between a START and the next START or STOP: the
   START's time (the Flipper's clock, in seconds from where the record began), the
@@ -1972,7 +1975,15 @@ app's screen compared with a file after each
   (I2C3): the firmware called 128 addresses, 2 answered; …`): one for a scan or for
   an app's start, and another only when the calls go differently (all answered,
   some, none) or after ten seconds of silence. An app that reads its sensor every
-  second is one line there, and one more when the sensor stops answering.
+  second is one line there, and one more when the sensor stops answering. When the
+  last of those calls went to nobody and a device is at twice its address, the
+  line has the word on the shift under it, and the GPIO menu has it under the
+  bus's line for as long as that call is the last one.
+- **GPIO > Record what goes over the I2C bus…** in the window asks for the file
+  and is `i2c record FILE`; GPIO > End the record of the I2C bus is `i2c record
+  stop`. While one runs, the status bar has its file and how many addresses were
+  called, and the menu's line how many of them answered and the bytes; that is so
+  for a record begun from a shell too, and either side can end the other's.
 - What is set from outside stays over a reset of the firmware, as the weather would.
 - **An EEPROM's contents** are a file of the device, `devices/NAME/i2c-50.bin` for the
   one at 0x50. A new one has 0xFF in every byte, as a chip that was never written.
@@ -1993,8 +2004,9 @@ Not there:
   of the ufbt here is for. It was not built for the other four.
 - A device cannot be put on the bus, or taken off it, while the emulator runs.
 - The window sets a temperature and shows the other values. `i2c ADDRESS NAME VALUE`
-  sets any value that can be set. The window has no record of the bus and no watch:
-  those are `i2c record` and `i2c watch` in a shell, also while the window is open.
+  sets any value that can be set. The window has no watch of the bus: that is
+  `i2c watch` in a shell, also while the window is open (the status bar then has
+  the watch's own record for as long as it watches).
 - The two lines are no levels: pins 15 and 16 read `unknown` on the header while the
   firmware talks, and a record of the pins (`gpio record`) has no bits of a
   transfer. A transfer takes no time at any bus speed, and no device stretches the

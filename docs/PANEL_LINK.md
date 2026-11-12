@@ -189,7 +189,7 @@ monitor. Then what changed comes back over the link, whoever changed it.
 | `/machine/speaker mute` | the speaker muted |
 | `/machine log-level` | the level of the firmware's log, as the RTC's register has it |
 | `/machine header`, `header-record` | the pins of the GPIO header (what the firmware has each as, its level, what is held to it); a record of the pins and the changes it has so far |
-| `/machine header-serial`, `header-i2c` | the header's two serial ports (off, or the baud rate and who takes what comes in); its I2C bus (the devices on it, how many addresses the firmware called and how many answered) |
+| `/machine header-serial`, `header-i2c`, `header-i2c-record` | the header's two serial ports (off, or the baud rate and who takes what comes in); its I2C bus (the devices on it, how many addresses the firmware called and how many answered); a record of that bus and what it has so far |
 
 `/machine/subghz tx` is the whole RAW recording of the latest transmission, too long to
 watch; the window looks for new files in `devices/NAME/subghz-tx/` instead. What the

@@ -374,11 +374,17 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         `i2c watch` end on a script's `kill` as on Ctrl+C. `scripts/i2c_check.py`
         is 63 checks (60 on the official 1.5.1, 55 on its dev build),
         `gpio_check.py` 56 (BRINGUP_LOG 114)
-  - ☐ More on that bus: the record in the window's GPIO menu, and the word on
-        the shift in the window's console; a repeated START and a refused byte
-        from a firmware (the record's `+` and `!` were not seen: an app of the
-        check's own with `furi_hal_i2c_tx_ext`); the C app on the other
-        firmwares, each with its own SDK
+  - ☑ That record in the window (2026-11-11): GPIO > Record what goes over the
+        I2C bus… asks for the file and is `i2c record`; the status bar counts
+        the addresses called, GPIO > End the record of the I2C bus ends it, and
+        a record or a watch that a shell began shows there too. The word on
+        the shift under the console's line for the firmware's calls and under
+        the bus's line in the GPIO menu. `gui_check.py` is 55 checks
+        (BRINGUP_LOG 115)
+  - ☐ More on that bus: a repeated START and a refused byte from a firmware
+        (the record's `+` and `!` were not seen: an app of the check's own
+        with `furi_hal_i2c_tx_ext`); the C app on the other firmwares, each
+        with its own SDK
   - ☐ What other peripherals put on a pin: PWM, SPI devices on the header; a
         voltage for the ADC
   - ☐ An interrupt on a held pin and an open-drain output (untried: they need an
