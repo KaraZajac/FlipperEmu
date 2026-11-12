@@ -34,35 +34,43 @@ The launcher has no switch for a card without them; `scripts/make_sdcard.py`
 without `--overlay` builds one with the package's own files.
 
 One overlay serves every firmware: the keys are the same everywhere. Its
-`keeloq_mfcodes` holds 124 codes. The packages' own files have 63 lines
-(official 1.5.1 and its dev build), 65 (Momentum mntm-012) and 125 (Unleashed
-unlshd-094 and RogueMaster RM1024-1347). So the official firmware and Momentum
-gain makers they do not ship, which is harmless, and Unleashed's and
-RogueMaster's own file has one line more than the overlay. Only a real
-Flipper's key opens those files, but an encrypted keystore shows how long
-each of its lines is, in blocks of 16 characters. By that, the package's file
-is the overlay's list with one line of 17 to 32 characters more, somewhere
-after the overlay's lines 3 to 45. A later list of Unleashed's has two lines
-that the overlay has not: `HomeGate` (simple learning) after line 22, which
-fits, and `Phantom_Hiland` (normal learning) after line 26, which is a block
-too long for this package's file. Unleashed's package has no `came_atomo`,
+`keeloq_mfcodes` has 231 lines for 202 keys: the 126 lines of a list of
+Unleashed's, first and as they are, and 105 lines of a longer collected list
+that the first has not (how they were chosen:
+[Putting key lists together](#putting-key-lists-together)). The packages'
+own files have 63 lines (official 1.5.1 and its dev build), 65 (Momentum
+mntm-012) and 125 (Unleashed unlshd-094 and RogueMaster RM1024-1347), so
+every firmware gains makers that it does not ship. What that costs is
+measured below.
+
+Only a real Flipper's key opens the packages' files, but an encrypted
+keystore shows how long each of its lines is, in blocks of 16 characters. By
+that, the file of Unleashed's package is the overlay's first 126 lines
+without `Phantom_Hiland` (line 28, normal learning). A line as long with
+another name would look the same. Unleashed's package has no `came_atomo`,
 and its card gets the overlay's.
 
 The numbers of the kinds of learning are not the same everywhere, and the
-overlay has Unleashed's (RogueMaster is built on Unleashed). Types 0 to 4
-mean the same in every firmware here. Momentum has Unleashed's numbers up to
-8, its last one, and passes over a line of a type from 9 to 19. The official
-firmware has 5, 6 and 7 for the three kinds of magic-serial learning, where
-Unleashed and Momentum have 6, 7 and 8. So for the five codes of that kind
-(KGB/Subaru, Magic_1 to Magic_4) it tries another kind of learning, or none:
-of three made-up remotes for each of the five it names none of the 15, where
-Momentum names 14 and Unleashed 12 (the others have the name of an earlier
-line). A second line for the same key with the official firmware's number
-mends it: with a local list that has such lines for four of the five, the
-official firmware names those four makers' 12 remotes, and Momentum and
-Unleashed name what they named before. The official firmware's Kingates
-Stylo 4K decoder tries the lines of type 1, and the overlay's line for that
-maker has type 10 (read in the source; no such remote was made up).
+overlay's first 126 lines have Unleashed's (RogueMaster is built on
+Unleashed). Types 0 to 4 mean the same in every firmware here. Momentum has
+Unleashed's numbers up to 8, its last one, and passes over a line of a type
+from 9 to 19. The official firmware has 5, 6 and 7 for the three kinds of
+magic-serial learning, where Unleashed and Momentum have 6, 7 and 8. So with
+Unleashed's lines for the five codes of that kind (KGB/Subaru, Magic_1 to
+Magic_4) it tries another kind of learning, or none: of three made-up remotes
+for each of the five it names none of the 15 with those lines alone. Among
+the other 105 lines are second lines for the same keys with the official
+firmware's numbers, for four of the five (not for Magic_1). With the overlay
+the official firmware names those four makers' 12 remotes, Momentum 14 of the
+15 and Unleashed 12 (the others have the name of an earlier line). The
+official firmware's Kingates Stylo 4K decoder tries the lines of type 1, and
+the overlay has such a line for that maker beside Unleashed's of type 10
+(read in the source; no such remote was made up).
+
+The longer list has type numbers of other tools too. A firmware tries such a
+line with the kind of learning that the number means to it, or passes over
+it: 13 lines of types 9 to 14 are so on Unleashed, and four lines have a
+magic-serial key as normal learning, which no firmware here reads so.
 
 ### A card that has the package's own keystores
 
@@ -70,7 +78,9 @@ Two kinds of card have them: one that was built before the overlay existed
 (a card is built once and kept), and one whose firmware was updated. A
 firmware's updater unpacks the resources of its package to the card, the
 stock keystores among them, and the firmware names no KeeLoq remote's maker
-after that.
+after that. A card that was built before 2026-11-12 can also have the
+overlay's earlier `keeloq_mfcodes` of 124 lines, and the command below brings
+it the present one.
 
 `update` and `run --update` write the emulator's keystores to the card again
 when the updater is done, and say so. For the rest (an older card,
@@ -108,6 +118,14 @@ These codes change rarely. To cover a fork exactly, decrypt its stock keystore
 once on a real device used as an enclave oracle, drop the `KEY:TYPE:NAME` list
 in `keystores/plaintext/`, and re-key.
 
+The tracked `keeloq_mfcodes` is what two commands make of two decrypted
+lists, Unleashed's 126 lines and the longer one:
+
+```
+scripts/rekey_keystore.py merge unleashed.keys longer.keys merged.keys
+scripts/rekey_keystore.py keys  merged.keys keystores/overlay/subghz/assets/keeloq_mfcodes
+```
+
 ### Putting key lists together
 
 ```
@@ -141,28 +159,30 @@ name. A line of type 1 to 4 is one try and a type-0 line is eight. In
 Unleashed the `JCM_Gen2` line (type 16) is 256, one for each value of a byte
 that the packet does not carry, and a remote whose line comes after it loses
 about one packet in nine to that name. What 300 made-up remotes with random
-keys were called, with the overlay and with two lists that `merge` made of
-its codes and a longer private list:
+keys were called, with Unleashed's list alone, with the overlay, and with
+nearly every line of both lists (`merge --all`):
 
 | `keeloq_mfcodes` | Official 1.5.1 | Momentum | Unleashed |
 |---|---|---|---|
-| the overlay, 124 lines | 23 named (7.7 %) | 22 (7.3 %) | 73 (24.3 %) |
-| merged, 230 lines | 37 (12.3 %) | 36 (12.0 %) | 87 (29.0 %) |
+| Unleashed's list alone, 126 lines | 23 named (7.7 %) | 22 (7.3 %) | 73 (24.3 %) |
+| the overlay, 231 lines | 37 (12.3 %) | 36 (12.0 %) | 87 (29.0 %) |
 | merged with `--all`, 298 lines | 88 (29.3 %) | not tried | 130 (43.3 %) |
 
 The dev build counted as the official release and RogueMaster as Unleashed,
 with the first two lists. A firmware loads each of these lists and saves it
 again line for line. With the first two, each of the five names a made-up
-remote for every line with simple or normal learning (72 and 147) within
+remote for every line with simple or normal learning (74 and 148) within
 three tries: the first packet of some has the name of an earlier line, for
 the reason above. With the 298 lines it took the official firmware four tries
-for 161, and Unleashed had one of them wrong after four.
+for 161, and Unleashed had one of them wrong after four. (The 298 lines were
+made when Unleashed's list had 124 lines. With its 126, `--all` gives 299,
+which were not tried.)
 
-With a later list of Unleashed's as the base, which has two lines more than
-the overlay, the merged lists have 231 and 299 lines. The 126 and the 231
-lines count as the 124 and the 230 do above, on all five firmwares, and
-each firmware names a made-up remote for every line of theirs with simple
-or normal learning (74 and 148).
+So the overlay gives about one unknown KeeLoq remote in eight a maker's name
+on the official firmware and Momentum, and nearly three in ten on Unleashed,
+where Unleashed's list alone does that to one in four. For a shorter list:
+`verify` prints the overlay's lines, `keys` makes a keystore of the ones that
+are wanted, and `push` brings it to a device's card.
 
 ## Checking it (`scripts/keystore_check.py`)
 
@@ -182,17 +202,17 @@ With a firmware it boots a throwaway device, and the unmodified firmware does
 the rest:
 
 - its own `subghz encrypt_keeloq` loads `keeloq_mfcodes` and saves it again:
-  124 of 124 lines, and with the same IV the tracked file;
+  231 of 231 lines, and with the same IV the tracked file;
 - its own `subghz encrypt_raw` makes each of the three RAW keystores from the
   decrypted bytes: the tracked file, byte for byte;
-- a made-up KeeLoq remote for each of the 72 codes with simple or normal
-  learning (41 and 31; the other 52 codes are not tried) is named after its
-  code by `subghz decode_raw`;
+- a made-up KeeLoq remote for each of the 148 lines with simple or normal
+  learning (61 and 87; the other 83 lines are not tried) is named after its
+  line by `subghz decode_raw`;
 - 8 made-up Nice Flor-S remotes are read with their serial number, counter
   and button, which needs the `nice_flor_s` table;
 - with the package's own `keeloq_mfcodes` and `nice_flor_s` in their place,
-  and the firmware started anew, none of the 72 is named and none of the 8 is
-  read as it was made.
+  and the firmware started anew, none of the 148 is named and none of the 8
+  is read as it was made.
 
 36 checks (23 of them without a firmware), which pass on the official
 1.5.1, its dev build, Momentum,
@@ -207,8 +227,11 @@ firmware ships its keystores as encrypted assets — so the emulator is
 self-contained. The difference from real firmware: *its* key is secret
 hardware, while the emulator's key 1 is public by construction
 (`SHA-256("FlipperEmu enclave key 1")`), so these files decode with
-`rekey_keystore.py verify`. They are the stock manufacturer codes, which
-already circulate publicly; this just carries them in the emulator's own key.
+`rekey_keystore.py verify`. The three RAW keystores are the stock ones, and
+the first 126 lines of `keeloq_mfcodes` are a list of Unleashed's: stock
+manufacturer codes, which already circulate publicly. The other 105 lines
+come from a longer collected list. The repository carries all of them in the
+emulator's own key, and no decrypted list.
 
 `keystores/plaintext/` — the decrypted key lists that *produce* the overlay —
 is **git-ignored**: there's no reason to carry a raw, greppable key list in the

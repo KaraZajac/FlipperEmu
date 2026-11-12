@@ -2476,6 +2476,67 @@ big lock, entry 92).
     - The tracked overlay is as it was, 124 lines: it is Unleashed's list
       of before unlshd-094.
 
+120. **The overlay's KeeLoq list is the merged one.** The tracked
+    `keeloq_mfcodes` was Unleashed's list of before unlshd-094, 124 lines.
+    It is now what `merge` makes of the later list of entry 119 and the
+    longer list of entry 118: 231 lines for 202 keys, the 126 first and as
+    they are, then 105 that they have not. The decrypted lists stay out of
+    the repository, as before. The file is under the emulator's key 1,
+    which is public: `verify` prints its lines.
+    - Only the file changed, and no script. `keystore_check.py` takes its
+      numbers from the tracked file: each of the five firmwares loads 231
+      of 231 lines and saves them again as the tracked file, and gives 148
+      of 148 made-up remotes their line's name (simple learning 61, normal
+      87) within the check's three tries. 93 of those lines come after
+      Unleashed's `JCM_Gen2` line, and three tries are enough there too.
+      36 checks of 36 on each.
+    - What it costs was measured for entry 119: of 300 made-up remotes
+      with random keys, 37 have a maker's name on the official firmware
+      where Unleashed's list alone gives 23, 36 for 22 on Momentum, 87 for
+      73 on Unleashed.
+    - What it mends: the official firmware names the made-up magic-serial
+      remotes of four of the five makers (12 of 15; there is no second line
+      for Magic_1), and its Kingates Stylo 4K decoder has a line of type 1
+      (not tried with a remote).
+    - What it does not mend: 13 lines have type numbers of other tools,
+      which Unleashed reads as another kind of learning, and four have a
+      magic-serial key as normal learning. Such a line is one more try for
+      every packet, and it names no remote of its maker.
+    - The other checks with the file in place: the smoke test on the five
+      firmwares, `files_check.py` on the official firmware and Unleashed,
+      `enclave_check.py` on the official firmware, its dev build and
+      RogueMaster, and `update_check.py` with 33 of 33 on the official
+      firmware (updated to itself, to Unleashed and to the dev build), on
+      Unleashed, on RogueMaster and on the dev build.
+    - On Momentum `update_check.py` had 32 of 33, twice: after the first
+      update the firmware's log had a crash report, `[CRASH][ISR MemMgmt]
+      NULL pointer dereference`. The list has no part in it. Counted on
+      throwaway devices, eight to eleven emulators at a time: 6 of 50
+      updates with the 231 lines in the tree, and 3 of 32 in a copy of the
+      tree with the 124. A debugger that waited at the fault handler
+      (`gdb --serve`, a breakpoint at the MemManage handler) caught it
+      twice, at the same place: the Desktop draws its slideshow view, and
+      `desktop_view_slideshow_draw` asks `slideshow_is_loaded` of a
+      pointer that is still zero. (The names are the official source's,
+      which the code has the shape of; Momentum's source was not read.)
+      An updater leaves a slideshow for the Desktop's next start (in the
+      official source, the package's splash picture). The view dispatcher
+      makes a view the current one and then calls its enter callback, and
+      that callback makes the slideshow: a redraw between the two draws a
+      view that has none yet. The firmware restarts and goes on. Each
+      report came 3 to 5 seconds before the `update` command was done,
+      and in the two that were looked at more closely before the launcher
+      had the USB port back, so before it wrote a file. In each of the 82
+      updates the update was complete and the four keystores were on the
+      card afterwards.
+    - 16 updates of the official 1.5.1, counted the same way, gave no
+      such report. The other three firmwares were not counted so; their
+      update checks passed. Not known: whether a real Flipper with
+      Momentum does it, how often an emulator that runs alone does, and
+      what brings a redraw at that moment.
+    - A card that a device has already keeps the 124 lines until an
+      `update` or `push keystores/overlay/subghz /ext/`.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

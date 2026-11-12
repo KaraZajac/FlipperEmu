@@ -180,20 +180,25 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       of the four keystores (KeeLoq, Nice Flor-S, Alutech AT-4N, CAME Atomo) encrypted
       under the emulator's key 1 (`keystores/overlay`, `scripts/rekey_keystore.py`,
       docs/keystores.md), on every card the launcher builds and again after a firmware
-      update. The firmware names a made-up KeeLoq remote for each of 72 codes and reads
+      update. The firmware names a made-up KeeLoq remote for each of 148 lines and reads
       Nice Flor-S remotes on official, dev, Momentum, Unleashed and RogueMaster
       (`keystore_check.py`; BRINGUP_LOG 117). Not tried: an Alutech AT-4N or CAME Atomo
       remote. `rekey_keystore.py merge` puts decrypted key lists together and leaves
-      out the lines that only add tries (BRINGUP_LOG 118)
-    - ☐ The overlay's type numbers are Unleashed's: the official firmware names no
-      remote of the five magic-serial codes (KGB/Subaru, Magic_1 to Magic_4) with it,
-      and its Kingates Stylo 4K decoder finds no line of type 1. A second line for
-      such a key with the official firmware's number mends the first (tried with a
-      local list that has one for four of the five); the tracked overlay has none yet
-    - ☐ The overlay is Unleashed's list of before unlshd-094. That package's own file
-      has one line more, and the lengths of its encrypted lines fit `HomeGate`; a
-      later list of Unleashed's has that line and `Phantom_Hiland`. The tracked
-      overlay has neither (BRINGUP_LOG 119)
+      out the lines that only add tries (BRINGUP_LOG 118). Since 2026-11-12 the
+      overlay's `keeloq_mfcodes` is what `merge` makes of a list of Unleashed's (126
+      lines; unlshd-094's own file is that list without one line, by the lengths of
+      its encrypted lines) and a longer collected one: 231 lines for 202 keys
+      (BRINGUP_LOG 119, 120)
+    - ☐ The overlay's first 126 lines have Unleashed's type numbers, and the official
+      firmware has other numbers for magic-serial learning. Second lines with its
+      numbers are there for KGB/Subaru and Magic_2 to Magic_4, and it names their
+      made-up remotes; there is none for Magic_1. Its Kingates Stylo 4K decoder has a
+      line of type 1 now, which no made-up remote has tried
+    - ☐ The longer list costs names for remotes that no line is for: of 300 with
+      random keys 37 where Unleashed's list alone gives 23 (official), 36 for 22
+      (Momentum), 87 for 73 (Unleashed). Some of its lines have type numbers that a
+      firmware reads as another kind of learning. A list for each firmware's own
+      numbers would be shorter; nothing makes one yet
 - ☐ U2F from a host: the app starts, takes the USB port as a HID token and shows
       "Connected!"; a registration and a login from a browser or libfido2 over USB/IP
       have not been tried
@@ -255,6 +260,13 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         updater leaves changed is said); `ufbt flash_usb` through the wrapper is this
         with the SDK's package;
         `scripts/update_check.py` (BRINGUP_LOG 84)
+  - ☐ Momentum's first start after an update ends in a crash report now and then:
+        `[CRASH][ISR MemMgmt] NULL pointer dereference`, the Desktop's slideshow view
+        drawn before it has a slideshow (9 of 82 updates, eight to eleven emulators at
+        a time; none of 16 with the official 1.5.1). The firmware restarts and the
+        update is complete, but `update_check.py` has 32 of 33 then. Not known:
+        whether a real Flipper does it, how often an emulator that runs alone does,
+        and what brings a redraw at that moment (BRINGUP_LOG 120)
   - ☑ A quicker way for a big package onto the card of a running device than the CLI's
         20 KB/s (2026-11-10): `update` takes the card out of its slot, writes the
         package to the card's image and puts the card in again, with the firmware
