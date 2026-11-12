@@ -7,8 +7,10 @@ for each of those, "NUMBER:PIN:MODE:PULL:LEVEL:HELD":
 
     2:PA7:out:none:1:free 3:PA6:in:up:0:low ... 13:PB6:af7:up:?:- ...
 
-and takes "PA6=1", "PA6=0" and "PA6=z" to hold a pin from outside, as a wire
-to 3V3 or to GND would, and to let go of it.
+(an input that the firmware has an interrupt for is "in+r", "in+f" or
+"in+rf": when it rises, when it falls, both) and takes "PA6=1", "PA6=0" and
+"PA6=z" to hold a pin from outside, as a wire to 3V3 or to GND would, and to
+let go of it.
 
 The machine's `header-record` is a file that gets every change of a pin's
 level with its time, a VCD file as logic analyzers' programs read (Record).
@@ -50,14 +52,16 @@ def parse(text):
     """The header's signal pins in their order on it, each a dict: its
     "number" there, the MCU's "pin" (PA7), the "label" on the case, what the
     firmware has it as ("mode": input, output, alternate or analog;
-    "function": which alternate one; "open_drain"; "pull": up, down or None),
-    its "level" (high, low, floating: nothing holds it, or unknown: a
-    peripheral's signal, which the emulator does not keep as a level), and
-    what the outside holds on it ("held": high, low or None; "holdable": may
-    it)."""
+    "function": which alternate one; "open_drain"; "pull": up, down or None;
+    "interrupt": the edges of an input that it has an interrupt for, rising,
+    falling, both or None), its "level" (high, low, floating: nothing holds
+    it, or unknown: a peripheral's signal, which the emulator does not keep
+    as a level), and what the outside holds on it ("held": high, low or None;
+    "holdable": may it)."""
     pins = []
     for word in text.split():
         number, pin, mode, pull, level, held = word.split(":")
+        mode, _, edges = mode.partition("+")
         function = re.fullmatch(r"af(\d+)(od)?", mode)
         pins.append({
             "number": int(number), "pin": pin,
@@ -67,6 +71,8 @@ def parse(text):
             "function": int(function[1]) if function else None,
             "open_drain": mode.endswith("od"),
             "pull": None if pull == "none" else pull,
+            "interrupt": {"r": "rising", "f": "falling",
+                          "rf": "both"}.get(edges),
             "level": {"0": "low", "1": "high", "z": "floating"}.get(level, "unknown"),
             "held": held if held in ("high", "low") else None,
             "holdable": held != "-"})
@@ -78,7 +84,10 @@ def mode_text(p):
     return ((f"alternate function {p['function']}" if p["mode"] == "alternate"
              else p["mode"])
             + (", open drain" if p["open_drain"] else "")
-            + (f", pull-{p['pull']}" if p["pull"] else ""))
+            + (f", pull-{p['pull']}" if p["pull"] else "")
+            + {"rising": ", interrupt when it rises",
+               "falling": ", interrupt when it falls",
+               "both": ", interrupt on both edges"}.get(p.get("interrupt"), ""))
 
 
 def parse_serial(text):

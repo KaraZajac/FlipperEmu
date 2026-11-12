@@ -551,17 +551,32 @@ static int header_index(int number)
     g_assert_not_reached();
 }
 
-/* Does the firmware wait for a header pin to fall?  An input, whose EXTI
- * line is the pin's port's, with the falling edge and the interrupt on. */
-static bool header_waits_fall(FlipperZeroState *s, int i)
+enum { HDR_RISE = 1, HDR_FALL = 2 };
+
+/*
+ * The edges of a header pin that the firmware has an interrupt for: an
+ * input, whose EXTI line is the pin's port's, with the interrupt on.  A
+ * line is its number's (line 2 for PA2, PB2 and PC2) and keeps an edge that
+ * was asked for another pin of it before: this is what the line has.
+ */
+static int header_edges(FlipperZeroState *s, int i)
 {
     int pin = header[i].pin;
 
-    return extract32(header_port(s, i)->moder, 2 * pin, 2) == 0 &&
-           extract32(s->soc.syscfg.exticr[pin / 4], 4 * (pin % 4), 3) ==
-               header[i].port - 'A' &&
-           extract32(s->soc.exti.ftsr[0], pin, 1) &&
-           extract32(s->soc.exti.imr[0], pin, 1);
+    if (extract32(header_port(s, i)->moder, 2 * pin, 2) != 0 ||
+        extract32(s->soc.syscfg.exticr[pin / 4], 4 * (pin % 4), 3) !=
+            header[i].port - 'A' ||
+        !extract32(s->soc.exti.imr[0], pin, 1)) {
+        return 0;
+    }
+    return (extract32(s->soc.exti.rtsr[0], pin, 1) ? HDR_RISE : 0) |
+           (extract32(s->soc.exti.ftsr[0], pin, 1) ? HDR_FALL : 0);
+}
+
+/* Does the firmware wait for a header pin to fall? */
+static bool header_waits_fall(FlipperZeroState *s, int i)
+{
+    return header_edges(s, i) & HDR_FALL;
 }
 
 /*
@@ -771,12 +786,15 @@ static void flipper_set_header_record(Object *obj, const char *value,
 }
 
 /* "NUMBER:PIN:MODE:PULL:LEVEL:HELD" for each pin: MODE in, out, od (an
- * open-drain output), afN, afNod or analog; PULL up, down or none; LEVEL as
- * above; HELD high, low, free, or - for a pin that is not for holding */
+ * open-drain output), afN, afNod or analog, and after in, out or od the edges
+ * that the firmware has an interrupt for (+r, +f, +rf: an input alone has
+ * any); PULL up, down or none; LEVEL as above; HELD high, low, free, or - for
+ * a pin that is not for holding */
 static char *flipper_get_header(Object *obj, Error **errp)
 {
     static const char *const pulls[] = { "none", "up", "down", "none" };
     static const char *const holds[] = { "free", "low", "high" };
+    static const char *const edges[] = { "", "+r", "+f", "+rf" };
     FlipperZeroState *s = FLIPPER_ZERO(obj);
     GString *out = g_string_new(NULL);
 
@@ -795,6 +813,7 @@ static char *flipper_get_header(Object *obj, Error **errp)
         } else {
             g_string_append(out, mode == 0 ? "in" : mode == 3 ? "analog" :
                                  od ? "od" : "out");
+            g_string_append(out, edges[header_edges(s, i)]);
         }
         g_string_append_printf(out, ":%s:%c:%s",
                                pulls[extract32(g->pupdr, 2 * pin, 2)],
@@ -1803,8 +1822,9 @@ static void flipper_zero_instance_init(Object *obj)
     object_property_add_str(obj, "header", flipper_get_header,
                             flipper_set_header);
     object_property_set_description(obj, "header",
-        "The GPIO header's pins as the firmware has them, and what the "
-        "outside holds on them: set PA7=1, PA7=0 or PA7=z (let go)");
+        "The GPIO header's pins as the firmware has them (in+r, in+f, "
+        "in+rf: an input with an interrupt on its rise, fall, both), and what "
+        "the outside holds on them: set PA7=1, PA7=0 or PA7=z (let go)");
     object_property_add_str(obj, "header-serial", flipper_get_header_serial,
                             NULL);
     object_property_set_description(obj, "header-serial",

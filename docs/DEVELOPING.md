@@ -222,9 +222,9 @@ somebody to look. `gpio` is both:
 ```
 $ ../../flipperemu gpio
 [flipper] the GPIO header (1 is +5V, 9 is 3V3; 8, 11 and 18 are GND)
-   2  PA7   output                         high
-   3  PA6   input                          floating
-   4  PA4   analog                         floating
+   2  PA7   output                                   high
+   3  PA6   input                                    floating
+   4  PA4   analog                                   floating
 …
 $ ../../flipperemu gpio PA6 high
 [flipper] PA6 (pin 3 of the header): held high from outside; it is high (the firmware has it as: input)
@@ -243,6 +243,18 @@ A pin is named as the MCU has it (`PA7`), as the case has it (`A7`) or by that n
 - **Your app reads a pin:** `gpio PA6 high` and `gpio PA6 low` hold it from outside as
   a wire to 3V3 or to GND would, and `gpio PA6 free` lets go (`gpio free`: of all).
   The firmware's own `gpio read PA6` in the CLI is a quick look from the inside.
+- **Your app has an interrupt on a pin:** the table says so beside the pin
+  (`input, pull-up, interrupt when it falls`), and `gpio PA4 low` is the edge: your
+  handler runs then, once. Not every pin has an interrupt to give. A line is a pin
+  number's, and the firmware's keys have lines 3, 6 and 10 to 13: on pins 3, 5 and 7
+  (PA6, PB3, PC3) `furi_hal_gpio_add_int_callback` ends in `furi_check failed`, and
+  on pin 2 (PA7) too while the firmware waits for an expansion module on pins 13 and
+  14. Pins 4, 6, 15 and 16 (PA4, PB2, PC1, PC0) are the ones to take; PB2 gets its
+  rising edge too, whatever you asked for, a leftover of the NFC chip's interrupt on
+  the same line. (The README has more on the lines.)
+- **Your app shares a line with something outside** (an open-drain output): the pin
+  is low while your app pulls it low, and when it lets go, the pin has what is held
+  to it, or its pull-up. `furi_hal_gpio_read` gives the line, not what you wrote.
 - A reset of the firmware leaves what is held, as it would leave a wire. A pin your
   app drives as a push-pull output keeps the app's level while it does (`gpio` says
   that something is held to it, and that it does not show).
@@ -1048,8 +1060,17 @@ and a record the emulator was stopped under is whole. Beneath the pins it wants 
 two serial ports as the firmware starts with them: the log's with a baud rate, its
 receiver off and a call waited for on pin 14, the other one off; and beneath those
 the I2C bus, with no device and no address called. It passes on the official 1.5.1,
-the official dev build, Momentum, Unleashed and RogueMaster (56 checks). It has no
-app of its own: an interrupt on a held pin and an open-drain output were not tried.
+the official dev build, Momentum, Unleashed and RogueMaster (56 checks). Then, where
+`ufbt` is there with this firmware's SDK (the official 1.5.1; skipped otherwise), an
+app of its own, `scripts/gpio_check_app`: inputs with an interrupt on PA4 (both
+edges), PC0 (its fall), PC1 (its rise) and PB2, and PA7 as an open-drain output. The
+table and `status --json` have each pin's edges. A pin held low and high is one
+logged interrupt for each edge asked for and none for the other; PC1's interrupt
+turns PC0's off and on again, and none arrives or is kept while it is off; PA7 is low
+while the app pulls it low, also with 3V3 held to it, high when let go of, and read
+as low by the firmware while it is held low from outside; a record has PA7's six
+levels in their order; and the NFC, whose chip has PB2's interrupt line, reads a tag
+afterwards (72 checks then).
 The window's pins are in `scripts/gui_check.py`: a click on pin 2 and Hold it high
 (the window has it high with a wire on it, and the launcher's `gpio PA7` from outside
 says `high`), pin 3 held low, the GPIO menu's lines, Let go of all pins, the clicks

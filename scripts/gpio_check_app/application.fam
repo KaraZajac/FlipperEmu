@@ -1,0 +1,13 @@
+# What scripts/gpio_check.py has a firmware do on the header's pins that its
+# `gpio` CLI command cannot: interrupts and an open-drain output.  Not an
+# example
+App(
+    appid="fe_pin_check",
+    name="GPIO pin check",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="fe_pin_check_app",
+    stack_size=2 * 1024,
+    fap_category="Debug",
+    fap_version="1.0",
+    fap_description="Interrupts and an open-drain output that scripts/gpio_check.py holds pins for",
+)

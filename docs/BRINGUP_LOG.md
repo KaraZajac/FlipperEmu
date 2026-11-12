@@ -2599,6 +2599,61 @@ big lock, entry 92).
       are in their packages under a real Flipper's key, and no decrypted
       copy is here.
 
+122. **Interrupts from the header's pins, and an open-drain output.** The two
+    things that the firmware's `gpio` CLI command cannot do with a pin were
+    untried since entry 100. Both worked as they were. A held header pin's
+    edge goes the way a key's does (the GPIO model's line, SYSCFG's choice of
+    the port, the EXTI's edges, the NVIC), and the GPIO model has had
+    open-drain lines right since QEMU patch 0004. What was missing: a way to
+    see them, and a check.
+    - The check has an app of its own, `scripts/gpio_check_app` (C, built with
+      ufbt and the official 1.5.1's SDK, as `scripts/i2c_check_app` is). PA4
+      has an interrupt on both edges, PC0 on its fall, PC1 on its rise, PB2 on
+      its fall, which ends the app. PA7 is an open-drain output with a
+      pull-up, pulled low while PA4 is low. Each interrupt is a line in the
+      log with its number and with what PA7 reads then; every rise of PC1
+      turns PC0's interrupt off, or on again.
+    - `gpio`, `status --json` (`"interrupt"`) and the window's GPIO menu say
+      which edges of an input the firmware has an interrupt for: `input,
+      pull-up, interrupt when it falls`. The machine's property `header` has
+      `in+r`, `in+f` or `in+rf` as the mode. It is read from the registers: the
+      pin is an input, SYSCFG has its port for the line, the line is not
+      masked, and the edges are RTSR's and FTSR's. After a start one pin has
+      the words, pin 14: the fall with which the firmware waits for an
+      expansion module's call.
+    - 16 checks more in `gpio_check.py`: 72 on the official 1.5.1; 56 and the
+      app's part skipped on its dev build, Momentum, Unleashed and
+      RogueMaster, whose SDKs ufbt has not. A pin held low and high from
+      outside is one interrupt for each edge that was asked for, and none for
+      the other. An interrupt that is off gives none, and keeps none for when
+      it is on again (a masked line sets no pending bit: entry 6). PA7 is low
+      while the app pulls it low, also with 3V3 held to it; high by its
+      pull-up when the app lets go; and held low from outside then, the
+      firmware reads it low. A record has PA7's six levels in their order.
+    - "PB2 rose", the app logged, for a pin asked for its fall alone. Not the
+      model. Line 2 has its rising edge from the firmware's start
+      (`furi_hal_resources.c` makes PA2, the NFC chip's interrupt,
+      `GpioModeInterruptRise`), and `furi_hal_gpio_init` sets the edge it is
+      asked for and takes none away: RTSR is 0x00163c4c after a start. So
+      PB2's interrupt has both edges, and the table says so. The app got PC0
+      for the fall alone and PB2 for its end.
+    - A line is its pin number's, with one handler in the firmware
+      (`furi_hal_gpio_add_int_callback` has a `furi_check` for a line that is
+      taken). The keys have lines 3, 6 and 10 to 13 (OK is PH3, Down is PC6),
+      the expansion service line 7 while it waits on pin 14, the NFC line 2
+      while it is on. That leaves the header PA4, PB2, PC1 and PC0. Tried: the
+      app with PA6 in PA4's place ends in `furi_check failed` in the emulator
+      too.
+    - How the app ends matters to the next one. `furi_hal_gpio_init` to
+      analog takes a pin's edges off its line only while the pin's interrupt
+      is on, so the app turns PC0's on again, makes each pin analog and then
+      removes its handler. With that RTSR is 0x00163c48 afterwards: line 2
+      has lost the rise that it had from the start. The NFC asks for it again
+      when it starts (`furi_hal_nfc_init_gpio_isr`), and the check has the
+      firmware read a tag after the app: it does.
+    - All of this is the firmware's source and the emulator. No real Flipper
+      was asked.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

@@ -47,7 +47,8 @@ made-up KeeLoq and Nice Flor-S remotes that the firmware's decoders read with th
 passes on the same five.
 `scripts/gpio_check.py` (the GPIO header: a pin the firmware drives seen from outside,
 a pin held from outside read by the firmware, a record of every change of a pin with
-its time) passes on the same five.
+its time) passes on the same five; on the official release it also has an app of its
+own take interrupts from held pins and drive an open-drain output.
 `scripts/uart_check.py` (the two serial ports of the header, pins 15 and 16 and pins
 13 and 14: an app that opens one is answered from the launcher, from a program on the
 port's pty, and over TCP; the firmware's expansion service answers a module that the
@@ -1371,19 +1372,19 @@ one high or low from outside, as a wire to 3V3 or to GND would:
 ```
 $ ./flipperemu gpio
 [flipper] the GPIO header (1 is +5V, 9 is 3V3; 8, 11 and 18 are GND)
-   2  PA7   output                         high
-   3  PA6   input                          low       held low from outside
-   4  PA4   analog                         floating
-   5  PB3   analog                         floating
-   6  PB2   analog                         floating
-   7  PC3   analog                         floating
-  10  PA14  analog                         floating  SWC on the case
-  12  PA13  analog                         floating  SIO on the case
-  13  PB6   alternate function 7, pull-up  unknown   USART1's TX (`uart --port usart` has what it sends)
-  14  PB7   input, pull-up                 high      USART1's RX (`uart send --port usart` puts bytes on it)
-  15  PC1   analog                         floating
-  16  PC0   analog                         floating
-  17  PB14  analog                         high      the iButton pin (`ibutton` holds a key to it)
+   2  PA7   output                                   high
+   3  PA6   input                                    low       held low from outside
+   4  PA4   analog                                   floating
+   5  PB3   analog                                   floating
+   6  PB2   analog                                   floating
+   7  PC3   analog                                   floating
+  10  PA14  analog                                   floating  SWC on the case
+  12  PA13  analog                                   floating  SIO on the case
+  13  PB6   alternate function 7, pull-up            unknown   USART1's TX (`uart --port usart` has what it sends)
+  14  PB7   input, pull-up, interrupt when it falls  high      USART1's RX (`uart send --port usart` puts bytes on it)
+  15  PC1   analog                                   floating
+  16  PC0   analog                                   floating
+  17  PB14  analog                                   high      the iButton pin (`ibutton` holds a key to it)
 its serial ports, as the firmware has them (`uart` sends and reads there)
   pins 13 and 14 (USART1)   230400 baud, 8N1; its receiver is off, and the firmware waits for a call on pin 14 (an interrupt on its fall, as for an expansion module)
   pins 15 and 16 (LPUART1)  off (nothing has opened it)
@@ -1394,6 +1395,13 @@ its I2C bus, SDA on pin 15 and SCL on pin 16 (`run --i2c TYPE@ADDRESS` puts a de
 A pin goes by the MCU's name (`PA7`), by what the case says beside it (`A7`, `C0`,
 `SWC`) or by its number on the header (`2`). `status` has the header in one line (the
 pins that are outputs, and those held), and `status --json` all of it.
+
+An input that the firmware has an interrupt for says on which edge: `interrupt when
+it falls`, `when it rises`, `on both edges`. Such a pin held from outside is a button
+on the header pressed, or a sensor's interrupt line pulled: the firmware's handler
+runs at the moment the pin gets its level, once for each edge that it asked for, and
+not for the other. After a start one pin has an interrupt, 14, where the firmware
+waits for an expansion module's call.
 
 Beneath the pins are the header's two serial ports as the firmware has them at that
 moment: off, or the baud rate and the frame it set, and what becomes of a byte that
@@ -1421,6 +1429,23 @@ second, so a pin that blinks faster than that shows only some of its blinks.
 - A pin that the firmware drives both ways (a push-pull output) keeps the firmware's
   level, where on a Flipper the two would fight. `gpio` says so, and the pin has what
   is held as soon as the firmware makes it an input.
+- An open-drain output is low while the firmware pulls it low, whatever is held to
+  it. When the firmware lets go of it, it has what is held to it, and else what its
+  pull-up gives: a line that both sides may hold low, as a 1-Wire or an I2C line is.
+  The firmware reads it as the line is, not as it wrote it.
+- An interrupt is a line's, and a line is a pin number's: PA4, PB4 and PC4 have line
+  4 between them, and the firmware has one handler for it. Its keys have lines 3, 6
+  and 10 to 13, so an app that asks for an interrupt on pin 3, 5 or 7 of the header
+  (PA6, PB3, PC3) ends in `furi_check failed`, the firmware's own check in
+  `furi_hal_gpio_add_int_callback`; so does one on pin 2 (PA7) while the firmware
+  waits for an expansion module on pins 13 and 14, which is line 7. Pins 4, 6, 15 and
+  16 (PA4, PB2, PC1, PC0) have lines of their own, PB2 while the NFC is off: line 2
+  is the NFC chip's too.
+- A line keeps an edge that it was given before. Line 2 has its rise from the
+  firmware's start, for the NFC chip, so PB2 asked for its fall alone gets its rise
+  too; the table says `on both edges` for it, which is what the line has. (This and
+  the lines above are the firmware's source read and the emulator watched. None of it
+  was tried on a real Flipper.)
 - `floating` is a pin that nothing drives, holds or pulls. `unknown` is a pin a
   peripheral has (an alternate function): what a UART, a timer's PWM or SPI puts on a
   pin is not a level the emulator keeps, so it is not on the header yet.
@@ -1493,9 +1518,12 @@ file.
 
 `scripts/gpio_check.py FIRMWARE` checks it with the firmware's own `gpio` CLI command
 on the other side of the pins: 56 checks, on the official 1.5.1, the official dev
-build, Momentum, Unleashed and RogueMaster. Not tried: an interrupt an app has on a
-held pin (the buttons' come the same way), and a pin that an app has as an open-drain
-output.
+build, Momentum, Unleashed and RogueMaster. What that command cannot do, interrupts
+and an open-drain output, it has an app of its own for (`scripts/gpio_check_app`,
+built with ufbt): four pins with an interrupt, held low and high from outside, each
+edge that was asked for counted once and no other, an interrupt turned off and on
+again, and a line that the app and the outside pull low in turn. Those are 16 checks
+more, on the official 1.5.1 alone: ufbt's SDK is that firmware's.
 
 ### The serial port on pins 15 and 16
 

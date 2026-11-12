@@ -432,8 +432,16 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         SDK
   - ☐ What other peripherals put on a pin: PWM, SPI devices on the header; a
         voltage for the ADC
-  - ☐ An interrupt on a held pin and an open-drain output (untried: they need an
-        app of the check's own)
+  - ☑ An interrupt on a held pin and an open-drain output (2026-11-12): both
+        worked as they were, on the path that a key's interrupt takes. An app of
+        the check's own, `scripts/gpio_check_app` (C, ufbt, the official 1.5.1):
+        four inputs with an interrupt, held from outside, and PA7 as an
+        open-drain output; 16 more checks in `gpio_check.py` (72 there, 56 on
+        the other four). New: `gpio`, `status --json` and the window say which
+        edges of an input the firmware has an interrupt for (`in+r`, `in+f`,
+        `in+rf` in the property `header`). The firmware's interrupt lines, which
+        leave the header four pins with one to give, are in the README
+        (BRINGUP_LOG 122)
 - ☑ A recording of the screen as an animated GIF: `./flipperemu record OUT.gif`
       (a client of the front-panel link, for a device without a window) and
       Device > Record the screen in the window; `scripts/fe_record.py` writes the
