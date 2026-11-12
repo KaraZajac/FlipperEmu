@@ -14,3 +14,8 @@ research/prior-art/
 # what ufbt leaves in an app folder
 examples/*/dist/
 examples/*/.vscode/
+
+# decrypted Sub-GHz key lists: the private input to rekey_keystore.py. The
+# re-keyed (encrypted) keystores under keystores/overlay/ are tracked.
+keystores/plaintext/
+keystores/README.md
