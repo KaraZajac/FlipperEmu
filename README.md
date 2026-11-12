@@ -42,6 +42,9 @@ same five, off-screen.
 `scripts/update_check.py` (an update package written to the card of a running device
 and installed there, and the updater's error screen) passes on the same five, from the
 official firmware to Unleashed, and from the release to the dev build.
+`scripts/keystore_check.py` (the emulator's own Sub-GHz keystores: the files, and
+made-up KeeLoq and Nice Flor-S remotes that the firmware's decoders read with them)
+passes on the same five.
 `scripts/gpio_check.py` (the GPIO header: a pin the firmware drives seen from outside,
 a pin held from outside read by the firmware, a record of every change of a pin with
 its time) passes on the same five.

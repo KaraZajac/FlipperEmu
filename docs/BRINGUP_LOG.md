@@ -2337,6 +2337,64 @@ big lock, entry 92).
       and three skipped on the dev build. The model changed, no patch: a
       QEMU tree is built again (`scripts/setup_qemu.sh`).
 
+117. **Sub-GHz keystores under the emulator's key, and what an update did to
+    them.** A firmware package's Sub-GHz keystores are encrypted with a real
+    Flipper's key 1 and stayed closed here (entry 61). Now every
+    card the launcher builds gets the same contents under the emulator's own
+    key 1: `keystores/overlay`, made by `scripts/rekey_keystore.py`
+    ([keystores.md](keystores.md)). What came out when that was tried:
+    - **A firmware update put the package's files back.** The updater
+      unpacks its package's resources to the card when it has written the
+      flash, the keystores among them, before the USB serial port is there
+      again. The firmware that then starts names no KeeLoq remote's maker.
+      `update` writes the emulator's four files to the card again when the
+      Flipper is back (through its CLI: they are a few KB) and says so;
+      `run --update` does the same from the run's own thread. After
+      `update --no-wait`, and after an update that was started on the
+      Flipper itself, nobody is there to do it: the launcher names the
+      command, `push keystores/overlay/subghz /ext/`, which works for a
+      device that runs and for one that is stopped. A card that was built
+      before the overlay has the package's files too.
+    - **The firmware's log is no witness.** `Load_keystore keeloq_mfcodes OK`
+      is printed for a file that decrypts to noise as well. So the check
+      asks the decoders: it makes up remotes, as recordings for
+      `subghz decode_raw`.
+    - KeeLoq: a remote for each of the 72 codes with simple or normal
+      learning (41 and 31 of the 124), made with that code, and the firmware
+      has to name it after the code. The decoder accepts a code when the
+      encrypted part holds the low ten bits of the serial number; for some
+      makers it wants something of their own there (Centurion in every
+      firmware here, three more in Unleashed and RogueMaster), and for
+      those the check makes the remote a second time by that rule. 72 of 72
+      on five firmwares; none of 72 with the package's own file.
+    - Nice Flor-S needs the 32 bytes of the `nice_flor_s` RAW keystore to
+      read a remote's serial number and counter: 8 made-up remotes, 8 read.
+      **Unleashed's decoder (RogueMaster has it too) read none at first.**
+      It also knows Nice O-Code, a protocol with a frame of the same 52
+      bits, and tells the two apart by what follows: the same frame again
+      is a Flor-S remote, whose button is held; a frame that comes once is
+      taken for O-Code. The check now sends each packet twice, as a remote
+      does. And that decoder keeps the table in memory once it has read it,
+      so a `nice_flor_s` that changes on the card counts from the firmware's
+      next start: for the control with the package's own files the firmware
+      is stopped and started.
+    - The firmware's own debug commands make the tracked files:
+      `subghz encrypt_keeloq` loads `keeloq_mfcodes` and saves all 124 lines
+      again, the same bytes with the same IV, and `subghz encrypt_raw` makes
+      each of the three RAW keystores from its decrypted bytes.
+    - The overlay's `keeloq_mfcodes` has 124 codes. The packages' own have
+      63 lines (official 1.5.1 and dev), 65 (Momentum) and 125 (Unleashed,
+      RogueMaster): one more than the overlay in those two, and which one
+      cannot be seen without a real Flipper's key. Unleashed's package has
+      no `came_atomo`; its card gets one.
+    - Not tried: an Alutech AT-4N or a CAME Atomo remote (those two
+      keystores are checked as files, and made by `encrypt_raw`), and the
+      52 KeeLoq codes with other kinds of learning.
+    - `scripts/keystore_check.py`: 32 checks on the official 1.5.1, its dev
+      build, Momentum, Unleashed and RogueMaster (19 of them need no
+      firmware). `scripts/update_check.py`: 33 checks now, with the
+      keystores after `update` and after `run --update`.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
