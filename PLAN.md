@@ -192,10 +192,10 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       `keeloq_mfcodes_kat` beside it has the 105 lines more of a longer collected
       list (`merge --new-only`). No firmware reads the second file by itself (0 of 74
       made-up remotes of its codes named on the five); as `keeloq_mfcodes_user` each
-      reads it (74 of 74). `keystore_check.py` 45 on the five (BRINGUP_LOG 119-121)
-    - ☐ No program here reads `keeloq_mfcodes_kat` yet: an example app that loads
-      both lists (`subghz_environment_load_keystore`, twice) and decodes a recording
-      would show the way that docs/keystores.md describes from the source
+      reads it (74 of 74). A program of one's own loads it after the first list
+      (`subghz_environment_load_keystore`; docs/keystores.md has the way from the
+      source, and no program here does it). `keystore_check.py` 45 on the five
+      (BRINGUP_LOG 119-121)
     - ☐ `keeloq_mfcodes` is Unleashed's list for every firmware, with Unleashed's
       type numbers. The official firmware has other numbers for magic-serial
       learning and names none of 15 such made-up remotes with it; the second lines
