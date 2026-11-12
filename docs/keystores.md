@@ -38,9 +38,15 @@ One overlay serves every firmware: the keys are the same everywhere. Its
 (official 1.5.1 and its dev build), 65 (Momentum mntm-012) and 125 (Unleashed
 unlshd-094 and RogueMaster RM1024-1347). So the official firmware and Momentum
 gain makers they do not ship, which is harmless, and Unleashed's and
-RogueMaster's own file has one line more than the overlay. Which code that is
-cannot be told here: only a real Flipper's key opens those files. Unleashed's
-package has no `came_atomo`, and its card gets the overlay's.
+RogueMaster's own file has one line more than the overlay. Only a real
+Flipper's key opens those files, but an encrypted keystore shows how long
+each of its lines is, in blocks of 16 characters. By that, the package's file
+is the overlay's list with one line of 17 to 32 characters more, somewhere
+after the overlay's lines 3 to 45. A later list of Unleashed's has two lines
+that the overlay has not: `HomeGate` (simple learning) after line 22, which
+fits, and `Phantom_Hiland` (normal learning) after line 26, which is a block
+too long for this package's file. Unleashed's package has no `came_atomo`,
+and its card gets the overlay's.
 
 The numbers of the kinds of learning are not the same everywhere, and the
 overlay has Unleashed's (RogueMaster is built on Unleashed). Types 0 to 4
@@ -151,6 +157,12 @@ remote for every line with simple or normal learning (72 and 147) within
 three tries: the first packet of some has the name of an earlier line, for
 the reason above. With the 298 lines it took the official firmware four tries
 for 161, and Unleashed had one of them wrong after four.
+
+With a later list of Unleashed's as the base, which has two lines more than
+the overlay, the merged lists have 231 and 299 lines. The 126 and the 231
+lines count as the 124 and the 230 do above, on all five firmwares, and
+each firmware names a made-up remote for every line of theirs with simple
+or normal learning (74 and 148).
 
 ## Checking it (`scripts/keystore_check.py`)
 

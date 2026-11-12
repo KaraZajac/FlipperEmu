@@ -2448,6 +2448,34 @@ big lock, entry 92).
       `scripts/keystore_check.py`: 36 checks on the five firmwares, 23 of
       them without one.
 
+119. **An encrypted keystore shows how long each line is.** The firmware
+    pads each line of a keystore to whole blocks of 16 bytes and writes it
+    as a line of hex of its own. So a file that no key here opens still
+    gives the number of its lines and the length of each, to the block.
+    Unleashed's and RogueMaster's own `keeloq_mfcodes` has 125 lines where
+    the overlay has 124, and entry 117 said that the line cannot be told.
+    By the lengths it is the overlay's list with one line of 17 to 32
+    characters more, somewhere after the overlay's lines 3 to 45.
+    - Then a later list of Unleashed's came, decrypted (126 lines; local,
+      as the lists of entry 118). It is the overlay's 124 lines, line for
+      line, with `HomeGate` (simple learning) after line 22 and
+      `Phantom_Hiland` (normal learning) after line 26. The first fits the
+      package's file. The second is a block too long for it: unlshd-094 has
+      the one and not yet the other. That is by length: a line as long with
+      another name would look the same.
+    - With that list as the base, `merge` gives 231 lines for 202 keys, and
+      299 lines with `--all`. Each of the five firmwares loads the 126 and
+      the 231 lines and saves them again line for line, and names a made-up
+      remote for each line with simple or normal learning (74 and 148).
+      Of 300 made-up remotes with random keys they name as many as with 124
+      and 230 lines: the official firmware and its dev build 23 and 37,
+      Momentum 22 and 36, Unleashed and RogueMaster 73 and 87. The
+      magic-serial remotes of entry 118 come out the same too (official 0
+      of 15 with the 126 lines and 12 with the 231, Momentum 14, Unleashed
+      12).
+    - The tracked overlay is as it was, 124 lines: it is Unleashed's list
+      of before unlshd-094.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

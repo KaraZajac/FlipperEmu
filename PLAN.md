@@ -190,6 +190,10 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       and its Kingates Stylo 4K decoder finds no line of type 1. A second line for
       such a key with the official firmware's number mends the first (tried with a
       local list that has one for four of the five); the tracked overlay has none yet
+    - ☐ The overlay is Unleashed's list of before unlshd-094. That package's own file
+      has one line more, and the lengths of its encrypted lines fit `HomeGate`; a
+      later list of Unleashed's has that line and `Phantom_Hiland`. The tracked
+      overlay has neither (BRINGUP_LOG 119)
 - ☐ U2F from a host: the app starts, takes the USB port as a HID token and shows
       "Connected!"; a registration and a login from a browser or libfido2 over USB/IP
       have not been tried
