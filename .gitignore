@@ -14,3 +14,6 @@ research/prior-art/
 # what ufbt leaves in an app folder
 examples/*/dist/
 examples/*/.vscode/
+
+# re-keyed Sub-GHz keystores + decrypted key lists (do not publish)
+keystores/

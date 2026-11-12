@@ -135,6 +135,11 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("image")
     ap.add_argument("--resources", help="resources tgz, update package or directory")
+    ap.add_argument("--overlay", action="append", metavar="DIR", default=[],
+                    help="a directory copied over the resources, after them "
+                         "(repeatable). For keystores re-keyed to the emulator's "
+                         "enclave (scripts/rekey_keystore.py): a stock card then "
+                         "decrypts its Sub-GHz codes in the emulator.")
     ap.add_argument("--size", default="512M", help="power of two, e.g. 256M, 1G")
     ap.add_argument("--force", action="store_true", help="overwrite an existing image")
     args = ap.parse_args()
@@ -157,17 +162,27 @@ def main() -> int:
     subprocess.run(["mkfs.vfat", "-F", "32", "-n", "FLIPPER", str(img)],
                    check=True, stdout=subprocess.DEVNULL)
 
-    if args.resources:
+    for d in args.overlay:
+        if not pathlib.Path(d).is_dir():
+            print(f"overlay {d} is not a directory", file=sys.stderr)
+            return 2
+
+    if args.resources or args.overlay:
         env = dict(os.environ, MTOOLS_SKIP_CHECK="1")
         with tempfile.TemporaryDirectory(prefix="fe-sd-") as tmp:
             stage = pathlib.Path(tmp)
-            stage_resources(pathlib.Path(args.resources), stage)
+            if args.resources:
+                stage_resources(pathlib.Path(args.resources), stage)
+            for d in args.overlay:                      # applied over resources
+                shutil.copytree(d, stage, dirs_exist_ok=True)
             entries = sorted(stage.iterdir())
             if entries:
                 subprocess.run(["mcopy", "-s", "-Q", "-i", str(img),
                                 *map(str, entries), "::/"], check=True, env=env)
             nfiles = sum(1 for _ in stage.rglob("*") if _.is_file())
-        print(f"{img}: {size >> 20} MiB FAT32, {nfiles} files from {args.resources}")
+        src = args.resources or "overlay only"
+        extra = f" + {len(args.overlay)} overlay(s)" if args.overlay and args.resources else ""
+        print(f"{img}: {size >> 20} MiB FAT32, {nfiles} files from {src}{extra}")
     else:
         print(f"{img}: {size >> 20} MiB FAT32, empty")
     return 0

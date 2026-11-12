@@ -88,6 +88,7 @@ import threading
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent
+REKEYED_OVERLAY = ROOT / "keystores" / "overlay"   # re-keyed Sub-GHz keystores
 sys.path.insert(0, str(ROOT / "scripts"))
 import fe_header                                # noqa: E402  (small: the rest
                                                 # is imported where it is used)
@@ -292,11 +293,19 @@ class Device:
                        **({"resources": str(resources.resolve())} if resources else {}))
         return label, resources
 
-    def make_sd(self, resources=None, size="512M", force=False):
+    def make_sd(self, resources=None, size="512M", force=False, overlay=None):
         cmd = [sys.executable, "-I", str(ROOT / "scripts" / "make_sdcard.py"),
                str(self.sd), "--size", size]
         if resources:
             cmd += ["--resources", str(resources)]
+        # Re-keyed Sub-GHz keystores (scripts/rekey_keystore.py): applied over
+        # the stock resources so the unmodified firmware decrypts its codes
+        # with the emulator's own enclave key. Opt in by creating the folder.
+        overlays = list(overlay or [])
+        if not overlays and REKEYED_OVERLAY.is_dir():
+            overlays = [REKEYED_OVERLAY]
+        for d in overlays:
+            cmd += ["--overlay", str(d)]
         if force:
             cmd.append("--force")
         subprocess.run(cmd, check=True)
