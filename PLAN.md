@@ -180,25 +180,33 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       of the four keystores (KeeLoq, Nice Flor-S, Alutech AT-4N, CAME Atomo) encrypted
       under the emulator's key 1 (`keystores/overlay`, `scripts/rekey_keystore.py`,
       docs/keystores.md), on every card the launcher builds and again after a firmware
-      update. The firmware names a made-up KeeLoq remote for each of 148 lines and reads
-      Nice Flor-S remotes on official, dev, Momentum, Unleashed and RogueMaster
+      update. The firmware names a made-up KeeLoq remote for each line with simple or
+      normal learning (74) and reads Nice Flor-S remotes on official, dev, Momentum,
+      Unleashed and RogueMaster
       (`keystore_check.py`; BRINGUP_LOG 117). Not tried: an Alutech AT-4N or CAME Atomo
       remote. `rekey_keystore.py merge` puts decrypted key lists together and leaves
       out the lines that only add tries (BRINGUP_LOG 118). Since 2026-11-12 the
-      overlay's `keeloq_mfcodes` is what `merge` makes of a list of Unleashed's (126
-      lines; unlshd-094's own file is that list without one line, by the lengths of
-      its encrypted lines) and a longer collected one: 231 lines for 202 keys
-      (BRINGUP_LOG 119, 120)
-    - ☐ The overlay's first 126 lines have Unleashed's type numbers, and the official
-      firmware has other numbers for magic-serial learning. Second lines with its
-      numbers are there for KGB/Subaru and Magic_2 to Magic_4, and it names their
-      made-up remotes; there is none for Magic_1. Its Kingates Stylo 4K decoder has a
-      line of type 1 now, which no made-up remote has tried
-    - ☐ The longer list costs names for remotes that no line is for: of 300 with
-      random keys 37 where Unleashed's list alone gives 23 (official), 36 for 22
-      (Momentum), 87 for 73 (Unleashed). Some of its lines have type numbers that a
-      firmware reads as another kind of learning. A list for each firmware's own
-      numbers would be shorter; nothing makes one yet
+      overlay has two KeeLoq keystores: `keeloq_mfcodes`, the list that a firmware
+      reads, is a list of Unleashed's (126 lines; unlshd-094's own file is that list
+      without one line, by the lengths of its encrypted lines), and
+      `keeloq_mfcodes_kat` beside it has the 105 lines more of a longer collected
+      list (`merge --new-only`). No firmware reads the second file by itself (0 of 74
+      made-up remotes of its codes named on the five); as `keeloq_mfcodes_user` each
+      reads it (74 of 74). `keystore_check.py` 45 on the five (BRINGUP_LOG 119-121)
+    - ☐ No program here reads `keeloq_mfcodes_kat` yet: an example app that loads
+      both lists (`subghz_environment_load_keystore`, twice) and decodes a recording
+      would show the way that docs/keystores.md describes from the source
+    - ☐ `keeloq_mfcodes` is Unleashed's list for every firmware, with Unleashed's
+      type numbers. The official firmware has other numbers for magic-serial
+      learning and names none of 15 such made-up remotes with it; the second lines
+      with its numbers (KGB/Subaru, Magic_2 to Magic_4; no such line exists for
+      Magic_1) and a type-1 line for its Kingates Stylo 4K decoder are in
+      `keeloq_mfcodes_kat`. A list of each firmware's own would be its package's
+      file, and only a real Flipper's key opens those
+    - ☐ As a firmware's second list, `keeloq_mfcodes_kat` costs names for remotes
+      that no line is for: of 300 with random keys 37 where the first list alone
+      gives 23 (official), 36 for 22 (Momentum), 87 for 73 (Unleashed). Some of its
+      lines have type numbers that a firmware reads as another kind of learning
 - ☐ U2F from a host: the app starts, takes the USB port as a HID token and shows
       "Connected!"; a registration and a login from a browser or libfido2 over USB/IP
       have not been tried

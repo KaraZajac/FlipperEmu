@@ -11,25 +11,30 @@ makes of them.
                                             a throwaway device
 
 The first part: scripts/rekey_keystore.py writes what the enclave check's
-own encoder writes, and reads it back; every line of the tracked KeeLoq
-keystore is a code under the emulator's key 1 and under no other, and making
-each of the four files again gives the same bytes; the tool's commands and
-what they refuse; git has the encrypted files and would not take a decrypted
-list.
+own encoder writes, and reads it back; every line of the two tracked KeeLoq
+keystores is a code under the emulator's key 1 and under no other, no code
+is in both, and making each of the five files again gives the same bytes;
+the tool's commands and what they refuse; git has the encrypted files and
+would not take a decrypted list.  The two KeeLoq keystores: keeloq_mfcodes,
+the list that a firmware reads, and keeloq_mfcodes_kat beside it, more codes
+that a firmware reads only where a program asks for them.
 
 The second part boots FIRMWARE (an update package, as ./flipperemu run -f
-takes one) on a new device.  Its card has the four files.  The firmware
-loads the KeeLoq keystore and saves it again (`subghz encrypt_keeloq`, a
+takes one) on a new device.  Its card has the five files.  The firmware
+loads each KeeLoq keystore and saves it again (`subghz encrypt_keeloq`, a
 debug command): every line comes back, and with the same IV it is the
 tracked file.  Its own `subghz encrypt_raw` makes the three RAW keystores
 from their bytes.  Then remotes that this check makes up, as recordings for
 `subghz decode_raw`: one KeeLoq remote for every code with simple or normal
 learning, which the firmware's decoder is to name after that code, and Nice
 Flor-S remotes, whose serial number and counter the firmware reads with the
-RAW keystore.  And the same with the keystores of the firmware's own package
-in their place, which only a real Flipper's key opens, and the firmware
-started anew: nothing is named, and nothing read.  (The other two RAW
-keystores, of Alutech AT-4N and CAME Atomo, are not tried with a remote.)
+RAW keystore.  The remotes of keeloq_mfcodes_kat's codes are not named while
+that file is only beside the first one, and they are named when the same
+file is keeloq_mfcodes_user, the second list that a firmware reads.  And the
+same with the keystores of the firmware's own package in their place, which
+only a real Flipper's key opens, and the firmware started anew: nothing is
+named, and nothing read.  (The other two RAW keystores, of Alutech AT-4N and
+CAME Atomo, are not tried with a remote.)
 
 Nothing that is in a keystore is printed: counts, and for a failure the names
 of makers.  Exit status 0 = pass.
@@ -59,6 +64,8 @@ OVERLAY = ROOT / "keystores" / "overlay"
 ASSETS = OVERLAY / "subghz" / "assets"
 ON_CARD = "/ext/subghz/assets"
 KEELOQ = "keeloq_mfcodes"
+MORE = "keeloq_mfcodes_kat"         # beside it: read where a program asks
+USER = "keeloq_mfcodes_user"        # the second list that a firmware reads
 RAW = ("nice_flor_s", "alutech_at_4n", "came_atomo")
 RAW_HEADER = "Filetype: Flipper SubGhz Keystore RAW File\nVersion: 0\n"
 KEY_LINE = re.compile(r"[0-9A-F]{16}:\d+:\S{1,64}")
@@ -208,24 +215,30 @@ def host_part():
           "writes them, and read back", same)
 
     names = sorted(p.name for p in ASSETS.iterdir()) if ASSETS.is_dir() else []
-    if not check(f"keystores/overlay has the four keystores ({', '.join(names)})",
-                 names == sorted((KEELOQ,) + RAW)):
+    if not check(f"keystores/overlay has the five keystores ({', '.join(names)})",
+                 names == sorted((KEELOQ, MORE) + RAW)):
         return
-    text = (ASSETS / KEELOQ).read_text()
-    lines = rk.verify(text, key)
-    check(f"{KEELOQ}: {len(lines)} lines, each a code (KEY:TYPE:NAME) under "
-          "key 1, none twice",
-          lines and all(KEY_LINE.fullmatch(l) for l in lines)
-          and len(set(lines)) == len(lines))
-    check(f"{KEELOQ}: made again from its codes, it is the same file",
-          rk.rekey(lines, key, rk.DEFAULT_IV) == text)
-    try:
-        other = [l for l in rk.verify(text, fe_enclave.default_key(2))
-                 if KEY_LINE.fullmatch(l)]
-    except ValueError:
-        other = []
-    check(f"{KEELOQ}: under another key no line is a code", not other,
-          f"{len(other)} lines")
+    codes = {}
+    for name in (KEELOQ, MORE):
+        text = (ASSETS / name).read_text()
+        lines = rk.verify(text, key)
+        codes[name] = {tuple(l.upper().split(":")[:2]) for l in lines}
+        check(f"{name}: {len(lines)} lines, each a code (KEY:TYPE:NAME) under "
+              "key 1, none twice",
+              lines and all(KEY_LINE.fullmatch(l) for l in lines)
+              and len(set(lines)) == len(lines))
+        check(f"{name}: made again from its codes, it is the same file",
+              rk.rekey(lines, key, rk.DEFAULT_IV) == text)
+        try:
+            other = [l for l in rk.verify(text, fe_enclave.default_key(2))
+                     if KEY_LINE.fullmatch(l)]
+        except ValueError:
+            other = []
+        check(f"{name}: under another key no line is a code", not other,
+              f"{len(other)} lines")
+    both = codes[KEELOQ] & codes[MORE]
+    check(f"{MORE} has no code that {KEELOQ} has (the same key and type)",
+          not both, f"{len(both)} codes")
     for name in RAW:
         text = (ASSETS / name).read_text()
         blob = raw_bytes(name, key)
@@ -319,6 +332,14 @@ def host_part():
               got == base + more[2:10] + [more[10].upper()
                                           .replace("LOWER", "lower")]
               and "12 lines" in out, out + err)
+        code, out, err = run("merge", "--new-only", tmp / "base.txt",
+                             tmp / "more.txt", tmp / "new")
+        got = (tmp / "new").read_text().split() if code == 0 else []
+        check("... --new-only: the new codes alone, for a file of their own",
+              got == [more[2], more[4], more[9], more[10].upper()
+                      .replace("LOWER", "lower"), more[3]]
+              and "5 lines, the new ones alone" in out and "5 keys" in out
+              and not re.search(r"[0-9A-Fa-f]{16}", out + err), out + err)
         refused = []
         for n, (bad, word) in enumerate((
                 ("9192939495969798:1:Two Words", "no blank"),
@@ -428,18 +449,27 @@ def stock_keystores(firmware):
     return found
 
 
-def keeloq_remotes(cli, codes, tag):
+TRIES = 5
+
+
+def keeloq_remotes(cli, codes, tag, tries=TRIES, first=0x0500000):
     """A made-up remote for each code with simple or normal learning, in one
-    recording: (how many, {index: the name it got}, how many needed the
-    maker's own rule)"""
+    recording: (the remotes, {index: the name it got}, how many needed the
+    maker's own rule, how many recordings it took).  A remote that has
+    another name gets a new packet, `tries` times in all: the firmware takes
+    the first line that fits, and a line fits a packet that is not its own
+    about once in 2048 tries (Unleashed's JCM_Gen2 line is 256 tries, so
+    about one packet in nine of a line after it).  `first` is the first
+    remote's serial number"""
     targets = [(i, int(k, 16), int(t), n) for i, (k, t, n) in enumerate(codes)
                if t in ("1", "2")]
-    serial = {i: 0x0500000 + i * 0x1111 for i, *_ in targets}
-    named, own = {}, set()
-    for attempt in range(3):
+    serial = {i: first + i * 0x1111 for i, *_ in targets}
+    named, own, used = {}, set(), 0
+    for attempt in range(tries):
         todo = [t for t in targets if named.get(t[0]) != t[3]]
         if not todo:
             break
+        used += 1
         packets = [keeloq_packet(2, 0x0ABCDEF, 7, 0x1122334455667788, 1)]
         for i, key, learning, name in todo:
             rule = name if attempt and name in OWN_RULE else None
@@ -452,7 +482,13 @@ def keeloq_remotes(cli, codes, tag):
         seen = keeloq_named(out)
         for i, *_ in todo:
             named[i] = seen.get(serial[i])
-    return targets, named, len([i for i in own if named.get(i) == codes[i][2]])
+    return (targets, named,
+            len([i for i in own if named.get(i) == codes[i][2]]), used)
+
+
+def packets(used):
+    return ("the first packet of each" if used == 1
+            else f"within {used} packets of each")
 
 
 NICE = [(1 << n % 4, 0x0123456 + n * 0x0102030, 0x0100 + n * 0x0111)
@@ -474,9 +510,11 @@ def nice_remotes(cli, table, tag):
 def firmware_part(firmware, timeout, keep):
     print(f"a firmware with them ({pathlib.Path(firmware).name}):")
     key = fe_enclave.default_key(1)
-    tracked = {n: (ASSETS / n).read_bytes() for n in (KEELOQ,) + RAW}
-    text = tracked[KEELOQ].decode()
-    codes = [l.split(":", 2) for l in rk.verify(text, key)]     # in memory only
+    tracked = {n: (ASSETS / n).read_bytes() for n in (KEELOQ, MORE) + RAW}
+    listed = {n: [l.split(":", 2) for l in rk.verify(tracked[n].decode(), key)]
+              for n in (KEELOQ, MORE)}                          # in memory only
+    codes, more = listed[KEELOQ], listed[MORE]
+    user = f"{ON_CARD}/{USER}"
     table = raw_bytes("nice_flor_s", key)
     stock = stock_keystores(firmware)
     emu = ec.Emu(f"kscheck-{int(time.time())}-{os.getpid()}",
@@ -492,33 +530,37 @@ def firmware_part(firmware, timeout, keep):
         cli = emu.cli
         wrong = [n for n, data in tracked.items()
                  if not same_on_card(cli, f"{ON_CARD}/{n}", data)]
-        check("the new device's card has the emulator's four keystores",
+        check("the new device's card has the emulator's five keystores",
               not wrong, ", ".join(wrong))
 
         cli.run("sysctl debug 1", timeout=10)
         commands = cli.run("subghz", timeout=10)
         if "encrypt_keeloq" in commands:
             one, two = f"/ext/{tag}.one", f"/ext/{tag}.two"
-            for path in (one, two):
-                cli.run(f"storage remove {path}", timeout=10)
-            out = cli.run(f"subghz encrypt_keeloq {ON_CARD}/{KEELOQ} {one} "
-                          f"{rk.DEFAULT_IV.hex()}", timeout=300)
-            back = lines_on_card(cli, one)
-            check(f"the firmware loads {KEELOQ} and saves it again: "
-                  f"{max(0, len(back) - 4)} of {len(codes)} lines, and with "
-                  "the same IV the tracked file",
-                  "Failed" not in out and back == text.splitlines(),
-                  f"{out.strip()[-200:]}\n{len(back)} lines")
             iv = bytes(range(0x31, 0x41))
-            cli.run(f"subghz encrypt_keeloq {ON_CARD}/{KEELOQ} {two} {iv.hex()}",
-                    timeout=300)
-            try:
-                again = rk.verify("\n".join(lines_on_card(cli, two)) + "\n", key)
-            except (ValueError, IndexError):
-                again = []
-            check(f"... and with another IV: the same {len(codes)} codes, read "
-                  "here", again == [":".join(c) for c in codes],
-                  f"{len(again)} lines")
+            for name in (KEELOQ, MORE):
+                for path in (one, two):
+                    cli.run(f"storage remove {path}", timeout=10)
+                out = cli.run(f"subghz encrypt_keeloq {ON_CARD}/{name} {one} "
+                              f"{rk.DEFAULT_IV.hex()}", timeout=300)
+                back = lines_on_card(cli, one)
+                check(f"the firmware loads {name} and saves it again: "
+                      f"{max(0, len(back) - 4)} of {len(listed[name])} lines, "
+                      "and with the same IV the tracked file",
+                      "Failed" not in out
+                      and back == tracked[name].decode().splitlines(),
+                      f"{out.strip()[-200:]}\n{len(back)} lines")
+                cli.run(f"subghz encrypt_keeloq {ON_CARD}/{name} {two} "
+                        f"{iv.hex()}", timeout=300)
+                try:
+                    again = rk.verify("\n".join(lines_on_card(cli, two)) + "\n",
+                                      key)
+                except (ValueError, IndexError):
+                    again = []
+                check(f"... and with another IV: the same {len(listed[name])} "
+                      "codes, read here",
+                      again == [":".join(c) for c in listed[name]],
+                      f"{len(again)} lines")
             for path in (one, two):
                 cli.run(f"storage remove {path}", timeout=10)
         else:
@@ -544,7 +586,7 @@ def firmware_part(firmware, timeout, keep):
             print("  (this firmware's CLI has no `subghz encrypt_raw`: not "
                   "tried)")
 
-        targets, named, own = keeloq_remotes(cli, codes, tag)
+        targets, named, own, used = keeloq_remotes(cli, codes, tag)
         good = [i for i, _, _, n in targets if named.get(i) == n]
         by = {t: (sum(1 for i, _, l, n in targets if l == t and named.get(i) == n),
                   sum(1 for _, _, l, _ in targets if l == t)) for t in (1, 2)}
@@ -554,8 +596,41 @@ def firmware_part(firmware, timeout, keep):
               "named after the code they were made with (simple learning "
               f"{by[1][0]} of {by[1][1]}, normal learning {by[2][0]} of "
               f"{by[2][1]}" + (f"; {own} by their maker's own rule" if own
-                               else "") + ")",
+                               else "") + f"; {packets(used)})",
               len(good) == len(targets), "not so: " + ", ".join(off))
+
+        # the second list.  Beside the first one no firmware reads it; as
+        # keeloq_mfcodes_user, the file for a user's own codes, each does
+        had = lines_on_card(cli, user)
+        if had:
+            print(f"  (the card has a {USER} of {len(had)} lines: out of the "
+                  "way for this, and back afterwards)")
+            cli.run(f"storage remove {user}", timeout=10)
+        targets, named, _, _ = keeloq_remotes(cli, more, tag, tries=1,
+                                              first=0x0700000)
+        got = [n for i, _, _, n in targets if named.get(i) == n]
+        check(f"{MORE} beside it is not read by the firmware: {len(got)} of "
+              f"{len(targets)} made-up remotes of its codes are named after "
+              "them", not got, ", ".join(got))
+        put(cli, user, tracked[MORE])
+        targets, named, own, used = keeloq_remotes(cli, more, tag,
+                                                   first=0x0700000)
+        good = [i for i, _, _, n in targets if named.get(i) == n]
+        by = {t: (sum(1 for i, _, l, n in targets if l == t and named.get(i) == n),
+                  sum(1 for _, _, l, _ in targets if l == t)) for t in (1, 2)}
+        off = [f"{n} (learning {l}: {named.get(i) or 'not decoded'})"
+               for i, _, l, n in targets if named.get(i) != n]
+        check(f"... and the same file as {USER}, the second list that a "
+              f"firmware reads: {len(good)} of {len(targets)} (simple "
+              f"learning {by[1][0]} of {by[1][1]}, normal learning "
+              f"{by[2][0]} of {by[2][1]}"
+              + (f"; {own} by their maker's own rule" if own else "")
+              + f"; {packets(used)})",
+              len(good) == len(targets), "not so: " + ", ".join(off))
+        cli.run(f"storage remove {user}", timeout=10)
+        if had:
+            put(cli, user, ("\n".join(had) + "\n").encode())
+
         count, read = nice_remotes(cli, table, tag)
         check(f"Nice Flor-S: {read} of {len(NICE)} made-up remotes are read "
               "with their serial number, counter and button, with the RAW "
@@ -580,7 +655,7 @@ def firmware_part(firmware, timeout, keep):
                 return
             cli = emu.cli
         if KEELOQ in stock:
-            targets, named, _ = keeloq_remotes(cli, codes, tag)
+            targets, named, _, _ = keeloq_remotes(cli, codes, tag, tries=3)
             got = sum(1 for i, _, _, n in targets if named.get(i) == n)
             check(f"with the package's own {KEELOQ} in its place, which a real "
                   f"Flipper's key opens: {got} of {len(targets)} are named",
@@ -602,6 +677,8 @@ def firmware_part(firmware, timeout, keep):
         cli.run("sysctl debug 0", timeout=10)
         wrong = [n for n, data in tracked.items()
                  if not same_on_card(cli, f"{ON_CARD}/{n}", data)]
+        if lines_on_card(cli, user) != had:
+            wrong.append(USER)
         check("the emulator's keystores are on the card as they were",
               not wrong, ", ".join(wrong))
         crash = ec.CRASH.search(logged + emu.uart_text())

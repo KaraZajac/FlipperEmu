@@ -2121,7 +2121,9 @@ never leave a real Flipper and are not in this project. Every emulated Flipper g
   on without those manufacturer codes. So a card that the launcher builds gets the
   project's own keystores in their place, the manufacturer codes encrypted under the
   emulator's key 1, and gets them again after a firmware update
-  ([docs/keystores.md](docs/keystores.md)).
+  ([docs/keystores.md](docs/keystores.md)). One more file is beside them,
+  `keeloq_mfcodes_kat`: more KeeLoq codes, which no firmware reads by itself and a
+  program can ask for.
   Nothing stands in for the stock U2F certificate's private key, which is encrypted
   the same way: the certificate of an emulated token does not match the key it signs
   with.

@@ -2537,6 +2537,68 @@ big lock, entry 92).
     - A card that a device has already keeps the 124 lines until an
       `update` or `push keystores/overlay/subghz /ext/`.
 
+121. **Two KeeLoq keystores where there was one.** Entry 120 put the 231
+    lines of both lists into `keeloq_mfcodes`, the file that every
+    firmware reads. That file is Unleashed's list again, 126 lines, and
+    the other 105 are a keystore of their own beside it,
+    `keeloq_mfcodes_kat`: the same format and the same key, for a program
+    that asks for it. The first file and then the second are the 231
+    lines in their order.
+    - Which KeeLoq lists a firmware reads by itself: two,
+      `keeloq_mfcodes` and `keeloq_mfcodes_user`. The official source has
+      the two names in `lib/subghz/types.h`; the Sub-GHz app loads them
+      when it starts (`helpers/subghz_txrx.c`), and `subghz decode_raw`
+      with each call (`subghz_cli.c`). The binaries of Momentum and
+      Unleashed have these two paths and no third. (The official
+      firmware, its dev build and RogueMaster keep the Sub-GHz app
+      outside `firmware.dfu`, and `strings` finds no such path there.)
+    - Measured on the five firmwares: with `keeloq_mfcodes_kat` beside
+      the first list, none of 74 made-up remotes of its codes is named;
+      with the same file as `keeloq_mfcodes_user`, all 74 are. The
+      firmware's `subghz encrypt_keeloq` loads either keystore and saves
+      it again: 126 of 126 lines, and 105 of 105.
+    - The tool: `merge --new-only` writes the new codes without the base
+      list's lines. For the two decrypted lists that is the 231 from its
+      line 127 on, byte for byte.
+    - The check gives a remote five packets where it gave three, and
+      says how many were needed. The first run on Unleashed failed with
+      three: one remote of the second list (`Leopard`, simple learning)
+      had the name `JCM_Gen2` three times. Its fourth packet has its
+      line's name, on RogueMaster too (the made-up packets are the same
+      in every run). That line of Unleashed's is 256 tries, so a packet
+      of a later line has its name about one time in nine, and three in a
+      row for one of 74 remotes comes in about one such set of remotes in
+      nine. With the 231 in one file no remote needed more than three:
+      the remotes had other serial numbers. The official firmware, its
+      dev build and Momentum need two packets for both lists.
+      `keystore_check.py`: 45 checks of 45 on each of the five (28
+      without a firmware).
+    - What the split gives back: a firmware's false names are those of
+      the 126 lines (entry 119: 23 of 300 on the official firmware, 22 on
+      Momentum, 73 on Unleashed; the 231 had 37, 36 and 87). What it
+      takes: with the first list alone the official firmware names no
+      made-up magic-serial remote (the second lines with its numbers are
+      in the second file), and its Kingates Stylo 4K decoder has no line
+      of type 1.
+    - An earlier card: on one with the 231 in one file and no second
+      file, `push keystores/overlay/subghz /ext/` wrote the two KeeLoq
+      keystores and left the other three, on a device that ran and on a
+      stopped one. The second file as the user list, by `push` with the
+      new name, and `rm` of it: tried on both too.
+    - An updater leaves `keeloq_mfcodes_kat` alone, because no package
+      has a file of that name: after an update the launcher writes 4 of
+      the 5 files, and 3 after one from Unleashed to itself, whose
+      package has no `came_atomo` either. `update_check.py`: 33 of 33
+      on the official firmware (updated to itself and to Unleashed),
+      its dev build, Momentum, Unleashed and RogueMaster. The smoke
+      test passes on the five.
+    - No program here loads both lists yet. What stands for one: the
+      loader's round trip with the second file, and a firmware that reads
+      it as its user list. `keeloq_mfcodes` is Unleashed's list for every
+      firmware: the official firmware's own 63 lines and Momentum's 65
+      are in their packages under a real Flipper's key, and no decrypted
+      copy is here.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

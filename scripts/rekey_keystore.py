@@ -20,7 +20,7 @@ into a firmware fork's resources (applications/.../resources/subghz/assets/).
     rekey_keystore.py keys   IN OUT [--slot N] [--iv TEXT] [--enclave FILE]
     rekey_keystore.py raw    IN OUT [--slot N] [--iv TEXT] [--enclave FILE]
     rekey_keystore.py verify FILE... [--slot N]           [--enclave FILE]
-    rekey_keystore.py merge  BASE MORE... OUT [--all]
+    rekey_keystore.py merge  BASE MORE... OUT [--all] [--new-only]
 
 `keys` reads IN (a decrypted key list; blank lines and `#` comments are
 skipped) and writes OUT. `raw` does the same for a RAW keystore (nice_flor_s,
@@ -50,7 +50,9 @@ order, these lines are left out:
     chance to name a remote that is not this maker's.
 
 The new type-0 lines go last. With --all only the first rule holds, and the
-new lines keep their order.
+new lines keep their order. With --new-only OUT has the new lines alone,
+without those of BASE: a list for a file of its own beside BASE's keystore,
+which a firmware reads only where a program asks for it.
 
 Keep the input key lists private: see the note in subghz_keystore.c.
 """
@@ -311,6 +313,9 @@ def main(argv) -> int:
                          "merge: the key lists, then OUT")
     ap.add_argument("--all", action="store_true",
                     help="merge: leave out only a code that the list has")
+    ap.add_argument("--new-only", action="store_true",
+                    help="merge: OUT has the new codes alone, without the "
+                         "base list's lines")
     ap.add_argument("--slot", type=int, default=1, metavar="N",
                     help="the enclave's key slot (default 1)")
     ap.add_argument("--iv", default=None, metavar="TEXT",
@@ -359,10 +364,16 @@ def main(argv) -> int:
             base = read_key_list(srcs[0])
             more = [k for p in srcs[1:] for k in read_key_list(p)]
             lines, left = merge(base, more, args.all)
+            if args.new_only:
+                lines = lines[len(base):]
             dst.write_text("".join(k + "\n" for k in lines))
             keys = len({k.split(":")[0].upper() for k in lines})
-            print(f"{dst}: {len(lines)} lines ({len(base)} of {srcs[0]}, "
-                  f"{len(lines) - len(base)} new), {keys} keys")
+            if args.new_only:
+                print(f"{dst}: {len(lines)} lines, the new ones alone (none "
+                      f"of the {len(base)} of {srcs[0]}), {keys} keys")
+            else:
+                print(f"{dst}: {len(lines)} lines ({len(base)} of {srcs[0]}, "
+                      f"{len(lines) - len(base)} new), {keys} keys")
             for why, text in LEFT_OUT:
                 rows = [row for row in left if row[0] == why]
                 if rows:
