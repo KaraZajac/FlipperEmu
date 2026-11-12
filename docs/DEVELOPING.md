@@ -378,9 +378,14 @@ $ ../../flipperemu i2c
   should have sent: `grep -v '^#' bus.txt | cut -d' ' -f2-` is the transfers
   without their times, the same on every run. `0x24 w no answer` is a call to
   nobody, `hh!` a byte that the device refused, and a `+` at a line's end a
-  transfer that went on with no STOP (a repeated START; the firmware's
-  `furi_hal_i2c_trx` and the JavaScript `writeRead` are a write with its STOP and
-  then a read, two lines with no `+`). `i2c watch` in a second terminal prints the
+  transfer that went on with no STOP: a repeated START, which an app makes with
+  `furi_hal_i2c_tx_ext(…, FuriHalI2cBeginStart, FuriHalI2cEndAwaitRestart, …)` and
+  after it `furi_hal_i2c_rx_ext(…, FuriHalI2cBeginRestart, FuriHalI2cEndStop, …)`.
+  The firmware's `furi_hal_i2c_trx` and the JavaScript `writeRead` are a write
+  with its STOP and then a read, two lines with no `+`. The record is the place to
+  look for a refused byte: in the emulator the firmware's write was true when the
+  device refused its last byte, and false only when it refused one before the
+  last (a real Flipper was not asked). `i2c watch` in a second terminal prints the
   same while the app runs, with the device's type beside each address, and `i2c
   watch 0x50` only the calls to the EEPROM. In a test's background it is ended with
   `kill`, and says its count as it would after Ctrl+C.
@@ -1120,9 +1125,9 @@ their count, and neither leaves a record running, its own file, or a byte more i
 record that had ended; what `i2c record` and `i2c watch` refuse, in words, and that
 none of it began a record; the word on an address that was not shifted, for 0x24 with
 a sensor at 0x48 and for 0x28 with a device at 0x51, for no other address and not
-when the call was answered; the launcher's reading of a line with a mark that no
-firmware here makes (`+`, `!`, `...`), where the emulator's writing of one is not
-checked; `examples/i2c/sensor.js` reads the temperature that was
+when the call was answered; the launcher's reading of a line with a mark (`+`, `!`,
+`...`), from a file that the check writes; `examples/i2c/sensor.js` reads the
+temperature that was
 set and counts one in the EEPROM, reads another after that was set from outside, the
 file has the count, and after a reset of the firmware the temperature is still as set
 and the count goes on; the record of such a run has it byte for byte (the sensor
@@ -1136,14 +1141,32 @@ leaves the count in the file when it is closed; the record of the app's run has 
 EEPROM's byte read and the run's number written, the sensor set to 12 bits and both
 temperatures byte for byte, every call answered; `examples/i2c/test.sh` passes on a
 Flipper of its own; a `run` with another `rom-size` is refused and the file is as it
-was; and a start with the EEPROM alone has no sensor in the scan, in the script or in
-the app, and the count from before. Before that last start, a record goes on over a
+was; and a start without the sensor has none in the scan, in the script or in the
+app, and the count from before. Before that last start, a record goes on over a
 reset of the firmware, the scan after it counted, and is whole when the device is
-stopped under it: 128 calls and no line cut. 63 checks on Momentum, Unleashed and
-RogueMaster, with the app's part skipped: the SDK of the ufbt here is for the
-official 1.5.1. On that one it is 60, with the script's part skipped, since the
-official JavaScript has no `i2c` module. On the official dev build it is 55, with
-both skipped: only the scan talks on the bus there.
+stopped under it: 128 calls and no line cut.
+
+The last start has a second device beside the EEPROM, `i2c-echo` at 0x42: QEMU's
+device for tests, which keeps three bytes, gives them back to a read, and refuses a
+fourth. It is there for the marks that neither example makes. A script writes four
+bytes to it and then five, and reads three: the record has the fourth byte refused
+in both writes, and the firmware's call is true for the first and false for the
+second. The check's own app in C (`scripts/i2c_check_app`, built and started by `ufbt
+launch`) logs how each of its calls went, and the record has to say the same: three
+bytes written and read back after a START with no STOP before it (`+`); the two
+writes with a byte refused (`!`); after a byte to the one device, a START with no
+STOP for the EEPROM, which answers with its own bytes, and one for an address where
+nobody is, which the call says and the record has as `no answer`; 300 bytes in one
+read, more than the peripheral counts at once, the EEPROM's 256 and then its first
+44 again, in one line; two bytes written, the transfer held, and a third (one line);
+and a byte written with the bus held for four seconds, in which the check ends the
+record: that line ends with `...` and is the file's last, the app's read after it
+goes well, and the firmware's scan finds the two devices afterwards.
+
+66 checks on the official 1.5.1, with the scripts' part skipped, since the official
+JavaScript has no `i2c` module. 64 on Momentum, Unleashed and RogueMaster, with the
+apps' part skipped: the SDK of the ufbt here is for the official 1.5.1. On the
+official dev build it is 55, with both skipped: only the scan talks on the bus there.
 
 `scripts/gdb_check.py FIRMWARE` does what the gdb section shows, with gdb in batch
 mode: a backtrace of the firmware with functions and lines, the breakpoint in the

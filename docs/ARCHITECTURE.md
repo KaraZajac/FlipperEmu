@@ -132,6 +132,11 @@ go by the chip's names, `i2c1` (the power bus) and `i2c3` (the header's), so tha
 Address 0, the general call, is answered by nobody: none of the devices here listens
 to it, and QEMU's bus would have every one of them answer. The model counts the
 addresses that the firmware calls and those that nobody took, and keeps the last.
+A START with no STOP before it, for another address than the one that has the
+transfer, ends that transfer on QEMU's bus first (`i2c_end_transfer`): the bus looks
+for a device only when it is idle, and would give the START to the device that has
+it, whatever the address. So the first device is told of a STOP that the wire did
+not have.
 
 ## CPU2: ST FUS without a wireless stack (`stm32wb55_ipcc.c`)
 
@@ -1181,9 +1186,14 @@ ufbt is not run at all, and `update` sends the package without the stage (BRINGU
   on the header while the firmware talks, and the pins' record has no bits of a
   transfer), the bus's speed (a transfer takes no time, and a record's bytes have
   the time of their START), clock stretching, 10-bit addresses, and a device put
-  there or taken away while the emulator runs. Not seen from a firmware: the
-  record's `+` (a START after no STOP) and `!` (a byte refused). The model has
-  both, and the firmware's calls that were tried make neither.
+  there or taken away while the emulator runs. The record's `+` (a START after no
+  STOP) and `!` (a byte refused) come from a firmware in `scripts/i2c_check.py`: an
+  app of the check's own on the official 1.5.1 for both, a script on Momentum,
+  Unleashed and RogueMaster for the `!`, nothing on the dev build. The device that
+  refuses there is QEMU's `i2c-echo`. After a STOP it asks the bus to let it send
+  what it was given, as a master, and is never let: the peripheral's model is a
+  master only and offers the bus to nobody. (QEMU keeps each such asking, a few
+  bytes of the emulator's memory for every STOP to that device.)
 
 ## The front panel (`flipper_panel.c`, `scripts/fe_gui*.py`)
 

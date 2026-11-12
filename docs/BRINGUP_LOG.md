@@ -2285,6 +2285,58 @@ big lock, entry 92).
       front at that point. It is of the console by itself now.
     - `scripts/gui_check.py`: 55 checks on the five.
 
+116. **A START with no STOP, and a byte that a device refuses, from a
+    firmware.** The record's `+` and `!` (entry 114) had been read by the
+    launcher from a file of the check's and never written for a firmware:
+    nothing here made either.
+    - A device that refuses a byte: QEMU's `i2c-echo`, a device for its own
+      tests. It keeps three bytes, gives them back to a read (0xff after
+      them), and refuses a fourth. The EEPROM and the TMP105 take whatever
+      comes. The check's last start has it at 0x42, beside the EEPROM.
+    - A START with no STOP is not in the firmware's plain calls
+      (`furi_hal_i2c_trx` is a write, a STOP, and a read) and not in the
+      JavaScript module. `furi_hal_i2c_tx_ext` and `furi_hal_i2c_rx_ext` have
+      it: a write that ends with `FuriHalI2cEndAwaitRestart`, and a read that
+      begins with `FuriHalI2cBeginRestart`. So the check has an app in C of
+      its own, `scripts/i2c_check_app`, which logs how each call went; the
+      record has to say the same.
+    - **It found a fault in the model.** After a byte to the echo device, a
+      START with no STOP for the EEPROM read `21 12`: the echo's bytes. And
+      one for 0x33, where nobody is, was answered. QEMU's bus looks for a
+      device only when it is idle (`i2c_do_start_transfer`); a START inside a
+      transfer goes to the device that has it, whatever the address. That is
+      right for a START again to the same device, which is all that a write
+      and a read of one register need, and all that had been tried. Now
+      `i2c_start()` ends the transfer on QEMU's bus first when the address is
+      another: the EEPROM answers with `e1 e2`, its own, and the call to
+      nobody is `no answer` and false in the app. The first device is told of
+      a STOP that the wire did not have, since QEMU has no other word for it.
+    - **A refused byte is not always a failed call.** Four bytes to the echo
+      device: the record has `01 02 03 04!`, and the firmware's
+      `furi_hal_i2c_tx` is true. Five bytes: the fourth has the `!` again,
+      the fifth is never sent, and the call is false.
+      `furi_hal_i2c_transfer` does not look at NACKF. It sees a STOP that
+      came early, and takes that for a failure only while bytes are still to
+      send ("If the transfer was over, still a success"): with the last one
+      refused, none is. The JavaScript `write` gives the same two answers.
+      Seen in the emulator; a real Flipper was not asked.
+    - More than 255 bytes in one transfer (RELOAD, which the HAL uses by
+      itself) and a write that is held and gone on with (`FuriHalI2cEndPause`,
+      `FuriHalI2cBeginResume`) are one line each in the record, as they are
+      one transfer on the wire: 300 bytes read from the EEPROM of 256 are its
+      contents and then the first 44 again.
+    - A record that is ended while the app holds the bus after a byte has
+      that line with ` ...`, and the read that follows is in no file.
+    - The echo device asks the bus at every STOP to let it send as a master.
+      Nothing lets it: the peripheral's model is a master only.
+    - Where: the `+` on the official 1.5.1 (the SDK of the ufbt here); the
+      `!` there and, from a script, on Momentum, Unleashed and RogueMaster;
+      neither on the dev build.
+    - `scripts/i2c_check.py`: 66 checks and one skipped on the official
+      1.5.1, 64 and one skipped on Momentum, Unleashed and RogueMaster, 55
+      and three skipped on the dev build. The model changed, no patch: a
+      QEMU tree is built again (`scripts/setup_qemu.sh`).
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

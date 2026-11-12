@@ -1,0 +1,12 @@
+# What scripts/i2c_check.py has a firmware do on the header's I2C bus: not an
+# example (examples/i2c is one)
+App(
+    appid="fe_bus_check",
+    name="I2C bus check",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="fe_bus_check_app",
+    stack_size=2 * 1024,
+    fap_category="Debug",
+    fap_version="1.0",
+    fap_description="Transfers on pins 15 and 16 that scripts/i2c_check.py records",
+)

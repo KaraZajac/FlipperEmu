@@ -119,6 +119,19 @@ static void i2c_start(WB55I2cState *s)
     }
 
     i2c_tap_end(s, false);              /* a START with no STOP before it */
+    if (s->active && addr != s->last) {
+        /*
+         * ... and for another address.  QEMU's bus looks for a device only
+         * when it is idle: a START in a transfer goes to the device that
+         * has it, whatever the address is.  So that one is let go of here,
+         * as it lets go by itself at an address that is not its own, and
+         * the bus looks again.  (It is told of a STOP, which QEMU has no
+         * other word for: a device that acts on one, as an EEPROM that then
+         * keeps what was written, does so here.)
+         */
+        i2c_end_transfer(s->bus);
+        s->active = false;
+    }
     s->calls++;
     s->last = addr;
     s->last_read = read;

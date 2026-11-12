@@ -52,9 +52,10 @@ launcher plays) passes on the same five.
 `scripts/i2c_check.py` (the I2C bus of the header: a temperature sensor and an EEPROM
 put there with `run --i2c`, found by the firmware's scan, read and written by a script
 and by an app in C, set from outside, the EEPROM's contents kept in a file, and every
-transfer in a record, byte for byte) passes on the same five. The script's part runs
-on Momentum, Unleashed and RogueMaster, whose JavaScript has an `i2c` module, and the
-app's part on the official 1.5.1, which the SDK of the ufbt here is for.
+transfer in a record, byte for byte, a byte that a device refuses and a START with no
+STOP before it among them) passes on the same five. The scripts' part runs on
+Momentum, Unleashed and RogueMaster, whose JavaScript has an `i2c` module, and the
+apps' part on the official 1.5.1, which the SDK of the ufbt here is for.
 `scripts/ufbt_check.py` (ufbt 0.2.6 building `examples/hello`, launching it there, and
 `ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's symbols, that
 app's and a stock app's, and its debug configuration for VS Code used the way that
@@ -1928,7 +1929,9 @@ app's screen compared with a file after each
   EEPROM, clocks (`ds1338`, `m41t80`, `rs5c372`), port expanders and an LED driver
   (`pca9535`, `pca9554`, `pca9552`), a pressure sensor (`dps310`), a magnetometer
   (`lsm303dlhc_mag`) and a small OLED (`ssd0303`). Tried here are the TMP105 and
-  the EEPROM, which the check has, and a TMP421's values by hand. The others are
+  the EEPROM, which the check has, a TMP421's values by hand, and `i2c-echo`,
+  QEMU's device for tests, which the check has for a byte that is refused: it
+  keeps three bytes, gives them back to a read, and refuses a fourth. The others are
   QEMU's models as they come, each as complete as QEMU has it. A type that QEMU
   has not is refused with the names of those it has, before anything is flashed.
 - **`i2c`** has a line for the bus and one for each device with what can be set on it
@@ -1952,7 +1955,8 @@ app's screen compared with a file after each
   address called (its seven bits, as `i2c` has them), `w` or `r`, and the bytes
   written or read. `no answer`: nobody took the address. `!` after a byte: the
   device refused it, and the transfer ended there. `+` at the end: no STOP, the next
-  line's START follows at once. The lines with `#` say what the file is and what
+  line's START follows at once. `...` at the end: the record was ended inside that
+  transfer. The lines with `#` say what the file is and what
   was on the bus. `i2c record` alone says whether one runs and what it has counted
   so far. A record goes on over a reset of the firmware, and ends with `i2c record
   stop` or with the emulator; the file is whole either way. One runs at a time.
@@ -2014,11 +2018,20 @@ Not there:
 - The record is of the header's bus. The Flipper's own I2C bus, with the fuel gauge,
   the charger and the LED driver, is not recorded.
 - The record is this project's own text. No logic analyzer's program was given it.
-- Not tried with a firmware: a line with `+` and a byte with `!`. What the script
-  and the app call in the firmware ends every START with a STOP (also
-  `furi_hal_i2c_trx` and the script's `writeRead`: a write, a STOP, and a read), and
-  neither device refuses a byte. The check has the launcher read such lines; the
-  emulator's writing of them was not seen.
+- A line with `+` and a byte with `!` were seen from a firmware, in the check. An app
+  in C makes a START with no STOP before it with `furi_hal_i2c_tx_ext` and
+  `furi_hal_i2c_rx_ext` (for the same device, for another one, and for an address
+  where nobody is): on the official 1.5.1, which the SDK of the ufbt here is for. A
+  byte is refused there too, and to a script on Momentum, Unleashed and RogueMaster.
+  On the official dev build nothing makes either. `furi_hal_i2c_trx` and the
+  script's `writeRead` make no `+`: they are a write, a STOP, and a read.
+- A refused byte is not always a failed call. The firmware's write came back true
+  when the device refused its last byte, and false when it refused one before the
+  last; the record has the `!` both times. That is the emulator's answer: a real
+  Flipper was not asked.
+- A START for another address inside a transfer tells the first device of a STOP,
+  since QEMU's bus has no other way to take the transfer from it. A device that
+  does something at a STOP does it there.
 - Nothing checks that the app has the pins in the bus's function: I2C3 answers here
   also when the app forgot to set the pins up, where a real Flipper would be silent.
 
@@ -2027,15 +2040,17 @@ with its whole path, or `off`; read, the addresses called, those nobody answered
 bytes written and read, the nanoseconds so far and the file.
 
 `scripts/i2c_check.py FIRMWARE` checks all of it with the firmware's scan, that script
-and that app: 63 checks on Momentum, Unleashed and RogueMaster, with the app's part
-skipped (ufbt's SDK is for another firmware); 60 on the official 1.5.1, with the
-script's part skipped; 55 on the official dev build, with both skipped.
+and that app, and with a script and an app of its own for the refused byte and the
+START with no STOP: 66 checks on the official 1.5.1, with the scripts' part skipped;
+64 on Momentum, Unleashed and RogueMaster, with the apps' part skipped (ufbt's SDK is
+for another firmware); 55 on the official dev build, with both skipped.
 
 An EEPROM's file needs one fix to QEMU's model (`qemu/patches/0009`,
 docs/BRINGUP_LOG.md, 110): it wanted the file's length in whole sectors of 512 bytes
 to be the EEPROM's size, so no file could hold a 256-byte chip. **A QEMU tree that
-was set up before 2026-11-11 wants `scripts/setup_qemu.sh` once more**, for the patch
-and for the machine's side of all this (the bus by its name, what was called).
+was set up before 2026-11-12 wants `scripts/setup_qemu.sh` once more**, for the patch
+and for the machine's side of all this (the bus by its name, what was called, the
+record, a START for another address inside a transfer).
 
 ### The secure enclave
 

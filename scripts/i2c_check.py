@@ -26,9 +26,9 @@ happens, and leaves no record behind; nor does a watch that a script ends
 with `kill`.  What is said wrongly is refused.  And
 the word on an address that was not shifted (a call to 0x24 that nobody
 answers while a sensor is at 0x48) is said for that call and for no other.
-A line with a mark that no firmware here makes (no STOP before the next
-START, a byte the device refused, a record that ended inside a transfer) is
-read as it is written; the machine's writing of those is not checked.
+A line with a mark (no STOP before the next START, a byte the device
+refused, a record that ended inside a transfer) is read as it is written,
+and said in words.
 
 Where the firmware's JS has an i2c module (Momentum, Unleashed, RogueMaster;
 the official firmware's has none, and that part is skipped), the firmware runs
@@ -49,8 +49,20 @@ test.sh passes on a Flipper of its own.
 
 A record that nobody ends goes on over a reset of the firmware, and its file
 is whole when the device is stopped.  After the stop an EEPROM of another
-size is refused while the file is there, and a start with the EEPROM alone
-finds its contents kept, and no sensor.
+size is refused while the file is there, and a start without the sensor
+finds the EEPROM's contents kept.
+
+That second start has QEMU's device for tests on the bus as well (i2c-echo at
+0x42: it keeps three bytes, gives them back to a read, and refuses a fourth),
+for what neither example does there.  A script (where the JS has an i2c
+module) writes four bytes and five: the record marks the fourth as refused,
+and the firmware's call says so only when a byte was still to follow.  And
+where ufbt has the firmware's SDK, an app in C of the check's own
+(scripts/i2c_check_app) does that and more: a START with no STOP before it,
+to the same device, to another, and to an address where nobody is; 300 bytes
+in one read; a write that is held and gone on with; and a transfer that is
+open while the record is ended.  The record has each as the app's log says
+it went.  (A firmware with neither: skipped.)
 Exit status 0 = pass.
 """
 import argparse
@@ -67,7 +79,7 @@ import time
 
 from files_check import ROOT, Bench, CRASH, check, results
 from uart_check import fe, start
-from ufbt_check import log_tail, logged, tool
+from ufbt_check import ANSI, log_tail, logged, tool
 
 sys.path.insert(0, str(ROOT / "scripts"))
 import fe_header                                            # noqa: E402
@@ -75,6 +87,16 @@ import fe_header                                            # noqa: E402
 EXAMPLE = ROOT / "examples" / "i2c"
 SENSOR = EXAMPLE / "sensor.js"
 APP = "/ext/apps/Examples/fe_sensor.fap"
+OWN = ROOT / "scripts" / "i2c_check_app"
+# QEMU's i2c-echo keeps three bytes, and refuses a fourth
+ECHO_JS = """let i2c = require("i2c");
+let ECHO = 0x42 << 1;
+print("four:", i2c.write(ECHO, [1, 2, 3, 4], 50));
+print("five:", i2c.write(ECHO, [0x11, 0x12, 0x13, 0x14, 0x15], 50));
+let back = Uint8Array(i2c.read(ECHO, 3, 50));
+print("back:", back[0], back[1], back[2]);
+print("echo done");
+"""
 WRONG = (
     ("tmp105", "TYPE@ADDRESS", "a device without an address"),
     ("tmp105@72", "as 0x48", "an address that is not in hex"),
@@ -283,11 +305,9 @@ def shifted_checks():
 
 
 def marks_checks():
-    """The marks at a record's line that no firmware here has the machine
-    write: its calls end every START with a STOP, and neither device refuses
-    a byte.  How the launcher reads such a line, and what a watch says of
-    it.  (The launcher's own doing; the machine's writing of them is not
-    checked.)"""
+    """The marks at a record's line: how the launcher reads such a line, and
+    what a watch says of it.  (The launcher's own doing, on lines that are
+    written here; the machine's writing of them is in rare_checks.)"""
     def read(line):
         try:
             part = fe_header.i2c_part(line)
@@ -324,8 +344,8 @@ def marks_checks():
         "hello", "1.0 0x48 w", "1.000000000 48 w", "1.000000000 0x48 x",
         "1.000000000 0x48 r 17!", "1.000000000 0x24 w no answer 00",
         "1.000000000 0x48 w 0", "1.000000000 0x48")]
-    check("a record's line with a mark that no firmware here makes (`+`: no "
-          "STOP, `!`: a byte refused, `...`: the record ended there): read "
+    check("a record's line with a mark (`+`: no STOP, `!`: a byte refused, "
+          "`...`: the record ended there), written here: read "
           "as it is written and said in words, 20 bytes as 16 and their "
           "number; a comment is no part, and what is no line of a record "
           "is not taken for one",
@@ -636,9 +656,10 @@ def app_checks(b, firmware, runs):
 
 
 def again_checks(b, timeout, runs, script, app):
-    """A stop, and a start with the EEPROM alone.  `runs`: what the EEPROM
-    has counted (None: nothing wrote to it); script, app: what there is to
-    read it with"""
+    """A stop, and a start without the sensor: the EEPROM, and QEMU's echo
+    device for rare_checks.  `runs`: what the EEPROM has counted (None:
+    nothing wrote to it); script, app: what there is to read it with.
+    -> the device runs"""
     rom = b.dir / "i2c-50.bin"
     # a record that nobody ends: over a reset, and until the device stops
     left = b.dir / "left.txt"
@@ -670,19 +691,22 @@ def again_checks(b, timeout, runs, script, app):
           code == 1 and "256 bytes" in err and "rom-size=256" in err
           and c2 == 1 and "not running" in e2 and rom.read_bytes() == kept,
           f"{code}\n{out}{err}\n{o2}{e2}")
-    ok, said = start(b, timeout, "--i2c", "eeprom@0x50")
-    if not check("a start with the EEPROM alone", ok,
+    ok, said = start(b, timeout, "--i2c", "eeprom@0x50", "--i2c",
+                     "i2c-echo@0x42")
+    if not check("a start without the sensor: the EEPROM, and QEMU's device "
+                 "for tests (i2c-echo) at 0x42", ok,
                  said + b.uart_text()[-2000:]):
-        return
+        return False
     found, said = scan(b)
     code, out, err, _ = fe(b, "i2c")
-    check("the scan finds 0x50 alone, and `i2c` has no sensor",
-          found == [0x50] and code == 0 and "tmp105" not in out
-          and "at24c-eeprom at 0x50" in out, said + out + err)
+    check("the scan finds those two, and `i2c` has no sensor",
+          found == [0x42, 0x50] and code == 0 and "tmp105" not in out
+          and "i2c-echo at 0x42, at24c-eeprom at 0x50" in out,
+          said + out + err)
     if runs is None:
         check("the EEPROM's contents are as they were",
               rom.read_bytes() == kept and len(kept) == 256, kept[:16].hex(" "))
-        return
+        return True
     if script:
         runs += 1
         (t, n), said = sensor(b)
@@ -700,6 +724,151 @@ def again_checks(b, timeout, runs, script, app):
               and rom.read_bytes()[:2] == bytes([runs, 255]),
               out + err + log_tail(b) + rom.read_bytes()[:16].hex(" "))
         fe(b, "app", "--close")
+    return True
+
+
+def texts(parts):
+    """What a watch says of each part (None: a part that the record has not)"""
+    return [fe_header.i2c_part_text(p) if "data" in p else None
+            for p in parts]
+
+
+def rare_checks(b, script, app):
+    """What neither example does on the bus, with QEMU's echo device at 0x42:
+    it keeps three bytes, gives them back to a read, and refuses a fourth.
+    script: the firmware's JS has an i2c module; app: ufbt's SDK is for this
+    firmware.  The machine's writing of a record's marks, which marks_checks
+    has the launcher's reading of"""
+    if not script and not app:
+        skip("a byte that a device refuses, and a START with no STOP before "
+             "it", "this firmware's JS has no i2c module, and ufbt's SDK is "
+             "not for it: nothing here makes it do either")
+        return
+    if script:
+        js = b.dir / "echo.js"
+        js.write_text(ECHO_JS)
+        rec = b.dir / "echo.txt"
+        fe(b, "push", js, "/ext")
+        fe(b, "i2c", "record", rec)
+        code, said, err, _ = fe(b, "cli", "--timeout", 60, "js /ext/echo.js")
+        c2, o2, e2, _ = fe(b, "i2c", "record", "stop")
+        _, short, parts, wrong = recorded(rec)
+        check("a script writes four bytes to a device that keeps three: the "
+              "record marks the fourth as refused, and the firmware's call "
+              "says that it went well all the same; of five, the fourth is "
+              "refused and the fifth not sent, and that call says so; the "
+              "three that the device kept are read back",
+              code == 0 and c2 == 0 and not wrong and "four: true" in said
+              and "five: false" in said and "back: 17 18 19" in said
+              and short == [(0x42, "w", True, b"\x01\x02\x03\x04"),
+                            (0x42, "w", True, b"\x11\x12\x13\x14"),
+                            (0x42, "r", True, b"\x11\x12\x13")]
+              and [p["refused"] for p in parts] == [True, True, False]
+              and all(p["stop"] and p["whole"] for p in parts)
+              and texts(parts)[:2] == [
+                  "wrote 01 02 03 04 (the last one refused)",
+                  "wrote 11 12 13 14 (the last one refused)"]
+              and count(parts) in o2 and "3 addresses called, all answered; "
+              "6 bytes written, 3 read" in o2,
+              said + err + o2 + e2 + wrong + "\n".join(map(str, short)))
+    if not app:
+        return
+
+    rom = b.dir / "i2c-50.bin"
+    rec = b.dir / "bus.txt"
+    work = pathlib.Path(tempfile.mkdtemp(prefix="fe-i2c-"))
+    try:
+        folder = work / "fe_bus_check"
+        folder.mkdir()
+        for name in ("application.fam", "bus.c"):
+            shutil.copy(OWN / name, folder)
+        fe(b, "i2c", "record", rec)
+        code, text = tool(b, folder, "launch")
+        # its last transfer is open for seconds: the record ends inside it
+        held = logged(b, "[FeBus] 8 written 1, and the bus is held", 30)
+        c2, o2, e2, _ = fe(b, "i2c", "record", "stop")
+        ended = logged(b, "[FeBus] done", 30)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    said = [line.split("[FeBus] ", 1)[1].strip()
+            for line in ANSI.sub("", b.uart_text()).splitlines()
+            if "[FeBus] " in line]
+    _, short, parts, wrong = recorded(rec)
+    lines, counted = len(short), count(parts)
+    short += [None] * (15 - len(short))
+    parts += [{"stop": None, "whole": None, "refused": None}] \
+        * (15 - len(parts))
+    said += [""] * (10 - len(said))
+    told = "\n".join(said) + "\n" + o2 + e2 + wrong + "\n" + "\n".join(
+        f"{p} {q.get('stop')} {q.get('whole')}"[:90]
+        for p, q in zip(short, parts))
+    kept = rom.read_bytes()
+    long = (kept * 2)[:300]
+    echo = [None, (0x42, "w", True), (0x42, "r", True)]
+
+    def line(n, how, data, stop=True, refused=False, whole=True):
+        return short[n] == echo[how][:3] + (data,) \
+            and (parts[n]["stop"], parts[n]["refused"], parts[n]["whole"]) \
+            == (stop, refused, whole)
+
+    check("an app in C of the check's own (scripts/i2c_check_app), by `ufbt "
+          "launch`: it runs to its end and logs what each of its calls said",
+          code == 0 and held and ended and said[9] == "done"
+          and len(said) == 10 and not wrong, text[-1500:] + told)
+    check("three bytes written and read after a START with no STOP before "
+          "it (furi_hal_i2c_tx_ext, furi_hal_i2c_rx_ext): the record has "
+          "the write with a `+` and the read on the line after it, and the "
+          "app got its bytes",
+          said[0] == "1 written 1, read after a START again 1: a1 b2 c3"
+          and line(0, 1, b"\xa1\xb2\xc3", stop=False)
+          and line(1, 2, b"\xa1\xb2\xc3")
+          and texts(parts[:1]) == ["wrote a1 b2 c3 (no STOP: the next one "
+                                   "follows at once)"], told)
+    check("a fourth byte, which the device refuses: marked in the record, "
+          "and the firmware's call says that it went well; of five the "
+          "fifth is not sent, and that call says that it did not",
+          said[1:3] == ["2 four bytes written 1", "3 five bytes written 0"]
+          and line(2, 1, b"\x01\x02\x03\x04", refused=True)
+          and line(3, 1, b"\x11\x12\x13\x14", refused=True), told)
+    check("a START with no STOP before it for another address: the EEPROM "
+          "answers there with its own bytes, and not the device that had "
+          "the bus; and where nobody is the call fails, with `no answer` "
+          "in the record",
+          said[3] == "4 EEPROM set 1, echo written 1, EEPROM read after a "
+          "START again 1: e1 e2"
+          and said[4] == "5 echo written 1, nobody read after a START again 0"
+          and short[4:6] == [(0x50, "w", True, b"\x10\xe1\xe2"),
+                             (0x50, "w", True, b"\x10")]
+          and line(6, 1, b"\x21", stop=False)
+          and short[7] == (0x50, "r", True, b"\xe1\xe2") and parts[7]["stop"]
+          and line(8, 1, b"\x31", stop=False)
+          and short[9] == (0x33, "r", False, b"") and parts[9]["stop"]
+          and kept[16:18] == b"\xe1\xe2", told + kept[:32].hex(" "))
+    check("300 bytes in one read, more than the peripheral counts at once: "
+          "one line of the record, the EEPROM's 256 and its first 44 "
+          "again; a write that is held and gone on with (no STOP, and no "
+          "START): one line of its three bytes",
+          said[5] == f"6 300 bytes read 1: their sum {sum(long)}, byte 16 "
+          "e1, byte 273 e2"
+          and short[10:12] == [(0x50, "w", True, b"\x00"),
+                               (0x50, "r", True, long)]
+          and said[6] == "7 two bytes written and held 1, a third 1, read "
+          "1: 41 42 43"
+          and line(12, 1, b"\x41\x42\x43") and line(13, 2, b"\x41\x42\x43"),
+          told)
+    found, scanned = scan(b)
+    check("the record ended inside a transfer (a byte written, and the "
+          "START that reads it seconds away): its last line says so with "
+          "`...`, the count is the file's, and the app's read after it "
+          "went well; the firmware's scan then finds the two devices",
+          said[7:9] == ["8 written 1, and the bus is held for 4 s",
+                        "8 read after a START again 1: 51"]
+          and line(14, 1, b"\x51", whole=False) and lines == 15
+          and rec.read_text().endswith(" 0x42 w 51 ...\n")
+          and texts(parts[14:]) == ["wrote 51 (the record ended there)"]
+          and c2 == 0 and counted in o2 and "15 addresses called, 14 "
+          "answered; 20 bytes written, 308 read" in o2
+          and found == [0x42, 0x50], told + scanned)
 
 
 def main():
@@ -733,8 +902,9 @@ def main():
             marks_checks()
             runs = script_checks(b, args.timeout)
             ran = app_checks(b, args.firmware, runs)
-            again_checks(b, args.timeout, ran or runs, runs is not None,
-                         ran is not None)
+            if again_checks(b, args.timeout, ran or runs, runs is not None,
+                            ran is not None):
+                rare_checks(b, runs is not None, ran is not None)
             ok, said = b.answers()
             check("the CLI still answers", ok, said)
             log = b.uart_text(every=True)

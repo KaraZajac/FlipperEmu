@@ -381,10 +381,17 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         the shift under the console's line for the firmware's calls and under
         the bus's line in the GPIO menu. `gui_check.py` is 55 checks
         (BRINGUP_LOG 115)
-  - ☐ More on that bus: a repeated START and a refused byte from a firmware
-        (the record's `+` and `!` were not seen: an app of the check's own
-        with `furi_hal_i2c_tx_ext`); the C app on the other firmwares, each
-        with its own SDK
+  - ☑ A repeated START and a refused byte from a firmware (2026-11-11): the
+        record's `+`, `!` and `...` are written from a firmware's transfers,
+        with QEMU's `i2c-echo` at 0x42 as the device that refuses a fourth
+        byte. An app of the check's own (`scripts/i2c_check_app`,
+        `furi_hal_i2c_tx_ext` and `rx_ext`; the official 1.5.1) and a script
+        (Momentum, Unleashed, RogueMaster). It found that a START with no STOP
+        for another address went to the device that had the bus: fixed in the
+        I2C model. `scripts/i2c_check.py` is 66 checks on the official 1.5.1,
+        64 on those three, 55 on the dev build (BRINGUP_LOG 116)
+  - ☐ More on that bus: the C app on the other firmwares, each with its own
+        SDK
   - ☐ What other peripherals put on a pin: PWM, SPI devices on the header; a
         voltage for the ADC
   - ☐ An interrupt on a held pin and an open-drain output (untried: they need an
