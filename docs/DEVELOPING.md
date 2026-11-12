@@ -1240,16 +1240,21 @@ the log: the window has to say it by itself.
 `update` (`--package PKG`: another firmware's). It wants the package on the card
 within seconds, the card in its slot again and the firmware using it, the launcher
 waiting until the Flipper is back and saying what runs on it, a file that was on the
-card still there, a manifest on the card without the radio stage, the updater's
-stages in the log, no crash, and the log level as before or else named. Then the same
+card still there, the emulator's own Sub-GHz keystores (`keystores/overlay`) on the
+card again after the updater unpacked the package's over them and the launcher saying
+so, a manifest on the card without the radio stage, the updater's stages in the log,
+no crash, and the log level as before or else named. Then the same
 with the radio stage kept and through the CLI (`--cli`): what was written to the
 card's image is the same to the firmware, so only the two changed files are sent, the
 updater's error is reported with the way out of it, and a held Back brings the
 firmware back. That part runs with the firmware's log level at none: the launcher has
 to lend the updater a level to see its error, and to give none back. And the
 refusals: a folder and a file that are no package, a pulled USB cable, a card that is
-out of its slot, a device that does not run. 29 checks; it passes on the official
-1.5.1, Momentum, Unleashed and RogueMaster with their own packages (3, 6, 4 and 10
+out of its slot, a device that does not run. At the end the Flipper is stopped and
+started with `run --update`: the updater has to start, the keystores to be on the card
+again when it is done and the run to say so, the package's firmware to run with its
+CLI answering, and no crash. 33 checks; it passes on the official
+1.5.1, Momentum, Unleashed and RogueMaster with their own packages (4, 9, 6 and 15
 minutes), on the official dev build with its own, and from the official firmware to
 Unleashed and to the dev build with `--package`.
 `ufbt_check.py` has the real `ufbt flash_usb` go through the wrapper (29 checks now).

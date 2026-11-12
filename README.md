@@ -848,6 +848,7 @@ $ ./flipperemu -d mine update firmware/official-1.5.1/flipper-z-f7-update-1.5.1.
 [mine] the card is in again, and the firmware has it
 [mine] updater started: the Flipper starts a few times, without USB, until it is done
 [mine] updated in 80 s: it runs 1.5.1 (commit 9e810dc3, built 15-10-2026)
+[mine] its updater unpacked the package's Sub-GHz keystores to the card, which only a real Flipper's key opens: the emulator's own are there again (4 files, docs/keystores.md)
 ```
 
 In [the window](#the-window) this is Device > Update with a package, and F6 for the
@@ -879,8 +880,20 @@ command that sets it again (`log --set-level`). If the level hides the updater's
 when you start, it gets `info` for as long as it works, so that an error on its screen
 is seen.
 
+An updater also unpacks its package's resources to the card, and the Sub-GHz keystores
+among them are encrypted with a real Flipper's key, which the emulator does not have:
+the firmware would name no KeeLoq remote's maker after that. So `update` and
+`run --update` write the emulator's own keystores ([docs/keystores.md](docs/keystores.md))
+to the card again when the updater is done, and say so. After `update --no-wait`, or an
+update that was started on the Flipper itself (its menu, `update install` at its CLI),
+this does it, for a device that runs and for one that is stopped:
+
+```sh
+./flipperemu -d mine push keystores/overlay/subghz /ext/
+```
+
 `scripts/update_check.py FIRMWARE [--package PKG]` checks all of that on a throwaway
-device (29 checks: the official firmware, its dev build, Momentum, Unleashed and
+device (33 checks: the official firmware, its dev build, Momentum, Unleashed and
 RogueMaster with their own packages, and the official one updated to Unleashed and to
 the dev build).
 

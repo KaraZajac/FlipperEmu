@@ -1208,6 +1208,7 @@ def usb_helpers(dev: Device, proc, usb_mode, manifest, label=None):
         print(f"[{dev.name}] updater started: {manifest}", flush=True)
         dev.save_info(firmware=f"{label} (installed by update)",
                       flashed=time.strftime("%Y-%m-%d %H:%M:%S"), source=manifest)
+        keystores_after_update(dev, proc)
 
 
 def cmd_stop(args):
@@ -3592,7 +3593,88 @@ class card_out:
         return False
 
 
-def await_update(dev, log, timeout):
+def overlay_push(dev):
+    """The command that puts the emulator's own Sub-GHz keystores on a
+    device's card, as it is typed where the launcher was called"""
+    paths = []
+    for p in sorted(REKEYED_OVERLAY.iterdir()):
+        try:
+            p = p.relative_to(pathlib.Path.cwd())
+        except ValueError:
+            pass
+        paths.append(str(p))
+    return f"`./flipperemu -d {dev.name} push {' '.join(paths)} /ext/`"
+
+
+def rekeyed_keystores(dev, cli):
+    """The emulator's own Sub-GHz keystores (keystores/overlay, which a new
+    card gets) on the card of a device that runs, through its firmware's CLI:
+    they are a few KB.  A firmware's updater unpacks the package's resources
+    over them, and the keystores among those only a real Flipper's key
+    opens.  How many files were written (none: they were there); None with
+    no such folder here."""
+    import fe_files
+    if not REKEYED_OVERLAY.is_dir():
+        return None
+    end = time.monotonic() + 20.0
+    while "Storage error" in cli.run("storage info /ext"):  # (a card just
+        if time.monotonic() > end:                          # taken)
+            raise fe_files.FilesError("the firmware has no card that it can "
+                                      "use")
+        time.sleep(0.5)
+    copied, _ = fe_files.push(fe_files.CliFiles(cli),
+                              sorted(REKEYED_OVERLAY.iterdir()), "/ext/",
+                              say=lambda line: None)
+    return copied
+
+
+def rekeyed_said(dev, keys, trouble):
+    """What `update` and `run --update` say of the keystores after an update"""
+    if keys:
+        print(f"[{dev.name}] its updater unpacked the package's Sub-GHz "
+              "keystores to the card, which only a real Flipper's key opens: "
+              f"the emulator's own are there again ({keys} "
+              f"file{'s' if keys > 1 else ''}, docs/keystores.md)", flush=True)
+    elif trouble:
+        print(f"[{dev.name}] the emulator's own Sub-GHz keystores could not "
+              f"be written to its card after the update ({trouble}): "
+              f"{overlay_push(dev)} does that (docs/keystores.md)", flush=True)
+
+
+def keystores_after_update(dev, proc, timeout=900.0):
+    """`run --update`: the emulator's own Sub-GHz keystores on the card again
+    when the firmware's updater is done, as `update` puts them there.  (This
+    is the run's own thread: it waits as long as the updater takes, and says
+    nothing of an updater that does not come back.)"""
+    import fe_files
+    import fe_log
+    if not REKEYED_OVERLAY.is_dir():
+        return
+    log = fe_log.Log(dev.uart, new=True)
+    try:
+        how, _ = await_update(dev, log, timeout, show=False)
+    except OSError:
+        return
+    finally:
+        log.close()
+    if how != "back" or proc.poll() is not None:
+        return
+    keys = trouble = None
+    try:
+        cli = open_cli(dev, timeout=60.0)       # (in its turn at the port)
+        try:
+            keys = rekeyed_keystores(dev, cli)
+        finally:
+            cli.close()
+    except SystemExit as e:
+        trouble = str(e).removeprefix(f"[{dev.name}] ")
+    except (fe_files.FilesError, OSError, TimeoutError) as e:
+        trouble = str(e)
+    if proc.poll() is None:
+        rekeyed_said(dev, keys, trouble)
+
+
+def await_update(dev, log, timeout, show=True):
     """Wait for the firmware's updater: what became of it ("back": the
     Flipper runs again, with its USB serial port; "error": the updater stopped
     at one; "ended": the emulator did; "restarted": it was started anew;
@@ -3605,7 +3687,7 @@ def await_update(dev, log, timeout):
     before a restart is the one for "done", and one above it is an error,
     after which the updater stays on its screen."""
     import fe_log
-    tty = sys.stderr.isatty()
+    tty = show and sys.stderr.isatty()
     start = time.monotonic()
     starts, stage, full, done, gone, look = 0, None, False, None, False, 0.0
     while True:
@@ -3726,6 +3808,11 @@ def send_update(dev, pkg, keep_radio=False, wait=True, timeout=900.0,
         print(f"[{dev.name}] updater started: {manifest} (it has no USB while "
               f"it works; `./flipperemu -d {dev.name} status` shows the serial "
               "port when it is back)")
+        if REKEYED_OVERLAY.is_dir():
+            print(f"[{dev.name}] it unpacks the package's Sub-GHz keystores "
+                  "to the card, which only a real Flipper's key opens: "
+                  f"{overlay_push(dev)}, when it is back, puts the emulator's "
+                  "own there again (docs/keystores.md)")
         return 0
     print(f"[{dev.name}] updater started: the Flipper starts a few times, "
           "without USB, until it is done", flush=True)
@@ -3759,8 +3846,13 @@ def send_update(dev, pkg, keep_radio=False, wait=True, timeout=900.0,
                  f"after {took:.0f} s (its log shows {starts} starts): the "
                  f"updater may still work, or wait at an error.  {look}")
     cli = open_cli(dev, timeout=30.0)
+    keys = trouble = None
     try:
         now = dict(re.findall(r"(?m)^([\w.]+) *: (.*)$", cli.run("info device")))
+        try:
+            keys = rekeyed_keystores(dev, cli)
+        except (fe_files.FilesError, OSError, TimeoutError) as e:
+            trouble = str(e)
     finally:
         cli.close()
     dev.save_info(**stamp)
@@ -3770,6 +3862,7 @@ def send_update(dev, pkg, keep_radio=False, wait=True, timeout=900.0,
         if now.get(key))
     print(f"[{dev.name}] updated in {took:.0f} s: it runs {runs}"
           + (f" ({more})" if more else ""))
+    rekeyed_said(dev, keys, trouble)
     left = firmware_log_level(dev)
     if left != was:
         # the firmware's own doing (the official updater: default; Unleashed's:

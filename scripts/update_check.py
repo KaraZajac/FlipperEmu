@@ -12,8 +12,10 @@ Boots a throwaway device with the firmware, and gives it an update package
 the card out of its slot for that moment, then `update install` at the
 firmware's CLI.  What is looked at: the card is in again and the firmware
 has it; the launcher waits until the Flipper is back and says what runs on
-it; a file that was on the card is still there; the manifest on the card
-has no radio stage; nothing crashed.  Then with the radio stage left in,
+it; a file that was on the card is still there; the emulator's own Sub-GHz
+keystores (keystores/overlay) are on the card again, after the updater
+unpacked the package's over them; the manifest on the card has no radio
+stage; nothing crashed.  Then with the radio stage left in,
 which the emulated second core cannot install, and through the firmware's
 CLI as a real Flipper gets a package (`--cli`): the files that are on the
 card are not sent again (what the launcher wrote to the image is what the
@@ -22,25 +24,31 @@ out of it, and that way works.  That is done with the firmware's log level
 at none, where the updater would say nothing: the launcher lends it another
 level, and gives the old one back.  And what is refused: a folder and a file
 that are no package, a Flipper with its cable pulled or its card out, one
-that does not run.  Exit status 0 = pass.
+that does not run.  At the end the Flipper is stopped and started with
+`run --update`, which puts the package on the card of one that does not run:
+the updater is started, and the keystores are on the card again after it.
+Exit status 0 = pass.
 
 The updater takes its time: three minutes or so with the official firmware,
 more with a bigger package.
 """
 import argparse
+import hashlib
 import json
 import os
 import pathlib
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
 import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from files_check import Bench, CRASH, check, results        # noqa: E402
+from files_check import ROOT, Bench, CRASH, check, results  # noqa: E402
 
+OVERLAY = pathlib.Path(__file__).resolve().parent.parent / "keystores" / "overlay"
 VERSION = re.compile(r"(?m)^firmware\.version *: (.*)$")
 
 
@@ -144,6 +152,64 @@ def refusals(b, pkg, work):
           state)
 
 
+def keystores_wrong(b, ours):
+    """Those of the emulator's keystores that the card does not have"""
+    wrong = []
+    for p in ours:
+        at = "/ext/" + p.relative_to(OVERLAY).as_posix()
+        code, text = b.fe("cli", f"storage md5 {at}")
+        if code or hashlib.md5(p.read_bytes()).hexdigest() not in text:
+            wrong.append(f"{at}: {text.strip()[-80:]}")
+    return wrong
+
+
+def run_update(b, pkg, ours, after, timeout=900):
+    """`run --update`: the package on the card of a Flipper that does not
+    run, and installed when it starts"""
+    name, _ = manifest_of(pkg)
+    b.stop()
+    if b.uart.exists():
+        b.uart.rename(b.dir / f"uart-run{b.runs}.log")
+    b.runs += 1
+    out = b.dir / "run-update.log"
+    b.log = open(out, "wb")
+    start = time.time()
+    b.proc = subprocess.Popen(
+        [sys.executable, str(ROOT / "flipperemu"), "-d", b.name, "run",
+         "--headless", "--audio", "none", "--serial", f"file:{b.uart}",
+         "--update", str(pkg)], stdout=b.log, stderr=subprocess.STDOUT)
+    done = re.compile(r"the emulator's own are there again \((\d+) file|"
+                      r"could not be written")
+    text, said = "", None
+    while time.time() - start < timeout and b.proc.poll() is None:
+        text = out.read_text(errors="replace")
+        said = done.search(text)
+        if said or (not ours and "updater started" in text):
+            break
+        time.sleep(1)
+    took = time.time() - start
+    started = f"updater started: /ext/update/{name}/update.fuf" in text
+    if ours:
+        wrong = keystores_wrong(b, ours) if said else ["not looked at"]
+        check("`run --update`, for a Flipper that does not run: the updater "
+              f"started, and {took:.0f} s later the emulator's own keystores "
+              f"are on the card again ({said.group(1) if said else 'none'} of "
+              f"{len(ours)} files written), and the run says so",
+              started and said and int(said.group(1) or 0) >= 1 and not wrong,
+              "\n".join(wrong) + "\n" + text[-1500:])
+    else:
+        check("`run --update`, for a Flipper that does not run: the updater "
+              "started", started, text[-1500:])
+        time.sleep(20)                  # (it still answers for a moment)
+    ok, text2 = answers_within(b, 20 if ours else timeout)
+    now = version(b)
+    check(f"... and it runs the firmware of the package ({now}), and its CLI "
+          "answers", ok and now and now == after, f"{now}\n{text2}")
+    crash = CRASH.search(b.uart_text())
+    check("... with no crash in the firmware's log", not crash,
+          crash and crash.group(0))
+
+
 def update_checks(b, pkg, work, other):
     name, radio = manifest_of(pkg)
     before = version(b)
@@ -195,6 +261,18 @@ def update_checks(b, pkg, work, other):
     code, text2 = b.fe("cli", "storage read /ext/fe-check/fe-marker.txt")
     check("the file that was on the card is still there",
           code == 0 and "kept" in text2, text2)
+    ours = sorted(p for p in OVERLAY.rglob("*") if p.is_file())
+    if ours:
+        said = re.search(r"the emulator's own are there again \((\d+) file", text)
+        wrong = keystores_wrong(b, ours)
+        check("the emulator's own Sub-GHz keystores are on the card again, "
+              "after the updater unpacked the package's over them "
+              f"({said.group(1) if said else 'none'} of {len(ours)} files "
+              "written), and the launcher says so",
+              said and int(said.group(1)) >= 1 and not wrong,
+              "\n".join(wrong) + "\n" + text[-700:])
+    else:
+        print("  (no keystores/overlay here: not looked at)")
     code, text2 = b.fe("cli", f"storage read /ext/update/{name}/update.fuf")
     check("the manifest on the card: no radio stage, and its keys in place",
           code == 0 and re.search(r"(?m)^Radio: *\r?$", text2)
@@ -214,7 +292,7 @@ def update_checks(b, pkg, work, other):
     if not radio:
         print("  (the package has no radio stage: the updater's error is not "
               "tried)")
-        return
+        return ours, after
 
     # at this level the updater says nothing, and its error would not be
     # seen: the launcher lends it one for as long as it works
@@ -246,12 +324,16 @@ def update_checks(b, pkg, work, other):
     start = time.time()
     code, text = b.fe("update", "--keep-radio", "--no-wait", pkg, timeout=1800)
     took = time.time() - start
-    check(f"--no-wait: back when the updater has started ({took:.0f} s)",
-          code == 0 and "updater started" in text and "updated in" not in text,
-          text)
+    check(f"--no-wait: back when the updater has started ({took:.0f} s)"
+          + (", and how the emulator's keystores get to the card after it"
+             if ours else ""),
+          code == 0 and "updater started" in text and "updated in" not in text
+          and (not ours or ("push " in text and "/ext/`, when it is back"
+                            in text)), text)
     time.sleep(12)
     ok, text = leave_error(b)
     check("and the firmware runs again after that one too", ok, text)
+    return ours, after
 
 
 def main():
@@ -278,7 +360,8 @@ def main():
                  b.uart_text()[-2000:]):
             time.sleep(2)
             refusals(b, pkg, work)
-            update_checks(b, pkg, work, bool(args.package))
+            ours, after = update_checks(b, pkg, work, bool(args.package))
+            run_update(b, pkg, ours, after)
             b.stop()
     finally:
         b.stop()
