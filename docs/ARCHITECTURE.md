@@ -255,9 +255,11 @@ What this gives and what it cannot:
 - The firmware's enclave paths run as on a device: the self-test, `crypto` in the CLI,
   key storage, the device's own key (U2F makes it and keeps its counter file under it).
 - Nothing an emulated Flipper encrypts is secret.
-- What a real Flipper's factory keys encrypted cannot be read: the stock Sub-GHz
-  keystore decrypts to noise (the firmware logs a `Failed to load line` error per line
-  and has no manufacturer codes), and so does the stock U2F certificate's private key.
+- What a real Flipper's factory keys encrypted cannot be read: a firmware package's
+  Sub-GHz keystore decrypts to noise (the firmware logs a `Failed to load line` error
+  per line and has no manufacturer codes), and so does the stock U2F certificate's
+  private key. For the keystores, a card gets the project's own in their place: the
+  manufacturer codes under the emulator's key 1 ([keystores.md](keystores.md)).
 
 AN5185 leaves several things open, and no real device was there to ask. They are
 decided as follows, and marked in the source:

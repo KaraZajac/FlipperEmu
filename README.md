@@ -219,8 +219,10 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
 
 The enclave's factory keys are FlipperEmu's, not Flipper Devices': those never leave a
 real Flipper, and they are not in this project. So the files a real Flipper's keys
-encrypted stay closed to an emulated one, the stock Sub-GHz keystore among them; see
-[The secure enclave](#the-secure-enclave).
+encrypted stay closed to an emulated one; see
+[The secure enclave](#the-secure-enclave). For the Sub-GHz keystores a card gets the
+project's own in their place, the manufacturer codes under the emulator's key
+([docs/keystores.md](docs/keystores.md)).
 
 ## Quick start
 
@@ -2113,18 +2115,24 @@ never leave a real Flipper and are not in this project. Every emulated Flipper g
 - Nothing an emulated Flipper encrypts is secret, because anybody can compute its keys.
   That suits development and testing. Don't register an emulated U2F token with an
   account that matters.
-- What a real Flipper's keys encrypted stays closed. The stock Sub-GHz keystore
-  (`/ext/subghz/assets/keeloq_mfcodes`) decrypts to noise: the firmware logs
-  `Failed to load line` for each line and carries on without those manufacturer codes.
-  The stock U2F certificate's private key is encrypted the same way, so the
-  certificate of an emulated token does not match the key it signs with.
+- What a real Flipper's keys encrypted stays closed. A Sub-GHz keystore from a
+  firmware package (`/ext/subghz/assets/keeloq_mfcodes`, and three more beside it)
+  decrypts to noise: the firmware logs `Failed to load line` for each line and carries
+  on without those manufacturer codes. So a card that the launcher builds gets the
+  project's own keystores in their place, the manufacturer codes encrypted under the
+  emulator's key 1, and gets them again after a firmware update
+  ([docs/keystores.md](docs/keystores.md)).
+  Nothing stands in for the stock U2F certificate's private key, which is encrypted
+  the same way: the certificate of an emulated token does not match the key it signs
+  with.
 
 Manufacturer codes of your own go where they go on a real Flipper: in
 `/ext/subghz/assets/keeloq_mfcodes_user`, in plain text (`keeloq_mfcodes_user.example`
 beside it shows the format). The firmware can also encrypt such a file the way the stock
 one is: after `sysctl debug 1`, `subghz encrypt_keeloq PLAIN_FILE ENCRYPTED_FILE IV`
 (the IV as 16 bytes of hex) writes a keystore under key 1, which this emulated Flipper
-reads and no real one does.
+reads and no real one does. `scripts/rekey_keystore.py` writes the same file without a
+firmware.
 
 The firmware's own check of the enclave encrypts one block with each factory key and
 compares it with a ciphertext that only the real key gives. For those ten blocks, and

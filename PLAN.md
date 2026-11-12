@@ -176,6 +176,14 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       (`enclave_check.py`; `./flipperemu enclave`; BRINGUP_LOG 56-63). Content encrypted
       with a real Flipper's keys (the stock KeeLoq keystore, the U2F certificate's key)
       stays unreadable
+- ☑ Sub-GHz keystores under the emulator's key (2026-11-11): the manufacturer codes
+      of the four keystores (KeeLoq, Nice Flor-S, Alutech AT-4N, CAME Atomo) encrypted
+      under the emulator's key 1 (`keystores/overlay`, `scripts/rekey_keystore.py`,
+      docs/keystores.md), on every card the launcher builds and again after a firmware
+      update. The firmware names a made-up KeeLoq remote for each of 72 codes and reads
+      Nice Flor-S remotes on official, dev, Momentum, Unleashed and RogueMaster
+      (`keystore_check.py`; BRINGUP_LOG 117). Not tried: an Alutech AT-4N or CAME Atomo
+      remote
 - ☐ U2F from a host: the app starts, takes the USB port as a HID token and shows
       "Connected!"; a registration and a login from a browser or libfido2 over USB/IP
       have not been tried
