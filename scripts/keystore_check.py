@@ -266,13 +266,13 @@ def host_part():
               code == 1 and "expected KEY:TYPE:NAME" in err
               and not (tmp / "out3").exists(), out + err)
         (tmp / "raw.hex").write_text("00112233445566778899AABBCCDDEEFF\n# c\n"
-                                     "0102030405060708090A0B0C0D0E0F10\n")
+                                     "B1B2B3B4B5B6B7B8090A0B0C0D0E0F10\n")
         code, out, err = run("raw", tmp / "raw.hex", tmp / "rawout")
         code2, out2, _ = run("verify", tmp / "rawout")
         check("... `raw` writes a RAW keystore of 32 made-up bytes, and "
               "`verify` gives them back",
               code == 0 and "32 RAW bytes" in out and code2 == 0
-              and "00112233445566778899AABBCCDDEEFF0102030405060708090A0B0C0D0E"
+              and "00112233445566778899AABBCCDDEEFFB1B2B3B4B5B6B7B8090A0B0C0D0E"
               "0F10" in out2.upper().replace(" ", ""), out + err + out2)
         (tmp / "odd.hex").write_text("001122\n")
         code, out, err = run("raw", tmp / "odd.hex", tmp / "odd")
@@ -284,6 +284,59 @@ def host_part():
         code, out, err = run("--help")
         check("... --help", code == 0 and "raw" in out and "--enclave" in out,
               out + err)
+
+        base = ["A1A2A3A4A5A6A7A8:1:Base_Simple", "0A0B0C0D0E0F1011:0:Base_Any",
+                "B1B2B3B4B5B6B7B8:16:Base_Special"]
+        more = ["# a comment", "A1A2A3A4A5A6A7A8:1:Other_Name",
+                "A1A2A3A4A5A6A7A8:2:Base_Normal", "C1C2C3C4C5C6C7C8:0:New_Any",
+                "D1D2D3D4D5D6D7D8:2:New_Normal", "11100F0E0D0C0B0A:2:Twin_Of_Any",
+                "B8B7B6B5B4B3B2B1:0:Twin_Reversed", "D1D2D3D4D5D6D7D8:0:Twin_Of_New",
+                "E1E2E3E4E5E6E7E8:20:No_Such_Type", "F1F2F3F4F5F6F7F8:19:Last_Type",
+                "a1b2c3d4e5f60718:1:lower"]
+        (tmp / "base.txt").write_text("\n".join(base) + "\n")
+        (tmp / "more.txt").write_text("\n".join(more) + "\n")
+        code, out, err = run("merge", tmp / "base.txt", tmp / "more.txt",
+                             tmp / "merged")
+        got = (tmp / "merged").read_text().split() if code == 0 else []
+        check("... `merge`: the base list's lines first and as they were, then "
+              "the new codes, those of type 0 last",
+              got == base + [more[2], more[4], more[9], more[10].upper()
+                             .replace("LOWER", "lower"), more[3]]
+              and "8 lines" in out and "5 new" in out and "7 keys" in out,
+              out + err)
+        said = [l.split() for l in out.splitlines() if l.startswith("  ")]
+        check("... left out and said by name: a code that the list has, a type "
+              "that no firmware has, and a second line for a key that has one",
+              said == [["Other_Name:1", "(Base_Simple:1)"], ["No_Such_Type:20"],
+                       ["Twin_Of_Any:2", "(Base_Any:0)"],
+                       ["Twin_Reversed:0", "(Base_Special:16)"],
+                       ["Twin_Of_New:0", "(New_Normal:2)"]]
+              and not re.search(r"[0-9A-Fa-f]{16}", out + err), out + err)
+        code, out, err = run("merge", "--all", tmp / "base.txt",
+                             tmp / "more.txt", tmp / "all")
+        got = (tmp / "all").read_text().split() if code == 0 else []
+        check("... --all leaves out only the code that the list has",
+              got == base + more[2:10] + [more[10].upper()
+                                          .replace("LOWER", "lower")]
+              and "12 lines" in out, out + err)
+        refused = []
+        for n, (bad, word) in enumerate((
+                ("9192939495969798:1:Two Words", "no blank"),
+                ("919293949596979:1:Short_Key", "16 hex digits"),
+                ("9192939495969798:1:A:B", "expected KEY:TYPE:NAME"))):
+            (tmp / "bad.txt").write_text(bad + "\n")
+            code, out, err = run("merge", tmp / "base.txt", tmp / "bad.txt",
+                                 tmp / f"no{n}")
+            refused.append(code == 1 and word in err and "91929394" not in err
+                           and not (tmp / f"no{n}").exists())
+        code, out, err = run("merge", tmp / "base.txt", tmp / "more.txt",
+                             tmp / "base.txt")
+        refused.append(code == 1 and "another file" in err and
+                       (tmp / "base.txt").read_text().split() == base)
+        check("... refused, with no file made and no key in the message: a name "
+              "with a blank, a key of 15 digits, a line of four fields, and "
+              "the new list over one that is read", all(refused),
+              f"{refused} {out}{err}")
 
     code, out = git("ls-files", "--", "keystores")
     if code != 0:

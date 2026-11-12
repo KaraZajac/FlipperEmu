@@ -183,7 +183,13 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       update. The firmware names a made-up KeeLoq remote for each of 72 codes and reads
       Nice Flor-S remotes on official, dev, Momentum, Unleashed and RogueMaster
       (`keystore_check.py`; BRINGUP_LOG 117). Not tried: an Alutech AT-4N or CAME Atomo
-      remote
+      remote. `rekey_keystore.py merge` puts decrypted key lists together and leaves
+      out the lines that only add tries (BRINGUP_LOG 118)
+    - ☐ The overlay's type numbers are Unleashed's: the official firmware names no
+      remote of the five magic-serial codes (KGB/Subaru, Magic_1 to Magic_4) with it,
+      and its Kingates Stylo 4K decoder finds no line of type 1. A second line for
+      such a key with the official firmware's number mends the first (tried with a
+      local list that has one for four of the five); the tracked overlay has none yet
 - ☐ U2F from a host: the app starts, takes the USB port as a HID token and shows
       "Connected!"; a registration and a login from a browser or libfido2 over USB/IP
       have not been tried

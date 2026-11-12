@@ -2395,6 +2395,59 @@ big lock, entry 92).
       firmware). `scripts/update_check.py`: 33 checks now, with the
       keystores after `update` and after `run --update`.
 
+118. **What a longer KeeLoq key list costs, and whose type numbers the overlay
+    has.** Two more decrypted key lists were to go into the local list
+    (`keystores/plaintext/`, ignored by git; the tracked overlay is as it
+    was). Together with the overlay's 124 codes they are 298 lines for 215
+    keys: 174 new lines with 94 new keys, 17 of which are another key's
+    bytes in the other order. What came out when the lists were tried on
+    the firmwares:
+    - **Every line costs every remote.** The KeeLoq decoder tries the lines
+      in their order and takes the first whose decryption has the packet's
+      button and the low byte of its serial number, or a zero there: a
+      foreign packet passes about once in 2048 tries. 300 made-up remotes
+      with random keys: with the overlay's 124 lines the official firmware
+      and its dev build give 23 of them a maker's name (7.7 %), Momentum 22,
+      Unleashed and RogueMaster 73 (24.3 %). With all 298 lines the official
+      firmware names 88 (29.3 %) and Unleashed 130 (43.3 %).
+    - **Unleashed's `JCM_Gen2` line is 256 tries**, one for each value of a
+      byte that the packet does not carry (`keeloq.c`). It is line 91 of the
+      overlay, and a remote whose line comes after it has that name for
+      about one packet in nine: of 147 made-up remotes, 13 at the first try
+      on Unleashed and none on the official firmware, which has no type 16.
+    - **A type-0 line is eight tries**: simple, normal, secure and magic-XOR
+      learning, each with the key and with its bytes in the other order. So
+      a type-0 line for a key that has a line with its type adds tries and
+      nothing else, and so does a line of type 1 to 4 for a key that has a
+      type-0 line. `scripts/rekey_keystore.py merge` leaves those out, and a
+      type that no firmware here has: 230 lines for 201 keys, no key of the
+      298 without a line (in one byte order at least). The official firmware
+      then names 37 of the 300 (12.3 %), Momentum 36, Unleashed and
+      RogueMaster 87 (29.0 %). `merge --all` keeps everything but a repeat
+      of key and type.
+    - Each of the five firmwares loads the 230 lines and saves them again
+      (`subghz encrypt_keeloq`), line for line, and names a made-up remote
+      for each of the 147 lines with simple or normal learning: at the
+      second try on the official firmware, its dev build and Momentum, at
+      the third on Unleashed and RogueMaster.
+    - **The overlay has Unleashed's type numbers, and the official firmware
+      has others above 4.** Magic-serial learning 1, 2 and 3 is type 5, 6
+      and 7 in the official firmware and 6, 7 and 8 in Momentum and
+      Unleashed (5 is FAAC there). Made-up remotes for the overlay's five
+      codes of that kind, three each: the official firmware names none of
+      the 15, Momentum 14, Unleashed 12. With the 230 lines, which have a
+      second line with the official number for four of the five, the
+      official firmware names those 12. The same holds for Kingates Stylo
+      4K, by the source and not tried: the official decoder tries lines of
+      type 1, Momentum's takes the line with the maker's name, Unleashed's
+      the first line of type 10, which is what the overlay has. Entry 117
+      said that one overlay serves every firmware; for these six codes it
+      does not serve the official one yet.
+    - `merge` prints names and types, never a key, and a line that is not
+      `KEY:TYPE:NAME` is no longer shown in the tool's message.
+      `scripts/keystore_check.py`: 36 checks on the five firmwares, 23 of
+      them without one.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

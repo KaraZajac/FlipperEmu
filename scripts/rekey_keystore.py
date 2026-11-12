@@ -20,6 +20,7 @@ into a firmware fork's resources (applications/.../resources/subghz/assets/).
     rekey_keystore.py keys   IN OUT [--slot N] [--iv TEXT] [--enclave FILE]
     rekey_keystore.py raw    IN OUT [--slot N] [--iv TEXT] [--enclave FILE]
     rekey_keystore.py verify FILE... [--slot N]           [--enclave FILE]
+    rekey_keystore.py merge  BASE MORE... OUT [--all]
 
 `keys` reads IN (a decrypted key list; blank lines and `#` comments are
 skipped) and writes OUT. `raw` does the same for a RAW keystore (nice_flor_s,
@@ -30,10 +31,32 @@ enclave slot (default 1). --iv sets the stored IV (16 bytes; ASCII, or hex
 with 0x); the default is fixed so re-keying is reproducible. --enclave reads
 the key from a device's enclave.keys instead of FlipperEmu's built-in key.
 
+`merge` makes one decrypted key list of several: OUT is BASE with the codes of
+the MORE lists that BASE does not have. It encrypts nothing, and it prints
+names and types only, never a key. The lines of BASE stay first and as they
+are: a firmware gives a remote the name of the first line that fits it, and
+some decoders take the first line of a type. Of the other lists, in their
+order, these lines are left out:
+
+  - a code that the list has (the same key and the same type), whatever its
+    name;
+  - a type above 19, which no firmware here has (19 is the last one of
+    Unleashed, which has the most);
+  - a line of type 1 to 4 whose key a type-0 line of BASE has, as it is or
+    with its bytes in the other order: for a type-0 line the firmware tries
+    simple, normal, secure and magic-XOR learning, each with both orders;
+  - a type-0 line whose key a line that stays has, as it is or with its bytes
+    in the other order: it would be eight more tries for every packet, each a
+    chance to name a remote that is not this maker's.
+
+The new type-0 lines go last. With --all only the first rule holds, and the
+new lines keep their order.
+
 Keep the input key lists private: see the note in subghz_keystore.c.
 """
 import argparse
 import pathlib
+import re
 import struct
 import sys
 
@@ -47,6 +70,20 @@ DEFAULT_IV = b"FlipperEmu rekey"
 FILETYPE = "Flipper SubGhz Keystore File"
 RAW_FILETYPE = "Flipper SubGhz Keystore RAW File"
 VERSION = 0
+# The last learning type of a firmware here: Unleashed's
+# KEELOQ_LEARNING_TELCOMA_TABLE_LO (lib/subghz/protocols/keeloq_common.h).
+# The official firmware's last one is 7, Momentum's 8.
+LAST_TYPE = 19
+# The firmware reads a line with "%08lX%08lX:%hu:%s" into a name of 64 bytes.
+KEY_FIELD = re.compile(r"[0-9A-Fa-f]{16}")
+NAME_MAX = 63
+LEFT_OUT = (
+    ("same", "the list has the code (the same key and type)"),
+    ("type", f"a type above {LAST_TYPE}, which no firmware here has"),
+    ("typed", "a type-0 line of the base list has the key, and tries this "
+              "type with it"),
+    ("zero", "a line that stays has the key"),
+)
 
 
 def mess_with_iv(iv: bytes) -> bytes:
@@ -92,9 +129,79 @@ def read_key_list(path) -> list:
             continue
         fields = line.split(":")
         if len(fields) != 3 or not fields[0] or not fields[1].isdigit():
-            raise ValueError(f"{path}:{n}: expected KEY:TYPE:NAME, got {line!r}")
+            # The line is not shown: it may hold a key
+            raise ValueError(f"{path}:{n}: expected KEY:TYPE:NAME")
         keys.append(line)
     return keys
+
+
+def parse_key_line(line: str) -> tuple:
+    """(key, type, name) of a `KEY:TYPE:NAME` line. ValueError for a key that
+    is not 16 hex digits, and for a name that the firmware reads otherwise.
+    The message has the name and the type, not the key."""
+    key, kind, name = line.split(":")
+    if not KEY_FIELD.fullmatch(key):
+        raise ValueError(f"{name}:{kind}: the key is 16 hex digits")
+    if not name or len(name) > NAME_MAX or name != "".join(name.split()) \
+            or not name.isascii():
+        raise ValueError(f"{name!r}:{kind}: a name is 1 to {NAME_MAX} ASCII "
+                         "characters with no blank among them")
+    return int(key, 16), int(kind), name
+
+
+def merge(base: list, more: list, everything=False) -> tuple:
+    """One key list of `base` and what `more` adds to it (both `KEY:TYPE:NAME`
+    lines; the rules are in the text at the top). Returns (lines, left): the
+    lines of the new list, and for each line of `more` that is left out
+    (why, its NAME:TYPE, the NAME:TYPE of the line that stands for it)."""
+    def other_order(key):
+        return int.from_bytes(key.to_bytes(8, "big"), "little")
+
+    def tag(entry):
+        return f"{entry[2]}:{entry[1]}"
+
+    def holder(table, key):
+        return table.get(key) or table.get(other_order(key))
+
+    first = {}              # (key, type) -> the first line with them
+    typed, zero = {}, {}    # key -> the first line that stays, by type 0 or not
+    for line in base:
+        entry = parse_key_line(line)
+        first.setdefault(entry[:2], entry)
+        (typed if entry[1] else zero).setdefault(entry[0], entry)
+    base_zero = dict(zero)
+    left, new = [], []
+    for line in more:
+        entry = parse_key_line(line)
+        if entry[:2] in first:
+            left.append(("same", tag(entry), tag(first[entry[:2]])))
+        else:
+            first[entry[:2]] = entry
+            new.append(entry)
+    if everything:
+        kept = new
+    else:
+        kept, last = [], []
+        for entry in new:
+            key, kind, _ = entry
+            by = holder(base_zero, key) if 1 <= kind <= 4 else None
+            if kind > LAST_TYPE:
+                left.append(("type", tag(entry), None))
+            elif kind == 0:
+                last.append(entry)
+            elif by:
+                left.append(("typed", tag(entry), tag(by)))
+            else:
+                kept.append(entry)
+                typed.setdefault(key, entry)
+        for entry in last:
+            by = holder(typed, entry[0]) or holder(zero, entry[0])
+            if by:
+                left.append(("zero", tag(entry), tag(by)))
+            else:
+                kept.append(entry)
+                zero.setdefault(entry[0], entry)
+    return (list(base) + ["%016X:%d:%s" % entry for entry in kept], left)
 
 
 def plaintext_line(key_line: str) -> bytes:
@@ -198,9 +305,12 @@ def main(argv) -> int:
     ap = argparse.ArgumentParser(
         prog="rekey_keystore.py", description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("action", choices=("keys", "raw", "verify"))
+    ap.add_argument("action", choices=("keys", "raw", "verify", "merge"))
     ap.add_argument("paths", nargs="+", metavar="PATH",
-                    help="keys, raw: IN and OUT; verify: the keystores")
+                    help="keys, raw: IN and OUT; verify: the keystores; "
+                         "merge: the key lists, then OUT")
+    ap.add_argument("--all", action="store_true",
+                    help="merge: leave out only a code that the list has")
     ap.add_argument("--slot", type=int, default=1, metavar="N",
                     help="the enclave's key slot (default 1)")
     ap.add_argument("--iv", default=None, metavar="TEXT",
@@ -238,6 +348,27 @@ def main(argv) -> int:
             pathlib.Path(dst).write_text(text)
             print(f"{dst}: {len(plain)} RAW bytes, encrypted under slot "
                   f"{args.slot}, round-trips OK")
+        elif args.action == "merge":
+            if len(args.paths) < 3:
+                raise ValueError("merge needs a base list, one list more at "
+                                 "least, and an output path")
+            *srcs, dst = (pathlib.Path(p) for p in args.paths)
+            if dst.exists() and any(dst.samefile(p) for p in srcs):
+                raise ValueError(f"{dst} is one of the lists: the new list "
+                                 "goes to another file")
+            base = read_key_list(srcs[0])
+            more = [k for p in srcs[1:] for k in read_key_list(p)]
+            lines, left = merge(base, more, args.all)
+            dst.write_text("".join(k + "\n" for k in lines))
+            keys = len({k.split(":")[0].upper() for k in lines})
+            print(f"{dst}: {len(lines)} lines ({len(base)} of {srcs[0]}, "
+                  f"{len(lines) - len(base)} new), {keys} keys")
+            for why, text in LEFT_OUT:
+                rows = [row for row in left if row[0] == why]
+                if rows:
+                    print(f"left out, {len(rows)}: {text}")
+                for _, line, by in rows:
+                    print(f"  {line}" + (f"  ({by})" if by else ""))
         else:
             for p in args.paths:
                 for k in verify(pathlib.Path(p).read_text(), key):
