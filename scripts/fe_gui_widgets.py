@@ -626,6 +626,24 @@ class DegreesDialog(Form):
         return f"{self.celsius.value():g}"
 
 
+class VoltsDialog(Form):
+    """A voltage to hold to a pin of the header that the ADC has as an
+    input"""
+
+    def __init__(self, parent, pin, mv, high_mv, most_mv):
+        super().__init__(parent, f"A voltage on {pin}",
+                         "What a sensor's output or a voltage divider would "
+                         "put on the pin. The firmware's ADC measures it; as "
+                         f"a level it is high from {high_mv / 1000:g} V up.")
+        self.volts = self.spin("Voltage", 0, most_mv / 1000, mv / 1000, " V",
+                               decimals=3)
+        self.volts.setSingleStep(0.05)
+
+    def value(self):
+        """... as the launcher's `gpio` takes it"""
+        return f"{round(self.volts.value() * 1000)}mV"
+
+
 class IqDialog(Form):
     def __init__(self, parent, path):
         super().__init__(parent, "An IQ recording as its antenna",

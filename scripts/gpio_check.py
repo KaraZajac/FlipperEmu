@@ -24,10 +24,21 @@ firmware reads a 1-Wire key has both sides of the line.  Then what is
 refused: the pins with their own use, power pins, pins that are not there,
 levels that are none.
 
-Then what the firmware's `gpio` command cannot do, with an app of the check's
-own, scripts/gpio_check_app (it needs `ufbt` on the PATH and its SDK to be
-this firmware's, which is the official release's as ufbt comes; skipped
-otherwise): interrupts and an open-drain output.  The table says which edges
+Then a voltage (`gpio PA7 1.25V`), for the firmware's ADC, which has six of
+the pins as inputs.  A script in the firmware's JavaScript measures each of
+them twice in a row (readAnalog(), in mV up to its reference's 2.048 V) and
+reads what is held; the launcher says what the ADC converted, and that it is
+on while the script has it.  A voltage is a level too, high from 1.65 V up.
+(Skipped on a firmware whose JavaScript cannot do that.)
+
+Then what the firmware's `gpio` command cannot do, with two apps of the
+check's own, scripts/gpio_check_app and scripts/adc_check_app (they need
+`ufbt` on the PATH and its SDK to be this firmware's, which is the official
+release's as ufbt comes; skipped otherwise).  The ADC with the firmware's own
+turning of a result into volts and degrees: the chip's reference, its
+temperature sensor and the battery pin, and the pins, with both of the ADC's
+reference voltages; a pin that the firmware itself drives or pulls measures
+as that.  And interrupts and an open-drain output.  The table says which edges
 of a pin the firmware has an interrupt for.  A pin held low and high from
 outside gives the app its interrupt on the edge it asked for, each once, and
 none on the other; an interrupt that the app turns off gives none, and gives
@@ -57,6 +68,24 @@ from ufbt_check import ANSI, log_tail, logged, tool  # noqa: E402
 
 SIGNALS = "PA7 PA6 PA4 PB3 PB2 PC3 PA14 PA13 PB6 PB7 PC1 PC0 PB14".split()
 APP = ROOT / "scripts" / "gpio_check_app"
+ADC_APP = ROOT / "scripts" / "adc_check_app"
+ADC_PINS = {"PA7": 12, "PA6": 11, "PA4": 9, "PC3": 4, "PC1": 2, "PC0": 1}
+ADC_BLOCK = ("its ADC, with pins 2, 3, 4, 7, 15 and 16 as inputs (`gpio PIN "
+             "1.25V` holds a voltage to one)\n  ADC1  ")
+# every pin that the ADC has as an input, measured twice in a row; then the
+# ADC is kept for a while, for the launcher to say that it is on
+ADC_JS = """\
+let eventLoop = require("event_loop");
+let gpio = require("gpio");
+let names = ["pa7", "pa6", "pa4", "pc3", "pc1", "pc0"];
+for (let i = 0; i < names.length; i++) {
+    let pin = gpio.get(names[i]);
+    pin.init({ direction: "in", inMode: "analog" });
+    print(names[i], pin.readAnalog(), pin.readAnalog());
+}
+delay(6000);
+print("end");
+"""
 skipped = []
 
 
@@ -99,6 +128,15 @@ def status(b):
         return {}
 
 
+def adc(b):
+    """The ADC as `status --json` has it"""
+    code, out, err, took = fe(b, "status", "--json")
+    try:
+        return json.loads(out).get("adc") or {}
+    except (ValueError, AttributeError):
+        return {}
+
+
 def start_checks(b):
     code, out, err, took = fe(b, "gpio")
     rows = [row(out, p) for p in SIGNALS]
@@ -130,10 +168,19 @@ def start_checks(b):
                     r"it\)\n", out), out)
     check("... and the I2C bus of pins 15 and 16, with no device on it and "
           "no address called",
-          out.endswith("its I2C bus, SDA on pin 15 and SCL on pin 16 (`run "
-                       "--i2c TYPE@ADDRESS` puts a device there)\n"
-                       "  pins 15 and 16 (I2C3)  no device; the firmware has "
-                       "called no address yet\n"), out)
+          "\nits I2C bus, SDA on pin 15 and SCL on pin 16 (`run "
+          "--i2c TYPE@ADDRESS` puts a device there)\n"
+          "  pins 15 and 16 (I2C3)  no device; the firmware has "
+          "called no address yet\n" in out, out)
+    first = adc(b)
+    check("... and at the end the ADC, with the six pins that are its "
+          "inputs: off, as nothing uses it, and it has converted nothing; "
+          "status --json has the same (off, its reference is the chip's "
+          "3.3 V then)",
+          out.endswith(ADC_BLOCK + "off (nothing uses it now); the firmware "
+                       "has converted nothing yet\n")
+          and first == {"name": "ADC1", "on": False, "reference": 3300,
+                        "conversions": 0, "last": None}, out + repr(first))
     code, out, err, took = fe(b, "gpio", "PA7")
     check("a pin alone: its level as one word, and nothing else",
           code == 0 and out == "floating\n" and not err, out + err)
@@ -146,7 +193,10 @@ def start_checks(b):
           and st["PB6"].get("mode") == "alternate"
           and st["PB6"].get("function") == 7 and st["PB7"].get("pull") == "up"
           and st["PB7"].get("interrupt") == "falling"
-          and st["PA7"].get("interrupt") is None, st)
+          and st["PA7"].get("interrupt") is None
+          and {p: st[p].get("adc", 0) for p in SIGNALS}
+          == {p: ADC_PINS.get(p) for p in SIGNALS}
+          and st["PA7"].get("held_mv", 0) is None, st)
     code, out, err, took = fe(b, "status")
     check("status: one line for the header, with nothing on it",
           re.search(r"^gpio\s*: none of its pins is an output, none is held$",
@@ -461,11 +511,149 @@ def refused_checks(b):
           code == 0 and out == "high\n", out + err)
 
 
-def app_lines(b):
-    """What the check's app has logged: its lines, without time and tag"""
-    return [line.split("[FePins] ", 1)[1].strip()
+def reads(mv, reference):
+    """What an ideal 12-bit ADC makes of a voltage, both in mV"""
+    return min(4095, mv * 4096 // reference)
+
+
+def adc_checks(b):
+    """Nothing is held, and the header's pins are as after a start"""
+    held = (("PA7", "1.25V", 1250, "low"), ("PA6", "high", 3300, "high"),
+            ("PA4", "low", 0, "low"), ("PC3", "2047mV", 2047, "high"),
+            ("PC1", "3.3V", 3300, "high"), ("PC0", ".1v", 100, "low"))
+    said = [fe(b, "gpio", pin, word) for pin, word, mv, level in held]
+    table = fe(b, "gpio")[1]
+    check("a voltage held to a pin (`gpio PA7 1.25V`, 2047mV, .1v): the "
+          "answer and the table have it, and what it is as a level: high "
+          "from 1.65 V up, half of what the chip runs on.  3.3 V is a wire "
+          "to 3V3, as `high` is",
+          all(code == 0 for code, out, err, took in said)
+          and "PA7 (pin 2 of the header): held at 1.25 V from outside (low "
+              "as a level); it is low" in said[0][1]
+          and row(table, "PA7") == "2 PA7 analog low held at 1.25 V from "
+                                   "outside (low as a level)"
+          and row(table, "PA6") == "3 PA6 analog high held high from outside"
+          and row(table, "PC3") == "7 PC3 analog high held at 2.047 V from "
+                                   "outside (high as a level)"
+          and row(table, "PC1") == "15 PC1 analog high held high from outside"
+          and row(table, "PC0") == "16 PC0 analog low held at 0.1 V from "
+                                   "outside (low as a level)",
+          "".join(out + err for code, out, err, took in said) + table)
+    st = status(b)
+    check("status --json: \"held_mv\" beside \"held\"",
+          [(st.get(pin, {}).get("held_mv"), st.get(pin, {}).get("held"))
+           for pin, word, mv, level in held]
+          == [(mv, level) for pin, word, mv, level in held], st)
+
+    js = b.dir / "fe_adc.js"
+    js.write_text(ADC_JS)
+    code, out, err, took = fe(b, "push", js, "/ext/fe_adc.js")
+    before = adc(b)
+    script = b.bg("cli", "--timeout", 60, "js /ext/fe_adc.js")
+    end, now = time.time() + 30, {}
+    while time.time() < end and script.poll() is None:
+        now = adc(b)
+        if now.get("on") and now.get("conversions", 0) \
+                >= before.get("conversions", 0) + 12:
+            break
+        time.sleep(0.3)
+    block = fe(b, "gpio")[1].partition(ADC_BLOCK)[2]
+    try:
+        text = script.communicate(timeout=90)[0]
+    except subprocess.TimeoutExpired:
+        script.kill()
+        text = script.communicate()[0]
+    lines = [line.strip() for line in text.splitlines()]
+    if "Script done!" not in text or "pa7" not in text:
+        skip("a script in the firmware's JavaScript measures the held "
+             "voltages (readAnalog)",
+             "this firmware's JavaScript did not run it: "
+             + " ".join(text.split())[:300])
+    else:
+        # the script has mV, to the firmware's reference of 2.048 V: half of
+        # a result of 12 bits
+        want = [f"{pin.lower()} {reads(mv, 2048) // 2} {reads(mv, 2048) // 2}"
+                for pin, word, mv, level in held]
+        check("a script in the firmware's JavaScript measures each of the "
+              "six twice in a row (readAnalog(), in mV): 1250 for 1.25 V, "
+              "100 for 0.1 V, 0 for a wire to GND, and 2047, the most there "
+              "is, for 2.047 V and for 3V3",
+              code == 0 and [x for x in lines if x[:2] in ("pa", "pc")]
+              == want and want[0] == "pa7 1250 1250"
+              and want[1] == "pa6 2047 2047" and "end" in lines,
+              text + repr(want) + log_tail(b))
+        check("... while the script has the ADC, the launcher has it as on, "
+              "with its reference at 2.048 V, and the last of the twelve "
+              "conversions: pin 16 (PC0) with 0.1 V on it, read as 200",
+              now.get("on") is True and now.get("reference") == 2048
+              and now.get("conversions") == before.get("conversions", 0) + 12
+              and now.get("last") == {"channel": 1, "pin": 16, "data": 200,
+                                      "uv": 100000}
+              and block == "on, its reference at 2.048 V; 12 conversions, "
+                           "the last: pin 16 (PC0), 0.1 V, read as 200\n",
+              repr(before) + repr(now) + block)
+        after = adc(b)
+        code, out, err, took = fe(b, "status")
+        check("... and as off again when the script has ended, with what "
+              "it converted; `status` has that in a line",
+              after.get("on") is False and after.get("reference") == 3300
+              and after.get("conversions") == now.get("conversions")
+              and re.search(r"^adc\s*: off \(nothing uses it now\); 12 "
+                            r"conversions, the last: pin 16 \(PC0\), 0\.1 V, "
+                            r"read as 200$", out, re.M),
+              repr(after) + out + err)
+    fe(b, "rm", "/ext/fe_adc.js")
+
+    code, out, err, took = fe(b, "gpio", "free")
+    check("`gpio free` lets go of them, and says what each was held at",
+          code == 0 and "(it was: PA7 at 1.25 V, PA6 high, PA4 low, PC3 at "
+                        "2.047 V, PC1 high, PC0 at 0.1 V)" in out, out + err)
+    firmware(b, "gpio mode PA6 0")
+    levels = []
+    for word in ("1649mV", "1.65V", "0.4V", "2.4V"):
+        fe(b, "gpio", "PA6", word)
+        levels.append(("<= 1" in firmware(b, "gpio read PA6"),
+                       fe(b, "gpio", "PA6")[1].strip()))
+    check("a voltage is a level too, to a pin that the firmware reads as an "
+          "input (its `gpio read PA6`): 1.649 V is low and 1.65 V high, "
+          "0.4 V low, 2.4 V high",
+          levels == [(False, "low"), (True, "high"), (False, "low"),
+                     (True, "high")], levels)
+    code, out, err, took = fe(b, "gpio", "PB3", "0.4V")
+    table = fe(b, "gpio")[1]
+    check("a voltage to a pin that is no input of the ADC's (PB3): held, "
+          "and the answer says that it is a level there and no more",
+          code == 0 and "held at 0.4 V from outside (low as a level)" in out
+          and "PB3 is no input of the ADC's" in out
+          and row(table, "PB3") == "5 PB3 analog low held at 0.4 V from "
+                                   "outside (low as a level)", out + err + table)
+    fe(b, "gpio", "free")       # (PA6 stays an input: the firmware's CLI has
+                                # no way back.  The check's app has one)
+
+    def refused(label, words, *args):
+        code, out, err, took = fe(b, "gpio", *args)
+        check(label + ": exit 1, one line that says why",
+              code == 1 and not out and len(err.strip().splitlines()) == 1
+              and all(w in err for w in words), out + err)
+
+    refused("more than the 3.3 V that the chip runs on (3.4V)",
+            ["3.4V", "0 to 3.3 V"], "PA7", "3.4V")
+    refused("a number with no unit (1.25)", ["'1.25'", "1250mV"],
+            "PA7", "1.25")
+    refused("a voltage below 0 (-1V)", ["'-1V'", "1250mV"], "PA7", "-1V")
+    refused("a voltage to the log's UART (TX)", ["PB6", "USART1's TX"],
+            "TX", "1V")
+    st = status(b)
+    check("... and none of that held anything",
+          st and not any(p.get("held") for p in st.values()), st)
+
+
+def app_lines(b, tag="FePins"):
+    """What one of the check's apps has logged: its lines, without time and
+    tag"""
+    return [line.split(f"[{tag}] ", 1)[1].strip()
             for line in ANSI.sub("", b.uart_text()).splitlines()
-            if "[FePins] " in line]
+            if f"[{tag}] " in line]
 
 
 def hold(b, pin, level, line=None, quiet=1.0):
@@ -480,32 +668,93 @@ def hold(b, pin, level, line=None, quiet=1.0):
     return app_lines(b)[before:]
 
 
-def interrupt_checks(b):
-    """Nothing is held, and the header's pins are as after a start"""
-    label = "interrupts from held pins, and an open-drain output"
+def own_app(b, label, source, appid, checks):
+    """Build one of the check's own apps, and run its checks if ufbt's SDK
+    is this firmware's.  Nothing is held then, and the header's pins are as
+    after a start"""
     if not shutil.which("ufbt"):
         return skip(label, "no `ufbt` on the PATH (`pipx install ufbt` gets "
                     "it)")
     work = pathlib.Path(tempfile.mkdtemp(prefix="fe-pins-"))
     try:
-        folder = work / "fe_pin_check"
-        shutil.copytree(APP, folder)
+        folder = work / appid
+        shutil.copytree(source, folder)
         code, text = tool(b, folder)
-        fap = folder / "dist" / "fe_pin_check.fap"
+        fap = folder / "dist" / f"{appid}.fap"
         if code or not fap.is_file():
-            return check("`ufbt` builds the check's app", False, text[-1500:])
+            return check(f"`ufbt` builds the check's app ({source.name})",
+                         False, text[-1500:])
         code, out, err, took = fe(b, "app", "--no-start", "--to",
                                   "/ext/apps/fe-check", fap)
         fe(b, "rm", "-r", "/ext/apps/fe-check")
         if "which is this firmware's" not in out:
             return skip(label, "ufbt's SDK is not for this firmware: "
                         + " ".join((out + err).split())[:200])
-        app_checks(b, folder)
+        checks(b, folder)
     finally:
         fe(b, "gpio", "record", "stop")
         fe(b, "gpio", "free")
         fe(b, "app", "--close")
         shutil.rmtree(work, ignore_errors=True)
+
+
+def adc_app_checks(b, folder):
+    held = (("PA7", "1.25V", 1250), ("PA6", "high", 3300), ("PA4", "2V", 2000),
+            ("PC3", "100mV", 100), ("PC1", "low", 0), ("PC0", None, 0))
+    for pin, word, mv in held:
+        if word:
+            fe(b, "gpio", pin, word)
+    before = adc(b)
+    code, text = tool(b, folder, "launch")
+    done = logged(b, "[FeAdc] done", 30)
+    lines = app_lines(b, "FeAdc")
+    check("`ufbt launch` starts the check's other app "
+          "(scripts/adc_check_app), which measures with the firmware's ADC, "
+          "says what it read, and ends", code == 0 and done,
+          text[-1500:] + log_tail(b))
+    check("what is inside the chip, with the firmware's own turning of a "
+          "result into volts and degrees.  With the reference at 2.048 V: "
+          "the chip's 1.212 V reads as 2424, from which the firmware has the "
+          "ADC's reference as 2048 mV; the temperature sensor as 1495, "
+          "25 degrees; a third of the battery pin's 3.3 V as 2200, 3300 mV",
+          "at 2.048 V: reference 2424 = 2048 mV, temperature 1495 = 25 C, "
+          "battery 2200 = 3300 mV" in lines, "\n".join(lines))
+    check("... and with the ADC's other reference, 2.5 V, and one sample "
+          "for a result: other numbers for the same (1985, 1224, 1802), and "
+          "2500 mV, 25 degrees, 3300 mV",
+          "at 2.5 V: reference 1985 = 2500 mV, temperature 1224 = 25 C, "
+          "battery 1802 = 3300 mV" in lines, "\n".join(lines))
+    numbers = dict(zip("PA7 PA6 PA4 PC3 PC1 PC0".split(), (2, 3, 4, 7, 15, 16)))
+    for at, reference in (("at 2.048 V", 2048), ("at 2.5 V", 2500)):
+        # (the firmware's mV: a result times the reference, over 4095)
+        want = [f"{at}: pin {numbers[pin]} {pin} {reads(mv, reference)} and "
+                f"{reads(mv, reference)} = "
+                f"{reads(mv, reference) * reference // 4095} mV"
+                for pin, word, mv in held]
+        got = [x for x in lines if x.startswith(f"{at}: pin ")]
+        check(f"the six pins of the firmware's own table {at}, each twice "
+              "in a row: " + ", ".join(
+                  f"{pin} {x.split(' = ')[1]}" for (pin, word, mv), x
+                  in zip(held, want))
+              + " (held: 1.25 V, 3V3, 2 V, 0.1 V, GND, nothing)",
+              got == want, "\n".join(got) + "\n" + "\n".join(want))
+    check("a pin's voltage that is the firmware's own doing (PC0, with "
+          "nothing held to it): 3.3 V as an output that is high and 0 V as "
+          "one that is low, 3.3 V as an input with a pull-up and 0 V with a "
+          "pull-down",
+          "pin 16 PC0 as an output: 4095 high, 0 low; as an input: 4095 "
+          "with a pull-up, 0 with a pull-down" in lines, "\n".join(lines))
+    after = adc(b)
+    st = status(b)
+    check("the launcher afterwards: the ADC is off, with the app's 34 "
+          "conversions more and the last of them (pin 16, 0 V, read as 0), "
+          "and the six pins are analog",
+          after.get("on") is False
+          and after.get("conversions") == before.get("conversions", 0) + 34
+          and after.get("last") == {"channel": 1, "pin": 16, "data": 0,
+                                    "uv": 0}
+          and all(st.get(pin, {}).get("mode") == "analog" for pin in numbers),
+          repr(before) + repr(after) + repr(st))
 
 
 def app_checks(b, folder):
@@ -676,7 +925,12 @@ def main():
             fight_checks(b)
             record_checks(b)
             refused_checks(b)
-            interrupt_checks(b)
+            adc_checks(b)
+            own_app(b, "the ADC with the firmware's own turning of a result "
+                    "into volts and degrees", ADC_APP, "fe_adc_check",
+                    adc_app_checks)
+            own_app(b, "interrupts from held pins, and an open-drain output",
+                    APP, "fe_pin_check", app_checks)
             ok, said = b.answers()
             check("the CLI still answers", ok, said)
             log = b.uart_text(every=True)

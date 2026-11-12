@@ -150,6 +150,21 @@ static bool soc_tim1_dma_ready(void *opaque)
 }
 
 /*
+ * VREF+, the ADC's reference, in mV.  It is the output of the chip's
+ * reference buffer while that is on: 2.048 V, or 2.5 V with VREFBUF_CSR.VRS.
+ * A Flipper has nothing else on the pin, and the firmware converts with the
+ * buffer on (furi_hal_adc_configure_ex waits for it); with it off the
+ * reference is the supply here, so that a conversion has a result at all.
+ */
+static uint32_t soc_adc_vref(void *opaque)
+{
+    WB55SocState *s = opaque;
+    uint32_t csr = s->syscfg.vrefbuf_csr;
+
+    return !(csr & 1) ? WB55_VDD_MV : csr & 4 ? 2500 : 2048;
+}
+
+/*
  * A comparator output changed.  TIM2_OR.TI4_RMP (bits 3:2) picks TI4's
  * source: 00 the TIM2_CH4 pin, 01 COMP1, 10 COMP2, 11 COMP1 OR COMP2.
  */
@@ -227,6 +242,7 @@ static void wb55_soc_init(Object *obj)
     object_initialize_child(obj, "tim17", &s->tim17, TYPE_WB55_TIM);
     object_initialize_child(obj, "tim17-or", &s->tim17_or, TYPE_OR_IRQ);
     object_initialize_child(obj, "comp", &s->comp, TYPE_WB55_COMP);
+    object_initialize_child(obj, "adc", &s->adc, TYPE_WB55_ADC);
     for (int i = 0; i < WB55_NUM_PORTS; i++) {
         g_autofree char *name = g_strdup_printf("gpio%c", "abcdeh"[i]);
         object_initialize_child(obj, name, &s->gpio[i], TYPE_STM32L4X5_GPIO);
@@ -543,7 +559,10 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
                        qdev_get_gpio_in(DEVICE(&s->tim17_or), 1));
     wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_APB2RSTR, 18, dev);
-    dev = soc_regfile("adc1", 0x50040000, 0x400, WB55_RF_ADC);
+    dev = DEVICE(&s->adc);
+    s->adc.vref = soc_adc_vref;
+    s->adc.vref_opaque = s;
+    soc_map(SYS_BUS_DEVICE(dev), 0x50040000, errp);
     wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_AHB2RSTR, 13, dev);
     /* AES1 is the application's, and the one the FUS lends keys to; AES2
      * belongs to the radio stack, when there is one */

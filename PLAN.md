@@ -430,8 +430,20 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         64 on those three, 55 on the dev build (BRINGUP_LOG 116)
   - ☐ More on that bus: the C app on the other firmwares, each with its own
         SDK
-  - ☐ What other peripherals put on a pin: PWM, SPI devices on the header; a
-        voltage for the ADC
+  - ☐ What other peripherals put on a pin: PWM, SPI devices on the header
+  - ☑ A voltage for the ADC (2026-11-12): `gpio PA7 1.25V` holds a voltage to one
+        of the six pins that the firmware's ADC has as inputs, and the firmware
+        measures it. An ADC model in place of a stand-in that gave one number and
+        crashed the firmware on a second read (`stm32wb55_adc.c`: one conversion
+        at a time, ideal; the reference from VREFBUF; the chip's own reference,
+        temperature sensor and battery input, with calibration values to match).
+        `gpio`, `status` and the window's GPIO menu have the ADC in a line: on or
+        off, how many conversions, the last one's pin, voltage and number; the
+        window holds a voltage from a pin's menu. In `gpio_check.py`: a script
+        in the firmware's JavaScript on all five firmwares, and an app of the
+        check's own (`scripts/adc_check_app`, the official 1.5.1) with the
+        firmware's own conversions in both ranges; 93 checks there,
+        70 on the other four; `gui_check.py` 57 (BRINGUP_LOG 123)
   - ☑ An interrupt on a held pin and an open-drain output (2026-11-12): both
         worked as they were, on the path that a key's interrupt takes. An app of
         the check's own, `scripts/gpio_check_app` (C, ufbt, the official 1.5.1):

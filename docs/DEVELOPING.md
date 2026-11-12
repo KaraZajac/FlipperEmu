@@ -258,8 +258,19 @@ A pin is named as the MCU has it (`PA7`), as the case has it (`A7`) or by that n
 - A reset of the firmware leaves what is held, as it would leave a wire. A pin your
   app drives as a push-pull output keeps the app's level while it does (`gpio` says
   that something is held to it, and that it does not show).
+- **Your app measures a voltage:** `gpio PA7 1.25V` holds one to a pin, as a sensor's
+  output would be, and `furi_hal_adc_read` gives what an ideal converter makes of it:
+  2500 of 4095 with the firmware's usual reference of 2.048 V, the same number every
+  time, so a test can ask for that number. Six pins are the ADC's: 2, 3, 4, 7, 15 and
+  16 (PA7, PA6, PA4, PC3, PC1, PC0). `gpio`'s last line has what the ADC converted
+  last (the pin, the voltage on it, the number), which says whether your app measured
+  the pin you think it did, and whether it turned the ADC off again
+  (`furi_hal_adc_release`). A pin that nothing holds measures as 0 V. The chip's own
+  three inputs are there too (its reference, its temperature at 25 degrees, the
+  battery pin at 3.3 V), with calibration values that make the firmware's
+  `furi_hal_adc_convert_*` come out at those.
 - What a peripheral puts on a pin (a UART, PWM, SPI, I2C) is `unknown`: only the levels
-  of plain inputs and outputs are on the header so far. The ADC reads nothing. (The
+  of plain inputs and outputs are on the header so far. (The
   bytes of the UART on pins 15 and 16 are there, as bytes: the next section. And so
   are devices for the I2C bus on those pins: the one after it.)
 - **What your app did to a pin, edge by edge:** `gpio record pins.vcd` has the
@@ -1059,10 +1070,25 @@ reads a DS1990A has the reset pulse and, right after it, the key's presence puls
 and a record the emulator was stopped under is whole. Beneath the pins it wants the
 two serial ports as the firmware starts with them: the log's with a baud rate, its
 receiver off and a call waited for on pin 14, the other one off; and beneath those
-the I2C bus, with no device and no address called. It passes on the official 1.5.1,
-the official dev build, Momentum, Unleashed and RogueMaster (56 checks). Then, where
-`ufbt` is there with this firmware's SDK (the official 1.5.1; skipped otherwise), an
-app of its own, `scripts/gpio_check_app`: inputs with an interrupt on PA4 (both
+the I2C bus, with no device and no address called, and the ADC, off, with nothing
+converted. Then voltages: six of them held to the ADC's six pins, in the table and in
+`status --json`; a script in the firmware's JavaScript that measures each pin twice
+in a row with `readAnalog()` and prints what is held (1250 for 1.25 V, 2047, the most
+that it has, for 3V3); the launcher's ADC line while the script has the ADC (on, its
+reference at 2.048 V) and after it (off, twelve conversions, the last one's pin,
+voltage and number); a voltage as a level, with the firmware's `gpio read` on both
+sides of 1.65 V; a voltage to a pin that is not the ADC's; and what is refused (more
+than 3.3 V, a number with no unit). It passes on the official 1.5.1,
+the official dev build, Momentum, Unleashed and RogueMaster (70 checks). Then, where
+`ufbt` is there with this firmware's SDK (the official 1.5.1; skipped otherwise), two
+apps of its own. `scripts/adc_check_app` measures with `furi_hal_adc` and logs each
+number with what the firmware's own `furi_hal_adc_convert_*` makes of it: the chip's
+reference, temperature sensor and battery pin, then the six pins of the firmware's
+`gpio_pins` table, each twice, all of it with the reference at 2.048 V and 64 samples
+for a result and again at 2.5 V with one; and one pin as the app's own output, high
+and low, and as an input with a pull-up and a pull-down. The check wants every
+number, each of which it works out from the voltage. And `scripts/gpio_check_app`:
+inputs with an interrupt on PA4 (both
 edges), PC0 (its fall), PC1 (its rise) and PB2, and PA7 as an open-drain output. The
 table and `status --json` have each pin's edges. A pin held low and high is one
 logged interrupt for each edge asked for and none for the other; PC1's interrupt
@@ -1070,7 +1096,7 @@ turns PC0's off and on again, and none arrives or is kept while it is off; PA7 i
 while the app pulls it low, also with 3V3 held to it, high when let go of, and read
 as low by the firmware while it is held low from outside; a record has PA7's six
 levels in their order; and the NFC, whose chip has PB2's interrupt line, reads a tag
-afterwards (72 checks then).
+afterwards (93 checks then).
 The window's pins are in `scripts/gui_check.py`: a click on pin 2 and Hold it high
 (the window has it high with a wire on it, and the launcher's `gpio PA7` from outside
 says `high`), pin 3 held low, the GPIO menu's lines, Let go of all pins, the clicks

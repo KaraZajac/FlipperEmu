@@ -1,0 +1,12 @@
+# What scripts/gpio_check.py has a firmware measure with its ADC: the
+# header's pins, and what is inside the chip.  Not an example
+App(
+    appid="fe_adc_check",
+    name="ADC check",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="fe_adc_check_app",
+    stack_size=2 * 1024,
+    fap_category="Debug",
+    fap_version="1.0",
+    fap_description="Voltages that scripts/gpio_check.py holds to pins, measured",
+)

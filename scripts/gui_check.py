@@ -265,11 +265,14 @@ class Driver:
 
         press(2)
         acts = [a for a in w.pin_menu.actions() if not a.isSeparator()]
-        shown = w.pin_menu.isVisible() and len(acts) == 4
+        shown = w.pin_menu.isVisible() and len(acts) == 5
         check("pins: a click on pin 2 (A7): its menu, with what the firmware "
-              "has it as, and nothing to let go of yet",
+              "has it as, a voltage to hold to it (the ADC has it as an "
+              "input), and nothing to let go of yet",
               shown and acts[0].text().startswith("Pin 2, A7 (PA7): ")
-              and not acts[0].isEnabled() and not acts[3].isEnabled(),
+              and not acts[0].isEnabled() and not acts[4].isEnabled()
+              and acts[3].text() == "Hold it at a voltage (the ADC measures "
+                                    "it)…" and not acts[3].isChecked(),
               "; ".join(a.text() for a in acts))
         if shown:
             acts[1].trigger()           # Hold it high
@@ -285,7 +288,7 @@ class Driver:
 
         press(3)
         acts = [a for a in w.pin_menu.actions() if not a.isSeparator()]
-        if w.pin_menu.isVisible() and len(acts) == 4:
+        if w.pin_menu.isVisible() and len(acts) == 5:
             acts[2].trigger()           # Hold it low
         w.pin_menu.close()
         low = self.until(lambda: state(3) == ("low", "low"), 15)
@@ -296,10 +299,11 @@ class Driver:
         subs = line.actions() if isinstance(line, QtWidgets.QMenu) else []
         check("pins: pin 3 held low; the GPIO menu has every pin, the held "
               "ones ticked",
-              low and len(w.gpio_items) == 18 and len(subs) == 3
+              low and len(w.gpio_items) == 18 and len(subs) == 4
               and "held high from outside" in line.title()
               and subs[0].isChecked() and not subs[1].isChecked()
-              and subs[2].isEnabled() and w.a_gpio_free.isEnabled()
+              and not subs[2].isChecked()
+              and subs[3].isEnabled() and w.a_gpio_free.isEnabled()
               and not w.gpio_items[1].isEnabled()
               and w.gpio_items[1].text() == "Pin 1: +5V",
               f"{state(3)}; {len(w.gpio_items)} lines")
@@ -313,6 +317,60 @@ class Driver:
               free and "held" not in said
               and "nothing is held to the GPIO header any more"
               in self.console(), f"{state(2)} {state(3)}")
+
+        # a voltage, to a pin that the ADC has as an input
+        was = []
+
+        def answer():                   # the dialog, once it is there
+            for d in w.findChildren(fe_gui.W.VoltsDialog):
+                if d.isVisible():
+                    was.append((d.windowTitle(), d.volts.value()))
+                    d.volts.setValue(1.25)
+                    d.accept()
+
+        timer = QtCore.QTimer(interval=100)
+        timer.timeout.connect(answer)
+        press(2)
+        acts = [a for a in w.pin_menu.actions() if not a.isSeparator()]
+        w.pin_menu.close()
+        if len(acts) == 5:
+            timer.start()
+            acts[3].trigger()           # Hold it at a voltage…
+            timer.stop()
+        held = self.until(lambda: state(2) == ("low", "low"), 15)
+        self.settle()
+        said = self.launcher("gpio").stdout
+        tip = v.pin_tips.get(2, "")
+        press(2)
+        acts = [a for a in w.pin_menu.actions() if not a.isSeparator()]
+        w.pin_menu.close()
+        check("pins: Hold it at a voltage: the dialog starts at half of what "
+              "the chip runs on; 1.25 V there, and the pin has a wire on it, "
+              "is low as a level, and its menu has the voltage, ticked",
+              was == [("A voltage on pin 2, A7 (PA7)", 1.65)] and held
+              and "held at 1.25 V from outside (low as a level)" in tip
+              and "held at 1.25 V from outside (low as a level)" in said
+              and len(acts) == 5 and acts[3].isChecked()
+              and acts[3].text() == "Hold it at 1.25 V: another voltage…"
+              and not acts[1].isChecked() and not acts[2].isChecked()
+              and acts[4].isEnabled(),
+              f"{was}; {state(2)}; {tip!r}; "
+              + "; ".join(a.text() for a in acts) + "\n" + said)
+        press(5)
+        acts = [a for a in w.pin_menu.actions() if not a.isSeparator()]
+        w.pin_menu.close()
+        w.fill_gpio_menu()
+        line = w.a_gpio_adc.text() if w.a_gpio_adc else ""
+        check("pins: pin 5 (B3) is no input of the ADC's: no voltage in its "
+              "menu; and the GPIO menu has the ADC in a line, as `gpio` has "
+              "it",
+              len(acts) == 4 and acts[3].text() == "Let go of it"
+              and line.startswith("ADC1: ") and line.split(": ", 1)[1] in said
+              and not w.a_gpio_adc.isEnabled(),
+              "; ".join(a.text() for a in acts) + f"\n{line!r}\n{said}")
+        self.launcher("gpio", "PA7", "free")
+        self.until(lambda: state(2) is not None and not state(2)[1], 15)
+        self.settle()
 
         w.show_log()
         self.spin(0.3)

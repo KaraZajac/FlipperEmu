@@ -55,6 +55,7 @@ WATCHES = (
     ("/machine", "log-level"), ("/machine", "header"),
     ("/machine", "header-record"), ("/machine", "header-serial"),
     ("/machine", "header-i2c"), ("/machine", "header-i2c-record"),
+    ("/machine", "header-adc"),
 )
 
 # what can come from a file: (the menu's word for them, file filter, where
@@ -192,6 +193,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ports = []                 # ... and its serial ports
         self.pin_record = None          # (changes, ns, the file) while they
         #                                 are recorded
+        self.adc = None                 # the ADC, which has pins of the
+        #                                 header as inputs (fe_header)
+        self.a_gpio_adc = None          # ... and its line in the GPIO menu
         self.i2c = None                 # the header's I2C bus (fe_header)
         self.i2c_values = {}            # an address there: its device with
         #                                 its values (`i2c --json`)
@@ -726,6 +730,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.view.set_power(state, *self.hint(state))
             self.view.set_blank(False)
             self.ports = []
+            self.on_adc(None)
             self.on_i2c(None)
             self.on_header(None)
             self.on_pin_record(None)
@@ -1015,6 +1020,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.on_serial(value, tell=not first)
         if key == ("/machine", "header-i2c"):
             self.on_i2c(value, tell=not first)
+        if key == ("/machine", "header-adc"):
+            self.on_adc(value)
         if not first and old != value:
             self.changed(path, name, old, value)
         self.tiles_due.start()
@@ -2195,14 +2202,41 @@ class MainWindow(QtWidgets.QMainWindow):
                                                  ).replace("`ibutton`", "iButton")
         text += f"{fe_header.mode_text(p)}, {p['level']}"
         if p["held"]:
-            text += f"; held {p['held']} from outside" + (
+            text += f"; {fe_header.held_text(p)}" + (
                 ", which does not show while the firmware drives it"
                 if fe_header.overruled(p) else "")
         return text
 
     def hold_pin(self, pin, level):
-        """level: high, low or free; pin None: let go of all"""
+        """level: high, low, a voltage (1250mV) or free; pin None: let go of
+        all"""
         self.command("gpio", *([pin, level] if pin else ["free"]))
+
+    def ask_pin_volts(self, p):
+        """A voltage for a pin that the ADC has as an input"""
+        mv = p.get("held_mv") if p["held"] else None
+        d = W.VoltsDialog(self, f"pin {p['number']}, {p['label']} ({p['pin']})",
+                          fe_header.HIGH_MV if mv is None else mv,
+                          fe_header.HIGH_MV, fe_header.VDD_MV)
+        if d.ask():
+            self.hold_pin(p["pin"], d.value())
+
+    def on_adc(self, text):
+        """What the machine says of its ADC (None: nothing).  What the
+        firmware measures goes to the GPIO menu's line and not to the log: an
+        app that measures does it again and again."""
+        try:
+            self.adc = fe_header.parse_adc(text) if isinstance(text, str) \
+                else None
+        except ValueError:
+            self.adc = None
+        if self.adc and self.a_gpio_adc:    # the menu's line, if it is open
+            self.a_gpio_adc.setText(self.adc_line())
+
+    def adc_line(self):
+        """The ADC in a line, as `gpio` has it"""
+        return (f"{self.adc['name']}: "
+                f"{fe_header.adc_text(self.adc, self.header)}")
 
     def on_i2c(self, text, tell=False):
         """What the machine says of the header's I2C bus (None: nothing).
@@ -2450,9 +2484,18 @@ class MainWindow(QtWidgets.QMainWindow):
                             ("Hold it low (a wire to GND)", "low")):
             a = menu.addAction(text)
             a.setCheckable(True)
-            a.setChecked(p["held"] == level)
+            a.setChecked(fe_header.held_word(p) == level)
             a.triggered.connect(lambda _=False, pin=p["pin"], level=level:
                                 self.hold_pin(pin, level))
+        if p.get("adc") is not None:    # an input of the ADC's
+            word = fe_header.held_word(p)
+            at = word not in (None, "high", "low")
+            a = menu.addAction(f"Hold it {word}: another voltage…" if at
+                               else "Hold it at a voltage (the ADC measures "
+                                    "it)…")
+            a.setCheckable(True)
+            a.setChecked(at)
+            a.triggered.connect(lambda _=False, p=p: self.ask_pin_volts(p))
         a = menu.addAction("Let go of it")
         a.setEnabled(bool(p["held"]))
         a.triggered.connect(lambda _=False, pin=p["pin"]:
@@ -2538,6 +2581,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 a.triggered.connect(lambda _=False: self.ask_i2c_record())
             self.a_gpio_i2c_record = a
             self.ask_i2c_values()       # they may have changed since
+        self.a_gpio_adc = None          # the ADC's line
+        if self.adc:
+            m.addSeparator()
+            a = m.addAction(self.adc_line())
+            a.setEnabled(False)
+            self.a_gpio_adc = a
         m.addSeparator()
         a = m.addAction("Let go of all pins")
         a.setEnabled(any(p["held"] for p in self.header))

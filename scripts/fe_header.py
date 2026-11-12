@@ -10,7 +10,9 @@ for each of those, "NUMBER:PIN:MODE:PULL:LEVEL:HELD":
 (an input that the firmware has an interrupt for is "in+r", "in+f" or
 "in+rf": when it rises, when it falls, both) and takes "PA6=1", "PA6=0" and
 "PA6=z" to hold a pin from outside, as a wire to 3V3 or to GND would, and to
-let go of it.
+let go of it.  "PA6=1250mV" holds a voltage between those to it, which is
+"1250mV" as what is held: six of the pins are inputs of the MCU's ADC, and
+the machine's `header-adc` has what the firmware converted there (parse_adc).
 
 The machine's `header-record` is a file that gets every change of a pin's
 level with its time, a VCD file as logic analyzers' programs read (Record).
@@ -40,6 +42,18 @@ POWER = {1: "+5V", 8: "GND", 9: "3V3", 11: "GND", 18: "GND"}
 NOT_HELD = {13: "USART1's TX (`uart --port usart` has what it sends)",
             14: "USART1's RX (`uart send --port usart` puts bytes on it)",
             17: "the iButton pin (`ibutton` holds a key to it)"}
+# What the MCU runs on, in mV: a pin held high is at that
+VDD_MV = 3300
+# A held voltage is a level too, to a pin's digital side: high from here up
+# (the machine's choice: half of VDD)
+HIGH_MV = VDD_MV // 2
+# The inputs of the ADC that are on the header: the pin's number there, by
+# the ADC's number for the input
+ADC_PINS = {1: 16, 2: 15, 4: 7, 9: 4, 11: 3, 12: 2}
+# ... and those inside the chip
+ADC_INSIDE = {0: "the chip's own reference voltage",
+              17: "the chip's temperature sensor",
+              18: "a third of the battery pin's voltage"}
 # The alternate function that puts a serial port on its pins
 PORT_FUNCTION = {"USART1": 7, "LPUART1": 8}
 # The baud rates with a name: a divider seldom gives one to the last digit
@@ -57,12 +71,17 @@ def parse(text):
     falling, both or None), its "level" (high, low, floating: nothing holds
     it, or unknown: a peripheral's signal, which the emulator does not keep
     as a level), and what the outside holds on it ("held": high, low or None;
-    "holdable": may it)."""
+    "held_mv": at how many mV, 3300 for high and 0 for low, and a voltage
+    between them is high or low as a level too; "holdable": may it), and
+    which input of the ADC it is ("adc": its number there, or None)."""
     pins = []
+    inputs = {number: channel for channel, number in ADC_PINS.items()}
     for word in text.split():
         number, pin, mode, pull, level, held = word.split(":")
         mode, _, edges = mode.partition("+")
         function = re.fullmatch(r"af(\d+)(od)?", mode)
+        volts = re.fullmatch(r"(\d+)mV", held)
+        mv = int(volts[1]) if volts else {"high": VDD_MV, "low": 0}.get(held)
         pins.append({
             "number": int(number), "pin": pin,
             "label": LABELS.get(int(number), pin[1:]),
@@ -74,9 +93,86 @@ def parse(text):
             "interrupt": {"r": "rising", "f": "falling",
                           "rf": "both"}.get(edges),
             "level": {"0": "low", "1": "high", "z": "floating"}.get(level, "unknown"),
-            "held": held if held in ("high", "low") else None,
-            "holdable": held != "-"})
+            "held": None if mv is None else "high" if mv >= HIGH_MV else "low",
+            "held_mv": mv,
+            "holdable": held != "-",
+            "adc": inputs.get(int(number))})
     return pins
+
+
+def volts(mv):
+    """A voltage in words: 1.25 V, 3.3 V, 0 V"""
+    return f"{mv / 1000:g} V"
+
+
+def parse_volts(word):
+    """A voltage as a user writes it (1.25V, 1250mV, 0.4v): in mV, to the
+    nearest one.  None: that is no voltage."""
+    m = re.fullmatch(r"(\d+(?:\.\d*)?|\.\d+)(m?)v", word.strip().lower())
+    if not m:
+        return None
+    return int(float(m[1]) * (1 if m[2] else 1000) + 0.5)
+
+
+def held_word(p):
+    """What the outside holds a pin at: "high", "low", "at 1.25 V"; None:
+    nothing"""
+    if not p["held"]:
+        return None
+    mv = p.get("held_mv")
+    return p["held"] if mv in (None, 0, VDD_MV) else f"at {volts(mv)}"
+
+
+def held_text(p):
+    """... as a pin is said to be held: "held high from outside", and with a
+    voltage what that is as a level"""
+    word = held_word(p)
+    return f"held {word} from outside" + (
+        f" ({p['held']} as a level)" if word != p["held"] else "")
+
+
+def parse_adc(text):
+    """The ADC as the firmware has it (the machine's `header-adc`), a dict:
+    its "name" (ADC1), is it "on" (the firmware has it on while something
+    uses it), its "reference" voltage now in mV, how many "conversions" it
+    made since the emulator started, and the "last" one: None, or the
+    "channel" (the ADC's number for the input), the header's "pin" that it is
+    (its number there; None: an input that is not on the header), the "data"
+    that the firmware read, and the "uv" that were on the input, in
+    microvolts."""
+    name, state, reference, conversions, last = text.split(":", 4)
+    if state not in ("on", "off"):
+        raise ValueError(text)
+    if last != "-":
+        channel, data, uv = (int(n) for n in last.split(":"))
+        last = {"channel": channel, "pin": ADC_PINS.get(channel),
+                "data": data, "uv": uv}
+    return {"name": name, "on": state == "on", "reference": int(reference),
+            "conversions": int(conversions),
+            "last": None if last == "-" else last}
+
+
+def adc_input(last, pins=()):
+    """An input of the ADC in words, from a conversion as parse_adc has it:
+    "pin 4 (PA4)", or what it is inside the chip"""
+    if last["pin"]:
+        names = {p["number"]: p["pin"] for p in pins}
+        return f"pin {last['pin']}" + (f" ({names[last['pin']]})"
+                                       if last["pin"] in names else "")
+    return ADC_INSIDE.get(last["channel"],
+                          f"its input {last['channel']}, which is not on "
+                          "the header")
+
+
+def adc_text(adc, pins=()):
+    """The ADC and what the firmware converted with it, in words"""
+    last, n = adc["last"], adc["conversions"]
+    return ((f"on, its reference at {volts(adc['reference'])}" if adc["on"]
+             else "off (nothing uses it now)") + "; "
+            + ("the firmware has converted nothing yet" if not n or not last
+               else f"{n} conversion{'' if n == 1 else 's'}, the last: "
+                    f"{adc_input(last, pins)}, {volts(last['uv'] / 1000)}, "
+                    f"read as {last['data']}"))
 
 
 def mode_text(p):
@@ -471,5 +567,5 @@ def summary(pins):
     """The header in one line: the pins that something is on"""
     parts = [f"{p['pin']} is an output, {p['level']}" for p in pins
              if p["mode"] == "output" and p["holdable"]]
-    parts += [f"{p['pin']} is held {p['held']}" for p in pins if p["held"]]
+    parts += [f"{p['pin']} is held {held_word(p)}" for p in pins if p["held"]]
     return "; ".join(parts) or "none of its pins is an output, none is held"

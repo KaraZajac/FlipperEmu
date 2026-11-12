@@ -415,6 +415,15 @@ static void wb55_flash_realize(DeviceState *dev, Error **errp)
     stl_le_p(info + 0, 0x20003000);
     stl_le_p(info + 4, WB55_SYSMEM_BASE + 0x101);
     stw_le_p(info + 0x100, 0xE7FE);     /* b . */
+    /* The factory's values for the ADC: what it reads of the internal
+     * reference with VREF+ at 3.6 V, and of the temperature sensor at 30 and
+     * at 130 degrees C with VREF+ at 3.0 V (stm32wb55_adc.c) */
+    stw_le_p(info + (WB55_VREFINT_CAL_ADDR - WB55_INFO_BASE),
+             WB55_ADC_CAL(WB55_VREFINT_UV, 3600));
+    stw_le_p(info + (WB55_TS_CAL1_ADDR - WB55_INFO_BASE),
+             WB55_ADC_CAL(WB55_TS_UV(30), 3000));
+    stw_le_p(info + (WB55_TS_CAL2_ADDR - WB55_INFO_BASE),
+             WB55_ADC_CAL(WB55_TS_UV(130), 3000));
     for (int i = 0; i < 16; i++) {
         s->ob[i] = ob_factory[i];
     }

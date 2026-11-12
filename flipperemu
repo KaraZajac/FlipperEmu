@@ -1535,6 +1535,7 @@ def device_status(dev):
         st["gpio"] = read_header(m)
         st["serial"] = read_serial(m)
         st["i2c"] = read_i2c(m)
+        st["adc"] = read_adc(m)
         st["lights"] = {"led": g("/machine/led", "led"),
                         "blinking": g("/machine/led", "blinking"),
                         "backlight": g("/machine/led", "backlight"),
@@ -1616,6 +1617,8 @@ def cmd_status(args):
           for i, p in enumerate(st["serial"] or ())],
         *([("i2c", f"{fe_header.i2c_name(st['i2c'])}: "
                    f"{fe_header.i2c_text(st['i2c'])}")] if st["i2c"] else []),
+        *([("adc", fe_header.adc_text(st["adc"], st["gpio"] or ()))]
+          if st["adc"] else []),
         ("lights", lights_text(st["lights"])),
         ("log", f"the firmware's level: {log_level_text(st['log']['level'])}"
                 + (f"; kept in {st['log']['file']}" if st["log"]["file"] else "")),
@@ -1722,6 +1725,16 @@ def read_i2c(m):
     text = qom_get(m, "/machine", "header-i2c")
     try:
         return fe_header.parse_i2c(text) if isinstance(text, str) else None
+    except ValueError:
+        return None
+
+
+def read_adc(m):
+    """The ADC as the firmware has it, and what it converted last
+    (fe_header.parse_adc), or None from an emulator that cannot tell yet"""
+    text = qom_get(m, "/machine", "header-adc")
+    try:
+        return fe_header.parse_adc(text) if isinstance(text, str) else None
     except ValueError:
         return None
 
@@ -1910,26 +1923,32 @@ def cmd_gpio(args):
                  "gpio watch PA7 --for 5")
     if word == "record" and not args.wait:
         return gpio_record(dev, args.level)
-    if level is not None and level not in levels:
-        sys.exit(f"gpio: {args.level!r}: a pin is held high or low, or let "
-                 "go of (free)")
+    volts = fe_header.parse_volts(level) if level else None
+    if level is not None and level not in levels and volts is None:
+        sys.exit(f"gpio: {args.level!r}: a pin is held high or low, or at a "
+                 "voltage (1.25V, 1250mV), or let go of (free)")
+    if volts is not None and volts > fe_header.VDD_MV:
+        sys.exit(f"gpio: {args.level}: a pin is held at 0 to "
+                 f"{fe_header.volts(fe_header.VDD_MV)}, which is what the "
+                 "chip runs on; its pins are not for more")
     if args.wait and (level or not args.pin or args.pin.lower() == "free"):
         sys.exit("gpio: --wait goes with a pin, and nothing to hold: "
                  "gpio PA7 --wait high")
     if args.timeout <= 0:
         sys.exit("gpio: --timeout is more than 0 seconds")
 
-    ports = bus = None
+    ports = bus = adc = None
 
     def now():
         # (the monitor takes one client at a time: not kept, so that a test
         # can press a button while this waits)
-        nonlocal ports, bus
+        nonlocal ports, bus, adc
         m = open_monitor(dev)
         try:
             pins = read_header(m)
             ports = read_serial(m)
             bus = read_i2c(m)
+            adc = read_adc(m)
         finally:
             m.close()
         if pins is None:
@@ -1956,7 +1975,8 @@ def cmd_gpio(args):
             hold([f"{p['pin']}=z" for p in held])
         print(f"[{dev.name}] nothing is held to the GPIO header"
               + (" any more (it was: " + ", ".join(
-                  f"{p['pin']} {p['held']}" for p in held) + ")" if held else ""))
+                  f"{p['pin']} {fe_header.held_word(p)}" for p in held) + ")"
+                 if held else ""))
         return 0
     if not args.pin:
         print(f"[{dev.name}] the GPIO header (1 is +5V, 9 is 3V3; 8, 11 and "
@@ -1970,7 +1990,7 @@ def cmd_gpio(args):
             if fe_header.i2c_pin(p, bus):
                 note = f"{bus['name']}'s {fe_header.i2c_pin(p, bus)}"
             if p["held"]:
-                note = f"held {p['held']} from outside" + (
+                note = fe_header.held_text(p) + (
                     ", which does not show while the firmware drives the pin"
                     if fe_header.overruled(p) else "")
             elif p["label"] in ("SWC", "SIO"):
@@ -1988,6 +2008,12 @@ def cmd_gpio(args):
             print("its I2C bus, SDA on pin 15 and SCL on pin 16 (`run --i2c "
                   "TYPE@ADDRESS` puts a device there)")
             print(f"  {fe_header.i2c_name(bus)}  {fe_header.i2c_text(bus)}")
+        if adc:
+            inputs = sorted(fe_header.ADC_PINS.values())
+            print("its ADC, with pins " + ", ".join(map(str, inputs[:-1]))
+                  + f" and {inputs[-1]} as inputs (`gpio PIN 1.25V` holds a "
+                  "voltage to one)")
+            print(f"  {adc['name']}  {fe_header.adc_text(adc, pins)}")
         return 0
 
     p = header_pin(pins, args.pin)
@@ -1998,7 +2024,7 @@ def cmd_gpio(args):
                 sys.exit(f"[{dev.name}] {p['pin']} is {p['level']} and not "
                          f"{args.wait} after {args.timeout:g} s (the firmware "
                          f"has it as: {fe_header.mode_text(p)}"
-                         + (f"; held {p['held']} from outside" if p["held"]
+                         + (f"; {fe_header.held_text(p)}" if p["held"]
                             else "") + ")")
             time.sleep(0.05)
             p = header_pin(now(), p["pin"])
@@ -2010,14 +2036,19 @@ def cmd_gpio(args):
     if not p["holdable"]:
         sys.exit(f"gpio: {p['pin']} is not a pin to hold; "
                  + fe_header.NOT_HELD.get(p["number"], "it has its own use"))
-    hold([f"{p['pin']}={levels[level]}"])
+    hold([f"{p['pin']}=" + (levels[level] if level in levels
+                            else f"{volts}mV")])
     p = header_pin(now(), p["pin"])
     print(f"[{dev.name}] {p['pin']} (pin {p['number']} of the header): "
-          + (f"held {p['held']} from outside" if p["held"] else "let go of")
+          + (fe_header.held_text(p) if p["held"] else "let go of")
           + f"; it is {p['level']} (the firmware has it as: "
           f"{fe_header.mode_text(p)})"
           + (". The firmware drives it, and what is held to it shows when it "
-             "is an input again" if fe_header.overruled(p) else ""))
+             "is an input again" if fe_header.overruled(p) else "")
+          + (f". {p['pin']} is no input of the ADC's: a voltage there is a "
+             "level to the firmware and no more"
+             if fe_header.held_word(p) not in (None, "high", "low")
+             and not p["adc"] else ""))
     return 0
 
 
@@ -5013,13 +5044,17 @@ def main():
 
     p = sub.add_parser(
         "gpio", help="the GPIO header of a running device: what the firmware "
-        "has its pins as, and a pin held high or low from outside",
+        "has its pins as, and a pin held high, low or at a voltage from "
+        "outside",
         description="The GPIO header of a running device.  Nothing: its pins, "
         "what the firmware has each as (input, output, ...) and its level.  A "
         "pin: its level, as one word (high, low, floating, unknown).  A pin "
         "and a level: held there from outside, as a wire to 3V3 or GND would, "
         "until `free`; a reset of the firmware leaves it held.  A pin the "
-        "firmware drives as an output keeps the firmware's level.  "
+        "firmware drives as an output keeps the firmware's level.  A pin and "
+        "a voltage (1.25V, 1250mV; 0 to 3.3 V): held at that, which is what "
+        "the firmware's ADC converts on pins 2, 3, 4, 7, 15 and 16; as a "
+        "level it is high from 1.65 V up.  "
         "`record FILE.vcd`: every change of a pin's level with its time, into "
         "a VCD file (GTKWave, PulseView), until `record stop`; `record`: "
         "does one run.  `watch [PIN,PIN...]`: the changes as they happen.")
@@ -5027,7 +5062,7 @@ def main():
                    help="PA7, or as on the case (A7, C0, SWC), or its number on "
                         "the header (2); `free` alone: let go of all; `record` "
                         "and `watch`: see above")
-    p.add_argument("level", nargs="?", metavar="high|low|free",
+    p.add_argument("level", nargs="?", metavar="high|low|VOLTAGE|free",
                    help="hold the pin there from outside; free: let go of it "
                         "(after `record`: the file, or `stop`; after `watch`: "
                         "the pins to watch, with commas between them)")

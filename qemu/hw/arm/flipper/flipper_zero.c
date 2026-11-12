@@ -14,6 +14,9 @@
  *            12 PA13 (SWDIO), 13 PB6 (TX), 14 PB7 (RX), 15 PC1, 16 PC0,
  *            17 PB14 (iButton); /machine "header" shows them and holds them,
  *            "header-record" writes every change of their levels to a file
+ *   ADC1 (header):  PC0 (16) IN1, PC1 (15) IN2, PC3 (7) IN4, PA4 (4) IN9,
+ *            PA6 (3) IN11, PA7 (2) IN12: "header" holds a voltage to a pin,
+ *            /machine "header-adc" says what the firmware converted
  *   I2C3 (header):  SDA PC1 (15), SCL PC0 (16), devices by -device
  *            TYPE,bus=i2c3,address=N; /machine "header-i2c" says what is
  *            there and what was called, "header-i2c-record" writes every
@@ -135,6 +138,7 @@ struct FlipperZeroState {
     bool halt_rest;              /* ... and the CPU rests because of it */
     bool halt_said;
     uint8_t hdr_hold[HDR_PINS];  /* what the outside holds on a header pin */
+    uint16_t hdr_mv[HDR_PINS];   /* ... and at how many mV it holds it */
     QEMUTimer *hdr_rx_end[2];    /* a start bit on a serial port's RX pin */
     bool hdr_rx_low[2];
     FILE *hdr_rec;               /* the record of the header's levels (VCD) */
@@ -526,6 +530,14 @@ static const struct {
 
 enum { HDR_FREE, HDR_LOW, HDR_HIGH };
 
+/*
+ * A held voltage is a level for the pin's digital side: high from half of
+ * VDD up, low beneath.  (The chip has a band between 0.3 and 0.7 of VDD
+ * where an input keeps what it read before; a voltage in there is nothing
+ * to read a level from, here it has one.)
+ */
+#define HDR_HIGH_MV (WB55_VDD_MV / 2)
+
 static Stm32l4x5GpioState *header_port(FlipperZeroState *s, int i)
 {
     return &s->soc.gpio[header[i].port - 'A'];
@@ -615,6 +627,47 @@ static char header_level(FlipperZeroState *s, int i)
         return '?';
     }
     return pull == 1 ? '1' : pull == 2 ? '0' : 'z';
+}
+
+/*
+ * The voltage on a header pin in mV, for the ADC.  The firmware's own drive
+ * first, as for the level; then what the outside holds; then a pull-up.
+ * A pin that nothing holds has 0 V here: on hardware it has what its
+ * surroundings leave on it.
+ */
+static uint32_t header_mv(FlipperZeroState *s, int i)
+{
+    Stm32l4x5GpioState *g = header_port(s, i);
+    int pin = header[i].pin;
+    bool odr = extract32(g->odr, pin, 1);
+
+    if (extract32(g->moder, 2 * pin, 2) == 1 &&
+        (!extract32(g->otyper, pin, 1) || !odr)) {
+        return odr ? WB55_VDD_MV : 0;
+    }
+    if (s->hdr_hold[i] != HDR_FREE) {
+        return s->hdr_mv[i];
+    }
+    return header_level(s, i) == '1' ? WB55_VDD_MV : 0;
+}
+
+/* ADC1's inputs that are on the header, by the header's pin numbers
+ * (furi_hal_resources.c: the channel of each GpioPinRecord) */
+static const uint8_t hdr_adc_pin[] = {
+    [1] = 16, [2] = 15, [4] = 7, [9] = 4, [11] = 3, [12] = 2,
+};
+
+/* The ADC asks what is on one of its inputs (stm32wb55_adc.c).  The inputs
+ * that are not on the header are other things' pins (the keys, the radios'
+ * lines), which are no voltages here: 0. */
+static uint32_t flipper_adc_input(void *opaque, int channel)
+{
+    FlipperZeroState *s = opaque;
+
+    if (channel >= ARRAY_SIZE(hdr_adc_pin) || !hdr_adc_pin[channel]) {
+        return 0;
+    }
+    return header_mv(s, header_index(hdr_adc_pin[channel]));
 }
 
 /*
@@ -788,8 +841,9 @@ static void flipper_set_header_record(Object *obj, const char *value,
 /* "NUMBER:PIN:MODE:PULL:LEVEL:HELD" for each pin: MODE in, out, od (an
  * open-drain output), afN, afNod or analog, and after in, out or od the edges
  * that the firmware has an interrupt for (+r, +f, +rf: an input alone has
- * any); PULL up, down or none; LEVEL as above; HELD high, low, free, or - for
- * a pin that is not for holding */
+ * any); PULL up, down or none; LEVEL as above; HELD high (3.3 V), low (0 V),
+ * a voltage between them as 1250mV, free, or - for a pin that is not for
+ * holding */
 static char *flipper_get_header(Object *obj, Error **errp)
 {
     static const char *const pulls[] = { "none", "up", "down", "none" };
@@ -815,10 +869,43 @@ static char *flipper_get_header(Object *obj, Error **errp)
                                  od ? "od" : "out");
             g_string_append(out, edges[header_edges(s, i)]);
         }
-        g_string_append_printf(out, ":%s:%c:%s",
+        g_string_append_printf(out, ":%s:%c:",
                                pulls[extract32(g->pupdr, 2 * pin, 2)],
-                               header_level(s, i),
-                               header[i].holds ? holds[s->hdr_hold[i]] : "-");
+                               header_level(s, i));
+        if (s->hdr_hold[i] != HDR_FREE && s->hdr_mv[i] &&
+            s->hdr_mv[i] != WB55_VDD_MV) {
+            g_string_append_printf(out, "%dmV", s->hdr_mv[i]);
+        } else {
+            g_string_append(out, header[i].holds ? holds[s->hdr_hold[i]] :
+                                 "-");
+        }
+    }
+    return g_string_free(out, false);
+}
+
+/*
+ * The ADC as the firmware has it, "ADC1:STATE:REF:CONVERSIONS:LAST": STATE
+ * on or off (enabled or not: the firmware has it on only while something
+ * uses it); REF its reference voltage now in mV (the reference buffer's
+ * 2048 or 2500, or VDD's 3300 while that is off); CONVERSIONS how many it
+ * made since the emulator started; LAST the last one as CHANNEL:DATA:UV
+ * (the input's number, the result as the firmware read it, and what was on
+ * the input in microvolts), "-" before the first.
+ */
+static char *flipper_get_header_adc(Object *obj, Error **errp)
+{
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+    WB55AdcState *a = &s->soc.adc;
+    GString *out = g_string_new(NULL);
+
+    g_string_printf(out, "ADC1:%s:%u:%" PRIu64 ":",
+                    wb55_adc_enabled(a) ? "on" : "off",
+                    a->vref(a->vref_opaque), a->conversions);
+    if (a->conversions) {
+        g_string_append_printf(out, "%d:%d:%u", a->last_channel, a->last_data,
+                               a->last_uv);
+    } else {
+        g_string_append_c(out, '-');
     }
     return g_string_free(out, false);
 }
@@ -1058,26 +1145,48 @@ static void flipper_set_header_i2c_record(Object *obj, const char *value,
     flipper_header_rec_flushes(s);
 }
 
-/* "PA7=1", "PA7=0" or "PA7=z" (let go of it); several, with blanks or
- * commas between them */
+/* "PA7=1" (3.3 V), "PA7=0" (0 V), "PA7=1250mV" (a voltage between them) or
+ * "PA7=z" (let go of it); several, with blanks or commas between them */
 static void flipper_set_header(Object *obj, const char *value, Error **errp)
 {
     FlipperZeroState *s = FLIPPER_ZERO(obj);
     g_auto(GStrv) words = g_strsplit_set(value, " ,", -1);
     uint8_t hold[HDR_PINS];
+    uint16_t mv[HDR_PINS];
 
     memcpy(hold, s->hdr_hold, sizeof(hold));
+    memcpy(mv, s->hdr_mv, sizeof(mv));
     for (char **w = words; *w; w++) {
-        char port, level;
-        int pin, used = 0, i;
+        char port;
+        int pin, used = 0, i, end = 0, to = -1;
+        unsigned n = 0;
+        const char *v;
 
         if (!**w) {
             continue;
         }
-        if (sscanf(*w, "P%c%d=%c%n", &port, &pin, &level, &used) != 3 ||
-            (*w)[used] || !strchr("01z", level)) {
-            error_setg(errp, "header: expected PIN=0, PIN=1 or PIN=z (as in "
-                       "PA7=1), not '%s'", *w);
+        if (sscanf(*w, "P%c%d=%n", &port, &pin, &used) == 2 && used) {
+            v = *w + used;
+            if (!strcmp(v, "z")) {
+                to = HDR_FREE;
+            } else if (!strcmp(v, "0") || !strcmp(v, "1")) {
+                n = *v == '1' ? WB55_VDD_MV : 0;
+                to = *v == '1' ? HDR_HIGH : HDR_LOW;
+            } else if (g_ascii_isdigit(*v) &&
+                       sscanf(v, "%5u%n", &n, &end) == 1 &&
+                       !strcmp(v + end, "mV")) {
+                if (n > WB55_VDD_MV) {
+                    error_setg(errp, "header: %s is more than the %u mV that "
+                               "the chip runs on: its pins are not for that",
+                               v, WB55_VDD_MV);
+                    return;
+                }
+                to = n >= HDR_HIGH_MV ? HDR_HIGH : HDR_LOW;
+            }
+        }
+        if (to < 0) {
+            error_setg(errp, "header: expected PIN=0, PIN=1, PIN=z or a "
+                       "voltage as PIN=1250mV (as in PA7=1), not '%s'", *w);
             return;
         }
         for (i = 0; i < HDR_PINS; i++) {
@@ -1098,12 +1207,14 @@ static void flipper_set_header(Object *obj, const char *value, Error **errp)
                        "the firmware's log is on that UART");
             return;
         }
-        hold[i] = level == 'z' ? HDR_FREE : level == '1' ? HDR_HIGH : HDR_LOW;
+        hold[i] = to;
+        mv[i] = n;
     }
     for (int i = 0; i < HDR_PINS; i++) {
         bool was = s->hdr_hold[i] != HDR_FREE;
 
         s->hdr_hold[i] = hold[i];
+        s->hdr_mv[i] = mv[i];
         if (was && hold[i] == HDR_FREE &&
             phase_check(PHASE_MACHINE_INITIALIZED)) {
             object_property_set_uint(OBJECT(header_port(s, i)),
@@ -1594,6 +1705,8 @@ static void flipper_zero_init(MachineState *machine)
     s->soc.gpio_hook_opaque = s;
     s->soc.i2c[1].tap = flipper_i2c_tap;
     s->soc.i2c[1].tap_opaque = s;
+    s->soc.adc.input = flipper_adc_input;
+    s->soc.adc.input_opaque = s;
     s->soc.comp.en_changed = flipper_comp_en;
     s->soc.comp.en_opaque = s;
     s->soc.comp.val_read = flipper_comp_val_read;
@@ -1824,7 +1937,13 @@ static void flipper_zero_instance_init(Object *obj)
     object_property_set_description(obj, "header",
         "The GPIO header's pins as the firmware has them (in+r, in+f, "
         "in+rf: an input with an interrupt on its rise, fall, both), and what "
-        "the outside holds on them: set PA7=1, PA7=0 or PA7=z (let go)");
+        "the outside holds on them: set PA7=1, PA7=0, PA7=1250mV (a voltage, "
+        "for the ADC) or PA7=z (let go)");
+    object_property_add_str(obj, "header-adc", flipper_get_header_adc, NULL);
+    object_property_set_description(obj, "header-adc",
+        "The ADC as the firmware has it: on or off, its reference in mV, "
+        "how many conversions it made, and the last one: the input's "
+        "number, the result, and the microvolts that were on the input");
     object_property_add_str(obj, "header-serial", flipper_get_header_serial,
                             NULL);
     object_property_set_description(obj, "header-serial",

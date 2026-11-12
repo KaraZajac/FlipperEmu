@@ -19,13 +19,15 @@ it; the file comments name that function. Register layouts come from RM0434 and 
         │   Cortex-M4F (QEMU armv7m, 63 IRQs, MPU, FPU)
         │   rcc pwr flash hsem ipcc(+CPU2, FUS key store) aes×2 exti syscfg rtc
         │   lptim×2 spi×2 i2c×2 dma(+dmamux) rng dwt dbgmcu usb(+virtual host) tim2
+        │   adc comp×2
         │   gpio×6 usart1 lpuart1 (QEMU L4x5 models)
-        │   tim1/16/17 adc pka crc comp iwdg … (register files)
+        │   tim1/16/17 pka crc iwdg … (register files)
         │
    SPI2 ── st7567 (LCD, CS PC11, A0 PB1, RST PB0)   ── ssi-sd + sd-card-spi (CS PC12, CD PC10)
    SPI1 ── cc1101 (CS PD0, GDO0 → PA1)              ── st25r3916 (CS PE4, IRQ → PA2)
    I2C1 ── bq27220 @0x55   bq25896 @0x6B   lp5562 @0x30
    I2C3 ── pins 15 (SDA) and 16 (SCL) of the header: what `run --i2c` puts there
+   ADC1 ←─ pins 2, 3, 4, 7, 15 and 16 of the header: a voltage held there (`gpio PIN 1.25V`)
    TIM16 CH1 (PB8) ── piezo → flipper-speaker → QEMU audio (desktop or WAV)
    PA0 + TIM2 TI1  ←─ IR receiver ← /machine/ir rx (marks/spaces)
    PA1 + TIM2 TI2  ←─ CC1101 GDO0 (async RX) ← /machine/subghz rx (the "air"),
@@ -1184,6 +1186,37 @@ ufbt is not run at all, and `update` sends the package without the stage (BRINGU
   while that call is the last one. It sees the property's value at its looks and
   not every call, so it cannot leave a scan out as `i2c watch` does: a scan that
   the console is told of while it stands at such an address would get the word.
+- **The ADC** (`stm32wb55_adc.c`): ADC1 at 0x5004_0000, as much of it as the
+  firmware's `furi_hal_adc` uses. One conversion at a time, of the channel in the
+  first rank of the regular sequence: ADSTART puts the result in DR at once, with
+  EOC, and reading DR takes EOC. CR's bits are the chip's kind, set by a 1 and not
+  cleared by a 0 (the firmware starts a conversion with a write of ADSTART alone
+  and then checks that the ADC is still enabled). A result is the input over the
+  reference in CFGR's resolution; with oversampling it is that many equal samples
+  added and shifted right. The reference is the SoC's word: VREFBUF's 2.048 V or
+  2.5 V while the firmware has it on (it does, for every measurement), 3.3 V
+  otherwise. Channels 0, 17 and 18 are inside the chip (VREFINT at 1.212 V, the
+  temperature sensor at 25 degrees, a third of VBAT's 3.3 V), each behind its bit
+  in CCR, and the flash model has the calibration values for those numbers at
+  their addresses in the system memory (`wb55.h` has the numbers once, for
+  both). The RCC's reset of the ADC goes to the model, as the firmware gives the
+  ADC back with one; the count of conversions and the last one are no registers
+  and stay.
+- **A pin's voltage**: the ADC asks the machine for a channel's input
+  (`flipper_adc_input`), which has six of the header's pins by the firmware's own
+  table (channels 12, 11, 9, 4, 2 and 1 are pins 2, 3, 4, 7, 15 and 16) and 0 V for
+  every other channel. A pin's voltage (`header_mv`) is the firmware's own drive
+  first (a push-pull output, or an open-drain one that pulls low), then what is
+  held to it, then 3.3 V for a pull-up, and 0 V else. What is held is a level and
+  a voltage: `PA7=1250mV` written to the property `header` holds a voltage, `1`
+  and `0` are 3.3 V and 0 V, and as a level a voltage is high from 1.65 V up. The
+  property `header-adc` (read only) is `ADC1:on|off:REFERENCE:CONVERSIONS:LAST`,
+  the reference in mV and LAST as `CHANNEL:DATA:MICROVOLTS` or `-`;
+  `fe_header.parse_adc` reads it and `adc_text` says it, for `gpio`, `status` and
+  the window, which watches the property over the panel link. Not there: noise,
+  the time of a conversion, a sequence of several channels, continuous mode, DMA,
+  the interrupt, a trigger from a timer, injected conversions and the analog
+  watchdogs (the model says the first such use in the log under `-d unimp`).
 - **Not there** on that bus: the two lines as levels (pins 15 and 16 are `unknown`
   on the header while the firmware talks, and the pins' record has no bits of a
   transfer), the bus's speed (a transfer takes no time, and a record's bytes have

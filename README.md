@@ -47,8 +47,10 @@ made-up KeeLoq and Nice Flor-S remotes that the firmware's decoders read with th
 passes on the same five.
 `scripts/gpio_check.py` (the GPIO header: a pin the firmware drives seen from outside,
 a pin held from outside read by the firmware, a record of every change of a pin with
-its time) passes on the same five; on the official release it also has an app of its
-own take interrupts from held pins and drive an open-drain output.
+its time, a voltage held to a pin and measured by the firmware's ADC) passes on the
+same five; on the official release it also has two apps of its own, which measure
+with the ADC in both of its ranges, take interrupts from held pins and drive an
+open-drain output.
 `scripts/uart_check.py` (the two serial ports of the header, pins 15 and 16 and pins
 13 and 14: an app that opens one is answered from the launcher, from a program on the
 port's pty, and over TCP; the firmware's expansion service answers a module that the
@@ -289,13 +291,17 @@ instead, and `--headless` no window at all.
 - **The GPIO pins** along the top show their levels: a pin that is high is lit amber,
   one that is low blue, and one that nothing drives stays dark. Click a pin to hold it
   high or low from outside, as a wire to 3V3 or to GND would (it gets a jumper wire),
-  and to let go of it again. The pointer over a pin says what the firmware has it as,
+  and to let go of it again. Six of the pins are inputs of the firmware's ADC (2, 3,
+  4, 7, 15 and 16): those can be held at a voltage too, as a sensor's output would
+  be, and the firmware measures it. The pointer over a pin says what the firmware has it as,
   and the GPIO menu has all eighteen, and beneath them the two serial ports with the
   speed the firmware set (the console says when an app opens one, and when it closes
   it) and the I2C bus of pins 15 and 16: the devices that `run --i2c` put there, each
   with its values, a sensor's temperature to set from the menu, and how many of the
   firmware's calls were answered (the console has that too, once the firmware has
-  talked on the bus). Pins 13 and 14 are where a real Flipper's log comes out: click
+  talked on the bus), and last the ADC with what it converted last: which pin, the
+  voltage on it, and the number the firmware got. Pins 13 and 14 are where a real
+  Flipper's log comes out: click
   them, or beside the pins, to read it. **GPIO > Record what the pins do…** writes
   every change of a pin's level to a file with its time, as a logic analyzer on the
   header would, until GPIO > End the record; the status bar counts the changes
@@ -412,7 +418,7 @@ it runs: once with the wait given up, once to the end.
 | `battery [PERCENT] [--voltage MV] [--temperature C] [--current MA]` | its battery (no argument: show it) |
 | `sd eject` \| `sd insert` | pull its microSD card out, push it back in |
 | `sound off` \| `sound on` | mute its speaker, and back |
-| `gpio` \| `gpio PIN` \| `gpio PIN high\|low\|free` \| `gpio PIN --wait high\|low` | its GPIO header: what the firmware has the pins as; one pin's level; a pin held from outside, or let go of; wait for a level |
+| `gpio` \| `gpio PIN` \| `gpio PIN high\|low\|1.25V\|free` \| `gpio PIN --wait high\|low` | its GPIO header: what the firmware has the pins as; one pin's level; a pin held from outside (at a voltage: for the firmware's ADC), or let go of; wait for a level |
 | `gpio record OUT.vcd` \| `gpio record stop` \| `gpio watch [PIN,PIN]` | every change of a pin's level with its time: into a file a logic analyzer's program opens, or printed as it happens |
 | `uart` \| `uart send TEXT [--expect TEXT]` \| `uart wait TEXT` \| `uart term` | the serial port on pins 15 and 16 of its header: where it goes; send to the app that has it open, and wait for its answer; wait for what the app sends; a terminal on it. `--port usart`: the one on pins 13 and 14 |
 | `expansion [--rpc] [--baud N] [--for S] [--port P]` | be an expansion module on its header, to the firmware's expansion service: the call, the baud rate, heartbeats, an RPC session; every frame printed |
@@ -1356,12 +1362,14 @@ quarter of a host core while idle, against 5 % with `--usb none` or the cable pu
 ### The GPIO header
 
 The pins along the top. `gpio` shows what the firmware has each of them as, and holds
-one high or low from outside, as a wire to 3V3 or to GND would:
+one high or low from outside, as a wire to 3V3 or to GND would, or at a voltage, as
+a sensor's output would be:
 
 ```sh
 ./flipperemu gpio                   # the pins: what the firmware has them as, and levels
 ./flipperemu gpio PA7               # one pin's level, as a word (high, low, floating)
 ./flipperemu gpio PA6 high          # hold it high from outside (low; free: let go of it)
+./flipperemu gpio PA7 1.25V         # ... or at a voltage, 0 to 3.3 V (1250mV is the same)
 ./flipperemu gpio free              # let go of all
 ./flipperemu gpio PA7 --wait high   # until it is high (--timeout S, then exit status 1)
 ./flipperemu gpio record pins.vcd   # every change of a level, with its time, into a file
@@ -1390,6 +1398,8 @@ its serial ports, as the firmware has them (`uart` sends and reads there)
   pins 15 and 16 (LPUART1)  off (nothing has opened it)
 its I2C bus, SDA on pin 15 and SCL on pin 16 (`run --i2c TYPE@ADDRESS` puts a device there)
   pins 15 and 16 (I2C3)  no device; the firmware has called no address yet
+its ADC, with pins 2, 3, 4, 7, 15 and 16 as inputs (`gpio PIN 1.25V` holds a voltage to one)
+  ADC1  off (nothing uses it now); the firmware has converted nothing yet
 ```
 
 A pin goes by the MCU's name (`PA7`), by what the case says beside it (`A7`, `C0`,
@@ -1413,15 +1423,74 @@ it waits to be read (the receiver is on, with no interrupt and no DMA for it).
 the other port than the one your wire is on, shows here without a look at its
 source. More on the ports [below](#the-serial-port-on-pins-15-and-16).
 
-The last line is the header's I2C bus: the devices that `run --i2c` put there, and what
-the firmware did on it (how many addresses it called, how many answered, the last one).
+Then the header's I2C bus: the devices that `run --i2c` put there, and what the
+firmware did on it (how many addresses it called, how many answered, the last one).
 More on it [below](#i2c-devices-on-pins-15-and-16).
+
+The last line is the firmware's ADC, which has six of the pins as inputs: 2, 3, 4, 7,
+15 and 16 (PA7, PA6, PA4, PC3, PC1, PC0). `gpio PA7 1.25V` holds a voltage to one, as
+a sensor's output or a voltage divider would, and the firmware measures that
+(`furi_hal_adc_read` in an app, `readAnalog()` in a script). The line says whether
+the ADC is on at that moment and with which reference (the firmware turns it on for
+a measurement and off again, so `off` is the usual word), how many conversions it has
+made since the emulator started, and the last one: the pin, the voltage that was on
+it, and the number that the firmware got.
+
+```
+$ cat volts.js
+let eventLoop = require("event_loop");
+let gpio = require("gpio");
+let pin = gpio.get("pa7");
+pin.init({ direction: "in", inMode: "analog" });
+print(pin.readAnalog(), "mV");
+$ ./flipperemu gpio PA7 1.25V
+[flipper] PA7 (pin 2 of the header): held at 1.25 V from outside (low as a level); it is low (the firmware has it as: analog)
+$ ./flipperemu push volts.js /ext/volts.js
+$ ./flipperemu cli "js /ext/volts.js"
+Running script /ext/volts.js, press CTRL+C to stop
+1250 mV
+Script done!
+$ ./flipperemu gpio | tail -1
+  ADC1  off (nothing uses it now); 1 conversion, the last: pin 2 (PA7), 1.25 V, read as 2500
+```
+
+(The script's number is in mV and the ADC's is not: the firmware's JavaScript halves
+the result, which is its 2.048 V reference over twelve bits. The line with
+`event_loop` has to be there: without it the firmware does not load `gpio`.)
+
+- The ADC is an ideal one. A result is the voltage over the reference, in twelve
+  bits: 1.25 V is 2500 of 4095 with the firmware's usual reference of 2.048 V, and
+  2048 with its other one, 2.5 V; from the reference up it is 4095. The same voltage
+  is the same number every time, with no noise and no offset, so a test can ask for
+  the exact number. A conversion takes no time (some 260 us on a Flipper, with the
+  firmware's 64 samples for a result).
+- A pin that nothing holds measures as 0 V, where a Flipper's open pin measures as
+  whatever it has picked up. A pin that the firmware itself drives or pulls measures
+  as that, 3.3 V or 0 V; one that a peripheral has (a UART's, the I2C bus's) as 0 V.
+- A voltage is a level too, to a pin that the firmware reads as an input: high from
+  1.65 V up, half of what the chip runs on, and low beneath. (A real pin is sure to
+  be low under 1 V and high over 2.3 V, and may be either in between.) More than
+  3.3 V is refused: the chip's pins are not for more.
+- Three more inputs are inside the chip, and `furi_hal_adc` reads them as it reads a
+  pin: the chip's own reference voltage (1.212 V), its temperature sensor (the chip
+  is at 25 degrees here, always) and a third of its battery pin (3.3 V here, whatever
+  the fuel gauge says). The factory's calibration values are this model's own
+  numbers, so the firmware's `furi_hal_adc_convert_vref`, `_temp` and `_vbat` give
+  2048 or 2500 mV, 25 degrees and 3300 mV.
+- One conversion at a time is all there is, which is all that `furi_hal_adc` does.
+  A sequence of channels, continuous conversion, DMA, the ADC's interrupt and a
+  timer as its trigger are not modelled: an app that sets the chip's registers for
+  those itself gets no result.
+- The model is the chip's reference manual and the firmware's source. Nothing was
+  compared with a real Flipper's ADC.
 
 In the window the pins of the drawn Flipper are the same thing by hand. A pin is lit
 amber while it is high and blue while it is low. A click on one has a menu to hold it
-high or low and to let go of it, and a held pin has a jumper wire on it. The GPIO menu
-lists every pin with what the firmware has it as, and beneath the pins the two serial
-ports and the I2C bus with its devices. The window looks at the header ten times a
+high or low and to let go of it, and a held pin has a jumper wire on it. For the six
+pins of the ADC the menu has **Hold it at a voltage…** too, which asks for the
+voltage. The GPIO menu lists every pin with what the firmware has it as, and beneath
+the pins the two serial ports, the I2C bus with its devices and the ADC with what it
+converted last. The window looks at the header ten times a
 second, so a pin that blinks faster than that shows only some of its blinks.
 
 - What is held stays so over a reset of the firmware, as a wire would, and is gone with
@@ -1449,7 +1518,6 @@ second, so a pin that blinks faster than that shows only some of its blinks.
 - `floating` is a pin that nothing drives, holds or pulls. `unknown` is a pin a
   peripheral has (an alternate function): what a UART, a timer's PWM or SPI puts on a
   pin is not a level the emulator keeps, so it is not on the header yet.
-- A held pin is a level, not a voltage: the ADC is not there to read it.
 - USART1's pins (13, 14) and the iButton pin (17) are read here, and not held: they
   have `uart --port usart` (and `log`) and `ibutton`.
 - `--wait` looks at the pin twenty times a second: a shorter pulse can pass unseen.

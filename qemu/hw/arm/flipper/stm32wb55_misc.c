@@ -265,33 +265,6 @@ static void wb55_dbgmcu_init(Object *obj)
 
 /* -------------------------------------------------------------- regfile */
 
-static void regfile_adc_write(WB55RegfileState *s, hwaddr addr, uint32_t val)
-{
-    uint32_t *isr = &s->regs[0x00 / 4], *cr = &s->regs[0x08 / 4];
-
-    switch (addr) {
-    case 0x00:
-        *isr &= ~val;                   /* write-1-to-clear */
-        return;
-    case 0x08:
-        *cr = val & ~((1u << 31) | (1u << 2) | (1u << 4) | (1u << 5));
-        if (val & (1u << 1)) {          /* ADDIS */
-            *cr &= ~3u;
-            *isr &= ~1u;
-        } else if (val & 1u) {          /* ADEN -> ADRDY */
-            *isr |= 1u;
-        }
-        if (val & (1u << 2)) {          /* ADSTART: conversion done at once */
-            s->regs[0x40 / 4] = 1500;   /* ~1.2 V on a 3.3 V reference */
-            *isr |= (1u << 1) | (1u << 2) | (1u << 3);
-        }
-        return;
-    case 0x40:
-        return;                         /* DR is read-only */
-    }
-    s->regs[addr / 4] = val;
-}
-
 static void regfile_tim_write(WB55RegfileState *s, hwaddr addr, uint32_t val)
 {
     switch (addr) {
@@ -338,7 +311,6 @@ static void wb55_regfile_write(void *opaque, hwaddr addr, uint64_t val,
         addr &= ~3;
     }
     switch (s->kind) {
-    case WB55_RF_ADC: regfile_adc_write(s, addr, val); break;
     case WB55_RF_TIM: regfile_tim_write(s, addr, val); break;
     default:          s->regs[addr / 4] = val; break;
     }
@@ -362,9 +334,6 @@ static void wb55_regfile_reset_hold(Object *obj, ResetType type)
 
     if (s->regs) {
         memset(s->regs, 0, s->size);
-        if (s->kind == WB55_RF_ADC) {
-            s->regs[0x08 / 4] = 1u << 29;   /* DEEPPWD */
-        }
     }
 }
 

@@ -501,6 +501,44 @@ struct WB55CompState {
 /* the board's analog side: is comparator n's input+ above input-? */
 void wb55_comp_input(WB55CompState *s, int n, bool above, int64_t when);
 
+/* ---------------------------------------------------------------- ADC1 */
+/*
+ * The chip's analog side: its supply, its internal reference, its
+ * temperature and its temperature sensor's output at t degrees C.  The ADC
+ * model converts these, and the factory's values in the system memory, which
+ * the firmware turns such a result into volts and degrees with, are made of
+ * the same numbers (WB55_ADC_CAL: a 12-bit result, rounded).
+ */
+#define WB55_VDD_MV         3300u
+#define WB55_VREFINT_UV     1212000u
+#define WB55_CHIP_DEGREES   25
+#define WB55_TS_UV(t)       ((uint32_t)(760000 + 2500 * ((t) - 30)))
+#define WB55_ADC_CAL(uv, ref_mv) \
+    ((uint16_t)(((uint64_t)(uv) * 4096 + (ref_mv) * 500u) / ((ref_mv) * 1000u)))
+#define WB55_TS_CAL1_ADDR     0x1FFF75A8u   /* the sensor at 30 C, VREF+ 3.0 V */
+#define WB55_VREFINT_CAL_ADDR 0x1FFF75AAu   /* VREFINT with VREF+ at 3.6 V */
+#define WB55_TS_CAL2_ADDR     0x1FFF75CAu   /* the sensor at 130 C, 3.0 V */
+
+#define TYPE_WB55_ADC "stm32wb55-adc"
+OBJECT_DECLARE_SIMPLE_TYPE(WB55AdcState, WB55_ADC)
+struct WB55AdcState {
+    SysBusDevice parent_obj;
+    MemoryRegion mmio;
+    uint32_t regs[0x400 / 4];    /* ADC1 and, from 0x300, the common block */
+    bool warned;
+    /* SoC hook: the voltage on VREF+ in mV */
+    uint32_t (*vref)(void *opaque);
+    void *vref_opaque;
+    /* board hook: the voltage in mV on the pin of a channel (1 to 16) */
+    uint32_t (*input)(void *opaque, int channel);
+    void *input_opaque;
+    uint64_t conversions;        /* since the emulator started */
+    uint8_t last_channel;        /* the last one: its channel, */
+    uint16_t last_data;          /* its result, */
+    uint32_t last_uv;            /* and the voltage it was of */
+};
+bool wb55_adc_enabled(WB55AdcState *s);
+
 /* Read/write register file used for blocks that only need readback. */
 #define TYPE_WB55_REGFILE "stm32wb55-regfile"
 OBJECT_DECLARE_SIMPLE_TYPE(WB55RegfileState, WB55_REGFILE)
@@ -516,7 +554,7 @@ struct WB55RegfileState {
     void (*changed)(void *opaque);
     void *changed_opaque;
 };
-enum { WB55_RF_PLAIN = 0, WB55_RF_ADC, WB55_RF_TIM, WB55_RF_CRC };
+enum { WB55_RF_PLAIN = 0, WB55_RF_TIM, WB55_RF_CRC };
 
 /* ----------------------------------------------------------------- USB */
 #include "chardev/char-fe.h"
@@ -659,6 +697,7 @@ struct WB55SocState {
     WB55TimState tim2;               /* IR receive, Sub-GHz async RX capture */
     WB55TimState tim17;              /* NFC block-TX timer */
     WB55CompState comp;              /* COMP1: 125 kHz RFID demodulator */
+    WB55AdcState adc;                /* ADC1: six pins of the GPIO header */
     Stm32l4x5GpioState gpio[WB55_NUM_PORTS];
     Stm32l4x5UsartBaseState usart1;
     Stm32l4x5UsartBaseState lpuart1;

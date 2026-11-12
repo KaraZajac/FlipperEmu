@@ -2654,6 +2654,72 @@ big lock, entry 92).
     - All of this is the firmware's source and the emulator. No real Flipper
       was asked.
 
+123. **A voltage for the ADC.** The header's pins were levels. Six of them
+    are inputs of the chip's ADC, and a script's `readAnalog()` or an app's
+    `furi_hal_adc_read` had nothing to measure.
+    - What was there: ADC1 as one of the plain register blocks that keep what
+      is written to them, with a fixed result. A script that read PA4 got 750
+      (the block's 1500, halved by the JavaScript module), whatever was held.
+      The second `readAnalog()` ended the firmware: `furi_check failed` on
+      the screen, and a restart. `LL_ADC_REG_StartConversion` writes ADSTART
+      to CR without ADEN, as the chip wants (ADEN, ADDIS and ADSTART are set
+      by a 1 and are not cleared by a 0), the block stored that as it came,
+      and `furi_hal_adc_read` begins with a check that the ADC is enabled. So
+      no app or script could measure twice. The factory's calibration values
+      read 0xFFFF.
+    - `stm32wb55_adc.c`: one conversion at a time, of the channel in the
+      first rank, which is all that `furi_hal_adc` asks for. ADCAL ends at
+      once, ADEN gives ADRDY, ADSTART puts the result in DR with EOC, and
+      reading DR takes EOC. The result is the input over the reference in
+      CFGR's resolution, and with oversampling that many equal samples added
+      and shifted, which comes out as the same number. The reference is
+      VREFBUF's, 2.048 V or 2.5 V by its range bit (3.3 V with VREFBUF off).
+      A conversion takes no time; on a Flipper it is 260 us with the
+      firmware's 64 samples.
+    - Three inputs are inside the chip: VREFINT (1.212 V), the temperature
+      sensor (0.76 V at 30 degrees and 2.5 mV for a degree, the chip at 25)
+      and a third of VBAT (3.3 V). The flash model writes the calibration
+      values that belong to those numbers into the system memory
+      (VREFINT_CAL 1379, TS_CAL1 1038, TS_CAL2 1379), so the firmware's own
+      macros give 2048 or 2500 mV for the reference, 25 degrees and 3300 mV.
+      The battery's voltage in the firmware's Power screen is the fuel
+      gauge's, not this.
+    - The machine has a voltage for each pin of the header: the firmware's
+      own drive first (a push-pull output, or an open-drain one that pulls
+      low), then what is held, then the pin's pull-up; else 0 V. `gpio PA7
+      1.25V` (or `1250mV`) holds a voltage, 0 to 3.3 V; `high` and `low` are
+      3.3 V and 0 V. To a pin that the firmware reads as an input a voltage
+      is a level, high from 1.65 V up. The property `header-adc` has the
+      ADC's state, the count of conversions and the last one (channel,
+      result, microvolts), which `gpio`, `status`, `status --json` (`"adc"`)
+      and the window's GPIO menu show; a pin's menu in the window has Hold it
+      at a voltage… for the six.
+    - The numbers, each worked out from the voltage before the emulator was
+      asked: 1.25 V is 2500 at 2.048 V and 2048 at 2.5 V; 2 V is 4000 and
+      3276; 0.1 V is 200 and 163 (which the firmware turns into 99 mV); 3.3 V
+      is 4095 in both. VREFINT is 2424 and 1985, the temperature sensor 1495
+      and 1224, the battery input 2200 and 1802. All came out so the first
+      time, in the check's app (`scripts/adc_check_app`, which goes by the
+      firmware's `gpio_pins` table, so the machine's map from channel to pin
+      is checked against the firmware's: channels 12, 11, 9, 4, 2, 1 for
+      pins 2, 3, 4, 7, 15, 16).
+    - The JavaScript module wants `require("event_loop")` before
+      `require("gpio")`, or the script ends with `"gpio" module load fail`.
+      It takes the ADC when it is loaded and gives it back when the script
+      ends, so the launcher has the ADC as on for as long as a script with
+      the module runs; the check looks at that while the script waits.
+    - `gpio_check.py`: 93 checks on the official 1.5.1 (21 more: one at the start,
+      13 with held voltages, the firmware's JavaScript and its `gpio read`,
+      7 with the app), 70 on its dev build, Momentum, Unleashed and
+      RogueMaster. `gui_check.py`: 57, with a voltage held from a pin's
+      menu.
+    - The model's choices, where a Flipper would differ: no noise and no
+      offset; a pin that nothing holds is 0 V, not what it has picked up; the
+      chip is at 25 degrees; a level's threshold is one voltage and not a
+      band. A sequence of conversions, continuous mode, DMA, the interrupt
+      and a hardware trigger are not there (said once under `-d unimp`). No
+      real Flipper's ADC was asked for any of these numbers.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
