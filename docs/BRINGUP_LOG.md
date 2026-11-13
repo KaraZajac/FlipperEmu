@@ -3832,6 +3832,59 @@ big lock, entry 92).
       checks were not run again: what changed is what AES1 saves and loads,
       the FUS's first run after a load, and the check.
 
+137. **A saved state: `status` names it, the window saves one, and a window
+    on a loaded one.** The last of the fourth part.
+    - `status`. The note of a load (`run.json`) has the snapshot's name and
+      the time of its save beside the machine's arguments. `status` says
+      `snapshot : the run began at NAME (saved …)`, and `--json` has
+      `"snapshot": {"name", "saved"}`, or `null` for a run that is no load.
+      The snapshot check asks after `snapshot load first`, and after a plain
+      `run` once more.
+    - The window. Device > Save a snapshot… asks for a name (none: the date
+      and the time) and runs the launcher's `snapshot save`; what it says
+      comes in the console, and its first line in the status bar. A window
+      on a loaded run says in its console which snapshot it began at
+      (`Loaded from the snapshot NAME (saved …).`): the launcher's session
+      keeps that for the window, and a start that is no load forgets it.
+    - `scripts/gui_check.py` saves one early in its run: the Flipper paused
+      in its menu, an RFID tag held from the window, Device > Save a
+      snapshot ("gui"); saved, it stays paused, and goes on with Pause. At
+      the end, after the window has closed, `snapshot load gui --paused`
+      opens a new window (a second driver of the check's own): the Flipper
+      stands still and the title says so, the console names the snapshot,
+      the picture is the save's (the 1024 bytes of the LCD, every one), the
+      RFID tile has the tag, and `status` names the snapshot and says
+      paused. Pause lets it go on: the screen moves, and `storage mkdir`
+      writes to its card. That is the panel's way out of `prelaunch` (135)
+      with a window on the machine.
+    - Not there: a load from the window's own menu. The window's emulator is
+      its session's, and a load would be a start of that session with the
+      snapshot's files and `-incoming`, and the window's own idea of the
+      machine (the cable, what it holds) would have to follow the state.
+    - The checks. `scripts/snapshot_check.py`: 68 on the official 1.5.1 and
+      on the official dev build (one skipped there: the enclave's app is for
+      the official SDK), 66 on Momentum, Unleashed and RogueMaster (the same
+      one skipped). `scripts/gui_check.py`, while other programs kept the
+      computer busy (a load average of 3 to 25 on 16 cores): on the official
+      1.5.1, 71 of 71 with one skipped (with the console's words before they
+      were made neutral), then 68 of 71; on Unleashed, 69 of 72, then a stop
+      at the step of the LED (below), then 58 passed and 2 failed, after
+      which the first phase ended early and the second passed. In that run
+      the NFC app was still loading when the LED's step pressed Read (an
+      hourglass on its screen in the check's picture), and holding Back for
+      the power menu did not switch it off. Every step of the snapshot
+      passed in every run. What failed are steps that wait for the firmware
+      with a time of their own: the LED's blink while NFC reads, a crash and
+      its words in the console, an app for another API, the I2C bus's scan
+      (127 of its 128 calls in the record). The stop: the LED's step took
+      the last of the LED's values when none had come, and the check ended
+      there; that is a failure of the step now. Does a save leave the
+      emulator slower? The boot after a `reset`, three times before a save
+      and three times after it in one run, under the same load: 6.2 to 7.3
+      s, and 6.3 to 7.2 s; the idle desktop took 35 % and 38 % of a core.
+      QEMU stops its log of dirty pages at the end of a migration
+      (`ram_save_cleanup()`).
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

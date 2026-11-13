@@ -444,6 +444,12 @@ def load_checks(b, timeout, u1, a1):
     check("the calendar is where the host's clock has it now",
           a3 is not None and abs(a3 - a1) <= 3,
           f"{a3} s ahead of the host, at the save {a1}")
+    snap = state(b).get("snapshot") or {}
+    code, out, err, took = fe(b, "status")
+    check("`status` names the snapshot that the run began at, and when it "
+          "was saved", snap.get("name") == "first" and snap.get("saved")
+          and f"the run began at first (saved {snap.get('saved')})" in out,
+          f"{snap} {out[:400]}{err[:300]}")
     seen = folders(b)
     check("the card is the save's: the folder from before it, not the one "
           "after it", "snap_before" in seen and "snap_after" not in seen,
@@ -491,11 +497,13 @@ def load_checks(b, timeout, u1, a1):
     seen = folders(b) if ok else set()
     st = state(b)
     check("a plain `run` after it: the firmware starts on the loaded "
-          "machine's card, with nothing held to it",
+          "machine's card, with nothing held to it, and `status` names no "
+          "snapshot",
           ok and {"snap_before", "snap_loaded"} <= seen
           and "snap_after" not in seen and (uptime(b) or 0) < u1
-          and held(st) == dict.fromkeys(HELD), said + str(sorted(seen))
-          + str(held(st)))
+          and held(st) == dict.fromkeys(HELD) and "snapshot" in st
+          and st["snapshot"] is None, said + str(sorted(seen))
+          + str(held(st)) + str(st.get("snapshot", "(no such field)")))
     code, out, err, took = fe(b, "snapshot", "save", "fourth")
     fourth = b.dir / "snapshots" / "fourth"
     names = {p.name for p in fourth.iterdir()} if fourth.is_dir() else set()

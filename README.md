@@ -37,8 +37,8 @@ a recording of the screen, Pause, the firmware log and its level, the backlight 
 in, a file copied to the card, an app dropped on it, pins of the GPIO header held with
 a click, the LED blinking while NFC reads,
 the bench, switching off and on, the Left + Back reboot, a crash and what the firmware
-does after it, an update through the firmware's updater, installing firmware) on the
-same five, off-screen.
+does after it, an update through the firmware's updater, installing firmware, a
+snapshot saved from its menu and loaded in a new window) on the same five, off-screen.
 `scripts/update_check.py` (an update package written to the card of a running device
 and installed there, and the updater's error screen) passes on the same five, from the
 official firmware to Unleashed, and from the release to the dev build.
@@ -396,6 +396,10 @@ instead, and `--headless` no window at all.
   is felt when it goes on. `./flipperemu pause` and `continue` do the same from a
   terminal, and the window shows it, as it shows a debugger that has the firmware
   stopped at a breakpoint.
+- **Device > Save a snapshot…** keeps the Flipper as it stands, with its card and what
+  is held to it, under a name of yours or the date and the time:
+  `./flipperemu snapshot load NAME` starts it at that moment again, in a window of its
+  own ([Snapshots](#snapshots)).
 
 Closing the window stops the emulator, as `./flipperemu stop` does. `./flipperemu gui`
 opens the window for a device that runs already (started with `--headless`); closing
@@ -428,7 +432,10 @@ write it (on the three firmwares whose JavaScript has `spi`), watches the LED bl
 while NFC reads, switches it off and on, reboots
 it, has an app crash the firmware,
 loses the emulator and finds it again after that, and updates it twice with the package
-it runs: once with the wait given up, once to the end.
+it runs: once with the wait given up, once to the end. Early on it saves a snapshot
+from the Device menu, with the Flipper paused in its menu and a tag held to it; at the
+end it loads that snapshot standing still, in a new window, which has to show the
+picture of the save to the pixel and the tag, and goes on with Pause.
 
 ## The `flipperemu` tool
 
@@ -2728,11 +2735,12 @@ If the launcher is killed outright in a load's middle (`kill -9`), the device ha
 snapshot's files in the places of its own. `./flipperemu stop`, and the next `run` or
 `snapshot load` puts the device's own files back before anything else, and says so.
 
-Not there: `status` does not say which snapshot a device was loaded from, and the
-window has no menu item for one (the commands work on a device with a window). Not
-tried: `--gtk`, a save with a PC attached over USB/IP, a file system that cannot share
-data between two files, and a snapshot carried to another computer. How it works, and
-what QEMU's migration needed for it:
+`status` says which snapshot a run began at (`snapshot : the run began at menu (saved
+…)`, and `"snapshot"` in `--json`). In the window, Device > Save a snapshot… saves one
+of the Flipper as it stands, and `snapshot load NAME` opens the window on it. Not there:
+a load from the window's own menu. Not tried: `--gtk`, a save with a PC attached over
+USB/IP, a file system that cannot share data between two files, and a snapshot carried
+to another computer. How it works, and what QEMU's migration needed for it:
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#snapshots-the-launchers-snapshot).
 
 ### Debugging firmware

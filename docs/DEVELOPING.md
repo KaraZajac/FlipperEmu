@@ -217,6 +217,8 @@ with the same machine every time, whatever the run before it left on the card.
   `--spi` of its own.
 - **A snapshot is for the emulator that made it.** After `scripts/setup_qemu.sh` has
   built another, make the snapshots of a test anew (a load says so, and refuses).
+- **In the window**: Device > Save a snapshot…, with a name or none (the date and the
+  time). `status` and the window's console say which snapshot a run began at.
 - **gdb may be on it.** A save while gdb has your app stopped at a breakpoint leaves it
   stopped there, until gdb lets it go on. `snapshot load NAME --gdb --paused` has the
   stub on before the Flipper runs: gdb gets on, sets its breakpoints, and the Flipper

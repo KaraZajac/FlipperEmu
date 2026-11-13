@@ -248,6 +248,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.crash_said = False         # the log had this crash's report
         self.say_fault = False          # a crash on its screen is news here
         self.fault_old = None           # one its screen said before an update
+        self.snapshot_said = None       # the snapshot a run began at, said
         self.updating = None            # a package, while its updater works
         self.app_file = None            # the .fap that F5 starts
         self.app_stamp = None           # ... as it was when it was started
@@ -398,6 +399,11 @@ class MainWindow(QtWidgets.QMainWindow):
                          live=True,
                          tip="Time stands still on it: its screen, its timers, "
                              "its radios.  Once more, and it goes on")
+        self.a_snapshot = A(m, "Save a snapshot…", self.ask_snapshot,
+                            live=True,
+                            tip="The Flipper as it stands, kept with its card "
+                                "(`snapshot save`): `./flipperemu snapshot "
+                                "load NAME` starts it at this moment again")
         self.a_off = A(m, "Switch off now" if owner else "Stop the emulator",
                        self.hard_off, live=True,
                        tip="Pull its battery, as it were: the firmware is not "
@@ -800,6 +806,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view.set_paused(self.stopped or ("halted" if halted else ""))
         self.show_state()
 
+    def ask_snapshot(self):
+        """Device > Save a snapshot…: what it is to be called"""
+        name, ok = QtWidgets.QInputDialog.getText(
+            self, "Save a snapshot",
+            "Its name (letters, digits, '.', '_' and '-'), or none for the "
+            "date and the time:")
+        if ok:
+            self.save_snapshot(name.strip())
+
+    def save_snapshot(self, name=""):
+        """The launcher's `snapshot save`: the Flipper stands still for the
+        moment of it, and goes on"""
+        def done(code, text):
+            if code == 0 and text.strip():
+                self.statusBar().showMessage(text.strip().splitlines()[0],
+                                             8000)
+        self.command("snapshot", "save", *([name] if name else []),
+                     then=done)
+
     def set_paused(self, on):
         # (the mark stays as it is until the emulator says it has changed)
         self.a_pause.setChecked(bool(self.stopped))
@@ -852,6 +877,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.props.clear()
         self.expect_off = False
         self.set_state("on")
+        snap = getattr(self.session, "snapshot", None)
+        if snap and snap is not self.snapshot_said:
+            self.snapshot_said = snap
+            self.log.add(f"Loaded from the snapshot {snap['name']} (saved "
+                         f"{snap.get('saved') or '?'}).", "you")
         # it may have halted before this window found it, or show a crash
         self.say_fault = True
         self.crash_said = False

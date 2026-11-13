@@ -42,8 +42,12 @@ crash the firmware (said in the console; a debug build halts then, which is
 said too, and Reboot starts it), updates it with its own package (Device >
 Update with a package: once left to itself half-way, once waited for),
 installs the firmware again from the Device menu, and closes the window
-(which stops the emulator).  Exit status 0 = pass. Pictures are kept in
---out.
+(which stops the emulator).  Early on, it saves a snapshot from the Device
+menu (paused, with its menu open and a tag held), and at the end it loads
+that snapshot standing still, in a new window: the picture of the save to
+the pixel, the tag, the snapshot's name in the console and in `status`, and
+Pause, which lets it go on and write to its card.  Exit status 0 = pass.
+Pictures are kept in --out.
 """
 import argparse
 import importlib.machinery
@@ -91,6 +95,7 @@ print("end");
 """
 CRASH = re.compile(r"\[CRASH\]|furi_check failed|HardFault|Kernel is Dead")
 results = []
+SAVED = {}      # what the window showed at the save of phase one's snapshot
 
 
 def check(label, ok, detail=""):
@@ -256,6 +261,37 @@ class Driver:
               there.returncode == 0 and said and shown
               and back.returncode == 0 and went
               and not w.a_pause.isChecked())
+
+    def snapshot_save(self):
+        """Device > Save a snapshot (its name dialog left out), of the Flipper
+        paused with its menu open and an RFID tag held.  Phase two loads it
+        (LoadedDriver): the picture of this moment is kept for that."""
+        w, v = self.win, self.win.view
+        w.hold("rfid", ["EM4100", "DEADBEEF01"])
+        self.click("ok")                # the menu
+        self.spin(1.5)
+        w.a_pause.trigger()
+        paused = self.until(lambda: w.stopped == "paused", 10)
+        self.settle()
+        self.spin(0.5)
+        SAVED["frame"] = v.frame
+        w.save_snapshot("gui")
+        self.settle()
+        saved = ("snapshot gui:" in self.console()
+                 and "snapshot gui:" in w.statusBar().currentMessage())
+        still = w.stopped == "paused"
+        w.a_pause.trigger()
+        went = self.until(lambda: not w.stopped, 10)
+        state = self.uart.parent / "snapshots" / "gui" / "state"
+        if not check("snapshot: Device > Save a snapshot of the paused "
+                     "Flipper (its menu open, a tag held): saved, it stays "
+                     "paused, and goes on with Pause",
+                     paused and saved and still and went and state.is_file()):
+            SAVED.clear()               # (no phase two)
+        w.take_away("rfid")
+        self.click("back")
+        self.spin(1.0)
+        self.settle()
 
     def launcher(self, *args):
         """the launcher, from outside the window"""
@@ -1012,7 +1048,7 @@ class Driver:
         self.spin(1.5)
         n = len(self.leds)
         self.spin(1.0)
-        still = len(self.leds) == n and v.led == self.leds[-1]
+        still = n > 0 and len(self.leds) == n and v.led == self.leds[-1]
         w.close_app()
         self.settle()
         self.spin(1.0)
@@ -1377,6 +1413,7 @@ class Driver:
         self.shot("on")
         self.recording()
         self.pausing()
+        self.snapshot_save()
 
         # what the firmware logs: a click on the GPIO pins, where a real one
         # has its UART
@@ -1507,6 +1544,54 @@ class Driver:
               back and "flashed" in w.log.text.toPlainText())
 
 
+class LoadedDriver(Driver):
+    """Phase two: the window on the machine of phase one's snapshot, loaded
+    standing still (`snapshot load gui --paused`)"""
+
+    def checks(self):
+        w, v = self.win, self.win.view
+        v.setFocus()
+        on = self.until(lambda: w.state == "on" and v.frame
+                        and w.stopped == "paused", 30)
+        self.settle()
+        self.spin(1.0)
+        check("load: the window on the loaded Flipper, standing still; its "
+              "console names the snapshot",
+              on and w.windowTitle().endswith("(paused)")
+              and "Loaded from the snapshot gui (saved" in self.console())
+        check("load: the screen is the one of the save, to the pixel",
+              v.frame is not None and v.frame == SAVED.get("frame"))
+        self.shot("loaded")
+        check("load: the RFID tag that was held at the save is held again, "
+              "and the bench says so", "EM4100" in self.tile("rfid"))
+        r = self.launcher("status", "--json")
+        try:
+            st = json.loads(r.stdout)
+        except ValueError:
+            st = {}
+        r2 = self.launcher("status")
+        check("load: `status` names the snapshot that the run began at",
+              (st.get("snapshot") or {}).get("name") == "gui"
+              and (st.get("snapshot") or {}).get("saved")
+              and st.get("stopped") == "paused"
+              and "the run began at gui" in r2.stdout,
+              r.stdout[-600:] + r2.stdout[-600:])
+        frames = []
+        w.link.frame.connect(frames.append)
+        w.a_pause.trigger()             # it was paused: once more, it goes on
+        went = self.until(lambda: not w.stopped, 10)
+        self.click("back")              # out of the menu
+        moved = self.until(lambda: frames, 5)
+        self.settle()
+        made = self.launcher("cli", "storage mkdir /ext/fe-gui-loaded")
+        seen = self.launcher("cli", "storage list /ext")
+        check("load: Device > Pause lets it go on: the screen moves, and it "
+              "writes to its card",
+              went and moved and w.state_label.text() == "running"
+              and made.returncode == 0 and "fe-gui-loaded" in seen.stdout,
+              made.stdout[-300:] + made.stderr[-300:] + seen.stdout[-600:])
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1534,6 +1619,13 @@ def main():
     try:
         code = launcher.main()
         check("exit status of the run: 0", code == 0)
+        if SAVED:                       # phase two: its snapshot, loaded
+            fe_gui.run = LoadedDriver(uart, out, args.timeout,
+                                      str(pathlib.Path(args.firmware).resolve()))
+            sys.argv = ["flipperemu", "-d", name, "snapshot", "load", "gui",
+                        "--paused", "--audio", "none"]
+            code = launcher.main()
+            check("exit status of the load: 0", code == 0)
     finally:
         if not args.keep:
             shutil.rmtree(devdir, ignore_errors=True)

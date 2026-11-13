@@ -1675,8 +1675,10 @@ a level that its voltage is not fails the load too. A value within its bounds is
 as it is: a state with odd values gives a machine that behaves oddly.
 
 Not there: a state for the header devices whose models save none (the list above).
-Not tried: a window on a loaded machine beyond its start, two buttons and its end (the
-snapshot check's), the radio links with a program on them over a load, a save in an
+The window on a loaded machine: `scripts/gui_check.py` loads a snapshot that its
+window saved, standing still (`--paused`). The new window has the picture of the save
+to the pixel, the tag that was held, the snapshot's name in its console, and goes on
+with Pause. Not tried: the radio links with a program on them over a load, a save in an
 app of the radios on a firmware other than official 1.5.1 (the things held, the
 header, the card slot and the cable are tried on five), an SPI device other than the
 flash, and what the firmware makes of an expansion module's call that was under way
@@ -1798,11 +1800,14 @@ A save with a gdb on the machine (the snapshot check): at a step QEMU's run stat
 leaves, QEMU's stub lets the machine go on without the monitor, and it writes to its
 card. The state of that step loads.
 
-Not there: `status` does not say which snapshot a device was loaded from, and the
-window has no menu item for a save or a load. Not tried: `--gtk` (QEMU's own window on
-a loaded machine), a snapshot of a machine on USB/IP with a PC attached, a file system
-without shared data (the copy by holes was not run: the disk here is btrfs), and a
-snapshot carried to another computer.
+The note of a loaded run (`run.json`) names its snapshot and the time of its save, and
+`status` says them. A `run` names none. The window's Device > Save a snapshot… is the
+launcher's `snapshot save`. Not there: a load from the window's menu (the window's
+emulator is its session's, and a load would be a start of that session with the
+snapshot's files and `-incoming`). Not tried: `--gtk` (QEMU's own window on a loaded
+machine), a snapshot of a machine on USB/IP with a PC attached, a file system without
+shared data (the copy by holes was not run: the disk here is btrfs), and a snapshot
+carried to another computer.
 
 ## Persistence per device (`devices/NAME/`)
 

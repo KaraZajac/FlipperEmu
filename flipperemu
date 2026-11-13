@@ -1252,6 +1252,7 @@ class Session:
         self.gauge = dict(gauge or {})
         self.update = (manifest, label)
         self.proc = None
+        self.snapshot = None            # the one this run began at (a load)
 
     def start(self, unplugged=None, gauge=None, incoming=None):
         """unplugged, gauge: as it was left when it went off (default: as
@@ -1279,6 +1280,8 @@ class Session:
         cmd = qemu_cmd(dev, args, self.window, self.gauge)
         if incoming:
             cmd += ["-incoming", f"file:{incoming}"]
+        else:
+            self.snapshot = None        # (switched on again: a start)
         self.proc = subprocess.Popen(cmd)
         run_note(dev, self.proc.pid, args)
         manifest, label = self.update
@@ -2197,7 +2200,9 @@ def snapshot_load(args, dev):
           + (f"it stands still, and `./flipperemu -d {dev.name} continue` "
              "lets it go on" if args.paused else "it goes on from there"),
           flush=True)
-    run_note(dev, session.proc.pid, run, snapshot=name)
+    run_note(dev, session.proc.pid, run, snapshot=name,
+             saved=note.get("saved"))
+    session.snapshot = {"name": name, "saved": note.get("saved")}
     return session.front()
 
 
@@ -2335,6 +2340,9 @@ def device_status(dev):
     try:
         g = lambda path, prop: qom_get(m, path, prop)
         st["stopped"] = stopped(m) or None
+        run = run_noted(dev, m) or {}
+        st["snapshot"] = ({"name": run["snapshot"], "saved": run.get("saved")}
+                          if run.get("snapshot") else None)
         st["halted"] = firmware_halt(dev, m)
         st["fault"] = None if st["halted"] else firmware_fault(dev, m)
         st["usb"] = read_usb(m)
@@ -2457,6 +2465,9 @@ def cmd_status(args):
                 + (f"; kept in {st['log']['file']}" if st["log"]["file"] else "")),
     ]
     print(f"[{dev.name}] running: {st['firmware'] or '?'}")
+    if st["snapshot"]:
+        print(f"{'snapshot':9}: the run began at {st['snapshot']['name']} "
+              f"(saved {st['snapshot']['saved'] or '?'})")
     if st["stopped"]:
         print(f"{'time':9}: {still_text(dev, st['stopped'])}")
     if st["halted"]:
