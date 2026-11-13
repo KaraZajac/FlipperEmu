@@ -70,6 +70,12 @@ the launcher's count of what the firmware clocked there, with a device selected 
 with none) passes on the same five. The script's part runs on Momentum, Unleashed and
 RogueMaster, whose JavaScript has an `spi` module, and the app's part on the official
 1.5.1.
+`scripts/snapshot_check.py` (a running device kept with its card and what is on its
+header, and started at that moment again: the uptime, the calendar, what was held, a
+sensor's value and the log as they were, a folder that was made after the save gone
+from the card; a damaged state, a state cut short, one of another machine and one of
+another build refused with the device left as it was, file for file; a load whose
+launcher was killed undone by the next start) passes on the same five.
 `scripts/ufbt_check.py` (ufbt 0.2.6 building `examples/hello`, launching it there, and
 `ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's symbols, that
 app's and a stock app's, and its debug configuration for VS Code used the way that
@@ -211,6 +217,9 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
   the debug configuration for VS Code into the app's folder.
 - The screen as a picture (PNG) and as a recording (an animated GIF, a few kB for a
   few seconds of an app), from the launcher and from the window.
+- Snapshots: a running device kept as it stands, with its card and what is on its
+  header, and started at that moment again in two or three seconds
+  (`./flipperemu snapshot save`, `snapshot load`).
 
 **Not yet** (see [PLAN.md](PLAN.md))
 - qFlipper's firmware *update* includes a radio-stack stage that the emulated CPU2
@@ -446,6 +455,7 @@ it runs: once with the wait given up, once to the end.
 | `spi` | that bus: its devices, which of them is selected, how many bytes the firmware clocked there and how many of them a device heard, and how the last was clocked. `spi --json`: the same for a program |
 | `reset` | reboot it, as holding Left + Back does |
 | `pause` \| `continue` | time stands still on it (screen, timers, radios), and goes on from there |
+| `snapshot save [NAME]` \| `snapshot load [NAME]` \| `snapshot` \| `snapshot rm NAME` | a running device as it stands, kept with its card and what is on its header; a stopped device started at that moment again (`--paused`: standing still there); the list; remove one |
 | `run --usbip [PORT]` | export the USB device over USB/IP (then `sudo scripts/usbip_attach.py`, or `scripts/fe_u2f.py` for U2F with no root) |
 | `cli ["CMD" …]` | the device's CLI over USB: interactive, or run commands and print their output |
 | `ls [-R] [PATH]` | what is on the SD card (`/ext` when no path is given); `-R`: and in every folder under it |
@@ -2619,6 +2629,101 @@ key would on hardware.
 |:-:|:-:|
 | ![u2f](docs/img/24-u2f-connected.png) | ![blank enclave](docs/img/25-enclave-blank.png) |
 | U2F, which needs the ten factory slots filled, and makes the device's own key | After `./flipperemu enclave blank`: the firmware finds no factory keys |
+
+### Snapshots
+
+A snapshot is a running Flipper as it stands at one moment, kept: its CPU and its
+memory, every chip on its board, the picture on its screen, the app that is open, the
+card or the tag that is held to it, and its SD card with all of it. `snapshot load`
+starts the device at that moment again, in two or three seconds, as often as wanted: a
+place in an app that takes a minute and twenty presses to get to is reached once.
+
+```sh
+./flipperemu press ok                   # the menu is open, say
+./flipperemu snapshot save menu         # of a device that runs: it stands still for
+                                        # the moment of it (under a second here)
+./flipperemu snapshot save              # no name: the date and the time
+./flipperemu snapshot                   # the list, the oldest first (--json)
+./flipperemu stop                       # a load is for a device that does not run
+./flipperemu snapshot load menu         # the Flipper with its menu open, as `run`
+                                        # starts one: in its window, until Ctrl-C
+./flipperemu snapshot load              # no name: the newest
+./flipperemu snapshot load menu --headless --detach    # the front end's words are a
+                                        # load's own: also --audio, --scale, --gdb
+./flipperemu snapshot load menu --paused    # it stands still at that moment, until
+                                        # `./flipperemu continue`
+./flipperemu snapshot rm menu
+```
+
+```
+$ ./flipperemu snapshot save menu
+[default] snapshot menu: 1.5.1, as it stands  (`./flipperemu -d default snapshot load menu` is back there)
+$ ./flipperemu snapshot
+[default] 2 snapshots, the oldest first  (/home/you/FlipperEmu/devices/default/snapshots)
+  menu             2026-11-13 01:03:36  1.5.1
+  20261113-010338  2026-11-13 01:03:39  1.5.1
+$ ./flipperemu snapshot load menu --headless --detach
+[default] snapshot menu: 1.5.1, saved 2026-11-13 01:03:36  (monitor: /home/you/FlipperEmu/devices/default/monitor.sock)
+…
+[default] loaded: it goes on from there
+```
+
+**A load takes the whole device back.** Its flash, its card and what is on its header
+become the snapshot's, and what the device had since the save is gone, with no
+question asked: a folder that was made on the card after the save is not there after
+the load. (It has to be so. The firmware has a part of the card's file system in its
+memory, and a saved memory on a newer card would write the old over the new.) To keep
+the device as it is now, save a snapshot of it first. A snapshot itself is not changed
+by a load: the same one loads again and again.
+
+What is and is not in one:
+
+- **The machine is made as the saved run made it**: the same `--i2c` and `--spi`
+  devices with their contents and their values, `--usb`, `--serial`, `--lpuart`,
+  `--no-sd`. A load does not take those words.
+- **What is held is held again**: a card, a tag, a key, a level or a voltage on a pin
+  of the header, a card that was out of its slot, a cable that was out. A signal that
+  was in the air at the save (an infrared signal, a reader's session, a Sub-GHz
+  transmission) ends there.
+- **Who was at the other end of a port is not in it.** A CLI session over USB ends as
+  when its program goes away, and `./flipperemu cli` opens a new one.
+- **The uptime goes on from the save, the calendar is today's**: a snapshot from last
+  week wakes up with this hour's date and time, as a Flipper whose clock ran on.
+- **The log goes on**: `./flipperemu log` after a load has what the firmware said up
+  to the save, and then what it says now.
+
+**A snapshot holds the device's keys.** It is a folder,
+`devices/NAME/snapshots/SNAPSHOT/`, with the machine's state (1.3 MB) and a copy of the
+device's files of that moment. On btrfs and XFS a copy shares its data with the file,
+and the card's 512 MB cost nothing again; elsewhere the card's image is copied without
+its empty parts. The state has the memory and the flash in plain: the enclave's keys,
+and the keys of a card that was held to it. The folder is yours alone (mode 0700), and
+`devices/` is not in git. Do not attach a snapshot to a bug report.
+
+**A snapshot is its build's.** A state is read by the emulator that wrote it. After
+`scripts/setup_qemu.sh` has built another one, the list says `(of another build of the
+emulator)` and a load is refused with that reason. `snapshot load --any-build` tries
+it all the same. A snapshot that cannot be loaded is not loaded by halves: when the
+emulator refuses the state, when the state lacks a part of the machine (the load names
+it), or when it is not the file that was saved (a snapshot notes its SHA-256), the
+device is as it was before the load, file for file.
+
+`snapshot save` wants a device that this launcher's `run` (or a load) started: it
+notes how the machine was made, and of a QEMU that was started by hand it does not
+know. Some of QEMU's own device types for the header save nothing of themselves (the
+clock `m41t80`, the `isl69259` family, `i2c-echo`): such a device is as new after a
+load, and the save says so.
+
+If the launcher is killed outright in a load's middle (`kill -9`), the device has the
+snapshot's files in the places of its own. `./flipperemu stop`, and the next `run` or
+`snapshot load` puts the device's own files back before anything else, and says so.
+
+Not there: `status` does not say which snapshot a device was loaded from, and the
+window has no menu item for one (the commands work on a device with a window). Not
+tried: a save or a load with a gdb on the machine, `--gtk`, a save with a PC attached
+over USB/IP, a file system that cannot share data between two files, and a snapshot
+carried to another computer. How it works, and what QEMU's migration needed for it:
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#snapshots-the-launchers-snapshot).
 
 ### Debugging firmware
 

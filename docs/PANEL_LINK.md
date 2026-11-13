@@ -43,7 +43,9 @@ Whether time goes on in the emulator. `running 0` is followed by why it stands s
 `paused` when somebody paused it (`./flipperemu pause`, the window's Device > Pause, the
 monitor's `stop`), `debug` when a debugger has it stopped (a gdb that has just got on,
 a breakpoint, its Ctrl-C), and otherwise QEMU's name for its run state (`io-error`,
-`shutdown`, …). While it stands still no other
+`shutdown`, …). A machine that has saved its state (`./flipperemu snapshot save`), or
+was loaded from one and has not gone on yet, stands still as a paused one does: `paused`,
+or `debug` with a debugger on it. While it stands still no other
 line comes: the screen, the lights and the properties are as the firmware left them.
 The panel itself goes on (it runs on the host's clock), so a `press` is taken, and felt
 by the firmware when it goes on. The NFC link stops the emulator for the moment a card

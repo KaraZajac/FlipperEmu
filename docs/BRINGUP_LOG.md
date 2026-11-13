@@ -3643,6 +3643,119 @@ big lock, entry 92).
       `gui_check` 64. On RogueMaster: `gpio_check` 82. On the official
       dev build: `spi_check` 25.
 
+135. **A saved state, the launcher's `snapshot`.** After 134 a state could
+    be saved and loaded through the monitor, by somebody who put the
+    device's files of that moment back by hand. The fourth part gives it a
+    command (`snapshot save [NAME]`, `snapshot load [NAME]`, `snapshot` for
+    the list, `snapshot rm NAME`) and a check, and found two defects of a
+    save on the way.
+    - A state alone is no snapshot. Tried (official 1.5.1): one state loaded
+      twice on the same card. The first loaded run made a folder. The second
+      made another, and after that the first run's folder was no longer in
+      the list: a firmware goes on from what it had read of its card before
+      the save. So a snapshot is a folder,
+      `devices/NAME/snapshots/SNAPSHOT/`, with the state and a copy of every
+      file of that moment: `sd.img`, `flash.img`, `enclave.keys`,
+      `nvram.bin`, `firmware.elf`, `device.json`, the header devices'
+      images, the logs, `held.json`, and a note (how the machine was made,
+      the firmware, the emulator's build, the state's SHA-256). It is the
+      user's alone, 0700 with files of 0600 under any umask: a state has the
+      RAM, and with it the keys.
+    - A copy shares its data with the original where the file system can
+      (`FICLONE`; on the btrfs here `filefrag -v` shows the card's extents
+      as `shared` in both files), and is a copy that keeps the holes where
+      it cannot (not tried: no such file system here). A save by hand took
+      0.77 to 0.84 s, with a window on the device too. The state is 1272615
+      bytes with nothing on the header (official 1.5.1). A snapshot is
+      written as `.NAME.new` and renamed at its end.
+    - Found, a save of a paused machine (official 1.5.1): `pause`, the
+      monitor's `migrate file:…` (completed, and QEMU's run state is
+      `postmigrate`), the launcher's `continue`, `storage mkdir`. QEMU ends:
+      `block/io.c:1993: bdrv_co_write_req_prepare: Assertion
+      '!(bs->open_flags & BDRV_O_INACTIVE)' failed`. QEMU takes a machine
+      that has migrated for one that is gone to another host. Its images are
+      closed to it, and only the monitor's `cont` opens them again. The
+      launcher's `continue` is the panel's property, and a debugger's
+      `continue` asks nobody. A second `migrate` is refused in that run
+      state.
+    - Found, a save at a debugger's stop (a gdb after one `stepi`; QEMU's
+      run state is `debug`): the state says `debug`, and a QEMU that loads
+      it ends with `invalid runstate transition: 'inmigrate' -> 'debug'`. No
+      machine can load that file.
+    - Both are mended in the panel's model (`flipper_panel.c`), which has
+      the machine's pauses, by a notifier on QEMU's migration and with no
+      patch to QEMU. Before a state is written a run state of `debug`
+      becomes `prelaunch`, which a load takes. After it the images are
+      opened again (`migration_block_activate`) and the run state is
+      `prelaunch`: a machine that stands still and nothing more. The panel
+      says `paused` for it, and `debug` with a gdb on the machine. A loaded
+      machine has no images either until it goes on: it gets them in the
+      panel's handler of a run's start, which is called before the other
+      models' (some write their files there, 131). After it (official
+      1.5.1): a paused machine saves twice, goes on by the launcher's
+      `continue` and writes its card; its state loads, goes on the same way
+      and writes its card; a state that was saved after a `stepi` loads.
+    - The panel counts the states that its QEMU has saved (the property
+      `saves`), and that count is what tells the launcher that a save has
+      ended: `info migrate` can say `completed` before the notifier has run.
+    - The state's file. QEMU's stream has no sum over its contents. 4096
+      bytes of FF in a state's middle were refused by QEMU
+      (`Illegal RAM offset`); a changed byte in a page of the RAM has
+      nothing that would notice it (not tried). So the note has the file's
+      SHA-256, and a load compares it before anything is done. The launcher
+      makes the file itself, new and 0600, before QEMU writes into it. (QEMU
+      11.1 gives a file of its own making that mode under any umask:
+      `migration/file.c`, and tried with 022.)
+    - A load is a new QEMU with the machine of the note (the header's
+      devices are a run's arguments, and a load asks for none of them) and
+      `-incoming file:…`, on the snapshot's files: they are copied to the
+      device's places, and the device's own are in `.before-load/` until the
+      load has worked. QEMU refuses a state with a part that the machine
+      does not have. It takes one that lacks a part, and that part is as
+      after a reset, without a word. So the loaded machine saves a state of
+      its own before it runs (official 1.5.1: 72 sections of 72 and 1272615
+      bytes, in 0.05 s), and the two files' sections are compared by their
+      names: a note that asks for a TMP105 that the state has not is refused
+      with "its state has nothing for TMP105". Then the held things get
+      their names back (`held.json`), and the machine goes on.
+    - A load that does not end well. A QEMU that refuses a state leaves by
+      `exit()`, and its sockets stay behind as files: the launcher removes
+      them. The device's files come back from `.before-load/`. That folder's
+      note names the snapshot's files once all of the device's own are aside
+      and not before, so that the way back never removes a file of the
+      device's. A launcher that was killed in between (SIGKILL) leaves the
+      snapshot's files in the device's places: the next `run` or
+      `snapshot load` puts the device's back first, and says so.
+    - A state is its build's (131). The note has the SHA-256 of the binary
+      that saved it, and a load refuses another build's snapshot unless it
+      is told to try (`--any-build`). The list marks such a snapshot.
+    - The logs: QEMU's log of a chardev appends (`logappend=on`), so the
+      loaded run goes on in the snapshot's copy of `uart.log`, and the log
+      of the run before the load is kept as `uart.log.1`. `nvram.bin` is
+      written at a run's end and not before: a device in its first run has
+      none, and its snapshot has none (what it would hold is in the state).
+    - In the check's five runs a detached load was back in 2.1 to 2.4 s,
+      with the machine going on. By hand, `wait` had the CLI's answer 1.1 s
+      after that.
+    - Not there: `status` does not name the snapshot that a run came from,
+      and the window has no menu item for a save or a load. Not tried: a
+      save or a load with a gdb on the machine through the command, the
+      report of a firmware that had halted before the save, a save with a PC
+      on the device over USB/IP, `--gtk`, a snapshot taken to another
+      computer.
+    - The checks. `scripts/snapshot_check.py` (new): 56 on each of the five
+      firmwares (DEVELOPING.md has what it does). The panel's model changed
+      how a machine stands still, so `gdb_check` 30 and `wait_check` 38 ran
+      on official 1.5.1, and `wait_check` 40 on the official dev build. The
+      smoke test on the five firmwares: 28 checks pass on official 1.5.1,
+      Momentum and the official dev build, 27 on Unleashed and RogueMaster
+      (one is skipped there). On official 1.5.1: the files check,
+      `update_check` 33, `spi_check` 45, `gpio_check` 111, `uart_check` 79,
+      `i2c_check` 66, `u2f_check` 39, `app_check` 32, `gui_check` 63. On
+      Momentum: `spi_check` 30. On Unleashed: `u2f_check` 39, `gui_check`
+      64. On RogueMaster: `gpio_check` 82. On the official dev build:
+      `spi_check` 25.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

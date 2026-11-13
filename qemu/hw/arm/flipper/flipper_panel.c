@@ -20,6 +20,7 @@
 #include "qemu/timer.h"
 #include "qapi/error.h"
 #include "system/runstate.h"
+#include "migration/misc.h"
 #include "chardev/char.h"
 #include "qobject/qobject.h"
 #include "qobject/qjson.h"
@@ -55,9 +56,23 @@ static const char *const panel_keys[BTN_NUM] = {
  * (the NFC link, for the card on it): that is over in milliseconds, it is
  * the link's own business, and to everyone else the machine runs through
  * it.  A pause that comes during such a stop outlasts it.
+ *
+ * A saved state is QEMU's migration to a file, and QEMU takes a machine
+ * that has migrated for gone to another host.  Its images are closed to it
+ * from then on (a write to one aborts QEMU), and only the monitor's `cont`
+ * opens them again: a pause that ends here, or a debugger's `continue`,
+ * does not ask the monitor.  It saves no second state.  And a state that
+ * was saved at a debugger's stop says so, which no machine can be loaded
+ * into.  Here a machine that has saved its state is one that stands still
+ * and nothing more: it has its images, and can go on or save again.  A
+ * machine that was loaded from a state has no images either until it goes
+ * on, and gets them here on any way that it does.
  */
 static bool vm_paused;          /* somebody asked for it */
 static int vm_holds;            /* stops of a link's own */
+static bool vm_images;          /* QEMU's images may be closed to it */
+static uint32_t vm_saves;       /* states saved by this QEMU */
+static NotifierWithReturn vm_migration;
 
 bool flipper_vm_hold(void)
 {
@@ -93,22 +108,64 @@ static int panel_stopped(void)
     if (runstate_is_running() || (vm_holds && !vm_paused)) {
         return -1;
     }
-    /* (one that was reset while it stood still is "prelaunch" to QEMU) */
-    if (vm_paused || state == RUN_STATE_PRELAUNCH) {
+    if (vm_paused) {
         return RUN_STATE_PAUSED;
     }
     /*
      * QEMU has "debug" at a breakpoint only: a gdb that has just got on, or
-     * interrupted, is "paused" to it, and is the debugger's stop all the same
+     * interrupted, is "paused" to it, and is the debugger's stop all the
+     * same.  (A machine that was reset while it stood still, or has saved
+     * its state, is "prelaunch" to QEMU.)
      */
-    return state == RUN_STATE_PAUSED && panel_gdb() ? RUN_STATE_DEBUG : state;
+    if (state == RUN_STATE_PAUSED || state == RUN_STATE_PRELAUNCH) {
+        return panel_gdb() ? RUN_STATE_DEBUG : RUN_STATE_PAUSED;
+    }
+    return state;
+}
+
+/* QEMU's images are its own again (nothing, if they are) */
+static bool panel_images(Error **errp)
+{
+    if (vm_images) {
+        if (!migration_block_activate(errp)) {
+            return false;
+        }
+        vm_images = false;
+    }
+    return true;
 }
 
 static void panel_vm_change(void *opaque, bool running, RunState state)
 {
     if (running) {
         vm_paused = false;      /* whoever said go: the monitor, a debugger */
+        panel_images(NULL);     /* (a debugger does not ask the monitor) */
     }
+}
+
+static int panel_migration(NotifierWithReturn *notify, MigrationEvent *e,
+                           Error **errp)
+{
+    switch (e->type) {
+    case MIG_EVENT_SETUP:
+        vm_images = true;
+        /* the state says how the machine stood: not "debug", see above */
+        if (runstate_check(RUN_STATE_DEBUG)) {
+            runstate_set(RUN_STATE_PRELAUNCH);
+        }
+        break;
+    case MIG_EVENT_DONE:
+        /* (after a state that failed, QEMU puts all back by itself) */
+        if (runstate_check(RUN_STATE_POSTMIGRATE)) {
+            panel_images(NULL);
+            runstate_set(RUN_STATE_PRELAUNCH);
+        }
+        vm_saves++;
+        break;
+    default:
+        break;
+    }
+    return 0;
 }
 
 static bool panel_get_paused(Object *obj, Error **errp)
@@ -118,6 +175,9 @@ static bool panel_get_paused(Object *obj, Error **errp)
 
 static void panel_set_paused(Object *obj, bool value, Error **errp)
 {
+    if (!value && !panel_images(errp)) {
+        return;                         /* stands still as it did */
+    }
     vm_paused = value;
     if (value) {
         vm_stop(RUN_STATE_PAUSED);      /* (nothing, if it stands still) */
@@ -438,7 +498,10 @@ static void panel_realize(DeviceState *dev, Error **errp)
     s->tick = timer_new_ms(QEMU_CLOCK_REALTIME, panel_tick, s);
     s->release = timer_new_ns(QEMU_CLOCK_VIRTUAL, panel_release, s);
     s->watches = g_ptr_array_new_with_free_func(panel_watch_free);
-    qemu_add_vm_change_state_handler(panel_vm_change, s);
+    /* before the models' own: some write their images at a first run */
+    qemu_add_vm_change_state_handler_prio(panel_vm_change, s, INT_MIN);
+    vm_images = runstate_check(RUN_STATE_INMIGRATE);
+    migration_add_notifier(&vm_migration, panel_migration);
     flipper_link_init(&s->lk, &s->link, "panel", panel_line, panel_opened, s);
 }
 
@@ -462,6 +525,11 @@ static void panel_class_init(ObjectClass *klass, const void *data)
     object_class_property_set_description(klass, "stopped",
         "Why the machine stands still (QEMU's run state: paused, debug ...), "
         "or empty: it runs");
+    object_class_property_add_uint32_ptr(klass, "saves", &vm_saves,
+                                         OBJ_PROP_FLAG_READ);
+    object_class_property_set_description(klass, "saves",
+        "The states that this QEMU has saved (migrations to a file that "
+        "have ended): a machine that has saved one can go on, or save again");
 }
 
 static const TypeInfo panel_types[] = {

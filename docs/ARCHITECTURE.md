@@ -1495,9 +1495,10 @@ A machine's state goes to a file by QEMU's migration (`stop`, then `migrate file
 in the monitor) and comes back in a new QEMU with the same machine arguments and
 `-incoming file:PATH`, which waits, paused, for a `cont`. Not `savevm`: that wants qcow2
 images to put the state in, and the launcher's tools read and write the card's raw
-image. The launcher has no command for it yet (PLAN, M6). What follows is the chip's
-side: each model in `stm32wb55_*.c` saves its registers and what it keeps beside them
-(where a transfer stands, its timers). The board's side is the section after this one.
+image. The launcher's `snapshot` does both, and keeps the device's files with a state
+(the third section from here). What follows is the chip's side: each model in
+`stm32wb55_*.c` saves its registers and what it keeps beside them (where a transfer
+stands, its timers). The board's side is the section after this one.
 
 - **No lines in a load.** A `qemu_irq` has no level that could be saved. Each receiver
   saves the levels of its own inputs (EXTI its lines, the DMA its requests, the SoC its
@@ -1520,8 +1521,9 @@ side: each model in `stm32wb55_*.c` saves its registers and what it keeps beside
 - **A state is its build's, for now.** Every section of this project's models has
   version 1, and sections grew from push to push while this was in work (the board's
   with each of its three). A state is for the emulator that made it: one from an
-  earlier build may load as something else. The launcher's command is to note the
-  build with a state (PLAN, M6).
+  earlier build may load as something else. The launcher's `snapshot` notes the build
+  with a state (the binary's SHA-256) and loads no other build's unless it is told to
+  (`--any-build`).
 
 The clock: a device's calendar is the host's clock plus a distance in whole seconds
 (`nvram.bin` has it so), and a state holds that distance, not a date. At the first run
@@ -1634,9 +1636,10 @@ the header adds its own.
   plug` brings the computer back.
 - **A halted firmware.** The board's watch for one saves nothing and finds the halt
   again in the loaded run, at the same address. The kind of the crash and its report
-  are read from the run's log, and a loaded run has a new one: `status` has the halt
-  and its address without those two, until the launcher has a command for a saved state
-  and carries the log on (PLAN, M6).
+  are read from the run's log. A state that is loaded by hand has a new log, and
+  `status` has the halt and its address without those two. The launcher's `snapshot`
+  keeps the log with the state, and a loaded run goes on in it (not tried: the report
+  of a firmware that had halted before the save).
 - **The window's link** (`flipper_panel.c`) saves nothing. A window that opens the link
   is sent everything as it is, from the models above.
 
@@ -1653,8 +1656,9 @@ What a state does not have of the front ends: a last capture (`qom-get /machine/
 and its like) is the run's, and a loaded machine has none until it makes one. The files
 of earlier captures stay in the device's directory. The name of a held thing in `status`
 (a file's name, "an NTAG215 with a URL") is the launcher's, in `devices/NAME/held.json`,
-which a start removes: a loaded machine shows the thing as the model has it, without its
-name, until the launcher has a command for a saved state (PLAN, M6).
+which a start removes: a machine with a state that was loaded by hand shows the thing as
+the model has it, without its name. The launcher's `snapshot` keeps the file with the
+state and puts it back.
 
 A damaged file. A value from a state that a model sizes memory with or indexes by is
 checked before it is used, and a load with one out of its bounds fails: the lengths of
@@ -1666,11 +1670,130 @@ a level that its voltage is not fails the load too. A value within its bounds is
 as it is: a state with odd values gives a machine that behaves oddly.
 
 Not there: a state for the header devices whose models save none (the list above).
-Not tried: a window on a loaded machine, the radio links with a program on them over a
-load, a save in an app of the radios on a firmware other than official 1.5.1 (the
-things held, the header, the card slot and the cable are tried on five), an SPI device
-other than the flash, and what the firmware makes of an expansion module's call that
-was under way at a save.
+Not tried: a window on a loaded machine beyond its start, two buttons and its end (the
+snapshot check's), the radio links with a program on them over a load, a save in an
+app of the radios on a firmware other than official 1.5.1 (the things held, the
+header, the card slot and the cable are tried on five), an SPI device other than the
+flash, and what the firmware makes of an expansion module's call that was under way
+at a save.
+
+## Snapshots (the launcher's `snapshot`)
+
+`snapshot save` and `snapshot load` are the two halves above, with what a state alone
+does not have. A state has the machine: the CPU, the RAM, every model. The contents of
+the card, of an EEPROM and of a flash on the header are their images', and the firmware
+has a part of the card's file system in its RAM. A state that is loaded on a card that
+went on since then writes that part over what is newer (tried: the folder that was made
+after the save was gone from the card). So a snapshot is a folder,
+`devices/NAME/snapshots/SNAPSHOT/`, with the state and the device's files of that
+moment:
+
+| file | what it is there for |
+|---|---|
+| `state` | QEMU's migration stream: the machine as it stood |
+| `sd.img`, `i2c-NN.bin`, `spi-N.bin` | the card, and what is on the header: the contents that the state's machine was in the middle of |
+| `flash.img`, `enclave.keys`, `nvram.bin` | what a loaded machine writes anew at its first run, or at its end: here so that the folder is one moment's. (`nvram.bin` is written at a run's end: a device in its first run has none, and neither has its snapshot) |
+| `device.json`, `firmware.elf` | which firmware it is, and its symbols for gdb |
+| `uart.log`, `lpuart.log`, `lpuart.mark`, `usart.mark` | what the firmware said in the run so far: a loaded run goes on in the same log, and `uart wait` where it was |
+| `held.json` | the names of what was held to it |
+| `snapshot.json` | the note: the time, the firmware, the arguments that made the machine, the emulator's build (the binary's SHA-256 and time), the state's SHA-256, what was held, the files' names |
+
+The copies cost little. Where the file system can (btrfs, XFS) a copy shares its data
+with the file (`FICLONE`), and elsewhere a file's holes stay holes: a card's image is
+mostly one. The folder is the user's alone (0700, its files 0600), since the state has
+the device's keys and a held card's memory. It is made as `.SNAPSHOT.new` and renamed at
+the end: a save that was killed leaves no half snapshot in the list.
+
+**A save.** `run` notes in `devices/NAME/run.json` which QEMU is its own (the pid) and
+the arguments that made the machine: how the USB port and the two serial ports are
+given to the host (`--usb`, `--usbip`, `--serial`, `--lpuart`), what is on the header
+(`--i2c`, `--spi`), `--no-sd`, `--name`, `--legacy-sleep`, and what came after `--`.
+`snapshot save` wants that note, and wants it to be of the QEMU that its monitor is
+(the socket's peer): a state is loaded into a machine that is made the same way, and
+of a QEMU that was started by hand nobody knows how it was made. Then: pause the
+machine through the panel's `paused` (unless it stands still already), make the
+state's file, `migrate -d "file:PATH"`, wait for it, copy the files, write the note,
+and let the machine go on if it ran before. Three things here are less plain than
+they look:
+
+- The launcher makes the state's file itself, new and with mode 0600, and QEMU writes
+  into the file that is there. (QEMU 11.1 gives a file of its own making that mode
+  too, tried with a umask of 022. The launcher does not lean on it.)
+- `info migrate` says `completed` a moment before the panel has taken the machine
+  back (below). The launcher waits for the panel's count of saved states, `saves`,
+  to be one more than before.
+- QEMU's stream has no checksum of its own. A wrong byte in a page of RAM in the file
+  would be a wrong byte in the RAM of the loaded machine, and nobody would be told.
+  The note has the state's SHA-256, and a load compares it before anything else.
+
+**A machine that has saved its state goes on** (`flipper_panel.c`). Migration is made
+for a machine that moves to another host, and QEMU takes one that has migrated for
+gone: its run state is `postmigrate` and its images are closed to it. The monitor's
+`cont` opens them again. A pause that is ended through the panel's `paused` does not
+ask the monitor, and neither does a debugger's `continue`: before this, the first
+write to the card after a save ended QEMU in an assertion of its block layer
+(`bdrv_co_write_req_prepare: Assertion '!(bs->open_flags & BDRV_O_INACTIVE)'`), and a
+second `migrate` was refused. A second thing: a state that is saved while a debugger
+has the machine at a breakpoint or a step says that its run state is `debug`, and QEMU
+ends when it loads one (`invalid runstate transition: 'inmigrate' -> 'debug'`). The
+panel has a notifier on QEMU's migration for both. When a save begins, a machine in
+`debug` becomes one in `prelaunch`. When a save has ended, the panel opens the images
+again (`migration_block_activate()`), makes `postmigrate` a `prelaunch` and counts the
+save. `prelaunch` is a machine that stands still and nothing more: the panel reports
+it as paused (as a debugger's stop, with a gdb on it), and it goes on by the panel, by
+the monitor or by a debugger, and saves again. A machine that was loaded from a state
+has no images either until it goes on: the panel's handler for the machine's run
+states opens them, before the models' own handlers, of which some write their images
+at a first run.
+
+**A load.** Before anything is touched: the device does not run, the emulator on the
+disk is the build in the note (`--any-build` goes on all the same), and the state has
+the sum in the note. Then the device's own files of the names above go into a folder
+aside, `devices/NAME/.before-load/`, the snapshot's are copied into their places, and
+QEMU starts with the note's machine arguments and `-incoming file:…/state`. What is the
+front end's is this start's own, as a run's: the window or none, the sound, the log on
+the terminal, a gdb stub. The launcher waits for `info migrate` to say `completed`,
+and then looks at what QEMU does not: QEMU refuses a state with a part that this
+machine does not have, or with one of another size, but takes a state that *lacks* a
+part, and that part is as after a reset. So the loaded machine saves a state of its
+own before it has run (a file beside the device's, removed at once), and the two
+states' descriptions are compared by their parts' names: QEMU writes at a state's end
+which devices are in it. A part that the snapshot's state has nothing for is named,
+and the load is refused. After that `held.json` is put back, the machine goes on
+(unless `--paused`), and the folder aside is removed. The log of the run before the
+load is kept as `uart.log.1`, as a start keeps it.
+
+**A load that fails, or is cut off.** A QEMU that refuses a state says why and leaves
+by `exit()`, its sockets still in the device's folder: the launcher removes them. On
+any failure it removes the snapshot's files from the device's places and moves the
+device's own back: the device is as it was, byte for byte. The folder aside has a note
+for that, `load.json`, in two steps. It has the snapshot's name from the start, and
+the names of the files that are the snapshot's only once all of the device's own are
+aside. An undo of a load that got no further than moving removes nothing, and what is
+still in the device's folder is the device's. At the end of a load that went well the
+folder is renamed before it is removed, so a kill in that last moment undoes nothing.
+A launcher that is killed with SIGKILL in a load's middle cannot undo: the snapshot's
+files are in the device's places then, and an emulator may stand there, loaded and
+still. `stop` ends it, and the next `run` or `snapshot load` moves the device's own
+files back before it does anything else, and says so. What was written to the stopped
+device in between (a `push` into the card's image) goes with that undo.
+
+What a load does not ask: it replaces what the device had since the save, with no
+question. A snapshot of the device as it is now is one `snapshot save` before it.
+
+Not in a snapshot: a header device's file that the user gave it with a `drive=` of
+their own, the captures of the radios (`nfc-tx/` and the like), the records of the
+pins and of the I2C bus, and the files that the bench holds things from
+(`nfc-card.txt`: a held card is in the state, with all of it). A header device whose
+model saves nothing is as new after a load (the list is in the section above), and a
+save says so for each.
+
+Not there: `status` does not say which snapshot a device was loaded from, and the
+window has no menu item for a save or a load. Not tried: `snapshot save` and `snapshot
+load --gdb` with a gdb on the machine, `--gtk` (QEMU's own window on a loaded
+machine), a snapshot of a machine on USB/IP with a PC attached, a file system without
+shared data (the copy by holes was not run: the disk here is btrfs), and a snapshot
+carried to another computer.
 
 ## Persistence per device (`devices/NAME/`)
 
@@ -1681,6 +1804,9 @@ was under way at a save.
 | `nvram.bin` | coin-cell / gauge state: BQ27220 data memory, RTC calendar offset, BKP0R–BKP19R |
 | `enclave.keys` | the FUS's key store on CPU2: the secure enclave's keys (text, one key per line) |
 | `held.json` | (while it runs) the names of what the launcher held to it, for `status` and the window |
+| `run.json` | (while it runs) which QEMU the run's is, and the arguments that made its machine: what `snapshot save` notes with a state |
+| `snapshots/NAME/` | a snapshot: the machine's state and the device's files of that moment (the section above). The user's alone: a state has the keys |
+| `.before-load/` | (while `snapshot load` is at work) the device's own files, until the snapshot's state is in: a load that fails puts them back |
 | `uart.log`, `uart.log.1` | what a serial adapter on pins 13 and 14 would have recorded: the firmware's log of this run, and of the one before |
 | `lpuart.log` | what a serial adapter on pins 15 and 16 would have recorded: what an app sent on LPUART1 in this run |
 | `usart.tty`, `usart.sock`, `usart.mark` | (while it runs) the same three for pins 13 and 14: the pty of `--serial pty`, the launcher's own end, the mark of `uart wait --port usart` |

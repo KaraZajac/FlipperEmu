@@ -43,6 +43,9 @@ you flash stays flashed, settings and files persist across runs.
                                              the devices, what the firmware clocked
   ./flipperemu reset                         reboot it, as Left + Back do on a real one
   ./flipperemu pause | continue              time stands still on it, and goes on
+  ./flipperemu snapshot save NAME | snapshot load NAME
+                                             a running device as it stands, kept
+                                             (state, flash, card); back at that moment
   ./flipperemu flash fw.dfu                  just program the flash
   ./flipperemu sd --resources update.tgz     (re)build the SD card
   ./flipperemu cli                           USB CLI of a running device
@@ -215,6 +218,8 @@ class Device:
         self.gdb_init = self.dir / "gdb.init"           # ... and what gdb is told (cmd_gdb)
         self.gdb_apps = self.dir / "gdb-apps"           # ... links to apps' debug ELFs
         self.gdb_ide = self.dir / "gdb-ide.init"        # ... and what an IDE's gdb is told
+        self.run_file = self.dir / "run.json"           # this run's QEMU, its arguments
+        self.snapshots = self.dir / "snapshots"         # a device as it stood (cmd_snapshot)
 
     def running(self):
         """Is a QEMU serving this device's monitor socket?"""
@@ -1104,12 +1109,14 @@ def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
 DETACHED = "FLIPPEREMU_DETACHED"     # set for the run that `run --detach` starts
 
 
-def run_detached(dev):
+def run_detached(dev, ready=None):
     """`run --detach`: this same run as a process of its own, and back to the
     shell when its emulator is up, or with what it said when that never came.
     A script's `run ... &` learns of a firmware that is not there a minute
-    later, from a `wait` that ran out."""
+    later, from a `wait` that ran out.  ready: says when it is up (a loaded
+    snapshot's emulator answers before the state is known to be in)."""
     import tempfile
+    ready = ready or dev.running
     DEVICES.mkdir(parents=True, exist_ok=True)
     # (beside the device's folder until there is one: a run that fails for
     # its firmware leaves no device behind)
@@ -1134,7 +1141,7 @@ def run_detached(dev):
         sys.stdout.buffer.flush()
 
     try:
-        while child.poll() is None and not dev.running():
+        while child.poll() is None and not ready():
             show()
             time.sleep(0.2)
         if child.poll() is not None:
@@ -1192,6 +1199,7 @@ def cmd_run(args):
             return run_detached(dev)
         if args.detach and args.serial == "stdio":
             args.serial = "null"        # (the log is `flipperemu log`'s to show)
+        snap_undo(dev)
     if args.update and (args.usb == "none" or args.unplugged):
         sys.exit("--update starts the install over the USB CLI; drop --usb none "
                  "and --unplugged")
@@ -1231,23 +1239,8 @@ def cmd_run(args):
     new_log(dev, args.serial)
     session = Session(dev, args, window, gauge, manifest, label)
     session.start()
-    # killing the launcher stops the emulator too (Ctrl-C already reaches both)
-    for sig in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, lambda signum, frame: session.signal(signum))
-    if args.usbip:
-        print(f"[{dev.name}] USB/IP on {args.usbip_host}:{args.usbip}: attach with "
-              f"`sudo {ROOT / 'scripts' / 'usbip_attach.py'} --port {args.usbip}`",
-              flush=True)
-    if window == "qt":
-        import fe_gui
-        return fe_gui.run(dev.name, dev.dir, ROOT / "flipperemu", session=session,
-                          scale=args.scale)
-    try:
-        return session.proc.wait()
-    except KeyboardInterrupt:
-        return session.stop()
-    finally:
-        session.tidy()
+    session.signals()
+    return session.front()
 
 
 class Session:
@@ -1260,9 +1253,11 @@ class Session:
         self.update = (manifest, label)
         self.proc = None
 
-    def start(self, unplugged=None, gauge=None):
+    def start(self, unplugged=None, gauge=None, incoming=None):
         """unplugged, gauge: as it was left when it went off (default: as
-        the run was asked for)"""
+        the run was asked for).  incoming: a state's file, and the machine
+        comes up as that state has it, standing still (snapshot_load(), which
+        does the rest once the state is known to be in)"""
         dev, args = self.dev, self.args
         if unplugged is not None:
             args.unplugged = unplugged
@@ -1270,7 +1265,7 @@ class Session:
             self.gauge = dict(gauge)
         for stale in (dev.monitor, dev.usb_tty, dev.lpuart_tty, dev.usart_tty,
                       dev.lpuart_sock, dev.usart_sock, dev.panel_sock,
-                      dev.held_file, dev.gdb_sock):
+                      dev.held_file, dev.gdb_sock, dev.run_file):
             try:
                 stale.unlink()
             except FileNotFoundError:
@@ -1281,10 +1276,16 @@ class Session:
         for _, _, path, size in spi_roms(dev, args.spi):
             if not path.exists():
                 spi_new(path, size)
-        self.proc = subprocess.Popen(qemu_cmd(dev, args, self.window, self.gauge))
+        cmd = qemu_cmd(dev, args, self.window, self.gauge)
+        if incoming:
+            cmd += ["-incoming", f"file:{incoming}"]
+        self.proc = subprocess.Popen(cmd)
+        run_note(dev, self.proc.pid, args)
         manifest, label = self.update
         self.update = (None, None)          # an update is started once
         args.log_level = None               # ... and its log level set once
+        if incoming:
+            return self.proc
         first = [spec for spec in i2c_parse(args.i2c) if spec[3]]
         helpers = "pty" in (args.usb, args.lpuart, args.serial) or manifest
 
@@ -1305,7 +1306,8 @@ class Session:
         """Behind a QEMU that is gone: what only meant something while it ran"""
         for stale in (self.dev.usb_tty, self.dev.lpuart_tty,
                       self.dev.usart_tty, self.dev.lpuart_sock,
-                      self.dev.usart_sock, self.dev.held_file):
+                      self.dev.usart_sock, self.dev.held_file,
+                      self.dev.run_file):
             try:
                 stale.unlink()
             except FileNotFoundError:
@@ -1314,6 +1316,30 @@ class Session:
     def signal(self, signum):
         if self.proc and self.proc.poll() is None:
             self.proc.send_signal(signum)
+
+    def signals(self):
+        """Killing the launcher stops the emulator too (Ctrl-C already
+        reaches both)"""
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, lambda signum, frame: self.signal(signum))
+
+    def front(self):
+        """The rest of a run that is up: its window, or the wait for its end"""
+        dev, args = self.dev, self.args
+        if args.usbip:
+            print(f"[{dev.name}] USB/IP on {args.usbip_host}:{args.usbip}: "
+                  f"attach with `sudo {ROOT / 'scripts' / 'usbip_attach.py'} "
+                  f"--port {args.usbip}`", flush=True)
+        if self.window == "qt":
+            import fe_gui
+            return fe_gui.run(dev.name, dev.dir, ROOT / "flipperemu",
+                              session=self, scale=args.scale)
+        try:
+            return self.proc.wait()
+        except KeyboardInterrupt:
+            return self.stop()
+        finally:
+            self.tidy()
 
     def stop(self, timeout=10):
         """As `flipperemu stop`: QEMU saves the NVRAM on its way out."""
@@ -1625,6 +1651,597 @@ def cmd_continue(args):
     if why:
         sys.exit(f"[{dev.name}] does not go on: {still_text(dev, why)}")
     print(f"[{dev.name}] " + ("goes on" if was else "is not paused: it runs"))
+    return 0
+
+
+# ------------------------------------------------------------- snapshots
+#
+# A snapshot is a running device as it stands, kept in the device's folder
+# (devices/NAME/snapshots/SNAPSHOT/): the emulator's state (QEMU's migration
+# to a file: the CPU, the RAM, every model of the chip and of the board) and
+# a copy of the device's files as they were at that moment.  The state alone
+# would not do.  The firmware has a part of the card's file system in its
+# RAM, and on a card that went on since it writes that over what is newer.
+#
+# A state holds the device's RAM and flash, its keys with them, and the
+# memory of a card that is held to it.  A snapshot's folder is the user's
+# alone (0700), and nothing here prints what is in one.
+
+# the arguments of a run that make its machine (the rest is the front end's,
+# or a start's alone: a battery's charge, a log level)
+MACHINE_ARGS = ("usb", "usbip", "usbip_host", "serial", "lpuart", "i2c",
+                "spi", "no_sd", "name", "legacy_sleep", "qemu_args")
+RUN_DEFAULTS = {}               # `run` with nothing said (main() has them)
+SNAP_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+SNAP_ASIDE = ".before-load"     # the device's own files, while one is loaded
+# header devices whose models save nothing of themselves (QEMU's own; tried)
+SNAP_AS_NEW = ("aspeed.i2c.slave", "i2c-echo", "isl69259", "isl69260",
+               "m41t80", "raa228000", "raa229004")
+FICLONE = 0x40049409            # <linux/fs.h>: two files share their data
+
+
+class SnapshotError(Exception):
+    pass
+
+
+def run_note(dev, pid, args, **more):
+    """devices/NAME/run.json: which QEMU a run's is, and the arguments that
+    made its machine.  A state is loaded into a machine that is made the
+    same way, and `snapshot save` reads here how this one was."""
+    note = {"pid": pid, "started": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "machine": {k: getattr(args, k, None) for k in MACHINE_ARGS},
+            **more}
+    tmp = dev.run_file.with_suffix(".tmp")
+    tmp.write_text(json.dumps(note, indent=2) + "\n")
+    os.replace(tmp, dev.run_file)
+
+
+def run_noted(dev, m=None):
+    """That note, or None.  m: the note of the QEMU on this monitor, and
+    None when it is another's (an emulator that was started by hand, or by
+    a launcher from before, has none)"""
+    try:
+        note = json.loads(dev.run_file.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(note, dict) or not isinstance(note.get("machine"), dict):
+        return None
+    if m:
+        pid = struct.unpack("3i", m.s.getsockopt(
+            socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))[0]
+        if note.get("pid") != pid:
+            return None
+    return note
+
+
+def file_sha256(path):
+    """(a file's SHA-256, when it was last written)"""
+    import hashlib
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            digest.update(block)
+        return digest.hexdigest(), os.fstat(f.fileno()).st_mtime
+
+
+def emulator_build(binary=None):
+    """Which build an emulator is (the one on the disk, or a running one's
+    /proc/PID/exe): a state is for the build that made it"""
+    sha256, built = file_sha256(binary or QEMU)
+    return {"sha256": sha256,
+            "built": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(built))}
+
+
+def copy_file(src, dst):
+    """A copy that is the user's alone.  Where the file system can (btrfs,
+    XFS) the two share their data and the copy costs nothing; elsewhere a
+    file's holes stay holes (a card's image is mostly one)."""
+    import fcntl
+    s = os.open(src, os.O_RDONLY)
+    try:
+        d = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            try:
+                fcntl.ioctl(d, FICLONE, s)
+                return
+            except OSError:
+                pass
+            size, at = os.fstat(s).st_size, 0
+            while at < size:
+                try:
+                    at = os.lseek(s, at, os.SEEK_DATA)
+                    end = os.lseek(s, at, os.SEEK_HOLE)
+                except OSError:         # a hole from here to the end
+                    break
+                os.lseek(s, at, os.SEEK_SET)
+                os.lseek(d, at, os.SEEK_SET)
+                while at < end:
+                    data = os.read(s, min(1 << 20, end - at))
+                    if not data:
+                        raise OSError(f"{src}: it became shorter in the copy")
+                    at += len(data)
+                    while data:
+                        data = data[os.write(d, data):]
+            os.ftruncate(d, size)
+        finally:
+            os.close(d)
+    finally:
+        os.close(s)
+
+
+def snap_files(dev, machine):
+    """The device's files that go with a state of a machine with these
+    arguments.  The card and what is on the header are their images' (a
+    state has none of their contents); the flash, the NVRAM and the keys
+    are written anew by a loaded machine, and are here for a folder that is
+    one moment's.  (A device on the header with a drive of its own, in the
+    user's words, is the user's to keep.)"""
+    files = [dev.flash, dev.nvram, dev.enclave, dev.elf, dev.meta]
+    if not machine.get("no_sd"):
+        files.append(dev.sd)
+    files += [path for _, path, _ in i2c_roms(dev, machine.get("i2c"))]
+    files += [path for _, _, path, _ in spi_roms(dev, machine.get("spi"))]
+    return files
+
+
+def snap_logs(dev):
+    """... and what the firmware said in the run so far: a loaded run goes
+    on in the same log (a crash's report is read from it), and `uart wait`
+    where it was"""
+    return [dev.uart, dev.lpuart_log,
+            uart_mark_file(dev, "lpuart"), uart_mark_file(dev, "usart")]
+
+
+def state_sections(path):
+    """The parts of a machine that a state file has: {(name, number)}, from
+    the description that QEMU writes at a state's end (names and sizes, no
+    contents: a byte 6, its length, JSON).  None: it has none there."""
+    with open(path, "rb") as f:
+        data = f.read()
+    at = len(data)
+    while True:
+        at = data.rfind(b"\x06", 0, at)
+        if at < 0:
+            return None
+        if at + 5 + int.from_bytes(data[at + 1:at + 5], "big") == len(data) \
+                and data[at + 5:at + 6] == b"{":
+            try:
+                return {(part["name"], part.get("instance_id"))
+                        for part in json.loads(data[at + 5:])["devices"]}
+            except (ValueError, KeyError, TypeError):
+                return None
+
+
+def snap_migrate(m, path):
+    """The state of a machine that stands still, into a file that is there
+    (made by us, new and the user's alone: QEMU 11 gives one of its own
+    making that mode too, and nothing here leans on it).  QEMU takes a
+    machine that has migrated for gone, and the panel's model takes it back
+    (flipper_panel.c): its `saves` counts the states that ended well, and
+    that count is what says that this one did."""
+    before = qom_get(m, "/machine/panel", "saves")
+    quoted = str(path).replace("\\", "\\\\").replace('"', '\\"')
+    said = re.search(r"Error: *(.+)", m.cmd(f'migrate -d "file:{quoted}"'))
+    end = time.time() + 120
+    while not said:
+        hit = re.search(r"Status:\s*([\w-]+)(?: *\((.+)\))?",
+                        m.cmd("info migrate"))
+        status = hit.group(1) if hit else ""
+        if status == "completed":
+            if qom_get(m, "/machine/panel", "saves") == before + 1:
+                return
+            end = min(end, time.time() + 5)     # (the count follows at once)
+        if status in ("failed", "cancelled") or time.time() > end:
+            said = hit and hit.group(2) and hit
+            break
+        time.sleep(0.05)
+    raise SnapshotError("the emulator did not save its state"
+                        + (f" ({said.group(said.lastindex).strip()})"
+                           if said else ""))
+
+
+def snap_list(dev):
+    """The device's snapshots, the oldest first: [(its folder, its note)]"""
+    found = []
+    try:
+        folders = [p for p in dev.snapshots.iterdir()
+                   if p.is_dir() and not p.name.startswith(".")]
+    except OSError:
+        folders = []
+    for folder in folders:
+        try:
+            note = json.loads((folder / "snapshot.json").read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(note, dict) and (folder / "state").is_file():
+            found.append((folder, note))
+    return sorted(found, key=lambda it: (it[1].get("at") or 0, it[0].name))
+
+
+def snap_find(dev, name):
+    """The snapshot of that name, or the newest: (its folder, its note)"""
+    found = snap_list(dev)
+    if name is None and found:
+        return found[-1]
+    for folder, note in found:
+        if folder.name == name:
+            return folder, note
+    sys.exit(f"[{dev.name}] has no snapshot"
+             + (f" {name}" if name else "")
+             + (": it has " + ", ".join(f.name for f, _ in found) if found
+                else f": `./flipperemu -d {dev.name} snapshot save` makes "
+                     "one of a device that runs"))
+
+
+def snap_undo(dev, quiet=False):
+    """A load that ended badly, or was killed, has the device's own files
+    in a folder aside, and the snapshot's in their places: back with them.
+    (The folder's note has the names of the snapshot's files once all of
+    the device's own are aside, and not before: a load that got no further
+    than that has put nothing in their places, and what is still in the
+    device's folder is the device's.)"""
+    aside = dev.dir / SNAP_ASIDE
+    if not aside.is_dir():
+        return
+    try:
+        put = json.loads((aside / "load.json").read_text())
+    except (OSError, ValueError):
+        put = {}
+    for name in put.get("files") or []:
+        try:
+            (dev.dir / pathlib.Path(name).name).unlink()
+        except OSError:
+            pass
+    for path in aside.iterdir():
+        if path.name not in ("load.json", "load.tmp"):
+            os.replace(path, dev.dir / path.name)
+    shutil.rmtree(aside)
+    if not quiet:
+        print(f"[{dev.name}] a load of the snapshot {put.get('snapshot', '?')} "
+              "did not come to its end: the device's files are as they were "
+              "before it")
+
+
+def snapshot_save(dev, name):
+    if not name:
+        name = stem = time.strftime("%Y%m%d-%H%M%S")
+        more = 1
+        while (dev.snapshots / name).exists():  # (two in one second)
+            more += 1
+            name = f"{stem}-{more}"
+    if not SNAP_NAME.match(name):
+        sys.exit("snapshot: a name is of letters, digits, `.`, `_` and `-`, "
+                 "begins with a letter or a digit and has 64 characters at "
+                 "most")
+    final = dev.snapshots / name
+    if final.exists():
+        sys.exit(f"[{dev.name}] has a snapshot {name} already: `./flipperemu "
+                 f"-d {dev.name} snapshot rm {name}` removes it")
+    stays = None
+    m = open_monitor(dev)
+    try:
+        run = run_noted(dev, m)
+        if run is None:
+            sys.exit(f"[{dev.name}] no snapshot: this emulator was not "
+                     "started by this launcher's `run` (or by one from "
+                     "before it had snapshots), and how its machine was "
+                     "made is not known.  Stop the device and run it again")
+        if qom_get(m, "/machine/panel", "saves") is None:
+            sys.exit(f"[{dev.name}] no snapshot: this emulator is from "
+                     "before it could save its state.  `scripts/"
+                     "setup_qemu.sh` builds the one that can; then stop "
+                     "the device and run it again")
+        was = stopped(m)
+        if was not in ("", "paused", "debug"):
+            sys.exit(f"[{dev.name}] no snapshot: {still_text(dev, was)}")
+        try:
+            build = emulator_build(f"/proc/{run['pid']}/exe")
+        except OSError:
+            build = emulator_build()
+        machine = run["machine"]
+        new = dev.snapshots / f".{name}.new"
+        dev.snapshots.mkdir(mode=0o700, exist_ok=True)
+        if new.exists():
+            shutil.rmtree(new)          # of a save that was killed
+        new.mkdir(mode=0o700)
+        try:
+            if not was:
+                m.cmd("qom-set /machine/panel paused true")
+                if stopped(m) != "paused":
+                    raise SnapshotError("the device did not pause")
+            try:
+                state = new / "state"
+                os.close(os.open(state, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                                 0o600))
+                snap_migrate(m, state)
+                files = []
+                for path in snap_files(dev, machine) + snap_logs(dev) \
+                        + [dev.held_file]:
+                    if path.is_file():
+                        copy_file(path, new / path.name)
+                        files.append(path.name)
+                note = {"name": name, "at": time.time(),
+                        "saved": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "firmware": dev.info().get("firmware"),
+                        "machine": machine, "emulator": build,
+                        "state": file_sha256(state)[0],
+                        "held": dev.held(), "files": files}
+                fd = os.open(new / "snapshot.json",
+                             os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w") as f:
+                    f.write(json.dumps(note, indent=2) + "\n")
+            finally:
+                if not was:
+                    gdb = gdb_stub(m)
+                    if gdb and gdb[1]:
+                        stays = ("it stays paused: a gdb is on it, and "
+                                 "`continue` there lets it go on")
+                    else:
+                        m.cmd("qom-set /machine/panel paused false")
+                        why = stopped(m)
+                        if why:
+                            stays = f"it does not go on: {still_text(dev, why)}"
+            os.rename(new, final)
+        except BaseException:
+            shutil.rmtree(new, ignore_errors=True)
+            raise
+    except SnapshotError as e:
+        sys.exit(f"[{dev.name}] no snapshot: {e}"
+                 + (f".  And {stays}" if stays else ""))
+    finally:
+        m.close()
+    print(f"[{dev.name}] snapshot {name}: {note['firmware'] or '?'}, as it "
+          f"stands  (`./flipperemu -d {dev.name} snapshot load {name}` is "
+          "back there)")
+    if stays:
+        print(f"[{dev.name}] {stays}")
+    for kind, address, _, _ in i2c_parse(machine.get("i2c")):
+        if kind in SNAP_AS_NEW:
+            print(f"[{dev.name}] the {kind} at 0x{address:02x} of the header "
+                  "has nothing in a snapshot (its model saves nothing): "
+                  "after a load it is as new")
+    return 0
+
+
+def snap_enter(dev, proc, snap, paused):
+    """A QEMU that was started on a state: wait for the state to be in,
+    see that it had something for every part of this machine, give the
+    held things their names back, and let the machine go on.
+
+    QEMU refuses a state with a part that this machine does not have, or
+    with one of another size, and ends.  It takes one that lacks a part,
+    and that part is as after a reset: so the loaded machine saves a state
+    of its own, before it has run, and the two are compared by their parts'
+    names.  (Not by the whole descriptions: what a part saves depends on
+    what the machine was doing.)"""
+    import tempfile
+    from fe_monitor import Monitor
+    m, end = None, time.time() + 60
+    try:
+        while True:
+            if proc.poll() is not None:
+                raise SnapshotError("the emulator refused its state (its "
+                                    "words are above this line)")
+            if time.time() > end:
+                raise SnapshotError("the emulator did not take its state in "
+                                    "a minute")
+            status = None
+            try:
+                if m is None and dev.monitor.exists():
+                    m = Monitor(str(dev.monitor))
+                if m:
+                    status = re.search(r"Status:\s*([\w-]+)",
+                                       m.cmd("info migrate"))
+            except OSError:             # not there yet, or gone again
+                if m:
+                    m.close()
+                m = None
+            if status and status.group(1) == "completed":
+                break
+            time.sleep(0.05)
+        if not stopped(m):              # (a state that was saved by hand)
+            m.cmd("qom-set /machine/panel paused true")
+        fd, again = tempfile.mkstemp(prefix=".state-", dir=dev.dir)
+        os.close(fd)
+        try:
+            snap_migrate(m, again)
+            ours = state_sections(again)
+        finally:
+            os.unlink(again)
+        theirs = state_sections(snap / "state")
+        if ours is None or theirs is None:
+            raise SnapshotError("its state has no description at its end: "
+                                "the file is not as the emulator wrote it")
+        lacks = sorted({name for name, _ in ours - theirs})
+        if lacks:
+            raise SnapshotError(
+                "its state has nothing for " + ", ".join(lacks[:8])
+                + (f" and {len(lacks) - 8} more" if len(lacks) > 8 else "")
+                + ", which would be as after a reset: it is of another build "
+                "of the emulator, or of a machine with other devices")
+        if (snap / dev.held_file.name).is_file():
+            copy_file(snap / dev.held_file.name, dev.held_file)
+        if not paused:
+            said = m.cmd("qom-set /machine/panel paused false").strip()
+            why = stopped(m)
+            if why:
+                raise SnapshotError("it does not go on: "
+                                    + (said or still_text(dev, why)))
+    except BaseException:
+        if m and proc.poll() is None:
+            try:
+                m.s.sendall(b"quit\n")          # (as `stop` ends one)
+                proc.wait(5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        raise
+    finally:
+        if m:
+            m.close()
+
+
+def snapshot_load(args, dev):
+    if not QEMU.exists():
+        sys.exit(f"QEMU not built yet: run scripts/setup_qemu.sh ({QEMU})")
+    detached = os.environ.pop(DETACHED, None)
+    snap, note = snap_find(dev, args.name)
+    name = snap.name
+    dev.refuse_if_running()
+    machine = note.get("machine")
+    if not isinstance(machine, dict):
+        sys.exit(f"[{dev.name}] the snapshot {name} does not say how its "
+                 f"machine was made ({snap / 'snapshot.json'})")
+    theirs = note.get("emulator") or {}
+    if theirs.get("sha256") != emulator_build()["sha256"]:
+        other = (f"the snapshot {name} is of another build of the emulator "
+                 f"(its own was built {theirs.get('built', '?')})")
+        if not args.any_build:
+            sys.exit(f"[{dev.name}] {other}.  A state is for the build that "
+                     "made it: another one refuses it, or takes it with a "
+                     "part of the machine as something else.  `snapshot load "
+                     "--any-build` tries it all the same (a state that the "
+                     "emulator refuses, or that lacks a part of this "
+                     "machine, is not loaded, and the device is then as it "
+                     "was)")
+    else:
+        other = None
+    # (QEMU's stream has no sum of its own: a byte of the RAM that is wrong
+    # in the file would be a byte of the RAM that is wrong in the machine)
+    if note.get("state") and file_sha256(snap / "state")[0] != note["state"]:
+        sys.exit(f"[{dev.name}] the snapshot {name} is not loaded: its state "
+                 f"is not the file that was saved ({snap / 'state'} is "
+                 "damaged, or was changed).  The device is as it was")
+    run = dict(RUN_DEFAULTS)
+    run.update({k: machine[k] for k in MACHINE_ARGS if k in machine})
+    extra, skip = [], False
+    for word in run["qemu_args"] or []:         # (a load made by hand)
+        if skip or word == "-incoming":
+            skip = not skip
+        else:
+            extra.append(word)
+    run.update(device=dev.name, headless=args.headless, gtk=args.gtk,
+               detach=args.detach, scale=args.scale, audio=args.audio,
+               gdb=args.gdb, gdb_port=args.gdb_port, qemu_args=extra)
+    run = argparse.Namespace(**run)
+    if run.serial in ("stdio", "null"):
+        # the log on the terminal, or not: that is this start's, as a run's
+        run.serial = "null" if args.detach else "stdio"
+    i2c_args(run.i2c)
+    spi_parse(run.spi)
+    window = pick_window(run)
+    if window == "qt":
+        need_display()
+    if args.detach and not detached:
+        try:
+            dev.run_file.unlink()
+        except FileNotFoundError:
+            pass
+        return run_detached(dev, ready=lambda: (run_noted(dev) or {})
+                            .get("snapshot") == name)
+    snap_undo(dev)
+    if other:
+        print(f"[{dev.name}] {other}: tried all the same")
+    print(f"[{dev.name}] snapshot {name}: {note.get('firmware') or '?'}, "
+          f"saved {note.get('saved', '?')}  (monitor: {dev.monitor}"
+          + (f", gdb: :{run.gdb_port}" if run.gdb else "") + ")", flush=True)
+    put = snap_files(dev, machine) + snap_logs(dev)
+    aside = dev.dir / SNAP_ASIDE
+    gone = dev.dir / (SNAP_ASIDE + ".old")
+    shutil.rmtree(gone, ignore_errors=True)     # (a load killed at its end)
+    aside.mkdir(mode=0o700)
+    load = {"snapshot": name}
+    (aside / "load.json").write_text(json.dumps(load) + "\n")
+    session = Session(dev, run, window)
+    done = False
+    try:
+        for path in put + [dev.uart_old]:
+            if path.exists():
+                os.replace(path, aside / path.name)
+        # from here on the files of these names in the device's folder are
+        # the snapshot's, and snap_undo() removes them
+        load["files"] = [path.name for path in put]
+        (aside / "load.tmp").write_text(json.dumps(load) + "\n")
+        os.replace(aside / "load.tmp", aside / "load.json")
+        for path in put:
+            if (snap / path.name).is_file():
+                copy_file(snap / path.name, path)
+        session.start(incoming=snap / "state")
+        session.signals()
+        snap_enter(dev, session.proc, snap, args.paused)
+        os.rename(aside, gone)          # loaded: no way back from here
+        done = True
+        # the log of the run before this one is kept, as a start keeps it
+        for old in (gone / dev.uart.name, gone / dev.uart_old.name):
+            if old.exists() and old.stat().st_size:
+                os.replace(old, dev.uart_old)
+                break
+        shutil.rmtree(gone)
+    except SnapshotError as e:
+        sys.exit(f"[{dev.name}] the snapshot {name} is not loaded: {e}.  "
+                 "The device is as it was")
+    finally:
+        if not done:
+            session.stop()
+            session.tidy()
+            # (a QEMU that refuses a state leaves by exit(), sockets and all)
+            for stale in (dev.monitor, dev.panel_sock, dev.nfc_sock,
+                          dev.subghz_sock, dev.gdb_sock):
+                try:
+                    stale.unlink()
+                except FileNotFoundError:
+                    pass
+            snap_undo(dev, quiet=True)
+    if "pty" in (run.usb, run.lpuart, run.serial):
+        usb_helpers(dev, session.proc, run.usb, None)
+    print(f"[{dev.name}] loaded: "
+          + (f"it stands still, and `./flipperemu -d {dev.name} continue` "
+             "lets it go on" if args.paused else "it goes on from there"),
+          flush=True)
+    run_note(dev, session.proc.pid, run, snapshot=name)
+    return session.front()
+
+
+def cmd_snapshot(args):
+    """A running device as it stands, kept; and a device back at that
+    moment"""
+    dev = Device(args.device)
+    if args.action == "save":
+        return snapshot_save(dev, args.name)
+    if args.action == "load":
+        return snapshot_load(args, dev)
+    if args.action == "rm":
+        if not args.name:
+            sys.exit("snapshot rm: which one?  (`snapshot` lists them)")
+        snap, _ = snap_find(dev, args.name)
+        shutil.rmtree(snap)
+        print(f"[{dev.name}] snapshot {snap.name}: removed")
+        return 0
+    if args.name:
+        sys.exit(f"snapshot: `snapshot save {args.name}` or `snapshot load "
+                 f"{args.name}`?")
+    found = snap_list(dev)
+    build = emulator_build()["sha256"] if found and QEMU.exists() else None
+    same = lambda note: (note.get("emulator") or {}).get("sha256") == build
+    if args.json:
+        print(json.dumps([{"name": folder.name, "saved": note.get("saved"),
+                           "firmware": note.get("firmware"),
+                           "this_build": same(note),
+                           "held": note.get("held") or {},
+                           "machine": note.get("machine"),
+                           "path": str(folder)}
+                          for folder, note in found], indent=2))
+        return 0
+    if not found:
+        print(f"[{dev.name}] no snapshots  (`./flipperemu -d {dev.name} "
+              "snapshot save [NAME]` makes one of a device that runs)")
+        return 0
+    width = max(len(folder.name) for folder, _ in found)
+    print(f"[{dev.name}] {len(found)} snapshot{'s'[:len(found) != 1]}, the "
+          f"oldest first  ({dev.snapshots})")
+    for folder, note in found:
+        print(f"  {folder.name:<{width}}  {note.get('saved', '?')}  "
+              f"{note.get('firmware') or '?'}"
+              + ("" if same(note) else "  (of another build of the emulator)"))
     return 0
 
 
@@ -5342,6 +5959,7 @@ def main():
     p.add_argument("--print-cmd", action="store_true", help="show the QEMU command and exit")
     p.add_argument("qemu_args", nargs="*", help="extra QEMU arguments after --")
     p.set_defaults(func=cmd_run)
+    RUN_DEFAULTS.update(vars(p.parse_args([])))
 
     p = sub.add_parser("flash", help="program firmware into the device flash")
     p.add_argument("firmware")
@@ -5359,6 +5977,44 @@ def main():
 
     p = sub.add_parser("stop", help="shut a running device down (saves its NVRAM)")
     p.set_defaults(func=cmd_stop)
+
+    p = sub.add_parser("snapshot", help="a running device as it stands, kept "
+                       "with its card and what is on its header: `snapshot "
+                       "save [NAME]`.  `snapshot load [NAME]` starts the "
+                       "device at that moment again, `snapshot` lists them, "
+                       "`snapshot rm NAME` removes one")
+    p.add_argument("action", nargs="?", default="list",
+                   choices=("save", "load", "list", "rm"),
+                   help="save: of a device that runs (it stands still for "
+                        "the moment of it).  load: of a device that does "
+                        "not run; its flash, its card and what is on its "
+                        "header become the snapshot's, and what it had "
+                        "since is gone")
+    p.add_argument("name", nargs="?",
+                   help="save: the snapshot's name (not said: the date and "
+                        "the time).  load: which one (not said: the newest)")
+    p.add_argument("--json", action="store_true",
+                   help="the list, for a program")
+    p.add_argument("--headless", action="store_true", help="load: no window")
+    p.add_argument("--detach", action="store_true",
+                   help="load: leave it running by itself, and come back "
+                        "when the state is in (or with what went wrong)")
+    p.add_argument("--gtk", action="store_true",
+                   help="load: QEMU's own window, the bare LCD")
+    p.add_argument("--paused", action="store_true",
+                   help="load: it stands still at the snapshot's moment, "
+                        "until `continue`")
+    p.add_argument("--any-build", action="store_true",
+                   help="load: try a snapshot of another build of the "
+                        "emulator (a state is for the build that made it)")
+    p.add_argument("--audio", default="auto",
+                   help="load: the speaker, as `run --audio`")
+    p.add_argument("--gdb", action="store_true",
+                   help="load: enable the gdb stub")
+    p.add_argument("--gdb-port", type=int, default=1234)
+    p.add_argument("--scale", type=int,
+                   help="load: size of an LCD pixel in the window")
+    p.set_defaults(func=cmd_snapshot)
 
     p = sub.add_parser("gui", help="the window that looks like a Flipper, for a "
                        "device that runs already (run --headless); closing it leaves "

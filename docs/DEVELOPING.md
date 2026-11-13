@@ -187,6 +187,40 @@ window says "STOPPED BY A DEBUGGER", and `./flipperemu continue` leaves it to gd
 `continue`, because a firmware that runs under a gdb that takes it to be stopped is no
 help to anyone. `./flipperemu pause` with a gdb attached is gdb's Ctrl-C.
 
+## Back at the same place: a snapshot
+
+```sh
+../../flipperemu snapshot save ready   # the Flipper as it stands, your app open
+../../flipperemu stop
+../../flipperemu snapshot load ready --headless --detach   # there again, in 2 to 3 s
+../../flipperemu wait                  # its CLI answers: a new session
+```
+
+A test of one screen of an app begins with getting there: the app started, a file
+picked, three menus down. A snapshot keeps the Flipper at that place, with its memory,
+its screen, its card and what is held to it, and a load is that place again: the same
+picture, the same heap, the same file open. A script that begins with a load begins
+with the same machine every time, whatever the run before it left on the card.
+[The README](../README.md#snapshots) has all of it. For an app's developer:
+
+- **The card comes back too**, with your app's `.fap` as it was at the save, and the
+  app that was open at the save is the one in the memory. After a new build, `ufbt
+  launch` puts the new one there and starts it, as on any running device.
+- **So does the flash.** A snapshot is of one firmware, and a load on a device that
+  has another one since brings the old firmware back with it.
+- **The firmware does not notice a load.** Its uptime goes on from the save, and its
+  timers with it. The calendar is the host's of now: an app that compares dates sees
+  the time that went by. A CLI or RPC session that was open at the save is not there
+  after it.
+- **The machine is the saved run's**: a sensor on the header with the value it had, an
+  EEPROM with its contents, a level held on a pin. A load takes no `--i2c` and no
+  `--spi` of its own.
+- **A snapshot is for the emulator that made it.** After `scripts/setup_qemu.sh` has
+  built another, make the snapshots of a test anew (a load says so, and refuses).
+
+Not tried: a snapshot with a gdb on the machine, and a load with `--gdb` and a gdb
+after it.
+
 ## The LED and the backlight
 
 ```
@@ -1532,6 +1566,46 @@ CLI answering, and no crash. 33 checks; it passes on the official
 minutes), on the official dev build with its own, and from the official firmware to
 Unleashed and to the dev build with `--package`.
 `ufbt_check.py` has the real `ufbt flash_usb` go through the wrapper (29 checks now).
+
+`scripts/snapshot_check.py FIRMWARE` starts a device with a TMP105, an EEPROM and a
+serial flash on its header. Before that it wants what a device with no snapshot and one
+that does not run are told, and that none of it made a device. On the running device: a
+folder on the card, an NTAG215, an EM4100 tag and a DS1990 key held to it, 31.5 °C for
+the sensor, and `snapshot save first`. The snapshot has to have the state, the device's
+files and the note, and nothing else; folder and files have to be the user's alone,
+under a umask of 022; the note has to say how the machine was made, which firmware it
+is, what was held, which build of the emulator it is and the state's SHA-256; the card's
+copy has to be as large as the card and not a second card on the disk; the EEPROM's and
+the flash's contents have to be in it. Then a name that is taken and four that are no
+names, a save of a paused device (which stays paused, and goes on with `continue`), a
+save with no name whose name of the date and the time is taken (it gets a `-2`) and one
+where it is free, the list and `--json`, and a load while the device runs, which is
+refused. The device then goes on for twenty seconds: another folder, the two tags taken
+away, 12.5 °C, and other bytes in the EEPROM's and the flash's files after its stop.
+`snapshot load first` has to bring all of it back: the uptime of the save and not of the
+stopped run, the calendar where the host's clock has it now, the first folder on the
+card and not the second, the three things held under their names, 31.5 °C, the files'
+contents, two devices on the I2C bus and one on the SPI bus, and a log that goes on from
+the snapshot's, with the log of the run before the load beside it. The loaded machine
+has to write to its card and to be saved again; a plain `run` after it starts on the
+loaded machine's card with nothing held, and its snapshot has nothing of the header and
+has the `nvram.bin` that the device has by then (in its first run it has none, and
+neither has the first snapshot); a load with no name takes that newest one; and the save
+of the loaded machine loads with its own card and its three things. Then what is not
+loaded, each with the device's folder compared before and after, file for file: a state
+with 16 bytes changed (refused by its sum, before anything is done), a state cut to its
+half with the note's sum made to fit (the emulator refuses it), a load that was cut off
+before the snapshot's files were put (the next load undoes it, and says so), a note that
+asks for one more sensor on the header than the state has (the load names the part), and
+a snapshot of another build of the emulator, which the list marks and
+`--any-build --paused` loads standing still until `continue`. A load whose launcher is
+killed with SIGKILL while the snapshot's files are in the device's places: the next
+`run` has to say so and to start the device as it was before that load. A load in the
+foreground has to end with 0 on SIGTERM and to leave nothing of itself, and a load with
+the window (off-screen) has to have the Flipper's window on the loaded machine, two
+presses, and an end with 0. Last, `snapshot rm`, and no crash in any of the runs' logs.
+56 checks; it passes on the official 1.5.1, Momentum, Unleashed, RogueMaster and the
+official dev build. A load took 2.1 to 2.4 seconds in them.
 
 By hand: the official self-update script sending a package without a radio stack
 (what `fbt flash_usb` sends) to a running device, which installed it and came back.

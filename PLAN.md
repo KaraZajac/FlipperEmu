@@ -651,10 +651,25 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           could leave its memory after an address that was cut short (patch 0012, an older
           defect). A halted firmware is found halted again. Not there: header devices whose QEMU
           models save no state are as after a reset (BRINGUP_LOG 134)
-    - ☐ A `snapshot` command in the launcher (the state, a copy of the card and of
-          the header devices' files, the run's arguments, the names of what is held,
-          the firmware's log carried on, the emulator's build noted: a state is for
-          the build that made it), a check for it, the docs
+    - ☑ A `snapshot` command in the launcher, a check for it and the docs (2026-11-13).
+          `snapshot save [NAME]` keeps a running device as it stands, under
+          `devices/NAME/snapshots/`: the state, a copy of the card, of the flash image and of
+          the header devices' files (their data shared with the originals where the file
+          system can), the run's arguments, the names of what is held, the firmware's log
+          and the emulator's build. `snapshot load [NAME]` starts the device at that moment
+          again in two to three seconds, with its window or without; the device's files of
+          before the load are kept aside until the load has worked, and are put back when it
+          has not. A state of another build of the emulator is not loaded unless that is
+          asked for, and one whose bytes have changed is refused before anything is done.
+          Found with it: a machine that had saved its state while it was paused ended QEMU
+          in an assertion at its next write to the card, and no machine could load a state
+          that was saved at a debugger's stop (both in the panel's model now).
+          `scripts/snapshot_check.py`: 56 checks on the five firmwares (BRINGUP_LOG 135)
+    - ☐ The rest of the fourth part: an app's test that the enclave's keys answer as before
+          after a load (ufbt, official 1.5.1); the window on a loaded machine beyond its
+          start; a save and a load with a debugger on the machine; the report of a firmware
+          that had halted before the save; `status` naming the snapshot that a run came
+          from; Save and Load in the window's Device menu
 - ☐ TCG plugin for coverage/trace of firmware or a single FAP
 - ☐ Fuzzing harness (AFL++/libafl QEMU mode) for parsers in the firmware
 - ☐ Upstream the thirteen QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:
