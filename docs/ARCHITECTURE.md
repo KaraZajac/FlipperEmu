@@ -1546,7 +1546,7 @@ a keyboard or a U2F token, a save with devices on the header's buses.
 The board goes by one rule. What is *held* to the Flipper (a card, a tag, a key, a
 level on a pin) is held to it again after a load. A signal that was *in the air* at the
 moment of the save (an infrared signal being played, a reader's session) ends there.
-Done so far: the face and the power.
+Done so far: the face, the power, the radios and what is held.
 
 - **The display** (`st7567.c`) saves the panel's memory, its registers and the levels of
   its pins: the picture of a loaded machine is the saved one before the firmware has
@@ -1567,12 +1567,65 @@ Done so far: the face and the power.
   `flipper-zero-board`) and lets go of them at the first run: the finger, the key or the
   click that held a button is not there any more, and no release would come from it.
   The firmware sees a button that was let go, and a menu that scrolled stops.
+- **The Sub-GHz chip** (CC1101, `flipper_rf.c`) saves its registers, its PA table, its
+  state (asleep, idle, receiving, sending) and the levels of its data pins. A Read that
+  was under way goes on and hears the next signal. What was on the air is not saved: a
+  signal that was being played to the chip (`subghz FILE`, an SDR's samples) ends, and
+  so does the capture of a transmission. Of a transmission under way at the save, the
+  loaded machine captures the part after the load. A bridge on the radio link is told
+  the loaded machine's set-up anew, in the run.
+- **Infrared** (`flipper_ir.c`) saves nothing, since all it has is in the air. A signal
+  that was being played to the receiver ends at the first run: the receiver's line goes
+  to its rest. The board saves whether the carrier's timer (TIM1) ran, since it follows
+  the timer's registers and is not told of them in a load.
+- **RFID** (`flipper_rfid.c`) saves the tag that is held to the coil: its frame and not
+  only its name (a file's path is a label after a load), where the tag is in its frame,
+  and a T5577 with all that was written to it. A tag reads after a load as before it,
+  and an emulation by the firmware goes on. Not saved: what a virtual reader had
+  recorded of an emulation. The capture in `rfid-tx/` is of the part after the load.
+- **iButton** (`flipper_ibutton.c`) saves the key on the contact: a 1-Wire key with its
+  ROM as it is now (a blank's, once written), its memory and its place in a command, a
+  Cyfral or Metakom key with its wave and its place in it. Not saved: a virtual reader
+  (`ibutton --reader`) and the capture of an emulation. A reader that held the line low
+  at the save is gone: the line is set as the key has it at the first run.
+- **NFC** (`st25r3916.c`, `nfc_card.c`) saves the chip as the firmware set it up, where
+  it is in a frame, and the card that is held to the Flipper with all of it: what was
+  written to it, its counters, its place in the activation and, for MIFARE Classic, in
+  its Crypto1 session. A talk between the firmware and the card goes on (a dictionary
+  attack finds its keys). A standing reader's field (`nfc --field on`) is saved as
+  well. A virtual reader's session (`nfc --reader`) is not: that reader is gone, its
+  field goes off at the first run, and the firmware's emulation waits for the next
+  reader. A question that was out to a card on the link (`nfc --link`) gets silence
+  for an answer.
 - **The window's link** (`flipper_panel.c`) saves nothing. A window that opens the link
   is sent everything as it is, from the models above.
 
-Not there yet: the radios, RFID, iButton and infrared (a loaded machine has them as
-after a reset, with nothing held), the header's pins and devices, the card slot, the
-cable. Not tried: a window on a loaded machine.
+The first run. A load drives no line and writes nothing to a link (the chip's rule), so
+what ends with a load ends when the loaded machine first runs: the board's handler
+(`flipper_loaded()` in `flipper_zero.c`) lets go of the buttons, puts the infrared
+receiver's line to its rest, sets the Sub-GHz chip's GDO pins and begins a capture if
+the chip is sending, sets the 1-Wire line, and takes the NFC reader's field away. One
+thing is armed in a load: the Sub-GHz chip's timer for its link, which is the model's
+own and counts virtual time.
+
+What a state does not have of the front ends: a last capture (`qom-get /machine/nfc tx`
+and its like) is the run's, and a loaded machine has none until it makes one. The files
+of earlier captures stay in the device's directory. The name of a held thing in `status`
+(a file's name, "an NTAG215 with a URL") is the launcher's, in `devices/NAME/held.json`,
+which a start removes: a loaded machine shows the thing as the model has it, without its
+name, until the launcher has a command for a saved state (PLAN, M6).
+
+A damaged file. A value from a state that a model sizes memory with or indexes by is
+checked before it is used, and a load with one out of its bounds fails: the lengths of
+a tag's frame, a key's memory and wave and the names, a card's kind and sizes, the
+frames' lengths in the NFC chip, the LED driver's program counters, the gauge's waiting
+bytes. A value within its bounds is taken as it is: a state with odd values gives a
+machine that behaves oddly.
+
+Not there yet: the header's pins and devices, the card slot, the cable. Not tried: a
+window on a loaded machine, the radio links with a program on them over a load, and a
+save in an app of the radios on a firmware other than official 1.5.1 (the things held
+are tried on five).
 
 ## Persistence per device (`devices/NAME/`)
 

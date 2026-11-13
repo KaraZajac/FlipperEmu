@@ -165,6 +165,7 @@ struct FlipperZeroState {
     FlipperRfidState *rfid;
     FlipperIbuttonState *ibutton;
     Cc1101State *cc1101;
+    St25r3916State *nfc;
     bool tim1_running;
     Bq27220State *gauge;
     Bq25896State *charger;
@@ -1959,6 +1960,15 @@ static void flipper_power_off(void *opaque)
  * what the board has to do after one waits for the loaded machine's first
  * run.  A button that was down at the save: no finger is on it now, it is
  * let go.
+ *
+ * What is held to the Flipper (a tag, a card, a key) is in its front end's
+ * state and is held again.  What was in the air at the save ends at the
+ * first run: an infrared signal that was being played to the receiver (its
+ * line goes to its rest), a transmission's capture (of one under way, the
+ * loaded machine captures the part after the load), an NFC reader's session
+ * and a question to a card on a link.  Whether TIM1 runs is saved with the
+ * board, since the board follows the timer's registers and is not told of
+ * them in a load.
  */
 static void flipper_loaded(void *opaque, bool running, RunState state)
 {
@@ -1974,6 +1984,10 @@ static void flipper_loaded(void *opaque, bool running, RunState state)
             flipper_button(s, b, false);
         }
     }
+    flipper_ir_idle(s->ir);             /* a signal being played ends */
+    cc1101_loaded(s->cc1101);           /* GDO0, GDO2; a capture begins anew */
+    flipper_ibutton_loaded(s->ibutton); /* the 1-Wire line as the key has it */
+    st25r3916_loaded(s->nfc);           /* a reader's session is over */
 }
 
 static int flipper_post_load(void *opaque, int version_id)
@@ -1993,6 +2007,7 @@ static const VMStateDescription vmstate_flipper_zero = {
     .post_load = flipper_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(keys_down, FlipperZeroState),
+        VMSTATE_BOOL(tim1_running, FlipperZeroState),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -2081,6 +2096,7 @@ static void flipper_zero_init(MachineState *machine)
     s->soc.tim2.oc_changed = flipper_tim2_oc;   /* TX: TIM2 CH2 -> GDO0 */
     s->soc.tim2.oc_opaque = s;
     dev = spi_named(machine, spi1, TYPE_ST25R3916, 1, "nfc");
+    s->nfc = ST25R3916(dev);
     soc_out(s, 'E', 4, qdev_get_gpio_in_named(dev, SSI_GPIO_CS, 0));
     qdev_connect_gpio_out_named(dev, "irq", 0, soc_in(s, 'A', 2));
     /* ... and what is wired to the header's pins (-device ...,bus=spi-header) */

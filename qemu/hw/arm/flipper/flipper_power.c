@@ -298,11 +298,23 @@ static void bq27220_init(Object *obj)
 /*
  * A saved state has the gauge with its data memory, and the battery as it
  * was set from outside: the battery of a loaded machine is the saved one.
+ * A length from a state file is not taken as it comes.
  */
+static int bq27220_post_load(void *opaque, int version_id)
+{
+    Bq27220State *s = opaque;
+
+    if (s->pend_len < 0 || s->pend_len > (int)sizeof(s->pend_data)) {
+        return -EINVAL;
+    }
+    return 0;
+}
+
 static const VMStateDescription vmstate_bq27220 = {
     .name = "bq27220",
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = bq27220_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_I2C_SLAVE(parent_obj, Bq27220State),
         VMSTATE_UINT8(ptr, Bq27220State),
@@ -943,10 +955,24 @@ static const VMStateDescription vmstate_lp5562_engine = {
     }
 };
 
+/* an engine's program has 16 commands: a PC from a state file is one */
+static int lp5562_post_load(void *opaque, int version_id)
+{
+    Lp5562State *s = opaque;
+
+    for (int n = 0; n < 3; n++) {
+        if (s->eng[n].pc > 15) {
+            return -EINVAL;
+        }
+    }
+    return 0;
+}
+
 static const VMStateDescription vmstate_lp5562 = {
     .name = "lp5562",
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = lp5562_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_I2C_SLAVE(parent_obj, Lp5562State),
         VMSTATE_UINT8_ARRAY(regs, Lp5562State, 0x71),

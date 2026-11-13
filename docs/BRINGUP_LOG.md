@@ -3297,6 +3297,7 @@ big lock, entry 92).
       RogueMaster: `gpio_check` 82, `u2f_check` 39. On the official dev
       build: `spi_check` 25, `u2f_check` 39. (Three comments changed
       after the first seven ran; the files check ran again after that.)
+
 132. **A saved state, the face and the power.** After 131 a loaded
     desktop ran with a dark display and a battery at its start values.
     The first of the board's three pushes: the display, the LED driver,
@@ -3376,6 +3377,143 @@ big lock, entry 92).
       and what 131 lists as not tried.
     - The checks, none of which saves a state. On official 1.5.1: the
       files check, `update_check` 33, `spi_check` 45, `gpio_check` 111,
+      `uart_check` 79, `i2c_check` 66, `u2f_check` 39, `app_check` 32,
+      `gui_check` 63. On Momentum: `spi_check` 30. On Unleashed:
+      `u2f_check` 39, `gui_check` 64. On RogueMaster: `gpio_check` 82.
+      On the official dev build: `spi_check` 25.
+
+133. **A saved state, the radios and what is held.** After 132 a loaded
+    machine had its radios as after a reset, with nothing held to it.
+    The second of the board's three pushes: the Sub-GHz chip, the NFC
+    chip and its card, RFID, iButton and infrared. A state has 70
+    device sections now, four of them new.
+    - What is held is saved whole and not by its name: a tag's frame, a
+      T5577 with what was written to it, a key's ROM, memory or wave, a
+      card with its memory, its counters and its place in a talk (for
+      MIFARE Classic the Crypto1 session). A file's path is a label
+      after a load. With each goes its place in what it was doing, on
+      the virtual clock: a read under way goes on.
+    - What was in the air is not saved: a signal being played to the
+      Sub-GHz chip or to the infrared receiver, a virtual reader's
+      session (NFC, iButton), what a virtual reader had recorded of an
+      emulation, the levels of a transmission captured so far, a
+      question that was out to a card on the NFC link. Infrared saves
+      nothing at all. The board saves whether TIM1 ran, which it
+      follows for the carrier and is not told in a load.
+    - What ends, ends at the first run, by 131's rule (no lines in a
+      load, nothing written to a link). The board's handler puts the
+      infrared receiver's line to its rest, sets the Sub-GHz chip's GDO
+      pins and begins a capture if the chip is sending, sets the 1-Wire
+      line as the key has it, and takes a session's reader field away.
+      One thing is armed in the load: the Sub-GHz chip's timer for its
+      link, the model's own, on the virtual clock.
+    - Four older defects, found while reading for this. The Sub-GHz
+      chip took a data access to address 0x2F for a register and went
+      one byte past its 47: it is answered as a status register now.
+      The NFC chip copied an answer of up to 1024 bytes into its FIFO
+      of 512. A card sends no such answer, a program on the link can:
+      it is cut at 512 now. And two values of 132's models were taken
+      from a state file as they came: an LED engine's place in its
+      program of 16 commands and the gauge's count of waiting bytes
+      (32 at most). A load with one out of its bounds fails now.
+    - Held things, on official 1.5.1: a T5577 that the firmware has
+      written (an H10301), an NTAG215 with a URL and a DS1990A, saved
+      (1322403 bytes, mode 600) and loaded in a new emulator. Before
+      the run all 257 values of `status` are the saved ones. In the run
+      `rfid read` finds the H10301, `ikey read` the key's ROM, and
+      `mfu info` reads 135 of 135 pages. The same on Momentum,
+      Unleashed, RogueMaster and the official dev build, with no crash.
+    - The round trip (132): 69 of the 70 device sections are the same,
+      on each of the five. The one is the USB host's timer.
+    - A talk under way: the NFC app's Read of a MIFARE Classic 1K, saved
+      6 s into the dictionary attack, at sector 4 of 16. 5.7 s into the
+      loaded run the app shows "Keys Found: 32/32" and "Sectors Read:
+      16/16".
+    - Saved in an app that has a radio: six cases, each on official
+      1.5.1, each with all 257 values of `status` the saved ones before
+      the run and no crash in it. The first, NFC: the app emulates an
+      NTAG215 from a file, saved 0.03 s after a virtual reader came (in
+      the state, that reader's field is on). In the run the reader is
+      gone and the app emulates on: a new reader reads all 135 pages,
+      and Back ends the emulation.
+    - RFID: the app emulates an EM4100, saved 2.5 s in. The capture of
+      the part after the load is that tag's frame. iButton: the app
+      emulates a DS1990, saved 4 ms after a virtual reader came. Before
+      the run that reader is gone, and in the run a new one reads the
+      ROM.
+    - Sub-GHz > Read, saved while it listens: a Princeton key put on
+      the air in the run shows in the list. Infrared > Learn New Remote
+      with a mark of 4 s being played to the receiver, saved 0.8 s in:
+      in the run the Learn screen stands, with nothing learned from the
+      mark that was cut, and a NEC signal played then is learned.
+    - Sub-GHz, a transmission: a saved Princeton key's Send screen, OK
+      put down, saved 0.2 s later with the chip in `tx`. Before the run
+      the picture is the saved one byte for byte. In the run OK is let
+      go (132) and the chip leaves `tx` 0.11 s in. The capture of the
+      part after the load has 101 durations, each of one or three of
+      the key's time elements or a frame's gap: a part of a frame, a
+      whole frame with the key, a part of a frame. A whole press of 1 s
+      on the loaded machine then sends for 1 s.
+    - A damaged file: a state with a tag and a card held, and six
+      copies of it with one value changed in each (an LED engine at
+      command 200, the gauge with 64 and with -1 waiting bytes, a tag's
+      frame of 0x7fffffff and of -1 edges, a card's name of 0x7fffffff
+      bytes). QEMU refuses each of the six with the device's name and
+      ends. The file as it was saved loads.
+    - The FIFO's cut, with a program on the NFC link: a card that
+      answers every question with 900 bytes. In 8 s of the NFC shell's
+      `scanner` it answers 82 of them, and `apdu` and `mfu info` follow.
+      The firmware finds no card and goes on: the CLI answers, and its
+      log has one start and no crash.
+    - The firmware's own, with no state saved or loaded: asked to close
+      by `loader close`, the NFC app that emulates a file it was opened
+      with ends in `[CRASH][NFC] furi_check failed` (`nfc_free`, the
+      state is not idle). The tests end it with Back.
+    - Also the firmware's own, and at first taken for a fault of the
+      loaded machine: OK held on a key's Send screen for more than
+      about 8 s with the cable in, and the release does not end the
+      transmission. The chip stays in `tx`. The Send scene asks the
+      notification service for a blink at every tick of 100 ms. With
+      another light on (the charging LED) the service first switches
+      the LEDs off for 100 ms and then blinks for 10: a blink takes
+      longer than a tick, and the service's queue of 8 is full after
+      about 8 s. A held key's repeats are published in the timer task,
+      and the notification service's listener there puts a message for
+      the backlight into the same queue: the timer task waits at the
+      full queue behind the app, which has the higher priority and
+      takes every place that comes free. The input service has asked
+      that task to stop the key's timer and waits for it, so the key's
+      release is never published. Seen with gdb on official 1.5.1 and
+      read in its source. Two runs with no state: a hold of 12 s with
+      the cable in, and the chip is in `tx` 8 s after the release; the
+      same with the cable out (`usb unplug`: no charging LED), and the
+      chip is `idle` at the release. A hold of 4 s with the cable in
+      ends at its release. Not tried on a real Flipper.
+    - Two notes from the tests. QEMU's monitor serves one client at a
+      time, and the launcher's `press --hold` keeps it for the whole
+      hold: a save from another process waits for the release. A key
+      that is down at a save is put down with `sendkey KEY MS` on a
+      connection that is closed at once (132's held button was). And a
+      held Princeton key is sent ten times, in about half a second,
+      after which the chip stays in `tx` with no level changing: a save
+      later in the hold leaves the loaded machine nothing to capture,
+      and a transmission without an edge makes no file.
+    - Not in a state: the name of a held thing, which is the launcher's
+      (`held.json`, which a start removes: the tests put it back before
+      they compare `status`), and a front end's last capture, which is
+      the run's.
+    - Not there: the header's pins and devices, the card slot, the
+      cable. Not tried: the saves in an app on a firmware other than
+      official 1.5.1, a radio link with a program or an SDR on it over
+      a load, a window on a loaded machine, and what 131 and 132 list
+      as not tried.
+    - The checks, none of which saves a state. The smoke test, which
+      has every radio in it, on the five firmwares: 28 checks pass on
+      official 1.5.1, Momentum and the official dev build, 27 on
+      Unleashed and RogueMaster (one is skipped there, a transmission
+      from the CLI). On official 1.5.1: `rfid_check` 71,
+      `ibutton_check` 18, `nfc_link_check` 4, `sdr_check` 4, the files
+      check, `update_check` 33, `spi_check` 45, `gpio_check` 111,
       `uart_check` 79, `i2c_check` 66, `u2f_check` 39, `app_check` 32,
       `gui_check` 63. On Momentum: `spi_check` 30. On Unleashed:
       `u2f_check` 39, `gui_check` 64. On RogueMaster: `gpio_check` 82.

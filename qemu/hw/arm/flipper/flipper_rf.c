@@ -30,6 +30,7 @@
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-properties-system.h"
+#include "migration/vmstate.h"
 #include "wb55.h"
 #include "flipper.h"
 
@@ -670,8 +671,8 @@ static uint32_t cc1101_transfer(SSIPeripheral *dev, uint32_t val)
         s->pa_idx++;
     } else if (s->addr == 0x3F) {       /* FIFO: nothing in, everything lost */
         ret = s->read ? 0 : ret;
-    } else if (s->addr >= 0x30) {       /* status register (burst read) */
-        ret = cc1101_status_reg(s, s->addr);
+    } else if (s->addr >= 0x2F) {       /* status register (burst read) */
+        ret = cc1101_status_reg(s, s->addr);    /* 0x2F: no register */
     } else {
         if (s->read) {
             ret = s->regs[s->addr];
@@ -782,6 +783,67 @@ static void cc1101_reset_exit(Object *obj, ResetType type)
     cc1101_update_gdo(s);
 }
 
+/*
+ * ---- a saved state
+ *
+ * What the chip is set to is saved.  What was on the air is not: a signal
+ * being heard at the save (the one-shot air's, a bridge's) ends there, and
+ * of a transmission under way the loaded machine captures the part after
+ * the load.  GDO0's level is saved as its receivers save theirs.  A load
+ * tells no line anything: cc1101_loaded() does, when the loaded machine
+ * first runs.
+ */
+static int cc1101_post_load(void *opaque, int version_id)
+{
+    Cc1101State *s = opaque;
+
+    /* what the loading machine itself had on the air, or was capturing */
+    timer_del(s->air_timer);
+    g_free(s->air);
+    s->air = NULL;
+    s->air_len = s->air_pos = 0;
+    s->carrier = false;
+    s->live_carrier = false;
+    if (s->tx_active) {
+        g_array_free(s->tx, true);
+        s->tx = NULL;
+        s->tx_active = false;
+    }
+    g_free(s->link_cfg);                /* the set-up is the loaded one: */
+    s->link_cfg = NULL;                 /* a bridge is told, its air dropped */
+    cc1101_link_check(s);
+    return 0;
+}
+
+void cc1101_loaded(Cc1101State *s)
+{
+    cc1101_update_gdo(s);               /* no carrier now */
+    if (s->state == MARC_TX) {
+        cc1101_tx_begin(s);
+    }
+}
+
+static const VMStateDescription vmstate_cc1101 = {
+    .name = "cc1101",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = cc1101_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_SSI_PERIPHERAL(parent_obj, Cc1101State),
+        VMSTATE_UINT8_ARRAY(regs, Cc1101State, 0x2F),
+        VMSTATE_UINT8_ARRAY(patable, Cc1101State, 8),
+        VMSTATE_UINT8(state, Cc1101State),
+        VMSTATE_INT32(phase, Cc1101State),
+        VMSTATE_UINT8(addr, Cc1101State),
+        VMSTATE_BOOL(read, Cc1101State),
+        VMSTATE_BOOL(burst, Cc1101State),
+        VMSTATE_INT32(pa_idx, Cc1101State),
+        VMSTATE_BOOL(gdo0_level, Cc1101State),
+        VMSTATE_BOOL(tx_level, Cc1101State),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const Property cc1101_props[] = {
     DEFINE_PROP_STRING("tx-dir", Cc1101State, tx_dir),
     DEFINE_PROP_CHR("link", Cc1101State, link),     /* a radio bridge */
@@ -793,6 +855,7 @@ static void cc1101_class_init(ObjectClass *klass, const void *data)
     ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     device_class_set_props(DEVICE_CLASS(klass), cc1101_props);
+    DEVICE_CLASS(klass)->vmsd = &vmstate_cc1101;
     k->realize = cc1101_realize;
     k->transfer = cc1101_transfer;
     k->set_cs = cc1101_set_cs;

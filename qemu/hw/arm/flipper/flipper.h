@@ -177,6 +177,8 @@ struct Cc1101State {
     int64_t spec_ns;             /* when it came */
 };
 void cc1101_tx_data(Cc1101State *s, bool level, int64_t when);
+/* a loaded machine runs for the first time: GDO0, a transmission's capture */
+void cc1101_loaded(Cc1101State *s);
 
 /* ---------------------------------------------------- ST25R3916 NFC */
 #define TYPE_ST25R3916 "st25r3916"
@@ -204,6 +206,7 @@ struct St25r3916State {
     bool field_on;
     NfcCard *card;
     char *card_str;
+    uint32_t card_str_len;       /* ... with its NUL, in a saved state */
     /* listen mode: a virtual reader in front of the emulating Flipper */
     QEMUTimer *rd_timer;
     char *rd_prog;               /* "scan", "ntag" while a session runs */
@@ -240,6 +243,11 @@ void nfc_card_free(NfcCard *c);
 void nfc_card_field(NfcCard *c, bool on);
 /* a frame from the reader, as air bits; returns the answer's bits (0: none) */
 int nfc_card_rx(NfcCard *c, const uint8_t *air, int nbits, uint8_t *out);
+/* the card in a saved state, and an empty one for a load to fill */
+extern const VMStateDescription vmstate_nfc_card;
+NfcCard *nfc_card_blank(void);
+/* a loaded machine runs for the first time: what was in the air has ended */
+void st25r3916_loaded(St25r3916State *s);
 
 /* --------------------------------------------- piezo speaker (TIM16) */
 #define TYPE_FLIPPER_SPEAKER "flipper-speaker"
@@ -321,6 +329,7 @@ struct FlipperRfidState {
     QEMUTimer *timer;
     int32_t *tag;                /* one frame: +high / -low µs at 125 kHz */
     char *tag_str;
+    uint32_t tag_str_len;        /* ... with its NUL, in a saved state */
     int len, pos;
     bool psk;                    /* a PSK tag: answers a PSK-mode read only */
     uint32_t field_hz;           /* the reader's field, 0 = off */
@@ -363,6 +372,7 @@ struct FlipperIbuttonState {
     QEMUTimer *timer;            /* lets go if the master never samples */
     QEMUTimer *wave_timer;
     char *key_str;
+    uint32_t key_str_len;        /* ... with its NUL, in a saved state */
     int kind;
     /* a 1-Wire key */
     uint8_t rom[8];
@@ -410,6 +420,8 @@ struct FlipperIbuttonState {
 };
 /* COMP1 was enabled or disabled */
 void flipper_ibutton_comp(FlipperIbuttonState *s, bool on);
+/* a loaded machine runs for the first time: the line as the key has it */
+void flipper_ibutton_loaded(FlipperIbuttonState *s);
 /* the CPU read COMP1's CSR */
 void flipper_ibutton_comp_read(FlipperIbuttonState *s);
 /* the CPU read GPIOB's IDR (fw_released: its own drive of PB14 is off) */

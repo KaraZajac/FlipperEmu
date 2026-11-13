@@ -112,6 +112,14 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
 - ☑ Sub-GHz transmit capture: every transmission → `devices/NAME/subghz-tx/*.sub` (exact
       timings, frequency, custom preset from the live registers); TX → RX loopback decodes
 - ☐ TX-side pacing against DMA refill lag; more key encoders (CAME, Nice FLO, …)
+  - ☐ A Send that is held for more than about 8 s does not end when OK is let go, if
+        the charging LED is on (official 1.5.1, in the emulator): the radio stays in
+        `tx`. It is the firmware's own. The Send scene asks for a blink every 100 ms, a
+        blink takes the notification service 110 ms while another light is on, the
+        service's queue of 8 fills, and the timer task, which has a held key's repeats
+        to publish, waits at that queue for good: the key's release is never
+        published. With the cable out (`usb unplug`) the same hold ends at the
+        release. Not known: whether a real Flipper does it (BRINGUP_LOG 133)
 - ◐ NFC: the ST25R3916 frame by frame (FIFO, IRQs, timed TX/RX, parity and CRC
       handling), TIM17 as a real timer. Virtual ISO14443-3A cards from `.nfc` files:
       NTAG21x / Ultralight / Ultralight EV1 ☑ (app Read with NDEF, `mfu info`, `dump`);
@@ -626,8 +634,15 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           the LED, the backlight, the motor and the battery as they were set; a blink
           that was under way goes on, a tone sounds until the firmware ends it, and a
           button that was held at the save is let go at the first run (BRINGUP_LOG
-          132). To do: the radios and what is held (CC1101, infrared, RFID, iButton,
-          NFC), then the header, the card slot and the cable
+          132). Done (2026-11-12): the radios and what is held. A tag, a card and a key
+          are held to the loaded machine with all that was written to them, on the five
+          firmwares, and a read of a MIFARE Classic card that was saved in the middle
+          of its dictionary attack finds every key after the load. Saved in an app
+          that has a radio (official 1.5.1): an emulation goes on for the next reader,
+          a Read hears the next signal, a transmission is captured from the load on and
+          ends when its button is let go, an infrared signal that was being played is
+          not learned. A state with a length or an index out of its bounds is refused
+          (BRINGUP_LOG 133). To do: the header, the card slot and the cable
     - ☐ A `snapshot` command in the launcher (the state, a copy of the card, the
           run's arguments), a check for it, the docs
 - ☐ TCG plugin for coverage/trace of firmware or a single FAP

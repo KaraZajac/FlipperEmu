@@ -35,6 +35,7 @@
 #include "qemu/bitops.h"
 #include "qemu/host-utils.h"
 #include "qapi/error.h"
+#include "migration/vmstate.h"
 #include "flipper.h"
 
 #define MEM_MAX 4096                    /* NTAG216: 231 pages; 4K Classic */
@@ -851,3 +852,72 @@ void nfc_card_free(NfcCard *c)
 {
     g_free(c);
 }
+
+/*
+ * ---- a saved state
+ *
+ * The card as it is: what was written to it, its counters, where it is in
+ * its activation and, for MIFARE Classic, in its Crypto1 session.  A talk
+ * between the firmware and the card goes on after a load.
+ */
+NfcCard *nfc_card_blank(void)
+{
+    return g_new0(NfcCard, 1);
+}
+
+/* what the card indexes with: within what it has */
+static int card_post_load(void *opaque, int version_id)
+{
+    NfcCard *c = opaque;
+    bool mfc = c->kind == KIND_MFC;
+
+    if ((c->kind != KIND_T2 && !mfc) ||
+        (c->uid_len != 4 && c->uid_len != 7 && c->uid_len != 10) ||
+        c->state < ST_OFF || c->state > ST_HALT ||
+        c->level < 0 || c->level > 2 ||
+        c->mem_len < 16 || c->mem_len > MEM_MAX || (c->mem_len & 3) ||
+        (mfc && c->mem_len != 20 * 16 && c->mem_len != 64 * 16 &&
+         c->mem_len != 256 * 16) ||
+        c->comp_write < -1 || c->comp_write >= t2_pages(c) ||
+        c->write_block < -1 || c->write_block >= mfc_blocks(c) ||
+        c->mfc < MFC_NONE || c->mfc > MFC_ON) {
+        return -EINVAL;
+    }
+    return 0;
+}
+
+const VMStateDescription vmstate_nfc_card = {
+    .name = "nfc-card",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = card_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_INT32(kind, NfcCard),
+        VMSTATE_UINT8_ARRAY(uid, NfcCard, 10),
+        VMSTATE_INT32(uid_len, NfcCard),
+        VMSTATE_UINT8_ARRAY(atqa, NfcCard, 2),
+        VMSTATE_UINT8(sak, NfcCard),
+        VMSTATE_INT32(state, NfcCard),
+        VMSTATE_INT32(level, NfcCard),
+        VMSTATE_UINT8_ARRAY(mem, NfcCard, MEM_MAX),
+        VMSTATE_INT32(mem_len, NfcCard),
+        VMSTATE_BOOL(has_version, NfcCard),
+        VMSTATE_BOOL(has_sig, NfcCard),
+        VMSTATE_UINT8_ARRAY(version, NfcCard, 8),
+        VMSTATE_UINT8_ARRAY(sig, NfcCard, 32),
+        VMSTATE_UINT32_ARRAY(counter, NfcCard, 3),
+        VMSTATE_UINT8_ARRAY(tearing, NfcCard, 3),
+        VMSTATE_UINT8_ARRAY(pwd, NfcCard, 4),
+        VMSTATE_UINT8_ARRAY(pack, NfcCard, 2),
+        VMSTATE_BOOL(authed, NfcCard),
+        VMSTATE_INT32(comp_write, NfcCard),
+        VMSTATE_INT32(mfc, NfcCard),
+        VMSTATE_UINT64(lfsr, NfcCard),
+        VMSTATE_UINT8_ARRAY(nt, NfcCard, 4),
+        VMSTATE_INT32(sector, NfcCard),
+        VMSTATE_BOOL(key_b, NfcCard),
+        VMSTATE_INT32(write_block, NfcCard),
+        VMSTATE_INT64(power_ns, NfcCard),
+        VMSTATE_END_OF_LIST()
+    }
+};

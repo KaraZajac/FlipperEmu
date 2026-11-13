@@ -56,6 +56,7 @@
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-properties-system.h"
+#include "migration/vmstate.h"
 #include "flipper.h"
 
 #define REG_IO_CONF1      0x00
@@ -276,15 +277,20 @@ static void st25_rx_end(St25r3916State *s)
 {
     bool raw = s->rega[REG_ISO14443A] & A_NO_RX_PAR;
     bool parity_ok = true;
+    uint8_t data[NFC_AIR_MAX + 1];
     int bits;
 
     st25_fifo_clear(s);
     if (raw) {
         bits = s->nrx;
-        memcpy(s->fifo, s->rx, (bits + 7) / 8);
+        memcpy(data, s->rx, (bits + 7) / 8);
     } else {
-        bits = nfc_air_decode(s->rx, s->nrx, s->fifo, &parity_ok);
+        bits = nfc_air_decode(s->rx, s->nrx, data, &parity_ok);
     }
+    /* the FIFO's 512 bytes: a longer frame loses its end (a card sends
+     * none, a program on the link can) */
+    bits = MIN(bits, (int)sizeof(s->fifo) * 8);
+    memcpy(s->fifo, data, (bits + 7) / 8);
     s->fifo_len = (bits + 7) / 8;
     s->fifo_lb = bits % 8;
     if (!parity_ok) {
@@ -1163,6 +1169,162 @@ static void st25_init(Object *obj)
         "What the virtual reader last read, as a .nfc file");
 }
 
+/*
+ * ---- a saved state
+ *
+ * The chip as the firmware set it up and where it is in a frame, the card
+ * held to the Flipper (nfc_card.c: all of it, so a talk with it goes on)
+ * and a standing reader's field.  Not saved, because it was in the air: a
+ * virtual reader's session and a question to a card on the link.  For the
+ * loaded machine the reader is gone (its field goes off at the first run)
+ * and the card on the link stays silent.  A load drives no line and writes
+ * nothing to a link: st25r3916_loaded() does, when the machine runs.
+ */
+#define ST25_STR_MAX (1u << 20)         /* a card's name in a saved state */
+
+static bool st25_card_needed(void *opaque)
+{
+    St25r3916State *s = opaque;
+
+    return s->card != NULL;
+}
+
+static int st25_card_pre_load(void *opaque)
+{
+    St25r3916State *s = opaque;
+
+    if (!s->card) {
+        s->card = nfc_card_blank();
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_st25_card = {
+    .name = "st25r3916/card",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = st25_card_needed,
+    .pre_load = st25_card_pre_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_STRUCT_POINTER(card, St25r3916State, vmstate_nfc_card,
+                               NfcCard),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static int st25_pre_save(void *opaque)
+{
+    St25r3916State *s = opaque;
+
+    s->card_str_len = s->card_str ?
+                      MIN(strlen(s->card_str) + 1, ST25_STR_MAX) : 0;
+    return 0;
+}
+
+/* before the size is used: a damaged file asks for no memory */
+static bool st25_size_ok(void *opaque, int version_id)
+{
+    St25r3916State *s = opaque;
+
+    return s->card_str_len <= ST25_STR_MAX;
+}
+
+/* no card is held and no reader talks: the state says what is */
+static int st25_pre_load(void *opaque)
+{
+    St25r3916State *s = opaque;
+
+    nfc_card_free(s->card);
+    s->card = NULL;
+    g_free(s->card_str);
+    s->card_str = NULL;
+    timer_del(s->rd_timer);
+    g_free(s->rd_prog);
+    s->rd_prog = NULL;
+    s->rd_waiting = false;
+    s->rd_ans_bits = -1;
+    timer_del(s->link_timeout);
+    return 0;
+}
+
+/* the lengths the frames are copied by: within their buffers */
+static int st25_post_load(void *opaque, int version_id)
+{
+    St25r3916State *s = opaque;
+
+    if (s->card_str_len) {
+        s->card_str[s->card_str_len - 1] = '\0';
+    }
+    if (!s->card) {                     /* a name names a card */
+        g_free(s->card_str);
+        s->card_str = NULL;
+    }
+    if (s->fifo_len > sizeof(s->fifo) || s->fifo_rd > s->fifo_len ||
+        s->ntx < 0 || s->ntx > (NFC_AIR_MAX - 1) * 8 ||
+        s->nrx < 0 || s->nrx > NFC_AIR_MAX * 8) {
+        return -EINVAL;
+    }
+    return 0;
+}
+
+void st25r3916_loaded(St25r3916State *s)
+{
+    if (s->stage == STAGE_LINK) {       /* asked in the saved machine's time */
+        st25_silence(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    }
+    if (s->rd_field) {                  /* the session's reader is gone */
+        st25_ext_field(s, false, s->ext_field);
+    }
+    flipper_link_send(&s->lk, "field %s\n", s->field_on ? "on" : "off");
+}
+
+static const VMStateDescription vmstate_st25r3916 = {
+    .name = "st25r3916",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .pre_save = st25_pre_save,
+    .pre_load = st25_pre_load,
+    .post_load = st25_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_SSI_PERIPHERAL(parent_obj, St25r3916State),
+        VMSTATE_UINT32(card_str_len, St25r3916State),
+        VMSTATE_VALIDATE("a card's name of a size", st25_size_ok),
+        VMSTATE_VBUFFER_ALLOC_UINT32(card_str, St25r3916State, 1, NULL,
+                                     card_str_len),
+        VMSTATE_UINT8_ARRAY(rega, St25r3916State, 64),
+        VMSTATE_UINT8_ARRAY(regb, St25r3916State, 64),
+        VMSTATE_UINT8_ARRAY(irq_mask, St25r3916State, 4),
+        VMSTATE_UINT8_ARRAY(irq_status, St25r3916State, 4),
+        VMSTATE_INT32(phase, St25r3916State),
+        VMSTATE_UINT8(addr, St25r3916State),
+        VMSTATE_BOOL(read, St25r3916State),
+        VMSTATE_BOOL(space_b, St25r3916State),
+        VMSTATE_BOOL(prefix_b, St25r3916State),
+        VMSTATE_UINT8_ARRAY(fifo, St25r3916State, 512),
+        VMSTATE_UINT16(fifo_len, St25r3916State),
+        VMSTATE_UINT16(fifo_rd, St25r3916State),
+        VMSTATE_UINT8(fifo_lb, St25r3916State),
+        VMSTATE_UINT8_ARRAY(pt_mem, St25r3916State, 48),
+        VMSTATE_UINT32(pt_pos, St25r3916State),
+        VMSTATE_BOOL(pt_read, St25r3916State),
+        VMSTATE_TIMER_PTR(timer, St25r3916State),
+        VMSTATE_INT32(stage, St25r3916State),
+        VMSTATE_UINT8_ARRAY(tx, St25r3916State, NFC_AIR_MAX),
+        VMSTATE_UINT8_ARRAY(rx, St25r3916State, NFC_AIR_MAX),
+        VMSTATE_INT32(ntx, St25r3916State),
+        VMSTATE_INT32(nrx, St25r3916State),
+        VMSTATE_BOOL(field_on, St25r3916State),
+        VMSTATE_BOOL(rd_field, St25r3916State),
+        VMSTATE_BOOL(ext_field, St25r3916State),
+        VMSTATE_BOOL(pt_sleep, St25r3916State),
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_st25_card,
+        NULL
+    }
+};
+
 static const Property st25_props[] = {
     DEFINE_PROP_STRING("tx-dir", St25r3916State, tx_dir),
     DEFINE_PROP_CHR("link", St25r3916State, link),  /* a card elsewhere */
@@ -1194,6 +1356,7 @@ static void st25_class_init(ObjectClass *klass, const void *data)
 
     k->realize = st25_realize;
     device_class_set_props(DEVICE_CLASS(klass), st25_props);
+    DEVICE_CLASS(klass)->vmsd = &vmstate_st25r3916;
     k->transfer = st25_transfer;
     k->set_cs = st25_set_cs;
     k->cs_polarity = SSI_CS_LOW;

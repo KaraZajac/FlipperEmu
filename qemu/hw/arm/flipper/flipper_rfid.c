@@ -43,6 +43,7 @@
 #include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "hw/core/qdev-properties.h"
+#include "migration/vmstate.h"
 #include "wb55.h"
 #include "flipper.h"
 
@@ -627,6 +628,169 @@ static void rfid_realize(DeviceState *dev, Error **errp)
     }
 }
 
+/*
+ * ---- a saved state
+ *
+ * A tag held to the Flipper is held to the loaded one.  Its frame is saved
+ * and not only its name (a file's path is a label after a load), a T5577
+ * with all that was written to it, and where the tag was in its frame with
+ * the pacing: a read under way goes on.  The load a virtual reader was
+ * recording while the Flipper emulated is not saved: the loaded machine's
+ * capture begins with the next load on the field.  A load tells COMP1 and
+ * TIM2 nothing: they save what they were last told.
+ */
+#define RFID_STR_MAX (1u << 20)         /* a tag's name in a saved state */
+
+static const VMStateDescription vmstate_t5577 = {
+    .name = "t5577",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(blk, T5577, 8),
+        VMSTATE_UINT32_ARRAY(p1, T5577, 4),
+        VMSTATE_UINT8(lock, T5577),
+        VMSTATE_BOOL(on, T5577),
+        VMSTATE_INT64(since, T5577),
+        VMSTATE_INT64(on_start, T5577),
+        VMSTATE_INT64(prev_on, T5577),
+        VMSTATE_BOOL(cmd, T5577),
+        VMSTATE_BOOL(pushed, T5577),
+        VMSTATE_INT32(nbits, T5577),
+        VMSTATE_UINT8_ARRAY(bits, T5577, 72),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool rfid_t5_needed(void *opaque)
+{
+    FlipperRfidState *s = opaque;
+
+    return s->t5 != NULL;
+}
+
+static int rfid_t5_pre_load(void *opaque)
+{
+    FlipperRfidState *s = opaque;
+
+    if (!s->t5) {
+        s->t5 = g_new0(T5577, 1);
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_rfid_t5577 = {
+    .name = "flipper-rfid/t5577",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = rfid_t5_needed,
+    .pre_load = rfid_t5_pre_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_STRUCT_POINTER(t5, FlipperRfidState, vmstate_t5577, T5577),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static int rfid_pre_save(void *opaque)
+{
+    FlipperRfidState *s = opaque;
+
+    s->tag_str_len = s->tag_str ?
+                     MIN(strlen(s->tag_str) + 1, RFID_STR_MAX) : 0;
+    return 0;
+}
+
+/* before the sizes are used: a damaged file asks for no memory */
+static bool rfid_sizes_ok(void *opaque, int version_id)
+{
+    FlipperRfidState *s = opaque;
+
+    return s->len >= 0 && s->len <= RFID_MAX_EDGES &&
+           s->tag_str_len <= RFID_STR_MAX;
+}
+
+/* nothing is held and nothing recorded: the state says what is */
+static int rfid_pre_load(void *opaque)
+{
+    FlipperRfidState *s = opaque;
+
+    g_free(s->tag);
+    s->tag = NULL;
+    g_free(s->tag_str);
+    s->tag_str = NULL;
+    g_free(s->t5);
+    s->t5 = NULL;
+    if (s->tx) {
+        g_array_free(s->tx, true);
+        s->tx = NULL;
+    }
+    timer_del(s->tx_timer);
+    return 0;
+}
+
+static int rfid_post_load(void *opaque, int version_id)
+{
+    FlipperRfidState *s = opaque;
+    T5577 *t = s->t5;
+
+    if (s->tag_str_len) {
+        s->tag_str[s->tag_str_len - 1] = 0;
+    }
+    if (s->pos < 0 || s->pos > s->len || s->t5_tc_ns <= 0 ||
+        (t && (t->nbits < 0 || t->nbits > (int)sizeof(t->bits)))) {
+        return -EINVAL;
+    }
+    for (int i = 0; i < s->len; i++) {
+        if (!s->tag[i] || s->tag[i] > 1000000 || s->tag[i] < -1000000) {
+            return -EINVAL;             /* a frame the property refuses */
+        }
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_flipper_rfid = {
+    .name = "flipper-rfid",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .pre_save = rfid_pre_save,
+    .pre_load = rfid_pre_load,
+    .post_load = rfid_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_INT32(len, FlipperRfidState),
+        VMSTATE_UINT32(tag_str_len, FlipperRfidState),
+        VMSTATE_VALIDATE("a tag's frame and name of a size", rfid_sizes_ok),
+        VMSTATE_VARRAY_INT32_ALLOC(tag, FlipperRfidState, len, 1,
+                                   vmstate_info_int32, int32_t),
+        VMSTATE_VBUFFER_ALLOC_UINT32(tag_str, FlipperRfidState, 1, NULL,
+                                     tag_str_len),
+        VMSTATE_BOOL(psk, FlipperRfidState),
+        VMSTATE_UINT32(field_hz, FlipperRfidState),
+        VMSTATE_BOOL(psk_mode, FlipperRfidState),
+        VMSTATE_INT32(pos, FlipperRfidState),
+        VMSTATE_INT64(next_ns, FlipperRfidState),
+        VMSTATE_INT64(shift_ns, FlipperRfidState),
+        VMSTATE_BOOL(waiting, FlipperRfidState),
+        VMSTATE_UINT64(n_edges, FlipperRfidState),
+        VMSTATE_UINT64(n_waits, FlipperRfidState),
+        VMSTATE_UINT64(n_forced, FlipperRfidState),
+        VMSTATE_INT64(delivered_ns, FlipperRfidState),
+        VMSTATE_INT64(read_ns, FlipperRfidState),
+        VMSTATE_INT64(isr_ns, FlipperRfidState),
+        VMSTATE_INT64(gap_ns, FlipperRfidState),
+        VMSTATE_BOOL(noise, FlipperRfidState),
+        VMSTATE_BOOL(noise_high, FlipperRfidState),
+        VMSTATE_UINT32(rng, FlipperRfidState),
+        VMSTATE_BOOL(reader, FlipperRfidState),
+        VMSTATE_INT64(t5_tc_ns, FlipperRfidState),
+        VMSTATE_TIMER_PTR(timer, FlipperRfidState),
+        VMSTATE_TIMER_PTR(t5_timer, FlipperRfidState),
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_rfid_t5577,
+        NULL
+    }
+};
+
 static const Property rfid_props[] = {
     DEFINE_PROP_STRING("tx-dir", FlipperRfidState, tx_dir),
 };
@@ -637,6 +801,7 @@ static void rfid_class_init(ObjectClass *klass, const void *data)
 
     dc->user_creatable = false;
     dc->realize = rfid_realize;
+    dc->vmsd = &vmstate_flipper_rfid;
     device_class_set_props(dc, rfid_props);
 }
 

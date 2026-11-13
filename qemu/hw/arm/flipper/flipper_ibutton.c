@@ -95,6 +95,7 @@
 #include "qapi/error.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
+#include "migration/vmstate.h"
 #include "wb55.h"
 #include "flipper.h"
 
@@ -1232,6 +1233,171 @@ static void ibtn_init(Object *obj)
         "A 1-Wire key's ROM now (a blank's, once written)");
 }
 
+/*
+ * ---- a saved state
+ *
+ * A key on the contact is on the loaded Flipper's contact as it was: a
+ * 1-Wire key with its ROM as it is now (a blank's, once written), its
+ * memory and the slave's place in a command, a Cyfral or Metakom key with
+ * its wave and its place in it.  What the key holds is saved, and not only
+ * its file's name (a label after a load).  A virtual reader's session and a
+ * capture of what the Flipper emulates are not saved: both end at the save,
+ * and nothing is written of them.  A load tells the line nothing:
+ * flipper_ibutton_loaded() does, when the loaded machine first runs.
+ */
+#define IBTN_STR_MAX  (1u << 20)        /* in a saved state: a key's name, */
+#define IBTN_MEM_MAX  (1u << 24)        /* its memory in bytes, */
+#define IBTN_WAVE_MAX (1 << 20)         /* its wave in edges */
+
+static int ibtn_pre_save(void *opaque)
+{
+    FlipperIbuttonState *s = opaque;
+
+    s->key_str_len = s->key_str ?
+                     MIN(strlen(s->key_str) + 1, IBTN_STR_MAX) : 0;
+    return 0;
+}
+
+/* before the sizes are used: a damaged file asks for no memory */
+static bool ibtn_sizes_ok(void *opaque, int version_id)
+{
+    FlipperIbuttonState *s = opaque;
+
+    return s->key_str_len <= IBTN_STR_MAX && s->mem_len <= IBTN_MEM_MAX &&
+           s->wave_len >= 0 && s->wave_len <= IBTN_WAVE_MAX;
+}
+
+/* no key, no reader, no capture: the state says what is */
+static int ibtn_pre_load(void *opaque)
+{
+    FlipperIbuttonState *s = opaque;
+
+    g_free(s->key_str);
+    s->key_str = NULL;
+    g_free(s->mem);
+    s->mem = NULL;
+    g_free(s->wave);
+    s->wave = NULL;
+    timer_del(s->rd_timer);
+    g_free(s->rd_prog);
+    s->rd_prog = NULL;
+    s->rd_state = RD_OFF;
+    s->rd_pull = false;
+    timer_del(s->cap_timer);
+    if (s->cap) {
+        g_array_free(s->cap, true);
+        s->cap = NULL;
+    }
+    s->cap_done = false;
+    return 0;
+}
+
+/* the slave's place in a byte, a ROM or what it sends: within it */
+static bool ibtn_place_ok(FlipperIbuttonState *s)
+{
+    switch (s->state) {
+    case OW_MEM:
+        return true;                    /* on past the memory's end: 1s */
+    case OW_TX:
+        return s->bit < 8 * s->tx_bytes;
+    case OW_SEARCH:
+    case OW_WROM:
+        return s->bit < 64;
+    case OW_ADDR:
+        return s->bit < 8 && s->count < s->addr_bytes;
+    case OW_TM_ADDR:
+        return s->bit < 8 && s->count < 2;
+    default:
+        return s->bit < 8;
+    }
+}
+
+static int ibtn_post_load(void *opaque, int version_id)
+{
+    FlipperIbuttonState *s = opaque;
+    bool wave = s->kind == IBTN_WAVE;
+
+    if (s->key_str_len) {
+        s->key_str[s->key_str_len - 1] = 0;
+    }
+    if (s->kind < IBTN_NONE || s->kind > IBTN_WAVE ||
+        s->blank < BLANK_NONE || s->blank > BLANK_TM2004 ||
+        s->addr_bytes < 0 || s->addr_bytes > 2 ||
+        s->state < OW_IDLE || s->state > OW_TM_PULSE ||
+        s->tx_next < OW_IDLE || s->tx_next > OW_TM_PULSE ||
+        s->tx_bytes < 0 || s->tx_bytes > 8 ||
+        s->phase < 0 || s->phase > 2 || s->count < 0 || s->count > 7 ||
+        s->bit < 0 || !ibtn_place_ok(s) ||
+        (wave ? s->wave_len < 2 : s->wave_len != 0) ||
+        s->wave_pos < 0 || s->wave_pos >= MAX(s->wave_len, 1)) {
+        return -EINVAL;
+    }
+    for (int i = 0; i < s->wave_len; i++) {
+        if (!s->wave[i] || s->wave[i] > 100000 || s->wave[i] < -100000) {
+            return -EINVAL;             /* a wave the property refuses */
+        }
+    }
+    return 0;
+}
+
+/* a reader of the emulator's that held the line low at the save is gone */
+void flipper_ibutton_loaded(FlipperIbuttonState *s)
+{
+    ow_drive(s, s->pulling);
+}
+
+static const VMStateDescription vmstate_flipper_ibutton = {
+    .name = "flipper-ibutton",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .pre_save = ibtn_pre_save,
+    .pre_load = ibtn_pre_load,
+    .post_load = ibtn_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(key_str_len, FlipperIbuttonState),
+        VMSTATE_UINT32(mem_len, FlipperIbuttonState),
+        VMSTATE_INT32(wave_len, FlipperIbuttonState),
+        VMSTATE_VALIDATE("a key's name, memory and wave of a size",
+                         ibtn_sizes_ok),
+        VMSTATE_VBUFFER_ALLOC_UINT32(key_str, FlipperIbuttonState, 1, NULL,
+                                     key_str_len),
+        VMSTATE_VBUFFER_ALLOC_UINT32(mem, FlipperIbuttonState, 1, NULL,
+                                     mem_len),
+        VMSTATE_VARRAY_INT32_ALLOC(wave, FlipperIbuttonState, wave_len, 1,
+                                   vmstate_info_int32, int32_t),
+        VMSTATE_INT32(kind, FlipperIbuttonState),
+        VMSTATE_UINT8_ARRAY(rom, FlipperIbuttonState, 8),
+        VMSTATE_INT32(addr_bytes, FlipperIbuttonState),
+        VMSTATE_INT32(blank, FlipperIbuttonState),
+        VMSTATE_BOOL(wr_enabled, FlipperIbuttonState),
+        VMSTATE_UINT8_ARRAY(newrom, FlipperIbuttonState, 8),
+        VMSTATE_UINT8(tm_byte, FlipperIbuttonState),
+        VMSTATE_BOOL(m_low, FlipperIbuttonState),
+        VMSTATE_BOOL(pulling, FlipperIbuttonState),
+        VMSTATE_BOOL(presence, FlipperIbuttonState),
+        VMSTATE_BOOL(od, FlipperIbuttonState),
+        VMSTATE_INT64(fall_ns, FlipperIbuttonState),
+        VMSTATE_INT32(state, FlipperIbuttonState),
+        VMSTATE_INT32(bit, FlipperIbuttonState),
+        VMSTATE_INT32(phase, FlipperIbuttonState),
+        VMSTATE_INT32(count, FlipperIbuttonState),
+        VMSTATE_UINT8(rx, FlipperIbuttonState),
+        VMSTATE_UINT32(addr, FlipperIbuttonState),
+        VMSTATE_UINT8_ARRAY(txbuf, FlipperIbuttonState, 8),
+        VMSTATE_INT32(tx_bytes, FlipperIbuttonState),
+        VMSTATE_INT32(tx_next, FlipperIbuttonState),
+        VMSTATE_TIMER_PTR(timer, FlipperIbuttonState),
+        VMSTATE_INT32(wave_pos, FlipperIbuttonState),
+        VMSTATE_BOOL(comp_on, FlipperIbuttonState),
+        VMSTATE_BOOL(playing, FlipperIbuttonState),
+        VMSTATE_BOOL(awaiting, FlipperIbuttonState),
+        VMSTATE_INT64(edge_t, FlipperIbuttonState),
+        VMSTATE_INT64(next_t, FlipperIbuttonState),
+        VMSTATE_TIMER_PTR(wave_timer, FlipperIbuttonState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const Property ibtn_props[] = {
     DEFINE_PROP_STRING("tx-dir", FlipperIbuttonState, tx_dir),
 };
@@ -1241,6 +1407,7 @@ static void ibtn_class_init(ObjectClass *klass, const void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->user_creatable = false;
+    dc->vmsd = &vmstate_flipper_ibutton;
     device_class_set_props(dc, ibtn_props);
 }
 
