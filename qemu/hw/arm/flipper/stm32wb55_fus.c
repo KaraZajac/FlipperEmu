@@ -355,14 +355,20 @@ uint8_t wb55_fus_lock_key(WB55IpccState *s, uint8_t index)
  */
 void wb55_fus_loaded(WB55IpccState *s)
 {
+    const WB55AesAnswer *answer = NULL;
+
     fus_file_save(s);
-    if (s->aes && s->aes->has_answer && s->key_loaded && s->key_answer) {
+    if (!s->aes) {
+        return;
+    }
+    if (s->aes->has_answer && s->key_loaded && s->key_answer) {
         const WB55FusKey *k = &s->key[s->key_loaded];
 
         if (k->type != WB55_FUS_KEY_NONE) {
-            s->aes->answer = s->key_answer(s->key_loaded, k->data, k->len);
+            answer = s->key_answer(s->key_loaded, k->data, k->len);
         }
     }
+    wb55_aes_enclave_answer(s->aes, answer);
 }
 
 /* A system reset: CPU2 starts over. The locks go, and AES1 is CPU1's again. */

@@ -174,6 +174,7 @@ struct WB55AesState {
     bool secure;                 /* the key registers are CPU2's */
     const WB55AesAnswer *answer;
     bool has_answer;             /* in a saved state: `answer` was there */
+    bool answer_due;             /* loaded with one, not put back yet */
     bool warned_dma;
 };
 
@@ -181,6 +182,7 @@ struct WB55AesState {
 void wb55_aes_enclave_load(WB55AesState *s, const uint8_t *key, int len,
                            const WB55AesAnswer *answer);
 void wb55_aes_enclave_unload(WB55AesState *s);
+void wb55_aes_enclave_answer(WB55AesState *s, const WB55AesAnswer *answer);
 
 /* ---------------------------------------------------------- IPCC + CPU2 */
 #define TYPE_WB55_IPCC "stm32wb55-ipcc"

@@ -68,7 +68,10 @@ NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
         tries of 15 (1.5.1: 15 of 15, with the same code in the firmware). Every
         edge reaches the firmware's handler once and with its exact time; deep sleep,
         late delivery and a starved reading thread are ruled out (BRINGUP_LOG 92).
-        Next: what the decoder is fed, read out under gdb
+        Next: what the decoder is fed, read out under gdb. 1.5.1 fails it too while
+        other programs keep the computer busy (a load average of about 20 on 16 cores,
+        2026-11-13): 0 of 10, with this push's emulator and with the one before it,
+        and some reads give another key (BRINGUP_LOG 136)
 
 ## M4: senses ◐
 - ☑ Speaker: TIM16 CH1 PWM → QEMU audio (desktop driver or `--audio wav:FILE`); tones
@@ -665,11 +668,19 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           in an assertion at its next write to the card, and no machine could load a state
           that was saved at a debugger's stop (both in the panel's model now).
           `scripts/snapshot_check.py`: 56 checks on the five firmwares (BRINGUP_LOG 135)
-    - ☐ The rest of the fourth part: an app's test that the enclave's keys answer as before
-          after a load (ufbt, official 1.5.1); the window on a loaded machine beyond its
-          start; a save and a load with a debugger on the machine; the report of a firmware
-          that had halted before the save; `status` naming the snapshot that a run came
-          from; Save and Load in the window's Device menu
+    - ☑ Tests of what the command had left untried (2026-11-13): a save and a load with a
+          gdb on the machine (a save at its step, its leaving lets the machine go on, that
+          state loads), a firmware that had crashed (a debug build's halt and report after
+          a load, a release build's message of the crash), and an app with a key of the
+          enclave loaded at the save (`scripts/snapshot_check_app`, ufbt, official 1.5.1:
+          the device's own key, and a factory key with the self-test's block). Found with
+          it: the launcher's load saves the loaded machine to check it, and AES1 said in
+          that state that it had no answer for the factory key (in the model now).
+          `scripts/snapshot_check.py`: 67 checks on the official 1.5.1 and its dev build,
+          65 on Momentum, Unleashed and RogueMaster (BRINGUP_LOG 136)
+    - ☐ The rest of the fourth part: the window on a loaded machine beyond its start;
+          `status` naming the snapshot that a run came from; Save and Load in the window's
+          Device menu
 - ☐ TCG plugin for coverage/trace of firmware or a single FAP
 - ☐ Fuzzing harness (AFL++/libafl QEMU mode) for parsers in the firmware
 - ☐ Upstream the thirteen QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:

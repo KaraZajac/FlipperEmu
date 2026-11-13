@@ -1,0 +1,12 @@
+# What scripts/snapshot_check.py has a firmware do with the enclave around a
+# save: not an example
+App(
+    appid="fe_keys_check",
+    name="Enclave key check",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="fe_keys_check_app",
+    stack_size=2 * 1024,
+    fap_category="Debug",
+    fap_version="1.0",
+    fap_description="A key of the enclave loaded while scripts/snapshot_check.py saves",
+)

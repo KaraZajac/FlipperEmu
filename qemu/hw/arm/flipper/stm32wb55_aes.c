@@ -582,6 +582,7 @@ void wb55_aes_enclave_load(WB55AesState *s, const uint8_t *key, int len,
     aes_key_put(s, key, len);
     s->secure = true;
     s->answer = answer;
+    s->answer_due = false;
 }
 
 /* CPU2 wipes the key registers and gives them back. */
@@ -590,6 +591,14 @@ void wb55_aes_enclave_unload(WB55AesState *s)
     memset(s->key, 0, sizeof(s->key));
     s->secure = false;
     s->answer = NULL;
+    s->answer_due = false;
+}
+
+/* After a load: the answer that went with the loaded key, or none */
+void wb55_aes_enclave_answer(WB55AesState *s, const WB55AesAnswer *answer)
+{
+    s->answer = answer;
+    s->answer_due = false;
 }
 
 static void wb55_aes_reset_hold(Object *obj, ResetType type)
@@ -611,6 +620,7 @@ static void wb55_aes_reset_hold(Object *obj, ResetType type)
     memset(s->gcm_y, 0, sizeof(s->gcm_y));
     s->nin = s->nout = 0;
     s->answer = NULL;
+    s->answer_due = false;
     qemu_set_irq(s->irq, 0);
 }
 
@@ -630,13 +640,26 @@ static const Property wb55_aes_props[] = {
 /*
  * A saved state.  A key of CPU2's is in it like any other (a state file
  * holds keys).  `answer` is a pointer: the state says whether there was one,
- * and CPU2's side puts it back (wb55_fus_loaded()).
+ * and CPU2's side puts it back when the loaded machine first runs
+ * (wb55_fus_loaded()).  A state that is saved before then (`snapshot load`
+ * saves one to check what it has) says what the loaded one said.
  */
 static int wb55_aes_pre_save(void *opaque)
 {
     WB55AesState *s = opaque;
 
-    s->has_answer = s->answer != NULL;
+    if (!s->answer_due) {
+        s->has_answer = s->answer != NULL;
+    }
+    return 0;
+}
+
+static int wb55_aes_post_load(void *opaque, int version_id)
+{
+    WB55AesState *s = opaque;
+
+    s->answer = NULL;
+    s->answer_due = s->has_answer;
     return 0;
 }
 
@@ -645,6 +668,7 @@ static const VMStateDescription vmstate_wb55_aes = {
     .version_id = 1,
     .minimum_version_id = 1,
     .pre_save = wb55_aes_pre_save,
+    .post_load = wb55_aes_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(cr, WB55AesState),
         VMSTATE_UINT32(sr, WB55AesState),

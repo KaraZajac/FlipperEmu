@@ -75,7 +75,9 @@ header, and started at that moment again: the uptime, the calendar, what was hel
 sensor's value and the log as they were, a folder that was made after the save gone
 from the card; a damaged state, a state cut short, one of another machine and one of
 another build refused with the device left as it was, file for file; a load whose
-launcher was killed undone by the next start) passes on the same five.
+launcher was killed undone by the next start; a save at a gdb's step and a load of
+it; a crashed firmware's report after a load; a key of the enclave loaded across a
+save, by an app of the check's own on the official 1.5.1) passes on the same five.
 `scripts/ufbt_check.py` (ufbt 0.2.6 building `examples/hello`, launching it there, and
 `ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's symbols, that
 app's and a stock app's, and its debug configuration for VS Code used the way that
@@ -2690,7 +2692,15 @@ What is and is not in one:
 - **The uptime goes on from the save, the calendar is today's**: a snapshot from last
   week wakes up with this hour's date and time, as a Flipper whose clock ran on.
 - **The log goes on**: `./flipperemu log` after a load has what the firmware said up
-  to the save, and then what it says now.
+  to the save, and then what it says now. A debug build that had crashed and halted
+  before the save is halted after the load, and `status` has the crash's report.
+- **A key of the enclave that an app has loaded stays loaded**, and the app encrypts on
+  with it as without a save.
+- **gdb may be on it at a save.** A save while gdb has the Flipper stopped (a
+  breakpoint, a step) leaves it so, until gdb lets it go on (`continue`, a step, or
+  gdb's leaving). A load of that snapshot goes on as any other, without gdb.
+  `snapshot load NAME --gdb --paused` has a gdb stub on the machine before it runs,
+  for gdb to get on there.
 
 **A snapshot holds the device's keys.** It is a folder,
 `devices/NAME/snapshots/SNAPSHOT/`, with the machine's state (1.3 MB) and a copy of the
@@ -2720,9 +2730,9 @@ snapshot's files in the places of its own. `./flipperemu stop`, and the next `ru
 
 Not there: `status` does not say which snapshot a device was loaded from, and the
 window has no menu item for one (the commands work on a device with a window). Not
-tried: a save or a load with a gdb on the machine, `--gtk`, a save with a PC attached
-over USB/IP, a file system that cannot share data between two files, and a snapshot
-carried to another computer. How it works, and what QEMU's migration needed for it:
+tried: `--gtk`, a save with a PC attached over USB/IP, a file system that cannot share
+data between two files, and a snapshot carried to another computer. How it works, and
+what QEMU's migration needed for it:
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#snapshots-the-launchers-snapshot).
 
 ### Debugging firmware

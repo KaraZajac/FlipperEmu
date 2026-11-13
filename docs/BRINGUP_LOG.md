@@ -3756,6 +3756,82 @@ big lock, entry 92).
       64. On RogueMaster: `gpio_check` 82. On the official dev build:
       `spi_check` 25.
 
+136. **A saved state with a debugger, a crash and a key of the enclave.**
+    What 135 had not tried, as checks in `scripts/snapshot_check.py`, and a
+    defect of the AES model that one of them found.
+    - A debugger. `snapshot load first --gdb --gdb-port N --paused`: the
+      machine stands still with the stub on that port. The launcher's `gdb`
+      gets on (in batch: `stepi`, then a sleep), and QEMU's run state is
+      `debug`. `snapshot save` at that step: saved, and the machine stays
+      the gdb's (`status`: stopped, `debug`; QEMU: `paused (prelaunch)`, as
+      135 has it). When the gdb leaves, its detach lets the machine go on
+      through QEMU's stub (`gdb_continue()`, which does not ask the monitor;
+      the launcher's own `cont` for a gdb that left the machine stopped was
+      not needed, and said nothing), and the machine writes to its card: the
+      write that ended QEMU before 135. The state of that step loads and
+      goes on, on the save's card. All of it on the five firmwares. In
+      QEMU's source a step, a `continue` and a detach of gdb's all start the
+      machine through `vm_prepare_start()`, which calls the panel's handler
+      before the other models'; the check tries the step and the detach.
+    - A crash, the one of app_check.py (the NFC app, asked to close while it
+      reads). On the official dev build, a debug build, the firmware halts:
+      `status --json` has `halted` with the address of its loop, the kind
+      `CRASH` and the report from the log. After `snapshot save`, a stop and
+      a load the three are the same, the report from the log that the
+      snapshot carried on; `wait` says at once that it has halted, and
+      `wait -- reset` starts it again. On the release builds (the official
+      1.5.1, Momentum, Unleashed and RogueMaster) the firmware starts again
+      and `status` has the crash's message from the RTC's backup register
+      (`fault`): the same after a save and a load.
+    - The enclave. An app of the check's own (`scripts/snapshot_check_app`,
+      built by ufbt with the official SDK: on the official 1.5.1) loads a
+      key of the enclave into AES1 and waits for OK. (The device's own key
+      is made when something first asks for it, as U2F does with
+      `furi_hal_crypto_enclave_ensure_key()`: the app asks first.) The check
+      saves the machine there, stops it and loads the snapshot, and presses
+      OK: the app encrypts a block, once more (AES1 goes on from the first:
+      CBC), unloads the key, loads it again and encrypts the block a third
+      time. The three blocks are those of a run with no save in it, for the
+      device's own key (slot 11) and for factory key 1 with the block of the
+      firmware's self-test (`enclave_signature_iv[0]` and
+      `enclave_signature_input[0]`), which AES1 answers from a table for
+      FlipperEmu's key 1: a state says only that there was such an answer,
+      and the FUS puts it back at the first run (`wb55_fus_loaded()`). The
+      app logs that the answer is the one the firmware expects, in both
+      runs.
+    - Found with it. With a save in between, factory key 1's self-test block
+      came out as plain AES with FlipperEmu's key 1, and not as the answer
+      that the firmware expects; with no save it was the answer. A load by
+      the launcher saves the loaded machine once before it runs (135: the
+      parts are compared). AES1's `pre_save` set its flag `has_answer` from
+      the pointer to the answer, which is NULL until the first run, and at
+      that run the FUS reads the same flag to put the pointer back
+      (`wb55_fus_loaded()`): it found none. The calendar had the same case
+      in 131, and a guard for it. Now AES1 keeps in a field of its own
+      (`answer_due`, which is not in the state) that the answer is to be put
+      back, a state that is saved before then says what the loaded one said,
+      and the FUS puts it back through `wb55_aes_enclave_answer()`. The
+      snapshots of an emulator from before are of another build, as 135 has
+      it.
+    - Not tried: a save with the USB port as a keyboard or a U2F token, a
+      `continue` of gdb's on a machine that has saved its state (its source
+      above), the window on a loaded machine beyond its start (the next
+      part), `--gtk`.
+    - The checks. `scripts/snapshot_check.py`: 67 on the official 1.5.1 and
+      on the official dev build (one skipped there: the app is for the
+      official SDK), 65 on Momentum, Unleashed and RogueMaster (the same one
+      skipped). `enclave_check.py`: 13 of the model alone, 35 with the
+      official 1.5.1. The smoke test on the official 1.5.1, while other
+      programs kept the computer busy (a load average of 6 to 25 on 16
+      cores): 26 and then 27 of 28. The T5577's write failed once, and the
+      Metakom read both times: an emulated Metakom key on the contact, and
+      `ikey read` did not read it in 15 s. Ten tries of that read on a
+      device of its own: 0 of 10 with this emulator, and 0 of 10 with the
+      one before this push (rebuilt for it, under the same load), three of
+      those with another key. 135's run, at night, read it. The rest of the
+      checks were not run again: what changed is what AES1 saves and loads,
+      the FUS's first run after a load, and the check.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

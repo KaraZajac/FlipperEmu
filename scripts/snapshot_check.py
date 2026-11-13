@@ -34,8 +34,19 @@ same; `--paused` leaves it standing still for `continue`).  A load that was
 cut off (its launcher killed) is undone by the next start, early or late.  A
 load in the foreground prints the firmware's log and ends with SIGTERM; one
 with the window, off-screen, ends with the window (skipped without PySide6).
-`snapshot rm` removes one.  Nothing here prints what a state holds.
-Exit status 0 = pass.
+`snapshot rm` removes one.
+
+With a gdb on it (the one `./flipperemu gdb` finds): a load that stands
+still with the gdb stub on, a gdb that steps, a save at that step, the gdb's
+leaving, which lets the machine go on, a write to the card after it, and a
+load of that state.  Where ufbt's SDK is the firmware's (the official
+release), an app of the check's own (scripts/snapshot_check_app) has a key
+of the enclave loaded across a save, a stop and a load: the device's own,
+and factory key 1 with the block of the firmware's self-test.  What it
+encrypts with the key after the load has to be what a run with no save
+gives.  Last, a crash on purpose: a debug build's halt and its report, or a
+release build's message of the crash, the same after a save and a load.
+Nothing here prints what a state holds.  Exit status 0 = pass.
 """
 import argparse
 import contextlib
@@ -53,9 +64,12 @@ import sys
 import tempfile
 import time
 
+from fe_monitor import Monitor
 from files_check import ROOT, Bench, CRASH, check, results
+from gdb_check import Gdb, free_port
 from gpio_check import skip, skipped
 from uart_check import fe
+from ufbt_check import ANSI, logged, tool
 
 QEMU = ROOT / "build" / "qemu" / "qemu-system-arm"
 HEADER = ("--i2c", "tmp105@0x48", "--i2c", "eeprom@0x50", "--spi", "flash")
@@ -718,6 +732,228 @@ def rm_checks(b):
           out + err)
 
 
+def said_by_qemu(b, command):
+    """What the emulator's monitor answers, in QEMU's own words"""
+    try:
+        m = Monitor(str(b.dir / "monitor.sock"))
+        try:
+            return m.cmd(command)
+        finally:
+            m.close()
+    except OSError:
+        return ""
+
+
+def debugger_checks(b, timeout):
+    """A save and a load with a gdb on the machine.  At a debugger's step
+    QEMU's run state is `debug`, which a state must not say (no machine
+    could be loaded from it), and a debugger lets a machine go on without
+    the monitor (flipper_panel.c has both)."""
+    work = pathlib.Path(tempfile.mkdtemp(prefix="fe-snap-gdb-"))
+    port = free_port()
+    g = None
+    try:
+        code, out, err, took = fe(b, "snapshot", "load", "first", "--detach",
+                                  "--paused", "--gdb", "--gdb-port", port,
+                                  *QUIET)
+        st = state(b)
+        if not check("`snapshot load --gdb --paused`: it stands still, with "
+                     "a gdb stub on the port", code == 0
+                     and f"gdb: :{port}" in out and "it stands still" in out
+                     and st.get("stopped") == "paused",
+                     f"{out + err} {st.get('stopped')}"):
+            return stop(b)
+        g = Gdb(b, work, "stepi", "python import time; time.sleep(15)")
+        until(lambda: "(debug)" in said_by_qemu(b, "info status")
+              or g.p.poll() is not None, 60)
+        if g.p.poll() is not None:
+            code, text = g.end()
+            if "no gdb" in text:
+                stop(b)
+                return skip("a save and a load with a gdb on the machine",
+                            text.strip()[-300:])
+        st = state(b)
+        check("a gdb gets on the loaded machine and steps: the machine is "
+              "the debugger's", g.p.poll() is None
+              and st.get("stopped") == "debug",
+              f"{st.get('stopped')} {said_by_qemu(b, 'info status')}")
+        code, out, err, took = fe(b, "snapshot", "save", "dbg")
+        st = state(b)
+        check("a save at the debugger's step: saved, and the machine stays "
+              "the gdb's", code == 0 and "snapshot dbg:" in out
+              and st.get("stopped") == "debug" and g.p.poll() is None,
+              f"{out + err} {st.get('stopped')}")
+        code, text = g.end()
+        g = None
+        code2, out, err, took = fe(b, "wait", "--timeout", timeout)
+        made = mkdir(b, "snap_dbg")
+        ok, said = b.answers()
+        check("the gdb leaves: its stub lets the machine go on (not the "
+              "launcher), and the machine writes to its card",
+              code == 0 and "left it stopped" not in text and code2 == 0
+              and made and ok, text[-1500:] + out + err + said)
+        stop(b)
+        ok, said = up(b, timeout, "snapshot", "load", "dbg")
+        seen = folders(b) if ok else set()
+        check("a load of the state that was saved at the step: it goes on, "
+              "on the save's card", ok and "snapshot dbg:" in said
+              and "snap_before" in seen and "snap_dbg" not in seen,
+              said + str(sorted(seen)))
+        stop(b)
+    finally:
+        if g:
+            g.end()
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def crash_checks(b, timeout):
+    """A firmware that has crashed, saved and loaded.  The crash is the one
+    of app_check.py: the NFC app, asked to close while it reads.  A debug
+    build halts there, and `status` reads its report from the log, which a
+    snapshot carries on.  A release build starts again and keeps the
+    crash's message in a register of the RTC, which is in the state.
+    (Last: the logs of these runs have a crash in them, on purpose.)"""
+    label = "a firmware that has crashed, saved and loaded"
+    ok, said = up(b, timeout, "snapshot", "load", "first")
+    if not check("`snapshot load first` once more, for a crash", ok, said):
+        return
+    fe(b, "nfc", "none")            # (with a card there the read ends)
+    code, out, err, took = fe(b, "app", "NFC")
+    if code:
+        fe(b, "stop")
+        return skip(label, "no NFC app in this firmware to close in the "
+                    "middle of a read")
+    time.sleep(2)
+    fe(b, "press", "ok")            # its first item: Read
+    time.sleep(3)
+    code, out, err, took = fe(b, "app", "--close")
+    if code == 0:
+        fe(b, "stop")
+        return skip(label, "this firmware's NFC app closes in the middle "
+                    "of a read")
+    halts = "has halted" in out + err
+    if not halts:
+        fe(b, "wait", "--timeout", timeout)     # (it starts again)
+    before = state(b)
+    crash = before.get("halted") if halts else before.get("fault")
+    if halts:
+        check("a debug build crashes and halts: `status` has where, and "
+              "the crash's report", crash and crash.get("kind") == "CRASH"
+              and crash.get("report") and crash.get("at"), out + err
+              + str(crash))
+    else:
+        check("a release build crashes and starts again: `status` has the "
+              "crash's message", crash, out + err + str(before))
+    code, out, err, took = fe(b, "snapshot", "save", "crashed")
+    fe(b, "stop")                   # (not stop(): its log has the crash)
+    code2, out2, err2, took = fe(b, "snapshot", "load", "crashed",
+                                 "--detach", *QUIET)
+    if not halts:
+        fe(b, "wait", "--timeout", timeout)
+    after = state(b)
+    check("saved and loaded: `status` says the same of the crash"
+          + (" (from the log that the snapshot carries on)" if halts
+             else ""),
+          code == 0 and code2 == 0 and crash
+          and (after.get("halted") if halts else after.get("fault"))
+          == crash, f"{out + err + out2 + err2} {crash} -> "
+          f"{after.get('halted')} {after.get('fault')}")
+    if halts:
+        code, out, err, took = fe(b, "wait", "--timeout", 60)
+        check("... and `wait` says at once that it has halted",
+              code == 1 and "has halted" in err and took < 15, out + err)
+        code, out, err, took = fe(b, "wait", "--timeout", 90, "--",
+                                  "reset")
+        check("`wait -- reset`: it starts again, and its CLI answers",
+              code == 0 and "its CLI answers" in out, out + err)
+    fe(b, "stop")
+
+
+KEYS_APP = ROOT / "scripts" / "snapshot_check_app"
+KEYS_FAP = "/ext/apps/Debug/fe_keys_check.fap"
+# its three lines: which, what each call said, the block that came out
+KEYS_LINE = re.compile(r"\[FeKeys\] (\d) (.*?): ([0-9a-f]{32}|-)")
+
+
+def keys_run(b, slot, between=None):
+    """The check's app with a slot of the enclave: its three lines, or None
+    when it did not get to the end.  between: what is done while it waits
+    for OK with the key loaded (False: that did not work)."""
+    log = lambda: ANSI.sub("", b.uart_text())
+    wait = f"[FeKeys] slot {slot} loaded 1, waiting for OK"
+    waits, ends = log().count(wait), log().count("[FeKeys] 3 ")
+    code, out, err, took = fe(b, "app", KEYS_FAP, slot)
+    if code or not logged(b, wait, 30, waits + 1):
+        return None
+    if between and not between():
+        return None
+    fe(b, "press", "ok")
+    if not logged(b, "[FeKeys] 3 ", 30, ends + 1):
+        return None
+    lines = KEYS_LINE.findall(log())
+    return lines[-3:] if len(lines) >= 3 else None
+
+
+def enclave_checks(b, timeout):
+    """An app has a key of the enclave loaded into AES1 at the moment of a
+    save, and the loaded machine encrypts with it, unloads it and loads it
+    again as a run with no save does.  Slot 11 is the device's own key.
+    Slot 1 is a factory key, with the block of the firmware's self-test:
+    AES1 answers that from a table, of which a state has no copy (the FUS
+    puts it back at the first run).  The app is built by ufbt, whose SDK
+    here is the official release's."""
+    label = "an app with a key of the enclave loaded at a save"
+    if not shutil.which("ufbt"):
+        return skip(label, "no `ufbt` on the PATH")
+    work = pathlib.Path(tempfile.mkdtemp(prefix="fe-snap-keys-"))
+    try:
+        folder = work / "fe_keys_check"
+        shutil.copytree(KEYS_APP, folder)
+        ok, said = up(b, timeout, "run")
+        if not check("`run` once more, for an app of the check's own", ok,
+                     said):
+            return
+        code, text = tool(b, folder)
+        fap = folder / "dist" / "fe_keys_check.fap"
+        if code or not fap.is_file():
+            check("`ufbt` builds the check's app", False, text[-1500:])
+            return stop(b)
+        code, out, err, took = fe(b, "app", "--no-start", "--to",
+                                  "/ext/apps/Debug", fap)
+        if "which is this firmware's" not in out:
+            stop(b)
+            return skip(label, "ufbt's SDK is not for this firmware: "
+                        + " ".join((out + err).split())[:200])
+        for slot, what in ((11, "the device's own key"),
+                           (1, "a factory key")):
+            name = f"keys{slot}"
+
+            def around():
+                code, out, err, took = fe(b, "snapshot", "save", name)
+                stop(b)
+                code2, out2, err2, took = fe(b, "snapshot", "load", name,
+                                             "--detach", *QUIET)
+                return code == 0 and code2 == 0
+
+            saved = keys_run(b, slot, around)
+            plain = keys_run(b, slot)
+            said = [s for _, s, _ in (saved or []) + (plain or [])]
+            check(f"slot {slot} ({what}) loaded at the save: the loaded "
+                  "machine encrypts on with it, unloads it and loads it "
+                  "again, as a run with no save does",
+                  saved and plain and saved == plain
+                  and all("used 1" in s and not re.search(r"\b0\b", s)
+                          for s in said)
+                  and saved[2][2] == saved[0][2] != saved[1][2]
+                  and (slot != 1 or "the self-test's answer 1"
+                       in saved[0][1]),
+                  f"with a save, then without: {said}; the blocks "
+                  + ("agree" if saved == plain else "differ"))
+        stop(b)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("firmware")
@@ -730,6 +966,7 @@ def main():
     os.umask(0o022)     # (what is the user's alone is so by the launcher)
     b = Bench(f"snapcheck-{int(time.time())}-{os.getpid()}", args.firmware,
               args.timeout)
+    loaded = False
     try:
         nothing_checks(b)
         ok, said = up(b, args.timeout, "run", "-f", args.firmware, *HEADER)
@@ -742,11 +979,16 @@ def main():
                 killed_checks(b, args.timeout)
                 front_checks(b, args.timeout)
                 rm_checks(b)
+                debugger_checks(b, args.timeout)
+                enclave_checks(b, args.timeout)
+                loaded = True
             stop(b)
             log = "\n".join(logs)
             crash = CRASH.search(log)
             check("no crash in the firmware's logs", not crash,
                   crash and log[max(0, crash.start() - 300):crash.end() + 300])
+            if loaded:
+                crash_checks(b, args.timeout)
     finally:
         fe(b, "stop")
         if not args.keep:

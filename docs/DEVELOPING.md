@@ -217,9 +217,10 @@ with the same machine every time, whatever the run before it left on the card.
   `--spi` of its own.
 - **A snapshot is for the emulator that made it.** After `scripts/setup_qemu.sh` has
   built another, make the snapshots of a test anew (a load says so, and refuses).
-
-Not tried: a snapshot with a gdb on the machine, and a load with `--gdb` and a gdb
-after it.
+- **gdb may be on it.** A save while gdb has your app stopped at a breakpoint leaves it
+  stopped there, until gdb lets it go on. `snapshot load NAME --gdb --paused` has the
+  stub on before the Flipper runs: gdb gets on, sets its breakpoints, and the Flipper
+  goes on from the save's moment when gdb lets it.
 
 ## The LED and the backlight
 
@@ -1603,9 +1604,25 @@ killed with SIGKILL while the snapshot's files are in the device's places: the n
 `run` has to say so and to start the device as it was before that load. A load in the
 foreground has to end with 0 on SIGTERM and to leave nothing of itself, and a load with
 the window (off-screen) has to have the Flipper's window on the loaded machine, two
-presses, and an end with 0. Last, `snapshot rm`, and no crash in any of the runs' logs.
-56 checks; it passes on the official 1.5.1, Momentum, Unleashed, RogueMaster and the
-official dev build. A load took 2.1 to 2.4 seconds in them.
+presses, and an end with 0. Then `snapshot rm`. With a gdb (the one `./flipperemu gdb`
+finds): `snapshot load --gdb --paused` has to stand still with the stub on the port it
+was given; a gdb that gets on and steps (`stepi`) has the machine stopped as its own;
+`snapshot save` at that step has to leave it the gdb's; the gdb's leaving has to let it
+go on through QEMU's stub (and not through the launcher's `cont`), and the machine has
+to write to its card; that state has to load and go on, on the save's card. Where ufbt's
+SDK is the firmware's (the official 1.5.1), an app of the check's own
+(`scripts/snapshot_check_app`) has a key of the enclave loaded into AES1 while the
+machine is saved, stopped and loaded, and then encrypts a block with it, once more, and
+after an unload and a load of the key again: the three blocks have to be those of a run
+with no save, for the device's own key and for factory key 1 with the block of the
+firmware's self-test. Then no crash in any of the runs' logs. Last, a crash on purpose
+(app_check.py's: the NFC app closed in the middle of a read): a debug build halts, and
+after a save and a load `status` has to say the same of the halt and its report, `wait`
+has to say at once that it has halted and `wait -- reset` has to start it again; a
+release build starts again, and `status` has to have the crash's message after the load
+as before it. 67 checks on the official 1.5.1 and on the official dev build (one skipped
+there: the app is for the official SDK), 65 on Momentum, Unleashed and RogueMaster (the
+same one skipped). A load took 2.1 to 2.4 seconds in them.
 
 By hand: the official self-update script sending a package without a radio stack
 (what `fbt flash_usb` sends) to a running device, which installed it and came back.

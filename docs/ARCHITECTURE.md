@@ -1543,10 +1543,15 @@ The enclave: the key store with its locks is in the state, and so is a key that 
 loaded into AES1 (in the unit's key registers, which CPU1 cannot read). The one block
 that AES1 answers from a table for one of FlipperEmu's own factory keys is a pointer and
 is not in it: the state says that there was one, and the FUS hands it over again at the
-first run.
+first run. A state that is saved before that run says what the loaded one said. (The
+launcher's `snapshot load` saves one, to see that the state had every part. Before, AES1
+said in that one that it had no answer, from the pointer that was not back yet, and the
+loaded machine got none.)
 
-Not tried: a save between an enclave key's load and its unload, a save with the port as
-a keyboard or a U2F token.
+The snapshot check has an app that holds a key of the enclave loaded across a save
+(official 1.5.1): the device's own, and factory key 1 with the self-test's block, which
+AES1 answers from the table after the load as before it. Not tried: a save with the port
+as a keyboard or a U2F token.
 
 ## A saved state (the board's models)
 
@@ -1638,8 +1643,8 @@ the header adds its own.
   again in the loaded run, at the same address. The kind of the crash and its report
   are read from the run's log. A state that is loaded by hand has a new log, and
   `status` has the halt and its address without those two. The launcher's `snapshot`
-  keeps the log with the state, and a loaded run goes on in it (not tried: the report
-  of a firmware that had halted before the save).
+  keeps the log with the state, and a loaded run goes on in it (the snapshot check: a
+  debug build that had halted after a crash has the same report after a load).
 - **The window's link** (`flipper_panel.c`) saves nothing. A window that opens the link
   is sent everything as it is, from the models above.
 
@@ -1788,12 +1793,16 @@ pins and of the I2C bus, and the files that the bench holds things from
 model saves nothing is as new after a load (the list is in the section above), and a
 save says so for each.
 
+A save with a gdb on the machine (the snapshot check): at a step QEMU's run state is
+`debug`, and the state says `prelaunch`. The machine stays the gdb's. When the gdb
+leaves, QEMU's stub lets the machine go on without the monitor, and it writes to its
+card. The state of that step loads.
+
 Not there: `status` does not say which snapshot a device was loaded from, and the
-window has no menu item for a save or a load. Not tried: `snapshot save` and `snapshot
-load --gdb` with a gdb on the machine, `--gtk` (QEMU's own window on a loaded
-machine), a snapshot of a machine on USB/IP with a PC attached, a file system without
-shared data (the copy by holes was not run: the disk here is btrfs), and a snapshot
-carried to another computer.
+window has no menu item for a save or a load. Not tried: `--gtk` (QEMU's own window on
+a loaded machine), a snapshot of a machine on USB/IP with a PC attached, a file system
+without shared data (the copy by holes was not run: the disk here is btrfs), and a
+snapshot carried to another computer.
 
 ## Persistence per device (`devices/NAME/`)
 
