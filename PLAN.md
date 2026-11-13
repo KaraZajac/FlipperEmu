@@ -626,32 +626,44 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           every start of a device lost the part of a second of its clock, half a second
           on average. Not there: the board (the display stays dark after a load)
           (BRINGUP_LOG 131)
-    - ☐ The board's models (display, power chips, LED driver, radios, RFID, iButton,
-          infrared). The rule: what is held to the Flipper (a card, a tag, a key) is
-          held to it again after a load; a signal that was in the air at the moment of
-          the save ends there. In three pushes. Done (2026-11-12): the face and the
-          power. The picture of a loaded machine is the saved one before it runs, with
-          the LED, the backlight, the motor and the battery as they were set; a blink
-          that was under way goes on, a tone sounds until the firmware ends it, and a
-          button that was held at the save is let go at the first run (BRINGUP_LOG
-          132). Done (2026-11-12): the radios and what is held. A tag, a card and a key
-          are held to the loaded machine with all that was written to them, on the five
-          firmwares, and a read of a MIFARE Classic card that was saved in the middle
-          of its dictionary attack finds every key after the load. Saved in an app
-          that has a radio (official 1.5.1): an emulation goes on for the next reader,
-          a Read hears the next signal, a transmission is captured from the load on and
-          ends when its button is let go, an infrared signal that was being played is
-          not learned. A state with a length or an index out of its bounds is refused
-          (BRINGUP_LOG 133). To do: the header, the card slot and the cable
-    - ☐ A `snapshot` command in the launcher (the state, a copy of the card, the
-          run's arguments), a check for it, the docs
+    - ☑ The board's models (display, power chips, LED driver, radios, RFID, iButton, infrared,
+          the header, the card slot). The rule: what is held to the Flipper (a card, a tag, a
+          key) is held to it again after a load; a signal that was in the air at the moment of
+          the save ends there. In three pushes. Done (2026-11-12): the face and the power. The
+          picture of a loaded machine is the saved one before it runs, with the LED, the
+          backlight, the motor and the battery as they were set; a blink that was under way goes
+          on, a tone sounds until the firmware ends it, and a button that was held at the save
+          is let go at the first run (BRINGUP_LOG 132). Done (2026-11-12): the radios and what
+          is held. A tag, a card and a key are held to the loaded machine with all that was
+          written to them, on the five firmwares, and a read of a MIFARE Classic card that was
+          saved in the middle of its dictionary attack finds every key after the load. Saved in
+          an app that has a radio (official 1.5.1): an emulation goes on for the next reader, a
+          Read hears the next signal, a transmission is captured from the load on and ends when
+          its button is let go, an infrared signal that was being played is not learned. A state
+          with a length or an index out of its bounds is refused (BRINGUP_LOG 133). Done
+          (2026-11-12): the header, the card slot and the cable. A pin that the outside holds
+          (low, high or at a voltage) is held on the loaded machine and let go by `gpio PIN
+          free`; a card that was out is out; the cable is in or out as it was, on the five
+          firmwares. A sensor, an EEPROM and a flash on the header's buses are as they were: an
+          I2C write to the EEPROM that was saved before its STOP ends in the loaded machine, and
+          a read of the flash that was saved in its middle goes on at the next byte (official
+          1.5.1, an app). QEMU's EEPROM saved nothing (patch 0013), and its address counter
+          could leave its memory after an address that was cut short (patch 0012, an older
+          defect). A halted firmware is found halted again. Not there: header devices whose QEMU
+          models save no state are as after a reset (BRINGUP_LOG 134)
+    - ☐ A `snapshot` command in the launcher (the state, a copy of the card and of
+          the header devices' files, the run's arguments, the names of what is held,
+          the firmware's log carried on, the emulator's build noted: a state is for
+          the build that made it), a check for it, the docs
 - ☐ TCG plugin for coverage/trace of firmware or a single FAP
 - ☐ Fuzzing harness (AFL++/libafl QEMU mode) for parsers in the firmware
-- ☐ Upstream the eleven QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:
+- ☐ Upstream the thirteen QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:
       register reads without the big lock under TCG, 2026-11-10; 0006 to 0009: a
       chardev's log file, the UART's reception, a byte no receiver took, an EEPROM's
-      file, 2026-11-11; 0010 and 0011: Winbond's read-ID commands, the load of a saved
-      state with an SD card on SPI, 2026-11-12); consider upstreaming the machine
+      file, 2026-11-11; 0010 to 0013: Winbond's read-ID commands, the load of a saved
+      state with an SD card on SPI, an EEPROM's address counter after an address that
+      was cut short, an EEPROM's saved state, 2026-11-12); consider upstreaming the
+      machine
 
 ## Non-goals (for now)
 - Running ST's radio stack on an emulated CPU2 (closed, encrypted binary)

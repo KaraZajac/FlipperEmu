@@ -1,0 +1,43 @@
+From: FlipperEmu
+Subject: [PATCH] eeprom_at24c: keep the address counter within the memory
+
+An EEPROM of more than 256 bytes takes two address bytes. Each one is
+shifted into the address counter as it comes, and the counter is
+reduced to the EEPROM's size when the second has come. A write that
+ends after the first byte (a STOP, or a new START) leaves the counter
+as it was shifted, the old low byte as the new high byte, with the
+count of address bytes back at zero.
+
+The next read takes mem[cur] with that counter. For an EEPROM of 4096
+bytes that is up to 60 KiB past the end of its memory: a byte of QEMU's
+heap goes to the guest. It is one byte per round, since the read
+reduces the counter then, and the guest chooses the place with the
+address that it sets before. (A write does not leave the memory this
+way: it begins with address bytes, and a whole address is reduced.)
+
+Reduce the counter when a START or a STOP ends an address that is not
+whole.
+
+Seen with the Flipper Zero machine and an EEPROM of 4096 bytes on the
+GPIO header's I2C bus, whose backing file was all 0xA5: sixteen reads,
+each after an address of one byte, gave 0x00. With this patch they give
+0xA5.
+
+Signed-off-by: FlipperEmu
+---
+--- a/hw/nvram/eeprom_at24c.c
++++ b/hw/nvram/eeprom_at24c.c
+@@ -66,6 +66,13 @@
+     switch (event) {
+     case I2C_START_SEND:
+     case I2C_FINISH:
++        /*
++         * An address that was cut short (one byte of two) is in the
++         * counter all the same: keep the counter within the memory.
++         */
++        if (ee->haveaddr > 0 && ee->haveaddr < ee->asize) {
++            ee->cur %= ee->rsize;
++        }
+         ee->haveaddr = 0;
+         /* fallthrough */
+     case I2C_START_RECV:

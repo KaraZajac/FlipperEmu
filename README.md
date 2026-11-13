@@ -848,9 +848,9 @@ scripts/enclave_check.py -f FIRMWARE     # and the enclave through the firmware 
 
 And for the setup itself, `scripts/setup_check.py`: what `scripts/setup_qemu.sh` makes
 of a source tree that has all, some or none of the patches in `qemu/patches`, and
-whether the tree here has them all (32 checks in ten seconds; it builds nothing and
-starts no emulator). A tree with a `.rej` file in it is one that the script, as it was
-until 2026-11-11, patched twice: the script says so now, and how to start over.
+whether the tree here has them all (36 checks in about ten seconds; it builds nothing
+and starts no emulator). A tree with a `.rej` file in it is one that the script, as it
+was until 2026-11-11, patched twice: the script says so now, and how to start over.
 
 ### qFlipper, lab.flipper.net and other PC tools (USB/IP)
 
@@ -2351,6 +2351,13 @@ to be the EEPROM's size, so no file could hold a 256-byte chip. **A QEMU tree th
 was set up before 2026-11-12 wants `scripts/setup_qemu.sh` once more**, for the patch
 and for the machine's side of all this (the bus by its name, what was called, the
 record, a START for another address inside a transfer).
+
+Two more changes to that model came with the saved states (2026-11-12,
+docs/BRINGUP_LOG.md, 134; a tree from before wants `scripts/setup_qemu.sh` once more,
+and the machine runs without them). `qemu/patches/0012` is a fix: an EEPROM of more
+than 256 bytes takes two address bytes, and a write that ended after the first left its
+address counter outside the memory, so the next read gave a byte of QEMU's own memory
+and not the EEPROM's. `qemu/patches/0013` gives the EEPROM a saved state.
 
 ### SPI devices on pins 2, 3 and 5
 

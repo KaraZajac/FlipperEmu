@@ -101,6 +101,18 @@ static void flipper_sd_slot_realize(SSIPeripheral *dev, Error **errp)
 {
 }
 
+/* ---- a saved state: its chip select, and whether a card is in it */
+static const VMStateDescription vmstate_flipper_sd_slot = {
+    .name = "flipper-sd-slot",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_SSI_PERIPHERAL(parent_obj, FlipperSdSlot),
+        VMSTATE_BOOL(empty, FlipperSdSlot),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void flipper_sd_slot_class_init(ObjectClass *oc, const void *data)
 {
     SSIPeripheralClass *k = SSI_PERIPHERAL_CLASS(oc);
@@ -108,6 +120,7 @@ static void flipper_sd_slot_class_init(ObjectClass *oc, const void *data)
     k->realize = flipper_sd_slot_realize;
     k->transfer = flipper_sd_slot_transfer;
     k->cs_polarity = SSI_CS_LOW;
+    DEVICE_CLASS(oc)->vmsd = &vmstate_flipper_sd_slot;
 }
 
 /*
@@ -144,6 +157,27 @@ static void flipper_header_spi_realize(SSIPeripheral *dev, Error **errp)
     FLIPPER_HEADER_SPI(dev)->bus = ssi_create_bus(DEVICE(dev), "spi-header");
 }
 
+/*
+ * ---- a saved state: what `spi` tells of the bus (the bytes it has counted
+ * and the last frame's form).  A device on the bus saves its own state, if
+ * its model has one.
+ */
+static const VMStateDescription vmstate_flipper_header_spi = {
+    .name = "flipper-header-spi",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_SSI_PERIPHERAL(parent_obj, FlipperHeaderSpi),
+        VMSTATE_UINT64(heard, FlipperHeaderSpi),
+        VMSTATE_UINT64(unheard, FlipperHeaderSpi),
+        VMSTATE_UINT32(last_hz, FlipperHeaderSpi),
+        VMSTATE_UINT8(last_mode, FlipperHeaderSpi),
+        VMSTATE_UINT8(last_bits, FlipperHeaderSpi),
+        VMSTATE_BOOL(last_lsb, FlipperHeaderSpi),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void flipper_header_spi_class_init(ObjectClass *oc, const void *data)
 {
     SSIPeripheralClass *k = SSI_PERIPHERAL_CLASS(oc);
@@ -152,6 +186,7 @@ static void flipper_header_spi_class_init(ObjectClass *oc, const void *data)
     k->transfer = flipper_header_spi_transfer;
     k->cs_polarity = SSI_CS_NONE;
     DEVICE_CLASS(oc)->user_creatable = false;
+    DEVICE_CLASS(oc)->vmsd = &vmstate_flipper_header_spi;
 }
 
 struct FlipperZeroState {
@@ -858,13 +893,26 @@ static bool header_spi_selected(SSIPeripheral *p)
 }
 
 /*
- * The chip selects of what is on the header's SPI bus, after a level of a
- * pin of that port may have changed (-1: of any).  A device is selected
- * while its pin is low (or high, for one whose select is that way): by the
- * firmware's drive, or by the outside's hold (a chip select that is wired
- * to GND).  A pin that nothing drives selects nothing; on hardware it has
- * no level to speak of, and a board with such a chip has a pull-up there.
+ * The level of a device's chip select on the header's SPI bus.  A device is
+ * selected while its pin is low (or high, for one whose select is that
+ * way): by the firmware's drive, or by the outside's hold (a chip select
+ * that is wired to GND).  A pin that nothing drives selects nothing; on
+ * hardware it has no level to speak of, and a board with such a chip has a
+ * pull-up there.
  */
+static bool header_spi_cs_level(FlipperZeroState *s, SSIPeripheral *p)
+{
+    SSIPeripheralClass *k = SSI_PERIPHERAL_GET_CLASS(p);
+    int i = header_find(p->cs_index);
+    bool high = k->cs_polarity == SSI_CS_HIGH;
+
+    /* (the level that selects, or the other one) */
+    return i >= 0 && header_spi_cs(p->cs_index) &&
+           header_level(s, i) == (high ? '1' : '0') ? high : !high;
+}
+
+/* The chip selects of what is on the header's SPI bus, after a level of a
+ * pin of that port may have changed (-1: of any). */
 static void flipper_header_spi_selects(FlipperZeroState *s, int port)
 {
     BusChild *kid;
@@ -876,19 +924,40 @@ static void flipper_header_spi_selects(FlipperZeroState *s, int port)
         SSIPeripheral *p = SSI_PERIPHERAL(kid->child);
         SSIPeripheralClass *k = SSI_PERIPHERAL_GET_CLASS(p);
         int i = header_find(p->cs_index);
-        bool high = k->cs_polarity == SSI_CS_HIGH, level;
+        bool level;
 
         if (k->cs_polarity == SSI_CS_NONE ||
             (port >= 0 && i >= 0 && port != header[i].port - 'A')) {
             continue;
         }
-        /* (the level that selects, or the other one) */
-        level = i >= 0 && header_spi_cs(p->cs_index) &&
-                header_level(s, i) == (high ? '1' : '0') ? high : !high;
+        level = header_spi_cs_level(s, p);
         if (p->cs != level &&
             object_property_find(OBJECT(p), SSI_GPIO_CS "[0]")) {
             qemu_set_irq(qdev_get_gpio_in_named(DEVICE(p), SSI_GPIO_CS, 0),
                          level);
+        }
+    }
+}
+
+/*
+ * The same in the load of a saved state, where no line is set: a device is
+ * given the level of its chip select as the loaded pin has it (the ports
+ * are loaded before the board), and is not told of a change.  A serial
+ * flash saves its place in a transfer, and not the level of the line that
+ * the transfer goes on with.
+ */
+static void flipper_header_spi_loaded(FlipperZeroState *s)
+{
+    BusChild *kid;
+
+    if (!s->hdr_spi) {
+        return;
+    }
+    QTAILQ_FOREACH(kid, &BUS(s->hdr_spi->bus)->children, sibling) {
+        SSIPeripheral *p = SSI_PERIPHERAL(kid->child);
+
+        if (SSI_PERIPHERAL_GET_CLASS(p)->cs_polarity != SSI_CS_NONE) {
+            p->cs = header_spi_cs_level(s, p);
         }
     }
 }
@@ -1969,6 +2038,18 @@ static void flipper_power_off(void *opaque)
  * and a question to a card on a link.  Whether TIM1 runs is saved with the
  * board, since the board follows the timer's registers and is not told of
  * them in a load.
+ *
+ * The outside's hands on the board are the board's to save: what is held on
+ * a pin of the header and at how many mV (the pin's level is in its port's
+ * state, but not who holds it: without this `free` would let go of
+ * nothing), whether the card is in its slot, and a start bit that is on a
+ * serial port's RX pin, with the timer that ends it.  A device on the
+ * header's SPI bus is given its chip select's level in the load, from the
+ * pin it is on (flipper_header_spi_loaded).
+ *
+ * Not saved: the records of the header's pins and of its I2C bus, which
+ * are a run's (files on the host), and the halt watch, which finds a
+ * halted firmware again by itself.
  */
 static void flipper_loaded(void *opaque, bool running, RunState state)
 {
@@ -1990,10 +2071,37 @@ static void flipper_loaded(void *opaque, bool running, RunState state)
     st25r3916_loaded(s->nfc);           /* a reader's session is over */
 }
 
+/*
+ * A hold from a state file is used as an index, and a voltage is what the
+ * ADC is given: both stay within what the `header` property takes (a pin
+ * that is not for holding is free, a level's voltage is on its side of
+ * half of VDD).
+ */
+static bool flipper_holds_valid(FlipperZeroState *s)
+{
+    for (int i = 0; i < HDR_PINS; i++) {
+        uint8_t hold = s->hdr_hold[i];
+        uint16_t mv = s->hdr_mv[i];
+
+        if (hold > HDR_HIGH || mv > WB55_VDD_MV ||
+            (hold != HDR_FREE && !header[i].holds) ||
+            (hold == HDR_FREE && mv) ||
+            (hold == HDR_LOW && mv >= HDR_HIGH_MV) ||
+            (hold == HDR_HIGH && mv < HDR_HIGH_MV)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static int flipper_post_load(void *opaque, int version_id)
 {
     FlipperZeroState *s = opaque;
 
+    if (!flipper_holds_valid(s)) {
+        return -EINVAL;
+    }
+    flipper_header_spi_loaded(s);
     if (!s->loaded) {
         s->loaded = qemu_add_vm_change_state_handler(flipper_loaded, s);
     }
@@ -2008,6 +2116,12 @@ static const VMStateDescription vmstate_flipper_zero = {
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(keys_down, FlipperZeroState),
         VMSTATE_BOOL(tim1_running, FlipperZeroState),
+        VMSTATE_BOOL(sd_in, FlipperZeroState),
+        VMSTATE_BOOL(sd_cs, FlipperZeroState),
+        VMSTATE_UINT8_ARRAY(hdr_hold, FlipperZeroState, HDR_PINS),
+        VMSTATE_UINT16_ARRAY(hdr_mv, FlipperZeroState, HDR_PINS),
+        VMSTATE_BOOL_ARRAY(hdr_rx_low, FlipperZeroState, 2),
+        VMSTATE_TIMER_PTR_ARRAY(hdr_rx_end, FlipperZeroState, 2),
         VMSTATE_END_OF_LIST()
     }
 };

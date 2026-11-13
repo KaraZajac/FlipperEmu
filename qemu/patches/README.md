@@ -17,8 +17,14 @@ by QEMU unless the EEPROM's size is a multiple of 512 bytes.
 SPI bus (`run --spi`) answers the read-ID commands 90h and ABh with zeros.
 0011 is a fix that the machine runs without: a saved machine state cannot be loaded
 then (QEMU ends in an assertion of its SD card model).
-A source tree that was set up before a patch came (0006 to 0009: 2026-11-11; 0010 and
-0011: 2026-11-12) gets it from one more run of that script.
+0012 is a fix that the machine runs without: an EEPROM of more than 256 bytes on the
+header's I2C bus (`run --i2c eeprom@…,rom-size=4096`) then gives a firmware that sets
+one address byte of two before a read a byte from outside the EEPROM's memory.
+0013 is an addition: without it the machine runs, and an EEPROM on the header's I2C bus
+is as after a reset in a loaded machine (its address counter at 0, a write that was
+under way lost).
+A source tree that was set up before a patch came (0006 to 0009: 2026-11-11; 0010 to
+0013: 2026-11-12) gets it from one more run of that script.
 
 How the script finds out what a tree has: it takes the patches out of a copy of the
 files they touch, the last one first, and what does not come out there is what the tree
@@ -27,7 +33,8 @@ so 0007 alone no longer comes out of a whole tree. What is to be applied is trie
 second copy first, so a patch that does not fit leaves the tree as it was.
 Two patches to one file need not be neighbours there (0003 and 0011 in `hw/sd/sd.c`):
 a tree that has the later one and lacks the earlier gets the earlier some lines from
-where its header says, and no backup file is left of that.
+where its header says, and no backup file is left of that. `hw/nvram/eeprom_at24c.c` has
+three (0009, 0012, 0013).
 
 **Until 2026-11-11 the script did ask each patch by itself**, and a run on a tree that
 had 0008 applied 0007 a second time, in part, and stopped before the build. Such a
@@ -39,7 +46,7 @@ tarball beside it, applies every patch and builds, about 6 min).
 from the tarball; nothing is built): a new tree, a second and a third run, a tree from
 before each patch, a tree that lacks one patch, the damaged tree, a file that is not
 this QEMU's, and last that the tree here has every patch and nothing else in those
-files. 32 checks in ten seconds. A patch that is added to this folder is in them
+files. 36 checks in about ten seconds. A patch that is added to this folder is in them
 without a change to the check.
 
 | patch | QEMU file | bug |
@@ -55,6 +62,8 @@ without a change to the check.
 | 0009 | `hw/nvram/eeprom_at24c.c` | an EEPROM with a backing file wanted the image's length to be its own size, and the block layer gives lengths in whole 512-byte sectors: no file could back an EEPROM smaller than a sector (a 24C02's 256 bytes), or one that ends within a sector |
 | 0010 | `hw/block/m25p80.c` | the read-ID commands 90h and ABh were answered for SST's flashes alone; Winbond's W25X and W25Q have both (90h: the maker and the device's ID, the device first from address 1; ABh: the device alone), and a host that tells a flash by them read zeros |
 | 0011 | `hw/sd/sd.c` | the load of a saved state powers the card up first, with a function that asserts the card is not powered up yet; a card in SPI mode is, from its reset on, so every load into a machine with an SD card on SPI ended QEMU in that assertion |
+| 0012 | `hw/nvram/eeprom_at24c.c` | with two address bytes, a write that ended after the first left the address counter as it was shifted, not reduced to the EEPROM's size: the next read took its byte from up to 60 KiB past the end of a 4096-byte EEPROM's memory (QEMU's heap, one byte for each such write) |
+| 0013 | `hw/nvram/eeprom_at24c.c` | the EEPROM saved no state: in a loaded machine its address counter was 0, the bytes of a write that was under way at the save were lost (as was all that had been written to an EEPROM without a backing file), and the bus did not have it as the device of a transfer under way |
 
 **Licence:** these patches modify QEMU's own source files, which are GPL-2.0-or-later,
 so the patches are GPL-2.0-or-later too, unlike the rest of this repository (BSD-3-Clause).

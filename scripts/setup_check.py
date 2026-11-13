@@ -73,7 +73,10 @@ class Stand:
         (self.root / "build" / "qemu" / "build.ninja").touch()  # no configure
         self.env = dict(os.environ, PATH=f"{work / 'bin'}:{os.environ['PATH']}",
                         TMPDIR=str(work / "tmp"))
-        self.made = all([patch(self.src, p) for p in have])
+        # (no backup file from the making: a patch goes in some lines from
+        # where it says when an earlier one to its file is left out)
+        self.made = all([patch(self.src, p, "--no-backup-if-mismatch")
+                         for p in have])
 
     def run(self):
         """The script on it: (exit status, the patches it said it applied,

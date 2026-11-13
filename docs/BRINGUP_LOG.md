@@ -3519,6 +3519,130 @@ big lock, entry 92).
       `u2f_check` 39, `gui_check` 64. On RogueMaster: `gpio_check` 82.
       On the official dev build: `spi_check` 25.
 
+134. **A saved state, the header, the card slot and the cable.** After
+    133 a loaded machine had nothing held on its header's pins, and a
+    device on the header's buses was as its own model left it. The last
+    of the board's three pushes. A state has 72 device sections with
+    nothing on the header, two of them new (the card slot and the
+    header's end of its SPI bus). A sensor, an EEPROM and a flash add
+    three.
+    - The outside's hands are the board's to save: each pin's hold (low,
+      high or a voltage) with its millivolts, the card in its slot, the
+      slot's chip select, and a start bit on a serial port's RX pin with
+      the timer that ends it. The pins' levels are the ports' (QEMU's
+      GPIO model saves which pins the outside drives), and the ports
+      are loaded before the board.
+    - The control, on the build of 133 with official 1.5.1: a TMP105,
+      two EEPROMs, a flash, two pins held low. After the load 10 of 272
+      values of `status` differ (the holds and their voltages, the
+      flash's select, the SPI bus's counters and its last frame), and
+      `gpio PC3 free` lets go of nothing. An EEPROM write that was open
+      at the save is lost, and an EEPROM's address counter is 0.
+    - A device on the header is a model of its own and saves what that
+      model saves. QEMU's EEPROM saved nothing. Patch 0013 gives it a
+      state: its memory whole, the address counter, how much of an
+      address is in. The memory is not read from the file in a load, so
+      a write that was under way goes on, and the file gets its bytes
+      at the STOP as it would have. A state from an EEPROM of another
+      size is refused.
+    - A flash on the SPI bus saves its place in a command and not the
+      level of its chip select, which it has from a line. No line is
+      set in a load (131): the board gives each device on the bus that
+      level in its own load, from the pin the select is on, as a value
+      and with no call to the device. (A call would end the command.)
+    - An older defect of QEMU's EEPROM, found while reading for this
+      (patch 0012). An EEPROM of more than 256 bytes takes two address
+      bytes. A write that ends after the first leaves the address
+      counter as it was shifted, not reduced to the EEPROM's size, and
+      the next read takes its byte from there: up to 60 KiB past the
+      end of a 4096-byte EEPROM's memory, one byte of QEMU's heap for
+      each such write. A firmware can do that. With a file of 0xA5,
+      sixteen such reads gave 00. With the patch they give a5.
+    - The test with an app (ufbt, official 1.5.1): a TMP105 set to
+      30.5 °C, an EEPROM of 256 bytes, one of 4096, a W25Q32, PB2 and
+      PC3 held low. Saved (1288092 bytes, mode 600) with an I2C write
+      to the small EEPROM begun and not ended, and the flash selected
+      in the middle of a read. Before the run all 272 values of
+      `status` are the saved ones. In the run the write ends and reads
+      back as written (the file has its three bytes after the STOP),
+      the flash's read goes on at its next byte, the big EEPROM's
+      counter is where it was, and the TMP105 has 30.5 °C. The firmware
+      reads PC3 as 0, and as 1 once it is held high, and `gpio PC3
+      free` lets go of it.
+    - A start bit under way: a byte that comes to USART1 while its
+      receiver is off puts pin 14 low for a bit's time (104 µs, 108).
+      Sent to a stopped machine and saved then (official 1.5.1): pin 14
+      is low before the run, with all 257 values of `status` the saved
+      ones, and high again in the run (looked at 1.5 s in).
+    - On the five firmwares: PA7 held at 1.25 V, PC3 low, PB2 high, a
+      TMP105, an EEPROM, a flash, the card pulled out. On each, all 267
+      values of `status` are the saved ones before the run. In the run
+      the firmware reads PC3 as 0 and PB2 as 1 and finds the two I2C
+      devices, `storage info /ext` says "filesystem not ready" until
+      `sd insert` and has the card's label after it, `gpio PIN free`
+      lets go of each pin, and no firmware crashes.
+    - The cable needed nothing new: it is the USB device's `attached`
+      (131) and the charger's VBUS (132). Saved with the cable out, on
+      the five: `usb` says unplugged after the load, and after `usb
+      plug` the CLI answers. Saved on a charger (official 1.5.1): the
+      charger is there after the load, and after `usb plug` the
+      computer sees the serial port.
+    - The round trip (132): with the cable in, every section but the
+      USB host's timer is the same, 74 of 75 with the three devices on
+      the header, on each of the five. With the cable out all 75 are.
+    - A halted firmware (the official dev build, after 133's `loader
+      close` of the NFC app): the board's watch saves nothing and finds
+      the halt again in the loaded run, at the same address. `status`
+      has the halt and its address, and has lost two of its 259 values:
+      the kind of the crash and its report. Those are read from the
+      run's log, and a loaded run has a new one. The launcher's command
+      is to carry the log on.
+    - A damaged file: a state with PA7 held at 1.25 V, PC3 held low and
+      an EEPROM of 256 bytes, and seven copies of it with one value
+      changed in each (a hold of 3, where free, low and high are 0 to
+      2; a pin held at 5000 mV; a pin held low at 3000 mV; a hold on
+      pin 17, which takes none; the EEPROM's counter at 0x200; 5 bytes
+      of an address of 1; a size of 512 bytes). QEMU refuses each of
+      the seven with the device's name and ends. The file as it was
+      saved loads.
+    - Two notes from the tests. On Momentum and RogueMaster the CLI's
+      `gpio` and `i2c` commands are files on the card: with the card
+      out the firmware does not know them, in a loaded machine as in
+      any. And the launcher sets a value of `--i2c TYPE@ADDRESS,NAME=`
+      when the monitor first answers, which it also does after a load:
+      the tests load without such a value, and the launcher's command
+      for a saved state must not set one.
+    - A state is its build's. The board's section has grown with each
+      of the three pushes and is at version 1 still, as is every
+      section of this project's models: a state of 133's build is not
+      one for this build, and nothing says so at a load. No state is
+      kept so far but a test's own. The launcher's command is to note
+      the build with a state.
+    - `setup_check` made its stand-in trees with a plain `patch`, which
+      leaves a backup file when a patch goes in some lines from where
+      it says. A tree that lacks 0009 or 0012 gets 0013 that way, and
+      the check took the backup for the script's litter. The stand-ins
+      are made without backups now: 36 checks with thirteen patches.
+    - Not there: a header device whose model saves nothing is as after
+      a reset in a loaded machine. Of the I2C types those are
+      `aspeed.i2c.slave`, `i2c-echo`, `isl69259`, `isl69260`, `m41t80`,
+      `raa228000` and `raa229004`, and the muxes `pca9546` and
+      `pca9548` but for their buses. The records (`gpio record`, `i2c
+      record`) are a run's and not in a state. Not tried: an SPI device
+      other than the flash, the test with an app on a firmware other
+      than official 1.5.1, what the firmware makes of a module's call
+      that was under way at a save, and what 131 to 133 list as not
+      tried.
+    - The checks, none of which saves a state. The smoke test on the
+      five firmwares: 28 checks pass on official 1.5.1, Momentum and
+      the official dev build, 27 on Unleashed and RogueMaster (one is
+      skipped there). On official 1.5.1: the files check,
+      `update_check` 33, `spi_check` 45, `gpio_check` 111, `uart_check`
+      79, `i2c_check` 66, `u2f_check` 39, `app_check` 32, `gui_check`
+      63. On Momentum: `spi_check` 30. On Unleashed: `u2f_check` 39,
+      `gui_check` 64. On RogueMaster: `gpio_check` 82. On the official
+      dev build: `spi_check` 25.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

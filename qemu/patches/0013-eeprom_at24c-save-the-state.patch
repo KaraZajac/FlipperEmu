@@ -1,0 +1,92 @@
+From: FlipperEmu
+Subject: [PATCH] eeprom_at24c: save the state
+
+The EEPROM has no VMStateDescription. In a machine that is saved and
+loaded it is as after a reset, with its memory read from the backing
+file again:
+
+- the address counter is 0, so a read at the current address begins at
+  the start of the memory;
+- the bytes of a write that was under way are lost: they were in the
+  memory, and the file gets them at the next START or STOP;
+- an EEPROM without a backing file loses all that was written to it;
+- the bus does not have the EEPROM as the device of a transfer that was
+  under way (the post_load of VMSTATE_I2C_SLAVE sees to that), and the
+  rest of the transfer goes to nobody.
+
+Save the memory, the counter, the count of address bytes and the
+"changed" flag. The memory's size goes first and has to be the
+EEPROM's: a state from an EEPROM of another size is refused. So is a
+counter outside the memory once an address is whole, or more address
+bytes than an address has: the counter is an index into the memory.
+
+Seen with the Flipper Zero machine and two EEPROMs on the GPIO header's
+I2C bus. A write of three bytes, saved after the second: the EEPROM
+read back 00 00 00 after the load, and the three bytes with this patch.
+A counter set to 0x123, then saved: a read after the load gave the
+bytes at 0, and those at 0x123 with this patch.
+
+Signed-off-by: FlipperEmu
+---
+--- a/hw/nvram/eeprom_at24c.c
++++ b/hw/nvram/eeprom_at24c.c
+@@ -16,6 +16,7 @@
+ #include "hw/nvram/eeprom_at24c.h"
+ #include "hw/core/qdev-properties.h"
+ #include "hw/core/qdev-properties-system.h"
++#include "migration/vmstate.h"
+ #include "system/block-backend.h"
+ #include "qom/object.h"
+ 
+@@ -239,6 +240,43 @@
+     ee->haveaddr = 0;
+ }
+ 
++/*
++ * A saved state: the memory, the address counter and how much of an
++ * address is in.  The memory is saved whole and is not read from the
++ * backing file in a load, so a write that was under way at the save goes
++ * on: its bytes are in the memory, and the file gets them at the next
++ * START or STOP as it would have.  A state from an EEPROM of another size
++ * is refused.
++ */
++static int at24c_eeprom_post_load(void *opaque, int version_id)
++{
++    EEPROMState *ee = opaque;
++
++    /* the counter is an index into the memory once the address is whole */
++    if (ee->haveaddr > ee->asize ||
++        ((ee->haveaddr == 0 || ee->haveaddr == ee->asize) &&
++         ee->cur >= ee->rsize)) {
++        return -EINVAL;
++    }
++    return 0;
++}
++
++static const VMStateDescription vmstate_at24c_eeprom = {
++    .name = TYPE_AT24C_EE,
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .post_load = at24c_eeprom_post_load,
++    .fields = (const VMStateField[]) {
++        VMSTATE_I2C_SLAVE(parent_obj, EEPROMState),
++        VMSTATE_UINT32_EQUAL(rsize, EEPROMState),
++        VMSTATE_UINT16(cur, EEPROMState),
++        VMSTATE_UINT8(haveaddr, EEPROMState),
++        VMSTATE_BOOL(changed, EEPROMState),
++        VMSTATE_VBUFFER_UINT32(mem, EEPROMState, 0, NULL, rsize),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
+ static const Property at24c_eeprom_props[] = {
+     DEFINE_PROP_UINT32("rom-size", EEPROMState, rsize, 0),
+     DEFINE_PROP_UINT8("address-size", EEPROMState, asize, 0),
+@@ -259,6 +297,7 @@
+ 
+     device_class_set_props(dc, at24c_eeprom_props);
+     device_class_set_legacy_reset(dc, at24c_eeprom_reset);
++    dc->vmsd = &vmstate_at24c_eeprom;
+ }
+ 
+ static

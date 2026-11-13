@@ -1517,6 +1517,11 @@ side: each model in `stm32wb55_*.c` saves its registers and what it keeps beside
 - **A state file is a secret.** It holds the RAM, the flash and the enclave's keys in
   plain. QEMU makes the file with mode 0600. It does not belong in a repository or in a
   bug report.
+- **A state is its build's, for now.** Every section of this project's models has
+  version 1, and sections grew from push to push while this was in work (the board's
+  with each of its three). A state is for the emulator that made it: one from an
+  earlier build may load as something else. The launcher's command is to note the
+  build with a state (PLAN, M6).
 
 The clock: a device's calendar is the host's clock plus a distance in whole seconds
 (`nvram.bin` has it so), and a state holds that distance, not a date. At the first run
@@ -1539,14 +1544,15 @@ is not in it: the state says that there was one, and the FUS hands it over again
 first run.
 
 Not tried: a save between an enclave key's load and its unload, a save with the port as
-a keyboard or a U2F token, a save with devices on the header's buses.
+a keyboard or a U2F token.
 
 ## A saved state (the board's models)
 
 The board goes by one rule. What is *held* to the Flipper (a card, a tag, a key, a
 level on a pin) is held to it again after a load. A signal that was *in the air* at the
 moment of the save (an infrared signal being played, a reader's session) ends there.
-Done so far: the face, the power, the radios and what is held.
+A state of a machine with nothing on its header has 72 device sections, and what is on
+the header adds its own.
 
 - **The display** (`st7567.c`) saves the panel's memory, its registers and the levels of
   its pins: the picture of a loaded machine is the saved one before the firmware has
@@ -1597,6 +1603,40 @@ Done so far: the face, the power, the radios and what is held.
   field goes off at the first run, and the firmware's emulation waits for the next
   reader. A question that was out to a card on the link (`nfc --link`) gets silence
   for an answer.
+- **The header's pins.** The board saves the outside's hand on each pin: whether the
+  pin is held low, held high or let go, and the voltage of a hold (`gpio PA7 1.25V`).
+  The levels are the ports' (QEMU's GPIO model saves which pins the outside drives), so
+  the firmware reads a held pin after a load as before it, and `gpio PIN free` lets go
+  of it. A start bit on a serial port's RX pin (a byte to a port whose receiver is off)
+  is saved with its timer and ends when it would have. Not saved: the records of the
+  pins and of the I2C bus (`gpio record`, `i2c record`), which are a run's files.
+- **The header's I2C bus.** A device on it (`run --i2c`) is a QEMU model of its own and
+  saves what that model saves. A TMP105 keeps its registers and the temperature it was
+  set to. An EEPROM keeps its memory, its address counter and a write that was under
+  way, whose bytes go to its file at the STOP as they would have (QEMU's EEPROM saved
+  nothing: `qemu/patches/0013`). The bus saves the address of a transfer under way, and
+  a device with a saved state is that transfer's device again. Models that save
+  nothing, whose devices are as after a reset in a loaded machine: `aspeed.i2c.slave`,
+  `i2c-echo`, `isl69259`, `isl69260`, `m41t80`, `raa228000`, `raa229004`, and the muxes
+  `pca9546` and `pca9548` but for their buses.
+- **The header's SPI bus.** The board's end of the bus saves its counters and the form
+  of the last frame. A flash (`run --spi`) saves its place in a command, and its memory
+  is its file's. It does not save the level of its chip select, which it has from a
+  line: the board gives each device on the bus that level in the load, from the pin its
+  select is on, as a value and with no call to the device. A read that was saved in its
+  middle goes on at the next byte.
+- **The card slot** saves whether the card is in it. The card is QEMU's model, and its
+  content is the image's. A card that was out at the save is out of the loaded machine,
+  and `sd insert` puts it in.
+- **The cable** needed nothing new. Whether it is in, and whether a computer or a
+  charger is at its other end, is in the states of the chip's USB device and of the
+  charger: a machine that was saved with the cable out is loaded with it out, and `usb
+  plug` brings the computer back.
+- **A halted firmware.** The board's watch for one saves nothing and finds the halt
+  again in the loaded run, at the same address. The kind of the crash and its report
+  are read from the run's log, and a loaded run has a new one: `status` has the halt
+  and its address without those two, until the launcher has a command for a saved state
+  and carries the log on (PLAN, M6).
 - **The window's link** (`flipper_panel.c`) saves nothing. A window that opens the link
   is sent everything as it is, from the models above.
 
@@ -1606,7 +1646,8 @@ what ends with a load ends when the loaded machine first runs: the board's handl
 receiver's line to its rest, sets the Sub-GHz chip's GDO pins and begins a capture if
 the chip is sending, sets the 1-Wire line, and takes the NFC reader's field away. One
 thing is armed in a load: the Sub-GHz chip's timer for its link, which is the model's
-own and counts virtual time.
+own and counts virtual time. And one thing is given in a load: the chip select's level
+to a device on the header's SPI bus, a value that the device has no state for.
 
 What a state does not have of the front ends: a last capture (`qom-get /machine/nfc tx`
 and its like) is the run's, and a loaded machine has none until it makes one. The files
@@ -1619,13 +1660,17 @@ A damaged file. A value from a state that a model sizes memory with or indexes b
 checked before it is used, and a load with one out of its bounds fails: the lengths of
 a tag's frame, a key's memory and wave and the names, a card's kind and sizes, the
 frames' lengths in the NFC chip, the LED driver's program counters, the gauge's waiting
-bytes. A value within its bounds is taken as it is: a state with odd values gives a
-machine that behaves oddly.
+bytes, an EEPROM's address counter and its size. A hold on a header pin has to be one
+that the pin can have: a hold on a pin that takes none, a voltage above the supply's or
+a level that its voltage is not fails the load too. A value within its bounds is taken
+as it is: a state with odd values gives a machine that behaves oddly.
 
-Not there yet: the header's pins and devices, the card slot, the cable. Not tried: a
-window on a loaded machine, the radio links with a program on them over a load, and a
-save in an app of the radios on a firmware other than official 1.5.1 (the things held
-are tried on five).
+Not there: a state for the header devices whose models save none (the list above).
+Not tried: a window on a loaded machine, the radio links with a program on them over a
+load, a save in an app of the radios on a firmware other than official 1.5.1 (the
+things held, the header, the card slot and the cable are tried on five), an SPI device
+other than the flash, and what the firmware makes of an expansion module's call that
+was under way at a save.
 
 ## Persistence per device (`devices/NAME/`)
 
