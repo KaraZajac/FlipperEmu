@@ -621,7 +621,13 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
     - ☐ The board's models (display, power chips, LED driver, radios, RFID, iButton,
           infrared). The rule: what is held to the Flipper (a card, a tag, a key) is
           held to it again after a load; a signal that was in the air at the moment of
-          the save ends there
+          the save ends there. In three pushes. Done (2026-11-12): the face and the
+          power. The picture of a loaded machine is the saved one before it runs, with
+          the LED, the backlight, the motor and the battery as they were set; a blink
+          that was under way goes on, a tone sounds until the firmware ends it, and a
+          button that was held at the save is let go at the first run (BRINGUP_LOG
+          132). To do: the radios and what is held (CC1101, infrared, RFID, iButton,
+          NFC), then the header, the card slot and the cable
     - ☐ A `snapshot` command in the launcher (the state, a copy of the card, the
           run's arguments), a check for it, the docs
 - ☐ TCG plugin for coverage/trace of firmware or a single FAP

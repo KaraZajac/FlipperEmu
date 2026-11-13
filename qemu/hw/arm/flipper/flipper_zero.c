@@ -58,6 +58,7 @@
 #include "hw/arm/machines-qom.h"
 #include "hw/sd/sd.h"
 #include "system/block-backend.h"
+#include "migration/vmstate.h"
 #include "system/blockdev.h"
 #include "ui/input.h"
 #include "system/reset.h"
@@ -177,6 +178,7 @@ struct FlipperZeroState {
     bool usb_cable;              /* plugged in from the start */
     QemuInputHandlerState *input;
     uint32_t keys_down;          /* bit per button */
+    VMChangeStateEntry *loaded;  /* a saved state came: see there */
     bool sd_drive;               /* there is a card: -drive if=sd */
     bool sd_in;                  /* ... and it is in the slot */
     bool sd_cs;                  /* PC12: the slot's chip select */
@@ -1949,6 +1951,52 @@ static void flipper_power_off(void *opaque)
 
 /* --------------------------------------------------------------- machine */
 
+/* ------------------------------------------- the board in a saved state */
+
+/*
+ * What the board itself knows, next to its chips' states.  A load sets no
+ * line (a line's level is in the state of the chip that has the pin), so
+ * what the board has to do after one waits for the loaded machine's first
+ * run.  A button that was down at the save: no finger is on it now, it is
+ * let go.
+ */
+static void flipper_loaded(void *opaque, bool running, RunState state)
+{
+    FlipperZeroState *s = opaque;
+
+    if (!running) {
+        return;
+    }
+    qemu_del_vm_change_state_handler(s->loaded);
+    s->loaded = NULL;
+    for (int b = 0; b < BTN_NUM; b++) {
+        if (s->keys_down & (1u << b)) {
+            flipper_button(s, b, false);
+        }
+    }
+}
+
+static int flipper_post_load(void *opaque, int version_id)
+{
+    FlipperZeroState *s = opaque;
+
+    if (!s->loaded) {
+        s->loaded = qemu_add_vm_change_state_handler(flipper_loaded, s);
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_flipper_zero = {
+    .name = "flipper-zero-board",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = flipper_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(keys_down, FlipperZeroState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void flipper_zero_init(MachineState *machine)
 {
     FlipperZeroState *s = FLIPPER_ZERO(machine);
@@ -2163,6 +2211,7 @@ static void flipper_zero_init(MachineState *machine)
     timer_mod(s->halt_watch,
               qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + HALT_WATCH_NS);
     qemu_add_vm_change_state_handler(flipper_halt_vm_state, s);
+    vmstate_register_any(NULL, &vmstate_flipper_zero, s);
 }
 
 static char *flipper_get_nvram(Object *obj, Error **errp)

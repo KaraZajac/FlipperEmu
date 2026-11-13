@@ -18,6 +18,7 @@
 #include "qemu/timer.h"
 #include "hw/core/qdev-properties.h"
 #include "qapi/visitor.h"
+#include "migration/vmstate.h"
 #include "flipper.h"
 
 /* ------------------------------------------------------------- BQ27220 */
@@ -294,10 +295,46 @@ static void bq27220_init(Object *obj)
                         bq_set_current, NULL, NULL);
 }
 
+/*
+ * A saved state has the gauge with its data memory, and the battery as it
+ * was set from outside: the battery of a loaded machine is the saved one.
+ */
+static const VMStateDescription vmstate_bq27220 = {
+    .name = "bq27220",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_I2C_SLAVE(parent_obj, Bq27220State),
+        VMSTATE_UINT8(ptr, Bq27220State),
+        VMSTATE_UINT8_ARRAY(wbuf, Bq27220State, 40),
+        VMSTATE_INT32(wlen, Bq27220State),
+        VMSTATE_BOOL(reading, Bq27220State),
+        VMSTATE_UINT8_ARRAY(snap, Bq27220State, 0x80),
+        VMSTATE_UINT16(mac_cmd, Bq27220State),
+        VMSTATE_UINT8_ARRAY(mac_data, Bq27220State, 32),
+        VMSTATE_UINT8_ARRAY(dm, Bq27220State, 0x1000),
+        VMSTATE_UINT16(pend_addr, Bq27220State),
+        VMSTATE_UINT8_ARRAY(pend_data, Bq27220State, 32),
+        VMSTATE_INT32(pend_len, Bq27220State),
+        VMSTATE_UINT8(sec, Bq27220State),
+        VMSTATE_UINT16(last_key, Bq27220State),
+        VMSTATE_BOOL(initcomp, Bq27220State),
+        VMSTATE_BOOL(cfgupdate, Bq27220State),
+        VMSTATE_UINT32(soc, Bq27220State),
+        VMSTATE_UINT32(voltage_mv, Bq27220State),
+        VMSTATE_UINT32(temperature_dk, Bq27220State),
+        VMSTATE_UINT32(capacity_mah, Bq27220State),
+        VMSTATE_INT32(current_ma, Bq27220State),
+        VMSTATE_BOOL(sysdwn, Bq27220State),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void bq27220_class_init(ObjectClass *klass, const void *data)
 {
     I2CSlaveClass *k = I2C_SLAVE_CLASS(klass);
 
+    DEVICE_CLASS(klass)->vmsd = &vmstate_bq27220;
     k->event = bq27220_event;
     k->send = bq27220_send;
     k->recv = bq27220_recv;
@@ -414,10 +451,26 @@ static void bq25896_init(Object *obj)
     object_property_add_bool(obj, "usb", bq25896_get_usb, bq25896_set_usb);
 }
 
+/* (with whether there was power on VBUS: the cable is as it was saved) */
+static const VMStateDescription vmstate_bq25896 = {
+    .name = "bq25896",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_I2C_SLAVE(parent_obj, Bq25896State),
+        VMSTATE_UINT8_ARRAY(regs, Bq25896State, 0x15),
+        VMSTATE_UINT8(ptr, Bq25896State),
+        VMSTATE_BOOL(first, Bq25896State),
+        VMSTATE_BOOL(vbus, Bq25896State),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void bq25896_class_init(ObjectClass *klass, const void *data)
 {
     I2CSlaveClass *k = I2C_SLAVE_CLASS(klass);
 
+    DEVICE_CLASS(klass)->vmsd = &vmstate_bq25896;
     k->event = bq25896_event;
     k->send = bq25896_send;
     k->recv = bq25896_recv;
@@ -864,10 +917,55 @@ static void lp5562_init(Object *obj)
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, lp5562_timer, s);
 }
 
+/*
+ * A saved state has the engines where they are in their programs: a blink
+ * or a fade that was under way goes on from there.  The board is not told
+ * of the outputs in a load (the display has what it was last told).
+ */
+static const VMStateDescription vmstate_lp5562_engine = {
+    .name = "lp5562/engine",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8(pc, Lp5562Engine),
+        VMSTATE_UINT8(pwm, Lp5562Engine),
+        VMSTATE_UINT8(peak, Lp5562Engine),
+        VMSTATE_UINT8_ARRAY(loops, Lp5562Engine, 16),
+        VMSTATE_UINT8(trig, Lp5562Engine),
+        VMSTATE_UINT8(need, Lp5562Engine),
+        VMSTATE_UINT8(ramp, Lp5562Engine),
+        VMSTATE_BOOL(down, Lp5562Engine),
+        VMSTATE_BOOL(busy, Lp5562Engine),
+        VMSTATE_BOOL(blocked, Lp5562Engine),
+        VMSTATE_INT64(step, Lp5562Engine),
+        VMSTATE_INT64(wait, Lp5562Engine),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_lp5562 = {
+    .name = "lp5562",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_I2C_SLAVE(parent_obj, Lp5562State),
+        VMSTATE_UINT8_ARRAY(regs, Lp5562State, 0x71),
+        VMSTATE_UINT8(ptr, Lp5562State),
+        VMSTATE_BOOL(first, Lp5562State),
+        VMSTATE_STRUCT_ARRAY(eng, Lp5562State, 3, 1, vmstate_lp5562_engine,
+                             Lp5562Engine),
+        VMSTATE_TIMER_PTR(timer, Lp5562State),
+        VMSTATE_INT64(at, Lp5562State),
+        VMSTATE_UINT32(shown, Lp5562State),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void lp5562_class_init(ObjectClass *klass, const void *data)
 {
     I2CSlaveClass *k = I2C_SLAVE_CLASS(klass);
 
+    DEVICE_CLASS(klass)->vmsd = &vmstate_lp5562;
     k->event = lp5562_event;
     k->send = lp5562_send;
     k->recv = lp5562_recv;

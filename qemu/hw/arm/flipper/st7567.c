@@ -20,6 +20,7 @@
 #include "hw/core/qdev-properties.h"
 #include "ui/console.h"
 #include "ui/pixel_ops.h"
+#include "migration/vmstate.h"
 #include "flipper.h"
 
 #define COLS 132
@@ -319,6 +320,56 @@ static void st7567_realize(SSIPeripheral *d, Error **errp)
     st7567_reset_state(s);
 }
 
+/*
+ * A saved state has the panel's memory and registers, the levels of its
+ * pins, and what the board last told it of the lights, the motor and the
+ * piezo (the board says a thing when it changes, and a load changes
+ * nothing).  Who looks at the picture or at the LED belongs to the host:
+ * to the loaded machine, nobody has looked yet.
+ */
+static int st7567_post_load(void *opaque, int version_id)
+{
+    St7567State *s = opaque;
+
+    memset(s->led_seen, 0, sizeof(s->led_seen));
+    memset(s->led_told, 0, sizeof(s->led_told));
+    s->led_was = s->led_rgb;
+    s->led_at = 0;
+    s->dirty = s->status_dirty = true;
+    return 0;
+}
+
+static const VMStateDescription vmstate_st7567 = {
+    .name = "st7567",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = st7567_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_SSI_PERIPHERAL(parent_obj, St7567State),
+        VMSTATE_UINT8_2DARRAY(ram, St7567State, PAGES, COLS),
+        VMSTATE_UINT8(page, St7567State),
+        VMSTATE_UINT8(col, St7567State),
+        VMSTATE_UINT8(start_line, St7567State),
+        VMSTATE_UINT8(contrast, St7567State),
+        VMSTATE_UINT8(pending_arg, St7567State),
+        VMSTATE_UINT8(rmw_col, St7567State),
+        VMSTATE_BOOL(adc_reverse, St7567State),
+        VMSTATE_BOOL(com_reverse, St7567State),
+        VMSTATE_BOOL(display_on, St7567State),
+        VMSTATE_BOOL(inverse, St7567State),
+        VMSTATE_BOOL(all_on, St7567State),
+        VMSTATE_BOOL(rmw, St7567State),
+        VMSTATE_BOOL(a0, St7567State),
+        VMSTATE_BOOL(rst_n, St7567State),
+        VMSTATE_UINT8(backlight, St7567State),
+        VMSTATE_UINT32(led_rgb, St7567State),
+        VMSTATE_INT64(led_since, St7567State),
+        VMSTATE_BOOL(vibro, St7567State),
+        VMSTATE_BOOL(speaker, St7567State),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const Property st7567_props[] = {
     DEFINE_PROP_UINT32("scale", St7567State, scale, 4),
 };
@@ -332,6 +383,7 @@ static void st7567_class_init(ObjectClass *klass, const void *data)
     k->transfer = st7567_transfer;
     k->cs_polarity = SSI_CS_LOW;
     device_class_set_props(dc, st7567_props);
+    dc->vmsd = &vmstate_st7567;
     set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
 }
 

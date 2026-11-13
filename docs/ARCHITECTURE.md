@@ -1495,9 +1495,9 @@ A machine's state goes to a file by QEMU's migration (`stop`, then `migrate file
 in the monitor) and comes back in a new QEMU with the same machine arguments and
 `-incoming file:PATH`, which waits, paused, for a `cont`. Not `savevm`: that wants qcow2
 images to put the state in, and the launcher's tools read and write the card's raw
-image. The launcher has no command for it yet, and the board's models have no saved
-state yet (PLAN, M6). What follows is the chip's side: each model in `stm32wb55_*.c`
-saves its registers and what it keeps beside them (where a transfer stands, its timers).
+image. The launcher has no command for it yet (PLAN, M6). What follows is the chip's
+side: each model in `stm32wb55_*.c` saves its registers and what it keeps beside them
+(where a transfer stands, its timers). The board's side is the section after this one.
 
 - **No lines in a load.** A `qemu_irq` has no level that could be saved. Each receiver
   saves the levels of its own inputs (EXTI its lines, the DMA its requests, the SoC its
@@ -1538,10 +1538,41 @@ that AES1 answers from a table for one of FlipperEmu's own factory keys is a poi
 is not in it: the state says that there was one, and the FUS hands it over again at the
 first run.
 
-Not there: the board. A loaded desktop runs with a dark display, and nothing is held to
-the Flipper. Not tried: a save between an enclave key's load and its unload, a save in
-an app, a save with the port as a keyboard or a U2F token, a save with devices on the
-header's buses.
+Not tried: a save between an enclave key's load and its unload, a save with the port as
+a keyboard or a U2F token, a save with devices on the header's buses.
+
+## A saved state (the board's models)
+
+The board goes by one rule. What is *held* to the Flipper (a card, a tag, a key, a
+level on a pin) is held to it again after a load. A signal that was *in the air* at the
+moment of the save (an infrared signal being played, a reader's session) ends there.
+Done so far: the face and the power.
+
+- **The display** (`st7567.c`) saves the panel's memory, its registers and the levels of
+  its pins: the picture of a loaded machine is the saved one before the firmware has
+  drawn anything. It also saves what the board last told it of the LED, the backlight,
+  the motor and the piezo, which the pictures and the window show: the board tells a
+  thing when it changes, and a load changes nothing (no lines in a load). Who has
+  looked at the LED's flashes belongs to the host: to a loaded machine, nobody has.
+- **The LED driver** (LP5562) saves its registers and its three engines where they are
+  in their programs, with the timer of the next step. A blink or a fade that was under
+  way goes on from there.
+- **The gauge and the charger** (BQ27220, BQ25896) save their registers, the gauge its
+  data memory, and the battery as it was set from outside (`battery 37`). The battery
+  of a loaded machine is the saved one, not the `--battery` of its start.
+- **The speaker** saves whether a tone sounds, its frequency and its duty cycle. A tone
+  that sounded at the save sounds from the first run on, until the firmware ends it. A
+  voice does not play while a machine stands still: nothing is heard before the `cont`.
+- **The buttons.** The machine saves which buttons were down (a section of its own,
+  `flipper-zero-board`) and lets go of them at the first run: the finger, the key or the
+  click that held a button is not there any more, and no release would come from it.
+  The firmware sees a button that was let go, and a menu that scrolled stops.
+- **The window's link** (`flipper_panel.c`) saves nothing. A window that opens the link
+  is sent everything as it is, from the models above.
+
+Not there yet: the radios, RFID, iButton and infrared (a loaded machine has them as
+after a reset, with nothing held), the header's pins and devices, the card slot, the
+cable. Not tried: a window on a loaded machine.
 
 ## Persistence per device (`devices/NAME/`)
 

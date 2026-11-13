@@ -19,6 +19,7 @@
 #include "qapi/error.h"
 #include "hw/core/qdev-properties.h"
 #include "system/system.h"
+#include "migration/vmstate.h"
 #include "flipper.h"
 
 #define RATE        48000
@@ -132,6 +133,36 @@ static void speaker_realize(DeviceState *dev, Error **errp)
     qemu_add_exit_notifier(&s->exit);
 }
 
+/*
+ * A tone that sounded at the save sounds in the loaded machine: the timer
+ * that makes it tells nothing in a load.  (A voice does not play while the
+ * machine stands still, so none is heard before the machine runs.)
+ */
+static int speaker_post_load(void *opaque, int version_id)
+{
+    FlipperSpeakerState *s = opaque;
+
+    s->phase = 0;
+    speaker_update_wave(s);
+    if (s->voice) {
+        audio_be_set_active_out(s->audio_be, s->voice, s->on && !s->mute);
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_flipper_speaker = {
+    .name = "flipper-speaker",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = speaker_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(on, FlipperSpeakerState),
+        VMSTATE_UINT32(freq_mhz, FlipperSpeakerState),
+        VMSTATE_UINT32(duty_ppm, FlipperSpeakerState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const Property speaker_props[] = {
     DEFINE_AUDIO_PROPERTIES(FlipperSpeakerState, audio_be),
 };
@@ -143,6 +174,7 @@ static void speaker_class_init(ObjectClass *klass, const void *data)
     dc->realize = speaker_realize;
     dc->user_creatable = false;
     device_class_set_props(dc, speaker_props);
+    dc->vmsd = &vmstate_flipper_speaker;
 }
 
 static const TypeInfo speaker_types[] = {

@@ -3297,6 +3297,89 @@ big lock, entry 92).
       RogueMaster: `gpio_check` 82, `u2f_check` 39. On the official dev
       build: `spi_check` 25, `u2f_check` 39. (Three comments changed
       after the first seven ran; the files check ran again after that.)
+132. **A saved state, the face and the power.** After 131 a loaded
+    desktop ran with a dark display and a battery at its start values.
+    The first of the board's three pushes: the display, the LED driver,
+    the gauge, the charger, the speaker and the buttons. The mark to
+    reach: the picture of a loaded machine is the saved machine's
+    before it runs. A state has 66 device sections now, six of them
+    new.
+    - The rule for the board's models: what is held to the Flipper (a
+      card, a tag, a key) is held to it again after a load, and a
+      signal that was in the air at the save ends there.
+    - The display saves the panel's memory, its registers and the
+      levels of its pins, and with them what the board last told it of
+      the LED, the backlight, the motor and the piezo. The board says
+      such a thing when it changes, and a load changes nothing (131:
+      no lines in a load), so the display would not hear of a light
+      that stays as it is. Who has looked at the picture belongs to the
+      host: to a loaded machine nobody has looked yet, and the first
+      look gets all of it.
+    - The LED driver saves its registers and its three engines where
+      they are in their programs, with their timer. The gauge saves
+      its data memory and the battery as it was set from outside
+      (`--battery`, `battery`): the battery of a loaded machine is the
+      saved one, not that of its start. The charger saves its
+      registers and whether there was power on VBUS.
+    - The speaker saves whether a tone sounds, its frequency and its
+      duty, and sets the host's voice from them. The window's link
+      saves nothing: a window that opens it is sent everything as it
+      is.
+    - The buttons are the board's own: a section of the machine,
+      `flipper-zero-board`, with one field so far. No finger is on a
+      button after a load. One that was down at the save is let go at
+      the loaded machine's first run, by the way of 131 (a handler for
+      the first run, since a load sets no line).
+    - On official 1.5.1: the battery set to 37 %, 3.712 V and 31 °C,
+      the LED to green 200, the backlight to 120, the motor on; saved,
+      and loaded in a new emulator. Before the run the picture is the
+      saved one, the same file byte for byte, with the LED and the
+      motor's mark under the screen, and of the 257 values of `status`
+      one differs: the Sub-GHz chip says `idle` where it said `sleep`
+      (it is not saved yet). In the run the CLI answers, the uptime
+      goes on, and the firmware reads its battery as 37 %, 3712 mV and
+      31 °C. With the motor and the LED switched off from the CLI,
+      both marks go. The same on Momentum, Unleashed, RogueMaster and
+      the official dev build, with the same numbers on each and no
+      crash.
+    - The round trip (a state A, loaded, saved again as B before it
+      runs): 65 of the 66 device sections are the same. The one is the
+      USB host's timer, as in 131.
+    - A button held at the save: Down in the main menu, which scrolls,
+      saved while it is held. Before the run the saved picture. In the
+      run the menu stands (the same item in three looks over 6 s), and
+      one press of Down then moves it by one item.
+    - A blink under way (Infrared > Learn New Remote): before the run
+      the picture and all 257 values of `status` are the saved ones.
+      In the run the engines go on in the same rhythm (15 changes in
+      59 looks 50 ms apart; 14 before the save), and Back ends the
+      blink. This is a save in an app, in this one case.
+    - A tone and the motor (`buzzer freq 440 60s` from the CLI), loaded
+      with `--audio wav:FILE`: the file has the tone from its first
+      sample, about 436 Hz for 0.095 s. It ends by the firmware's
+      doing: the command that sounds it ends when the CLI's port
+      closes, and a load closes the port (131). The motor stays on
+      until the CLI switches it off.
+    - Two notes from the tests. A read of `status` moves the LED
+      driver's clock (the property brings the engines up to now), so a
+      state after such a read differs from one before it in that
+      field: the tests read `status` with the machine stopped, before
+      the save. And a section's number is the saving machine's: with
+      another audio driver every number is one higher. QEMU goes by a
+      section's name and its place among those of that name, and the
+      load completes. A tool that compares two dumps has to go by the
+      names as well.
+    - Not there: the radios, infrared, RFID, iButton and NFC (a loaded
+      machine has them as after a reset, with nothing held), the
+      header's pins and devices, the card slot, the cable. Not tried:
+      a window on a loaded machine, a fade of the backlight under way,
+      and what 131 lists as not tried.
+    - The checks, none of which saves a state. On official 1.5.1: the
+      files check, `update_check` 33, `spi_check` 45, `gpio_check` 111,
+      `uart_check` 79, `i2c_check` 66, `u2f_check` 39, `app_check` 32,
+      `gui_check` 63. On Momentum: `spi_check` 30. On Unleashed:
+      `u2f_check` 39, `gui_check` 64. On RogueMaster: `gpio_check` 82.
+      On the official dev build: `spi_check` 25.
 
 ## Things that were right the first time (and why)
 
