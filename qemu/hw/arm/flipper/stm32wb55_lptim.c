@@ -24,6 +24,7 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "hw/core/irq.h"
+#include "migration/vmstate.h"
 #include "wb55.h"
 
 #define ISR_CMPM  (1u << 0)
@@ -334,9 +335,31 @@ static void wb55_lptim_init(Object *obj)
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, lptim_timer_cb, s);
 }
 
+static const VMStateDescription vmstate_wb55_lptim = {
+    .name = "stm32wb55-lptim",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_TIMER_PTR(timer, WB55LptimState),
+        VMSTATE_UINT32(isr, WB55LptimState),
+        VMSTATE_UINT32(ier, WB55LptimState),
+        VMSTATE_UINT32(cfgr, WB55LptimState),
+        VMSTATE_UINT32(cr, WB55LptimState),
+        VMSTATE_UINT32(cmp, WB55LptimState),
+        VMSTATE_UINT32(arr, WB55LptimState),
+        VMSTATE_UINT32(or_, WB55LptimState),
+        VMSTATE_BOOL(running, WB55LptimState),
+        VMSTATE_BOOL(oneshot, WB55LptimState),
+        VMSTATE_INT64(start_ns, WB55LptimState),
+        VMSTATE_UINT32(stopped_cnt, WB55LptimState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void wb55_lptim_class_init(ObjectClass *klass, const void *data)
 {
     RESETTABLE_CLASS(klass)->phases.hold = wb55_lptim_reset_hold;
+    DEVICE_CLASS(klass)->vmsd = &vmstate_wb55_lptim;
 }
 
 static const TypeInfo wb55_lptim_info = {

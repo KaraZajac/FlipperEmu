@@ -27,6 +27,7 @@
 #include "hw/core/irq.h"
 #include "system/address-spaces.h"
 #include "system/memory.h"
+#include "migration/vmstate.h"
 #include "wb55.h"
 
 #define CCR_EN      (1u << 0)
@@ -385,9 +386,45 @@ static void wb55_dma_init(Object *obj)
     qdev_init_gpio_in_named(DEVICE(obj), dma_request, "request", 64);
 }
 
+static const VMStateDescription vmstate_wb55_dma_channel = {
+    .name = "stm32wb55-dma/channel",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(ccr, WB55DmaChannel),
+        VMSTATE_UINT32(cndtr, WB55DmaChannel),
+        VMSTATE_UINT32(cpar, WB55DmaChannel),
+        VMSTATE_UINT32(cmar, WB55DmaChannel),
+        VMSTATE_UINT32(reload, WB55DmaChannel),
+        VMSTATE_UINT32(pidx, WB55DmaChannel),
+        VMSTATE_UINT32(midx, WB55DmaChannel),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+/* A saved state: with the request lines' levels, which nobody sends again */
+static const VMStateDescription vmstate_wb55_dma = {
+    .name = "stm32wb55-dma",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_STRUCT_ARRAY(ch, WB55DmaState, 14, 0, vmstate_wb55_dma_channel,
+                             WB55DmaChannel),
+        VMSTATE_UINT32_ARRAY(isr, WB55DmaState, 2),
+        VMSTATE_UINT32_ARRAY(muxccr, WB55DmaState, 14),
+        VMSTATE_UINT64(req, WB55DmaState),
+        VMSTATE_UINT16(latched, WB55DmaState),
+        VMSTATE_UINT16_ARRAY(served, WB55DmaState, 64),
+        VMSTATE_BOOL(in_service, WB55DmaState),
+        VMSTATE_BOOL(dirty, WB55DmaState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void wb55_dma_class_init(ObjectClass *klass, const void *data)
 {
     RESETTABLE_CLASS(klass)->phases.hold = wb55_dma_reset_hold;
+    DEVICE_CLASS(klass)->vmsd = &vmstate_wb55_dma;
 }
 
 static const TypeInfo wb55_dma_info = {

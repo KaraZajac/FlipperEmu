@@ -3202,6 +3202,102 @@ big lock, entry 92).
       again after a load, and a signal that was in the air at the
       moment of the save ends there.
 
+131. **A saved state, the chip's models.** After 130 a state loaded and
+    the firmware stopped at once: the chip's registers were at their
+    reset values. Each model of the chip (`stm32wb55_*.c`) has a saved
+    state now, 22 models, and 37 of a state's 61 sections are this
+    project's. The mark to reach: a desktop that was saved to a file
+    answers the CLI after a load.
+    - Lines between devices are not in a state: a `qemu_irq` has no
+      level that could be saved. So each receiver saves the levels of
+      its own inputs (EXTI its lines, the DMA its requests, the SoC its
+      pins), and no model raises or drops a line to another model in its
+      `post_load`: the other may not be loaded yet, and it has the level
+      in its own state. What a model does there stays within it: its own
+      timers, its own memory regions (SYSCFG maps address 0 as MEMRMP
+      says). Clocks the same way: the RCC, the timers and the DWT save
+      theirs, and a load propagates nothing.
+    - Nothing on the host is written in a `post_load`. A load may still
+      fail after it, and QEMU does not have the images open for writing
+      before the machine runs. A model with a file of the host's
+      registers a handler for the machine's first run (`cont`) and
+      writes there: the flash controller the whole flash image, CPU2
+      the key store's file, the RTC its calendar. Tried with a key that
+      was stored after the save, and 16 bytes of `flash.img` damaged
+      with the emulator stopped: while the loaded machine waits, both
+      files are as they were left; once it runs, both are the saved
+      state's again.
+    - The clock. A device's calendar is the host's clock plus a distance
+      in whole seconds (`nvram.bin` has it so), and a state holds that
+      distance. The first version set the calendar in the load, and the
+      Flipper's clock was behind by the time that the machine waited
+      for its `cont`: it is set at the first run now. And a state that
+      is saved from a machine which was loaded and has not run keeps
+      the distance it was loaded with (the second version computed it
+      anew, from a calendar that was not set yet: 16 s off).
+    - An older fault, found on the way: every start of a device lost
+      the part of a second of its clock, half a second on average. The
+      distance was taken in whole seconds, cut off, and the calendar
+      was then set to a whole second of the host's clock. The distance
+      is the nearest second now, and the calendar gets the host's part
+      of a second. Read against the host's clock: the same distance
+      before a save and after the load.
+    - So the date after a load is today's, as far as the device's
+      distance goes, and the uptime goes on from the save: to the
+      firmware a load looks like a sleep that its tick did not count.
+    - USB. What the built-in host knows of the device is in the state
+      (its address, the descriptors, the endpoints, where a control
+      transfer stands), so a loaded machine is not enumerated again and
+      the firmware sees no bus reset. Who was at the other end did not
+      come along. A serial port that a program had open is closed as
+      when the program goes away (DTR drops), and the next one that
+      opens it starts clean. A device that a PC had over USB/IP is the
+      built-in host's again, with a bus reset, as when the PC lets go
+      of it; tried with a user-space client, loaded with and without
+      `--usbip`.
+    - A key that the enclave has loaded into AES1 is in that unit's
+      state, with the key registers. The block that AES1 answers from a
+      table for one of FlipperEmu's own factory keys is a pointer: the
+      state says that there was one, and the FUS hands it over again at
+      the first run. Not tried: nothing here saves between a key's load
+      and its unload yet (an app for that comes with the check of the
+      `snapshot` command).
+    - The round trip, on official 1.5.1: a state A, loaded, saved again
+      as B before it runs. The five RAM blocks are the same, and 59 of
+      the 60 device sections. The one that differs is the USB host's
+      timer, which a load sets anew on purpose.
+    - In the middle of things: a save while the firmware computes the
+      MD5 of a 3 MB file on the card (`storage md5`, 10.7 s undisturbed)
+      with the CLI's port open. The saved machine, going on, prints the
+      right sum. The loaded one gives the right sum to a new command,
+      in 22 s: the command that was cut off still runs beside it, with
+      nobody to print to.
+    - Five firmwares (official 1.5.1 and dev, Momentum, Unleashed,
+      RogueMaster), each on a new device: the desktop saved 22 s after
+      the start, loaded half a minute later. Each answers the CLI, its
+      uptime goes on from the save, its date is the host's to the
+      second, the card answers, and there is no crash.
+    - What a state file holds, once more: the device's RAM and flash,
+      and the enclave's keys in plain. QEMU makes the file with mode
+      0600 (a file that was there keeps its mode). It does not belong
+      in a repository.
+    - Not there: the board's models. A loaded desktop runs with a dark
+      display (its controller is at reset; the firmware set it up
+      once), and the power chips, the LED driver, the radios and what
+      is held to the Flipper are at their start values. Not tried: a
+      save in an app, a save with the USB port as a keyboard or a U2F
+      token, a save with devices on the header's I2C or SPI bus (their
+      sections go by the order in which the machine makes its devices,
+      so a load wants the same `--i2c` and `--spi` as the save).
+    - The checks. None of them saves a state: they say that a machine
+      which never loads one is as it was. On official 1.5.1: the files
+      check, `update_check` 33, `spi_check` 45, `gpio_check` 111,
+      `uart_check` 79, `i2c_check` 66, `u2f_check` 39, `gui_check` 63.
+      On Momentum and Unleashed: `spi_check` 30, `u2f_check` 39. On
+      RogueMaster: `gpio_check` 82, `u2f_check` 39. On the official dev
+      build: `spi_check` 25, `u2f_check` 39. (Three comments changed
+      after the first seven ran; the files check ran again after that.)
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

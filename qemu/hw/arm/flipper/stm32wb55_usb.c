@@ -48,6 +48,7 @@
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-properties-system.h"
+#include "migration/vmstate.h"
 #include "wb55.h"
 
 /* ---- EPnR */
@@ -2208,6 +2209,128 @@ static const Property usb_props[] = {
     DEFINE_PROP_BOOL("debug", WB55UsbState, debug, false),
 };
 
+/*
+ * A saved state: the device controller, and the built-in host with what it
+ * knows of the device (so the firmware is not enumerated again after a
+ * load, and its port is where it was).  Who was at the other end of the
+ * port stayed behind with the old program:
+ *
+ *  - a program that had the serial port open: its port is closed, as when
+ *    it goes away (DTR drops, and who opens the port next starts clean);
+ *  - a PC that had the device over USB/IP: the device is the built-in
+ *    host's again, with a new reset, as when that PC lets it go.
+ */
+static int usb_post_load(void *opaque, int version_id)
+{
+    WB55UsbState *s = opaque;
+    int64_t now = now_ns();
+
+    fifo8_reset(&s->to_dev);
+    fifo8_reset(&s->to_chr);
+    if (s->usbip_imported) {
+        s->usbip_imported = false;          /* (nothing here to disconnect) */
+        if (s->hstate != H_DETACHED) {
+            host_detach(s);
+            host_pullup(s, true);
+        }
+        return 0;
+    }
+    if (s->cdc && s->dtr_sent && !s->hup) {
+        s->hup = true;
+        s->hup_by = now;
+    }
+    if (s->hstate != H_DETACHED && s->hstate != H_FAILED) {
+        host_wake(s, now + KICK_NS);
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_wb55_usb_ctl = {
+    .name = "stm32wb55-usb/ctl",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(active, WB55UsbCtl),
+        VMSTATE_UINT8_ARRAY(setup, WB55UsbCtl, 8),
+        VMSTATE_UINT8_ARRAY(buf, WB55UsbCtl, 512),
+        VMSTATE_UINT16(len, WB55UsbCtl),
+        VMSTATE_UINT16(done, WB55UsbCtl),
+        VMSTATE_UINT8(stage, WB55UsbCtl),
+        VMSTATE_INT64(deadline, WB55UsbCtl),
+        VMSTATE_INT64(not_before, WB55UsbCtl),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_wb55_usb = {
+    .name = "stm32wb55-usb",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = usb_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT16_ARRAY(epr, WB55UsbState, 8),
+        VMSTATE_UINT16_ARRAY(epr_seen, WB55UsbState, 8),
+        VMSTATE_UINT16(cntr, WB55UsbState),
+        VMSTATE_UINT16(istr, WB55UsbState),
+        VMSTATE_UINT16(istr_seen, WB55UsbState),
+        VMSTATE_UINT16(daddr, WB55UsbState),
+        VMSTATE_UINT16(btable, WB55UsbState),
+        VMSTATE_UINT16(lpmcsr, WB55UsbState),
+        VMSTATE_UINT16(bcdr, WB55UsbState),
+        VMSTATE_UINT8_ARRAY(pma, WB55UsbState, 1024),
+        VMSTATE_INT64(frame_base_ns, WB55UsbState),
+        VMSTATE_INT64_ARRAY(ep_armed, WB55UsbState, 8),
+        VMSTATE_INT64_ARRAY(ep_done, WB55UsbState, 8),
+        VMSTATE_INT64_ARRAY(ep_look, WB55UsbState, 8),
+        VMSTATE_INT64_ARRAY(ep_idle, WB55UsbState, 8),
+        VMSTATE_BOOL_ARRAY(ep_timed, WB55UsbState, 8),
+        VMSTATE_INT64(bus_last, WB55UsbState),
+        VMSTATE_INT64(turn_ns, WB55UsbState),
+        VMSTATE_BOOL(attached, WB55UsbState),
+        VMSTATE_TIMER_PTR(timer, WB55UsbState),
+        VMSTATE_INT32(hstate, WB55UsbState),
+        VMSTATE_INT64(wait_until, WB55UsbState),
+        VMSTATE_INT32(failures, WB55UsbState),
+        VMSTATE_UINT8(addr, WB55UsbState),
+        VMSTATE_UINT8(ep0_mps, WB55UsbState),
+        VMSTATE_INT32(enum_step, WB55UsbState),
+        VMSTATE_STRUCT(ctl, WB55UsbState, 0, vmstate_wb55_usb_ctl, WB55UsbCtl),
+        VMSTATE_UINT8_ARRAY(dev_desc, WB55UsbState, 18),
+        VMSTATE_UINT8_ARRAY(cfg_desc, WB55UsbState, 512),
+        VMSTATE_UINT16(cfg_len, WB55UsbState),
+        VMSTATE_UINT16(langid, WB55UsbState),
+        VMSTATE_BUFFER_UNSAFE(strings, WB55UsbState, 0, 3 * 64),
+        VMSTATE_BUFFER_UNSAFE(functions, WB55UsbState, 0, 64),
+        VMSTATE_BOOL(cdc, WB55UsbState),
+        VMSTATE_UINT8(cdc_if, WB55UsbState),
+        VMSTATE_UINT8(cdc_in, WB55UsbState),
+        VMSTATE_UINT8(cdc_out, WB55UsbState),
+        VMSTATE_UINT16(cdc_out_mps, WB55UsbState),
+        VMSTATE_BOOL(dtr_sent, WB55UsbState),
+        VMSTATE_BOOL(dtr_pending, WB55UsbState),
+        VMSTATE_BOOL(hup, WB55UsbState),
+        VMSTATE_BOOL(stale, WB55UsbState),
+        VMSTATE_INT64(hup_by, WB55UsbState),
+        VMSTATE_INT64(reopen_at, WB55UsbState),
+        VMSTATE_BOOL(hid, WB55UsbState),
+        VMSTATE_UINT8(hid_in, WB55UsbState),
+        VMSTATE_UINT8(hid_interval, WB55UsbState),
+        VMSTATE_INT64(hid_next_poll, WB55UsbState),
+        VMSTATE_UINT8(kb_mods, WB55UsbState),
+        VMSTATE_UINT8_ARRAY(kb_keys, WB55UsbState, 6),
+        VMSTATE_UINT8(kb_lone_mods, WB55UsbState),
+        VMSTATE_UINT8(mouse_btn, WB55UsbState),
+        VMSTATE_UINT16(alt_code, WB55UsbState),
+        VMSTATE_UINT8(alt_digits, WB55UsbState),
+        VMSTATE_UINT16_ARRAY(consumer, WB55UsbState, 2),
+        VMSTATE_UINT16_2DARRAY(ep_mps, WB55UsbState, 2, 16),
+        VMSTATE_UINT8(nif, WB55UsbState),
+        VMSTATE_UINT8_2DARRAY(if_class, WB55UsbState, 16, 3),
+        VMSTATE_BOOL(usbip_imported, WB55UsbState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void usb_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -2218,6 +2341,7 @@ static void usb_class_init(ObjectClass *klass, const void *data)
     rc->phases.hold = usb_reset_hold;
     rc->phases.exit = usb_reset_exit;
     device_class_set_props(dc, usb_props);
+    dc->vmsd = &vmstate_wb55_usb;
 }
 
 static const TypeInfo usb_types[] = {

@@ -32,6 +32,7 @@
  */
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "migration/vmstate.h"
 #include "wb55.h"
 
 enum {
@@ -234,11 +235,28 @@ static void wb55_adc_init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mmio);
 }
 
+/* A saved state: the registers, and what `status` tells of the last
+ * conversion */
+static const VMStateDescription vmstate_wb55_adc = {
+    .name = "stm32wb55-adc",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(regs, WB55AdcState, 0x400 / 4),
+        VMSTATE_UINT64(conversions, WB55AdcState),
+        VMSTATE_UINT8(last_channel, WB55AdcState),
+        VMSTATE_UINT16(last_data, WB55AdcState),
+        VMSTATE_UINT32(last_uv, WB55AdcState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void wb55_adc_class_init(ObjectClass *klass, const void *data)
 {
     ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     rc->phases.hold = wb55_adc_reset_hold;
+    DEVICE_CLASS(klass)->vmsd = &vmstate_wb55_adc;
 }
 
 static const TypeInfo wb55_adc_info = {

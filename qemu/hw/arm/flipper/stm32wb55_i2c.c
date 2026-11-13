@@ -19,6 +19,7 @@
 #include "qemu/log.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
+#include "migration/vmstate.h"
 #include "wb55.h"
 
 #define CR1_PE      (1u << 0)
@@ -320,11 +321,44 @@ static const Property wb55_i2c_props[] = {
     DEFINE_PROP_STRING("bus-name", WB55I2cState, bus_name),
 };
 
+/*
+ * A saved state: the registers, where a transfer stands, and what `status`
+ * tells of the bus.  Not a record that somebody took of it (tap_open): that
+ * one starts anew, at the next START.
+ */
+static const VMStateDescription vmstate_wb55_i2c = {
+    .name = "stm32wb55-i2c",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(cr1, WB55I2cState),
+        VMSTATE_UINT32(cr2, WB55I2cState),
+        VMSTATE_UINT32(oar1, WB55I2cState),
+        VMSTATE_UINT32(oar2, WB55I2cState),
+        VMSTATE_UINT32(timingr, WB55I2cState),
+        VMSTATE_UINT32(timeoutr, WB55I2cState),
+        VMSTATE_UINT32(isr, WB55I2cState),
+        VMSTATE_UINT32(pecr, WB55I2cState),
+        VMSTATE_UINT32(rxdr, WB55I2cState),
+        VMSTATE_UINT32(txdr, WB55I2cState),
+        VMSTATE_BOOL(active, WB55I2cState),
+        VMSTATE_BOOL(reading, WB55I2cState),
+        VMSTATE_UINT32(count, WB55I2cState),
+        VMSTATE_UINT64(calls, WB55I2cState),
+        VMSTATE_UINT64(unanswered, WB55I2cState),
+        VMSTATE_UINT8(last, WB55I2cState),
+        VMSTATE_BOOL(last_read, WB55I2cState),
+        VMSTATE_BOOL(last_taken, WB55I2cState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void wb55_i2c_class_init(ObjectClass *klass, const void *data)
 {
     RESETTABLE_CLASS(klass)->phases.hold = wb55_i2c_reset_hold;
     DEVICE_CLASS(klass)->realize = wb55_i2c_realize;
     device_class_set_props(DEVICE_CLASS(klass), wb55_i2c_props);
+    DEVICE_CLASS(klass)->vmsd = &vmstate_wb55_i2c;
 }
 
 static const TypeInfo wb55_i2c_info = {

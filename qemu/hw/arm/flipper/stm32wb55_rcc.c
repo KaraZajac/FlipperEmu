@@ -18,6 +18,7 @@
 #include "hw/core/qdev-clock.h"
 #include "hw/core/qdev.h"
 #include "system/runstate.h"
+#include "migration/vmstate.h"
 #include "wb55.h"
 
 #define R_CR        (0x00 / 4)
@@ -341,12 +342,32 @@ static void wb55_rcc_init(Object *obj)
     clock_set_hz(s->refclk, 500000);
 }
 
+/*
+ * A saved state.  The clocks' periods come with it, as the rules for clocks
+ * want it (docs/devel/clocks.rst): nothing is propagated in a load, and who
+ * takes a clock from here saves that clock too.
+ */
+static const VMStateDescription vmstate_wb55_rcc = {
+    .name = "stm32wb55-rcc",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(regs, WB55RccState, WB55_RCC_NREGS),
+        VMSTATE_BOOL(powered, WB55RccState),
+        VMSTATE_UINT32(pending_reset_flags, WB55RccState),
+        VMSTATE_CLOCK(hclk, WB55RccState),
+        VMSTATE_CLOCK(refclk, WB55RccState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void wb55_rcc_class_init(ObjectClass *klass, const void *data)
 {
     ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     rc->phases.hold = wb55_rcc_reset_hold;
     rc->phases.exit = wb55_rcc_reset_exit;
+    DEVICE_CLASS(klass)->vmsd = &vmstate_wb55_rcc;
 }
 
 static const TypeInfo wb55_rcc_info = {

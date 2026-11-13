@@ -43,6 +43,7 @@
 #include "hw/core/irq.h"
 #include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
+#include "migration/vmstate.h"
 #include "wb55.h"
 
 #define R_CR1   0x00
@@ -759,6 +760,37 @@ static const Property tim_props[] = {
     DEFINE_PROP_BOOL("batch-dma", WB55TimState, batch_dma, false),
 };
 
+/*
+ * A saved state: the registers, the counter's base, the next event's time
+ * and the levels on the pins.  The clock's period too: no clock is
+ * propagated in a load.
+ */
+static const VMStateDescription vmstate_wb55_tim = {
+    .name = "stm32wb55-tim",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_CLOCK(clk, WB55TimState),
+        VMSTATE_TIMER_PTR(timer, WB55TimState),
+        VMSTATE_UINT32(rep, WB55TimState),
+        VMSTATE_UINT32_ARRAY(regs, WB55TimState, 0x70 / 4),
+        VMSTATE_BOOL(running, WB55TimState),
+        VMSTATE_UINT32(cnt_base, WB55TimState),
+        VMSTATE_INT64(base_ns, WB55TimState),
+        VMSTATE_INT64(checked_ns, WB55TimState),
+        VMSTATE_INT64(now_override, WB55TimState),
+        VMSTATE_BOOL_ARRAY(ti_level, WB55TimState, 4),
+        VMSTATE_UINT8(cap_unread, WB55TimState),
+        VMSTATE_INT64_ARRAY(cap_ns, WB55TimState, 4),
+        VMSTATE_BOOL_ARRAY(oc_level, WB55TimState, 4),
+        VMSTATE_BOOL(dma_up_pending, WB55TimState),
+        VMSTATE_BOOL(in_updates, WB55TimState),
+        VMSTATE_UINT64(ext_hz, WB55TimState),
+        VMSTATE_BOOL(dma_wait, WB55TimState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void tim_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -769,6 +801,7 @@ static void tim_class_init(ObjectClass *klass, const void *data)
     device_class_set_props(dc, tim_props);
     rc->phases.hold = tim_reset_hold;
     rc->phases.exit = tim_reset_exit;
+    dc->vmsd = &vmstate_wb55_tim;
 }
 
 static const TypeInfo tim_types[] = {

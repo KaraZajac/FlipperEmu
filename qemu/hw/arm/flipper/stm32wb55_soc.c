@@ -19,6 +19,7 @@
 #include "system/address-spaces.h"
 #include "system/system.h"
 #include "target/arm/cpu-qom.h"
+#include "migration/vmstate.h"
 #include "wb55.h"
 
 static const hwaddr gpio_addr[WB55_NUM_PORTS] = {
@@ -631,12 +632,25 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
 #undef DREQ
 }
 
+/* A saved state: the SoC's own part is the pins' levels as the board's
+ * devices were last told them */
+static const VMStateDescription vmstate_wb55_soc = {
+    .name = "stm32wb55-soc",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8_ARRAY(pin_level, WB55SocState, WB55_PINS),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void wb55_soc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = wb55_soc_realize;
     dc->user_creatable = false;
+    dc->vmsd = &vmstate_wb55_soc;
 }
 
 static const TypeInfo wb55_soc_info = {

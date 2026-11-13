@@ -36,6 +36,8 @@
 #include "qapi/error.h"
 #include "system/address-spaces.h"
 #include "system/memory.h"
+#include "migration/vmstate.h"
+#include "system/runstate.h"
 #include "wb55.h"
 
 #define C1CR      0x00
@@ -423,6 +425,68 @@ static const Property wb55_ipcc_props[] = {
     DEFINE_PROP_STRING("keys", WB55IpccState, key_file),
 };
 
+/*
+ * A saved state: the registers, whether CPU2 has started, and CPU2's key
+ * store with its locks.  (So a state file holds keys, as the store's own
+ * file does.)  The file on the host follows when the machine next runs: see
+ * wb55_fus_loaded().
+ */
+static void wb55_ipcc_loaded(void *opaque, bool running, RunState state)
+{
+    WB55IpccState *s = opaque;
+
+    if (!running) {
+        return;
+    }
+    qemu_del_vm_change_state_handler(s->loaded);
+    s->loaded = NULL;
+    wb55_fus_loaded(s);
+}
+
+static int wb55_ipcc_post_load(void *opaque, int version_id)
+{
+    WB55IpccState *s = opaque;
+
+    if (!s->loaded) {
+        s->loaded = qemu_add_vm_change_state_handler(wb55_ipcc_loaded, s);
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_wb55_fus_key = {
+    .name = "stm32wb55-ipcc/key",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8(type, WB55FusKey),
+        VMSTATE_UINT8(len, WB55FusKey),
+        VMSTATE_UINT8_ARRAY(data, WB55FusKey, 32),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_wb55_ipcc = {
+    .name = "stm32wb55-ipcc",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = wb55_ipcc_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(c1cr, WB55IpccState),
+        VMSTATE_UINT32(c1mr, WB55IpccState),
+        VMSTATE_UINT32(c1toc2sr, WB55IpccState),
+        VMSTATE_UINT32(c2cr, WB55IpccState),
+        VMSTATE_UINT32(c2mr, WB55IpccState),
+        VMSTATE_UINT32(c2toc1sr, WB55IpccState),
+        VMSTATE_TIMER_PTR(boot_timer, WB55IpccState),
+        VMSTATE_BOOL(c2_booted, WB55IpccState),
+        VMSTATE_STRUCT_ARRAY(key, WB55IpccState, WB55_FUS_KEYS, 0,
+                             vmstate_wb55_fus_key, WB55FusKey),
+        VMSTATE_BOOL_ARRAY(key_locked, WB55IpccState, WB55_FUS_KEYS),
+        VMSTATE_UINT8(key_loaded, WB55IpccState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void wb55_ipcc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -430,6 +494,7 @@ static void wb55_ipcc_class_init(ObjectClass *klass, const void *data)
     dc->realize = wb55_ipcc_realize;
     device_class_set_props(dc, wb55_ipcc_props);
     RESETTABLE_CLASS(klass)->phases.hold = wb55_ipcc_reset_hold;
+    dc->vmsd = &vmstate_wb55_ipcc;
 }
 
 static const TypeInfo wb55_ipcc_info = {

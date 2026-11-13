@@ -20,6 +20,7 @@
 #include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
 #include "qemu/bitops.h"
+#include "migration/vmstate.h"
 #include "wb55.h"
 
 /* ------------------------------------------------------------------- RNG */
@@ -76,9 +77,21 @@ static void wb55_rng_init(Object *obj)
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
 }
 
+static const VMStateDescription vmstate_wb55_rng = {
+    .name = "stm32wb55-rng",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(cr, WB55RngState),
+        VMSTATE_UINT32(sr, WB55RngState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void wb55_rng_class_init(ObjectClass *klass, const void *data)
 {
     RESETTABLE_CLASS(klass)->phases.hold = wb55_rng_reset_hold;
+    DEVICE_CLASS(klass)->vmsd = &vmstate_wb55_rng;
 }
 
 /* ------------------------------------------------------------------- DWT */
@@ -220,12 +233,45 @@ static void wb55_dwt_init(Object *obj)
                                 ClockPreUpdate);
 }
 
+static const VMStateDescription vmstate_wb55_dwt = {
+    .name = "stm32wb55-dwt",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_CLOCK(clk, WB55DwtState),
+        VMSTATE_UINT32(ctrl, WB55DwtState),
+        VMSTATE_UINT64(base_cycles, WB55DwtState),
+        VMSTATE_INT64(base_ns, WB55DwtState),
+        VMSTATE_UINT32_ARRAY(comp, WB55DwtState, 16),
+        VMSTATE_BOOL(stamped, WB55DwtState),
+        VMSTATE_INT64(stamp_ns, WB55DwtState),
+        VMSTATE_INT64(read_ns, WB55DwtState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void wb55_dwt_class_init(ObjectClass *klass, const void *data)
 {
     RESETTABLE_CLASS(klass)->phases.hold = wb55_dwt_reset_hold;
+    DEVICE_CLASS(klass)->vmsd = &vmstate_wb55_dwt;
 }
 
 /* ---------------------------------------------------------------- DBGMCU */
+
+static const VMStateDescription vmstate_wb55_dbgmcu = {
+    .name = "stm32wb55-dbgmcu",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(regs, WB55DbgmcuState, 0x54 / 4),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static void wb55_dbgmcu_class_init(ObjectClass *klass, const void *data)
+{
+    DEVICE_CLASS(klass)->vmsd = &vmstate_wb55_dbgmcu;
+}
 
 static uint64_t wb55_dbgmcu_read(void *opaque, hwaddr addr, unsigned size)
 {
@@ -350,7 +396,8 @@ static void wb55_regfile_realize(DeviceState *dev, Error **errp)
 {
     WB55RegfileState *s = WB55_REGFILE(dev);
 
-    s->regs = g_new0(uint32_t, s->size / 4);
+    s->nregs = s->size / 4;
+    s->regs = g_new0(uint32_t, s->nregs);
     memory_region_init_io(&s->mmio, OBJECT(dev), &wb55_regfile_ops, s,
                           s->name ? s->name : "regfile", s->size);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->mmio);
@@ -362,6 +409,17 @@ static const Property wb55_regfile_props[] = {
     DEFINE_PROP_UINT32("kind", WB55RegfileState, kind, WB55_RF_PLAIN),
 };
 
+static const VMStateDescription vmstate_wb55_regfile = {
+    .name = "stm32wb55-regfile",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_VARRAY_UINT32(regs, WB55RegfileState, nregs, 0,
+                              vmstate_info_uint32, uint32_t),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void wb55_regfile_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -370,6 +428,7 @@ static void wb55_regfile_class_init(ObjectClass *klass, const void *data)
     device_class_set_props(dc, wb55_regfile_props);
     RESETTABLE_CLASS(klass)->phases.hold = wb55_regfile_reset_hold;
     RESETTABLE_CLASS(klass)->phases.exit = wb55_regfile_reset_exit;
+    dc->vmsd = &vmstate_wb55_regfile;
 }
 
 static const TypeInfo wb55_misc_types[] = {
@@ -390,6 +449,7 @@ static const TypeInfo wb55_misc_types[] = {
         .parent = TYPE_SYS_BUS_DEVICE,
         .instance_size = sizeof(WB55DbgmcuState),
         .instance_init = wb55_dbgmcu_init,
+        .class_init = wb55_dbgmcu_class_init,
     }, {
         .name = TYPE_WB55_REGFILE,
         .parent = TYPE_SYS_BUS_DEVICE,

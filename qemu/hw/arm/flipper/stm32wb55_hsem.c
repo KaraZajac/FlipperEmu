@@ -18,6 +18,7 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "hw/core/irq.h"
+#include "migration/vmstate.h"
 #include "wb55.h"
 
 #define HSEM_LOCK      (1u << 31)
@@ -154,9 +155,25 @@ static void wb55_hsem_init(Object *obj)
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
 }
 
+static const VMStateDescription vmstate_wb55_hsem = {
+    .name = "stm32wb55-hsem",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(r, WB55HsemState, 32),
+        VMSTATE_UINT32(c1ier, WB55HsemState),
+        VMSTATE_UINT32(c1isr, WB55HsemState),
+        VMSTATE_UINT32(c2ier, WB55HsemState),
+        VMSTATE_UINT32(c2isr, WB55HsemState),
+        VMSTATE_UINT32(keyr, WB55HsemState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void wb55_hsem_class_init(ObjectClass *klass, const void *data)
 {
     RESETTABLE_CLASS(klass)->phases.hold = wb55_hsem_reset_hold;
+    DEVICE_CLASS(klass)->vmsd = &vmstate_wb55_hsem;
 }
 
 static const TypeInfo wb55_hsem_info = {

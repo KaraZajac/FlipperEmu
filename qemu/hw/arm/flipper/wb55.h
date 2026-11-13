@@ -135,6 +135,7 @@ struct WB55FlashState {
     hwaddr pg_addr;
     uint32_t pg_lo;
     WB55RccState *rcc;
+    VMChangeStateEntry *loaded;  /* a saved state came: the image follows */
 };
 uint8_t *wb55_flash_info_ptr(WB55FlashState *s);
 
@@ -172,6 +173,7 @@ struct WB55AesState {
     uint8_t gcm_h[16], gcm_y[16];
     bool secure;                 /* the key registers are CPU2's */
     const WB55AesAnswer *answer;
+    bool has_answer;             /* in a saved state: `answer` was there */
     bool warned_dma;
 };
 
@@ -219,6 +221,7 @@ struct WB55IpccState {
     void (*provision)(WB55IpccState *s);
     /* A CBC encryption the key at `index` is known to produce, or NULL */
     const WB55AesAnswer *(*key_answer)(int index, const uint8_t *key, int len);
+    VMChangeStateEntry *loaded;  /* a saved state came: the file follows */
 };
 
 bool wb55_fus_realize(WB55IpccState *s, Error **errp);
@@ -231,6 +234,9 @@ uint8_t wb55_fus_store_key(WB55IpccState *s, const uint8_t *p, int plen,
 uint8_t wb55_fus_load_key(WB55IpccState *s, uint8_t index);
 uint8_t wb55_fus_unload_key(WB55IpccState *s, uint8_t index);
 uint8_t wb55_fus_lock_key(WB55IpccState *s, uint8_t index);
+/* A saved state was loaded and the machine runs: the store on the host is
+ * the loaded one, and AES1 has its answer again if it had one */
+void wb55_fus_loaded(WB55IpccState *s);
 
 /* ---------------------------------------------------------------- EXTI */
 #define TYPE_WB55_EXTI "stm32wb55-exti"
@@ -277,6 +283,8 @@ struct WB55RtcState {
     uint32_t init_bkp[20];       /* "factory" backup register contents */
     int64_t wut_next_ns;
     int64_t last_alarm_s;
+    int64_t saved_offset;        /* in a saved state: calendar - host clock */
+    VMChangeStateEntry *loaded;  /* a saved state came: the calendar follows */
 };
 void wb55_rtc_backup_domain_reset(WB55RtcState *s);
 
@@ -559,6 +567,7 @@ struct WB55RegfileState {
     char *name;
     uint32_t size;
     uint32_t *regs;
+    uint32_t nregs;              /* size / 4 */
     uint32_t kind;               /* WB55_RF_* special behaviour */
     bool warned;
     /* board hook, called after every write and after reset (e.g. TIM16 -> speaker) */

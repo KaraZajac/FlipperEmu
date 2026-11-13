@@ -56,6 +56,7 @@
 #include "crypto/aes.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
+#include "migration/vmstate.h"
 #include "wb55.h"
 
 #define AES_CR      0x00
@@ -626,10 +627,47 @@ static const Property wb55_aes_props[] = {
     DEFINE_PROP_STRING("name", WB55AesState, name),
 };
 
+/*
+ * A saved state.  A key of CPU2's is in it like any other (a state file
+ * holds keys).  `answer` is a pointer: the state says whether there was one,
+ * and CPU2's side puts it back (wb55_fus_loaded()).
+ */
+static int wb55_aes_pre_save(void *opaque)
+{
+    WB55AesState *s = opaque;
+
+    s->has_answer = s->answer != NULL;
+    return 0;
+}
+
+static const VMStateDescription vmstate_wb55_aes = {
+    .name = "stm32wb55-aes",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .pre_save = wb55_aes_pre_save,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(cr, WB55AesState),
+        VMSTATE_UINT32(sr, WB55AesState),
+        VMSTATE_UINT32_ARRAY(key, WB55AesState, 8),
+        VMSTATE_UINT32_ARRAY(iv, WB55AesState, 4),
+        VMSTATE_UINT32_ARRAY(susp, WB55AesState, 8),
+        VMSTATE_UINT32_ARRAY(din, WB55AesState, 4),
+        VMSTATE_UINT32_ARRAY(dout, WB55AesState, 4),
+        VMSTATE_UINT8(nin, WB55AesState),
+        VMSTATE_UINT8(nout, WB55AesState),
+        VMSTATE_UINT8_ARRAY(gcm_h, WB55AesState, 16),
+        VMSTATE_UINT8_ARRAY(gcm_y, WB55AesState, 16),
+        VMSTATE_BOOL(secure, WB55AesState),
+        VMSTATE_BOOL(has_answer, WB55AesState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void wb55_aes_class_init(ObjectClass *klass, const void *data)
 {
     device_class_set_props(DEVICE_CLASS(klass), wb55_aes_props);
     RESETTABLE_CLASS(klass)->phases.hold = wb55_aes_reset_hold;
+    DEVICE_CLASS(klass)->vmsd = &vmstate_wb55_aes;
 }
 
 static const TypeInfo wb55_aes_info = {

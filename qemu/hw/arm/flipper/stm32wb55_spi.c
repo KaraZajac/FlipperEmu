@@ -17,6 +17,7 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "hw/core/irq.h"
+#include "migration/vmstate.h"
 #include "wb55.h"
 
 #define CR1_SPE    (1u << 6)
@@ -202,12 +203,28 @@ static void wb55_spi_init(Object *obj)
     s->bus = ssi_create_bus(DEVICE(obj), "ssi");
 }
 
+static const VMStateDescription vmstate_wb55_spi = {
+    .name = "stm32wb55-spi",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(cr1, WB55SpiState),
+        VMSTATE_UINT32(cr2, WB55SpiState),
+        VMSTATE_UINT32(sr_err, WB55SpiState),
+        VMSTATE_UINT32(crcpr, WB55SpiState),
+        VMSTATE_UINT8_ARRAY(rxfifo, WB55SpiState, 4),
+        VMSTATE_INT32(rxcount, WB55SpiState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void wb55_spi_class_init(ObjectClass *klass, const void *data)
 {
     ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     rc->phases.hold = wb55_spi_reset_hold;
     rc->phases.exit = wb55_spi_reset_exit;
+    DEVICE_CLASS(klass)->vmsd = &vmstate_wb55_spi;
 }
 
 static const TypeInfo wb55_spi_info = {

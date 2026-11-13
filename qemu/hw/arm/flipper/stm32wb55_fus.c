@@ -347,6 +347,24 @@ uint8_t wb55_fus_lock_key(WB55IpccState *s, uint8_t index)
     return FUS_DONE;
 }
 
+/*
+ * A saved state was loaded and the machine runs.  The store is the loaded
+ * one, and the file on the host has to say the same.  AES1 came with its key
+ * registers; the answer that went with the key (wb55_fus_load_key()) is a
+ * pointer, which no state holds: it is asked for again.
+ */
+void wb55_fus_loaded(WB55IpccState *s)
+{
+    fus_file_save(s);
+    if (s->aes && s->aes->has_answer && s->key_loaded && s->key_answer) {
+        const WB55FusKey *k = &s->key[s->key_loaded];
+
+        if (k->type != WB55_FUS_KEY_NONE) {
+            s->aes->answer = s->key_answer(s->key_loaded, k->data, k->len);
+        }
+    }
+}
+
 /* A system reset: CPU2 starts over. The locks go, and AES1 is CPU1's again. */
 void wb55_fus_reset(WB55IpccState *s)
 {

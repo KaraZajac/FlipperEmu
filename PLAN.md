@@ -605,8 +605,19 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           patch the state loads, and the firmware then stops with `furi_check failed`
           and starts again: its chip's registers are at their reset values
           (BRINGUP_LOG 130)
-    - ☐ The chip's models save their state (clocks, timers, DMA, RTC, USB and the
-          rest), until a saved desktop answers the CLI after a load
+    - ☑ The chip's models save their state (2026-11-12): clocks, timers, DMA, RTC,
+          USB, the flash controller, CPU2's key store and the rest, 22 models. A desktop
+          saved to a file answers the CLI after a load, on the five firmwares, with no
+          crash and no new USB enumeration. A state that is loaded and saved again
+          before it runs is the same: the RAM, and every section but the USB host's
+          timer. The host's files follow at the loaded machine's first run, not in the
+          load: the flash image, the key store's file, the calendar (the host's clock
+          plus the distance it had). Who was at the other end of the USB port stays
+          behind: an open serial port is closed as when its program goes away, and a
+          device that a PC had over USB/IP is the built-in host's again. Found with it:
+          every start of a device lost the part of a second of its clock, half a second
+          on average. Not there: the board (the display stays dark after a load)
+          (BRINGUP_LOG 131)
     - ☐ The board's models (display, power chips, LED driver, radios, RFID, iButton,
           infrared). The rule: what is held to the Flipper (a card, a tag, a key) is
           held to it again after a load; a signal that was in the air at the moment of

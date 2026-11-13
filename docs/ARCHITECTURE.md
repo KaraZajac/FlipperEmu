@@ -1489,6 +1489,60 @@ relay's checks run against it.
 card descriptions, or Flipper `.nfc` files, so a card the Proxmark3 dumped can sit in
 the emulated field.
 
+## A saved state (the chip's models)
+
+A machine's state goes to a file by QEMU's migration (`stop`, then `migrate file:PATH`
+in the monitor) and comes back in a new QEMU with the same machine arguments and
+`-incoming file:PATH`, which waits, paused, for a `cont`. Not `savevm`: that wants qcow2
+images to put the state in, and the launcher's tools read and write the card's raw
+image. The launcher has no command for it yet, and the board's models have no saved
+state yet (PLAN, M6). What follows is the chip's side: each model in `stm32wb55_*.c`
+saves its registers and what it keeps beside them (where a transfer stands, its timers).
+
+- **No lines in a load.** A `qemu_irq` has no level that could be saved. Each receiver
+  saves the levels of its own inputs (EXTI its lines, the DMA its requests, the SoC its
+  pins), and a `post_load` raises or drops no line to another model: that one may not be
+  loaded yet, and has the level in its own state. Clocks the same way: a model saves its
+  own, and a load propagates nothing. What a `post_load` does stays within its model:
+  its timers, its memory regions.
+- **No file of the host in a load.** A load may still fail, and QEMU does not have the
+  images open for writing before the machine runs. The flash controller, CPU2's key
+  store and the RTC register a handler for the machine's first run and do it there: the
+  whole flash image is written, `enclave.keys` is written, the calendar is set. Until
+  that `cont` the device's files are what the last run left.
+- **Sections go by their order.** Models of one type (three timers, ten register files)
+  are numbered in the order in which the machine makes them, so a state wants a machine
+  with the same arguments: the same devices on the header's I2C and SPI bus. What is on
+  the host's side of a chardev may differ (`--usbip` or not).
+- **A state file is a secret.** It holds the RAM, the flash and the enclave's keys in
+  plain. QEMU makes the file with mode 0600. It does not belong in a repository or in a
+  bug report.
+
+The clock: a device's calendar is the host's clock plus a distance in whole seconds
+(`nvram.bin` has it so), and a state holds that distance, not a date. At the first run
+after a load the calendar is set from the host's clock, so a state that was saved last
+week wakes up with today's date. The uptime does not jump: SysTick and the timers count
+QEMU's virtual time, which goes on from the save. To the firmware a load looks like a
+sleep that its tick did not count.
+
+USB: what the built-in host knows of the device is in the state (its address, the
+descriptors, the endpoints, where a control transfer stands), so a loaded machine is not
+enumerated again and the firmware sees no bus reset. Who was at the other end is not in
+it. A serial port that a program had open is closed as when the program goes away (DTR
+drops, the CLI's session ends), and a device that a PC had over USB/IP is the built-in
+host's again, with a bus reset, as when the PC lets go of it.
+
+The enclave: the key store with its locks is in the state, and so is a key that was
+loaded into AES1 (in the unit's key registers, which CPU1 cannot read). The one block
+that AES1 answers from a table for one of FlipperEmu's own factory keys is a pointer and
+is not in it: the state says that there was one, and the FUS hands it over again at the
+first run.
+
+Not there: the board. A loaded desktop runs with a dark display, and nothing is held to
+the Flipper. Not tried: a save between an enclave key's load and its unload, a save in
+an app, a save with the port as a keyboard or a U2F token, a save with devices on the
+header's buses.
+
 ## Persistence per device (`devices/NAME/`)
 
 | file | real-world equivalent |

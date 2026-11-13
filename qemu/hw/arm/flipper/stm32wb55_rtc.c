@@ -21,6 +21,8 @@
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "system/rtc.h"
+#include "migration/vmstate.h"
+#include "system/runstate.h"
 #include "wb55.h"
 
 #define ISR_ALRAWF (1u << 0)
@@ -76,6 +78,45 @@ static void rtc_set_calendar(WB55RtcState *s, int64_t secs)
 {
     s->base_s = secs;
     s->base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+}
+
+/*
+ * The calendar and the host's clock.  The calendar counts the machine's own
+ * time; from one run to the next (and into a saved state) goes how far it
+ * is from the host's clock, in whole seconds.  The part of a second is the
+ * host's whenever the calendar is set from it: so a distance that is read
+ * and set again stays what it was, and a Flipper does not lose half a second
+ * with every start.
+ */
+static int64_t rtc_host_ns(void)
+{
+    struct tm tm;
+    int64_t frac, again;
+
+    do {                        /* (the two in one and the same second) */
+        frac = qemu_clock_get_ns(QEMU_CLOCK_HOST) % NANOSECONDS_PER_SECOND;
+        qemu_get_timedate(&tm, 0);
+        again = qemu_clock_get_ns(QEMU_CLOCK_HOST) % NANOSECONDS_PER_SECOND;
+    } while (again < frac);
+    return mktimegm(&tm) * NANOSECONDS_PER_SECOND + frac;
+}
+
+static int64_t rtc_host_offset(WB55RtcState *s)
+{
+    int64_t frac, secs = rtc_now_s(s, &frac);
+    int64_t d = secs * NANOSECONDS_PER_SECOND + frac - rtc_host_ns();
+
+    /* the nearest second */
+    d += d < 0 ? -(NANOSECONDS_PER_SECOND / 2) : NANOSECONDS_PER_SECOND / 2;
+    return d / NANOSECONDS_PER_SECOND;
+}
+
+static void rtc_set_from_host(WB55RtcState *s, int64_t offset)
+{
+    int64_t host = rtc_host_ns();
+
+    rtc_set_calendar(s, host / NANOSECONDS_PER_SECOND + offset);
+    s->base_ns -= host % NANOSECONDS_PER_SECOND;
 }
 
 static void rtc_tm(WB55RtcState *s, struct tm *tm)
@@ -364,10 +405,7 @@ void wb55_rtc_backup_domain_reset(WB55RtcState *s)
 
 void wb55_rtc_export(WB55RtcState *s, WB55RtcBackup *b)
 {
-    struct tm tm;
-
-    qemu_get_timedate(&tm, 0);
-    b->calendar_offset = rtc_now_s(s, NULL) - mktimegm(&tm);
+    b->calendar_offset = rtc_host_offset(s);
     b->cr = s->cr;
     b->prer = s->prer;
     b->wutr = s->wutr;
@@ -384,11 +422,8 @@ void wb55_rtc_export(WB55RtcState *s, WB55RtcBackup *b)
 /* Restore a saved backup domain before the first reset (the "coin cell"). */
 void wb55_rtc_import(WB55RtcState *s, const WB55RtcBackup *b)
 {
-    struct tm tm;
-
     rtc_clear_domain(s);
-    qemu_get_timedate(&tm, 0);
-    rtc_set_calendar(s, mktimegm(&tm) + b->calendar_offset);
+    rtc_set_from_host(s, b->calendar_offset);
     s->cr = b->cr & ~CR_WUTE;
     s->prer = b->prer;
     s->wutr = b->wutr;
@@ -410,10 +445,8 @@ static void wb55_rtc_reset_hold(Object *obj, ResetType type)
     if (s->backup_valid) {
         return;                         /* system reset: backup domain kept */
     }
-    struct tm tm;
     rtc_clear_domain(s);
-    qemu_get_timedate(&tm, 0);
-    rtc_set_calendar(s, mktimegm(&tm));
+    rtc_set_from_host(s, 0);
     memcpy(s->bkp, s->init_bkp, sizeof(s->bkp));
     s->backup_valid = true;
 }
@@ -443,6 +476,82 @@ static const Property wb55_rtc_props[] = {
     DEFINE_PROP_UINT32("bkp1", WB55RtcState, init_bkp[1], 0x00002000),
 };
 
+/*
+ * A saved state.  The calendar follows the host's clock, as it does from one
+ * run to the next (wb55_rtc_export()): a state says how far the Flipper's
+ * clock was from the host's, and after a load it is that far from it again.
+ * So the Flipper's clock is right after a load, if it was right before, and
+ * it is not the moment of the save.  It is set when the machine next runs:
+ * a loaded machine may wait for that.  The wakeup timer counts the machine's
+ * own time and goes on where it was.
+ */
+static int wb55_rtc_pre_save(void *opaque)
+{
+    WB55RtcState *s = opaque;
+
+    if (!s->loaded) {           /* (a loaded state that has not run says it) */
+        s->saved_offset = rtc_host_offset(s);
+    }
+    return 0;
+}
+
+static void wb55_rtc_loaded(void *opaque, bool running, RunState state)
+{
+    WB55RtcState *s = opaque;
+
+    if (!running) {
+        return;
+    }
+    qemu_del_vm_change_state_handler(s->loaded);
+    s->loaded = NULL;
+    if (!rtc_in_init(s)) {              /* (there the firmware is setting it) */
+        rtc_set_from_host(s, s->saved_offset);
+        rtc_schedule(s);
+    }
+}
+
+static int wb55_rtc_post_load(void *opaque, int version_id)
+{
+    WB55RtcState *s = opaque;
+
+    if (!s->loaded) {
+        s->loaded = qemu_add_vm_change_state_handler(wb55_rtc_loaded, s);
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_wb55_rtc = {
+    .name = "stm32wb55-rtc",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .pre_save = wb55_rtc_pre_save,
+    .post_load = wb55_rtc_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_TIMER_PTR(tick, WB55RtcState),
+        VMSTATE_BOOL(backup_valid, WB55RtcState),
+        VMSTATE_INT64(base_s, WB55RtcState),
+        VMSTATE_INT64(base_ns, WB55RtcState),
+        VMSTATE_UINT32(cr, WB55RtcState),
+        VMSTATE_UINT32(isr_flags, WB55RtcState),
+        VMSTATE_UINT32(prer, WB55RtcState),
+        VMSTATE_UINT32(wutr, WB55RtcState),
+        VMSTATE_UINT32(alrmar, WB55RtcState),
+        VMSTATE_UINT32(alrmbr, WB55RtcState),
+        VMSTATE_UINT32(alrmassr, WB55RtcState),
+        VMSTATE_UINT32(alrmbssr, WB55RtcState),
+        VMSTATE_UINT32(calr, WB55RtcState),
+        VMSTATE_UINT32(tampcr, WB55RtcState),
+        VMSTATE_UINT32(or_, WB55RtcState),
+        VMSTATE_UINT32(shiftr, WB55RtcState),
+        VMSTATE_UINT32(wpr, WB55RtcState),
+        VMSTATE_UINT32_ARRAY(bkp, WB55RtcState, 20),
+        VMSTATE_INT64(wut_next_ns, WB55RtcState),
+        VMSTATE_INT64(last_alarm_s, WB55RtcState),
+        VMSTATE_INT64(saved_offset, WB55RtcState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void wb55_rtc_class_init(ObjectClass *klass, const void *data)
 {
     ResettableClass *rc = RESETTABLE_CLASS(klass);
@@ -450,6 +559,7 @@ static void wb55_rtc_class_init(ObjectClass *klass, const void *data)
     device_class_set_props(DEVICE_CLASS(klass), wb55_rtc_props);
     rc->phases.hold = wb55_rtc_reset_hold;
     rc->phases.exit = wb55_rtc_reset_exit;
+    DEVICE_CLASS(klass)->vmsd = &vmstate_wb55_rtc;
 }
 
 static const TypeInfo wb55_rtc_info = {

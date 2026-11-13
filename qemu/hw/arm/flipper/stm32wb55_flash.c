@@ -29,6 +29,9 @@
 #include "system/block-backend.h"
 #include "system/memory.h"
 #include "hw/core/cpu.h"
+#include "qemu/error-report.h"
+#include "migration/vmstate.h"
+#include "system/runstate.h"
 #include "wb55.h"
 
 #define R_ACR      0x00
@@ -444,6 +447,59 @@ static void wb55_flash_init(Object *obj)
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
 }
 
+/*
+ * A saved state.  The flash's contents came with the machine's memory; the
+ * image on the host has to say the same.  It takes no write while a state
+ * is coming in, so it is written when the machine next runs, and a load that
+ * fails leaves it as it was.
+ */
+static void wb55_flash_loaded(void *opaque, bool running, RunState state)
+{
+    WB55FlashState *s = opaque;
+
+    if (!running) {
+        return;
+    }
+    qemu_del_vm_change_state_handler(s->loaded);
+    s->loaded = NULL;
+    if (blk_pwrite(s->blk, 0, WB55_FLASH_SIZE, flash_ptr(s), 0) < 0) {
+        error_report("wb55-flash: the image was not written after a load");
+    }
+}
+
+static int wb55_flash_post_load(void *opaque, int version_id)
+{
+    WB55FlashState *s = opaque;
+
+    if (s->blk && blk_supports_write_perm(s->blk) && !s->loaded) {
+        s->loaded = qemu_add_vm_change_state_handler(wb55_flash_loaded, s);
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_wb55_flash = {
+    .name = "stm32wb55-flash",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = wb55_flash_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(acr, WB55FlashState),
+        VMSTATE_UINT32(sr, WB55FlashState),
+        VMSTATE_UINT32(cr, WB55FlashState),
+        VMSTATE_UINT32(eccr, WB55FlashState),
+        VMSTATE_UINT32(c2acr, WB55FlashState),
+        VMSTATE_UINT32(c2sr, WB55FlashState),
+        VMSTATE_UINT32(c2cr, WB55FlashState),
+        VMSTATE_UINT32_ARRAY(ob, WB55FlashState, 16),
+        VMSTATE_UINT32(key_state, WB55FlashState),
+        VMSTATE_UINT32(optkey_state, WB55FlashState),
+        VMSTATE_BOOL(pg_pending, WB55FlashState),
+        VMSTATE_UINT64(pg_addr, WB55FlashState),
+        VMSTATE_UINT32(pg_lo, WB55FlashState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void wb55_flash_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -451,6 +507,7 @@ static void wb55_flash_class_init(ObjectClass *klass, const void *data)
     dc->realize = wb55_flash_realize;
     device_class_set_props(dc, wb55_flash_props);
     RESETTABLE_CLASS(klass)->phases.hold = wb55_flash_reset_hold;
+    dc->vmsd = &vmstate_wb55_flash;
 }
 
 static const TypeInfo wb55_flash_info = {

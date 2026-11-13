@@ -22,6 +22,7 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "hw/core/irq.h"
+#include "migration/vmstate.h"
 #include "wb55.h"
 
 /* configurable (latching) lines: 0-21, 31, 33, 40, 41 */
@@ -166,12 +167,32 @@ static void wb55_exti_init(Object *obj)
     qdev_init_gpio_out(DEVICE(obj), s->out, WB55_EXTI_LINES);
 }
 
+/* A saved state: with the lines' levels, which nobody sends again */
+static const VMStateDescription vmstate_wb55_exti = {
+    .name = "stm32wb55-exti",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(rtsr, WB55ExtiState, 2),
+        VMSTATE_UINT32_ARRAY(ftsr, WB55ExtiState, 2),
+        VMSTATE_UINT32_ARRAY(swier, WB55ExtiState, 2),
+        VMSTATE_UINT32_ARRAY(pr, WB55ExtiState, 2),
+        VMSTATE_UINT32_ARRAY(imr, WB55ExtiState, 2),
+        VMSTATE_UINT32_ARRAY(emr, WB55ExtiState, 2),
+        VMSTATE_UINT32_ARRAY(c2imr, WB55ExtiState, 2),
+        VMSTATE_UINT32_ARRAY(c2emr, WB55ExtiState, 2),
+        VMSTATE_UINT64(level, WB55ExtiState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void wb55_exti_class_init(ObjectClass *klass, const void *data)
 {
     ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     rc->phases.hold = wb55_exti_reset_hold;
     rc->phases.exit = wb55_exti_reset_exit;
+    DEVICE_CLASS(klass)->vmsd = &vmstate_wb55_exti;
 }
 
 static const TypeInfo wb55_exti_info = {

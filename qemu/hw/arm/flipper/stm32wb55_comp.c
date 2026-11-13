@@ -19,6 +19,7 @@
 #include "qemu/log.h"
 #include "qemu/timer.h"
 #include "hw/core/irq.h"
+#include "migration/vmstate.h"
 #include "wb55.h"
 
 #define CSR_EN       (1u << 0)
@@ -118,6 +119,18 @@ static void comp_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(obj), s->exti, "exti", 2);
 }
 
+static const VMStateDescription vmstate_wb55_comp = {
+    .name = "stm32wb55-comp",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(csr, WB55CompState, 2),
+        VMSTATE_BOOL_ARRAY(inp, WB55CompState, 2),
+        VMSTATE_BOOL_ARRAY(out, WB55CompState, 2),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void comp_class_init(ObjectClass *klass, const void *data)
 {
     ResettableClass *rc = RESETTABLE_CLASS(klass);
@@ -125,6 +138,7 @@ static void comp_class_init(ObjectClass *klass, const void *data)
     DEVICE_CLASS(klass)->user_creatable = false;
     rc->phases.hold = comp_reset_hold;
     rc->phases.exit = comp_reset_exit;
+    DEVICE_CLASS(klass)->vmsd = &vmstate_wb55_comp;
 }
 
 static const TypeInfo comp_types[] = {

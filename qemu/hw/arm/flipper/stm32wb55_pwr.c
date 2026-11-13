@@ -9,6 +9,7 @@
  */
 #include "qemu/osdep.h"
 #include "hw/core/irq.h"
+#include "migration/vmstate.h"
 #include "wb55.h"
 
 #define R_CR1    (0x00 / 4)
@@ -103,9 +104,20 @@ static void wb55_pwr_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(obj), &s->c2boot, "c2boot", 1);
 }
 
+static const VMStateDescription vmstate_wb55_pwr = {
+    .name = "stm32wb55-pwr",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(regs, WB55PwrState, 0x90 / 4),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void wb55_pwr_class_init(ObjectClass *klass, const void *data)
 {
     RESETTABLE_CLASS(klass)->phases.hold = wb55_pwr_reset_hold;
+    DEVICE_CLASS(klass)->vmsd = &vmstate_wb55_pwr;
 }
 
 static const TypeInfo wb55_pwr_info = {

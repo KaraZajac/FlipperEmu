@@ -19,6 +19,7 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "hw/core/irq.h"
+#include "migration/vmstate.h"
 #include "wb55.h"
 
 static void syscfg_route(WB55SyscfgState *s, int line)
@@ -158,12 +159,49 @@ static void wb55_syscfg_init(Object *obj)
     qdev_init_gpio_out(DEVICE(obj), s->exti, 16);
 }
 
+/* A saved state: what is mapped at address 0 follows MEMRMP again */
+static int wb55_syscfg_post_load(void *opaque, int version_id)
+{
+    WB55SyscfgState *s = opaque;
+
+    if (s->remap) {
+        s->remap(s->remap_opaque, s->memrmp & 7);
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_wb55_syscfg = {
+    .name = "stm32wb55-syscfg",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = wb55_syscfg_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(memrmp, WB55SyscfgState),
+        VMSTATE_UINT32(cfgr1, WB55SyscfgState),
+        VMSTATE_UINT32_ARRAY(exticr, WB55SyscfgState, 4),
+        VMSTATE_UINT32(scsr, WB55SyscfgState),
+        VMSTATE_UINT32(cfgr2, WB55SyscfgState),
+        VMSTATE_UINT32(swpr1, WB55SyscfgState),
+        VMSTATE_UINT32(swpr2, WB55SyscfgState),
+        VMSTATE_UINT32(imr1, WB55SyscfgState),
+        VMSTATE_UINT32(imr2, WB55SyscfgState),
+        VMSTATE_UINT32(c2imr1, WB55SyscfgState),
+        VMSTATE_UINT32(c2imr2, WB55SyscfgState),
+        VMSTATE_UINT32(sipcr, WB55SyscfgState),
+        VMSTATE_UINT32(vrefbuf_csr, WB55SyscfgState),
+        VMSTATE_UINT32(vrefbuf_ccr, WB55SyscfgState),
+        VMSTATE_UINT8_ARRAY(level, WB55SyscfgState, 8 * 16),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void wb55_syscfg_class_init(ObjectClass *klass, const void *data)
 {
     ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     rc->phases.hold = wb55_syscfg_reset_hold;
     rc->phases.exit = wb55_syscfg_reset_exit;
+    DEVICE_CLASS(klass)->vmsd = &vmstate_wb55_syscfg;
 }
 
 static const TypeInfo wb55_syscfg_info = {
