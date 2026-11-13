@@ -8,6 +8,7 @@ arm_common_ss.add(when: 'CONFIG_FLIPPER_ZERO', if_true: files(
   'stm32wb55_flash.c',
   'stm32wb55_hsem.c',
   'stm32wb55_ipcc.c',
+  'stm32wb55_ble.c',
   'stm32wb55_fus.c',
   'stm32wb55_aes.c',
   'stm32wb55_exti.c',

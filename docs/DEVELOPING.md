@@ -224,6 +224,17 @@ with the same machine every time, whatever the run before it left on the card.
   stub on before the Flipper runs: gdb gets on, sets its breakpoints, and the Flipper
   goes on from the save's moment when gdb lets it.
 
+## Bluetooth
+
+The Flipper has its radio stack (ST's BLE Light 1.20.0 on CPU2), so code that asks for
+Bluetooth runs as on a real one up to the radio: `furi_hal_bt_is_alive()` and
+`furi_hal_bt_is_gatt_gap_supported()` are true, Settings > Bluetooth switches
+advertising on and off, and the services that a profile registers are in the stack.
+`./flipperemu status` has a `bluetooth` row: whether the firmware has started the
+stack, whether it advertises and under which name, how many GATT services it has. No
+phone or computer can connect yet. `run --radio-stack none` is a Flipper without a
+stack, to see what your app does on one.
+
 ## The LED and the backlight
 
 ```
@@ -886,9 +897,10 @@ than `default`. It also
 - refuses the targets that go through a debug probe (`flash`, `debug`, `blackmagic`,
   `jflash`, …). They would reach the real Flipper on your desk, or nothing.
   `./flipperemu flash` and `./flipperemu gdb` are what does that here;
-- does `ufbt flash_usb` itself: the SDK's update package has a radio stack in it, which
-  the emulated Flipper cannot install, so the launcher installs that package without
-  the stage (`./flipperemu update`). See [below](#when-it-goes-wrong).
+- does `ufbt flash_usb` itself: the SDK's update package has a radio stack in it, and
+  the emulated Flipper installs no other stack than the one it runs, so the launcher
+  installs that package (`./flipperemu update`): with its radio stage when that stack
+  is the device's, without it when it is another. See [below](#when-it-goes-wrong).
 
 Without the wrapper it is one argument, and it has to be there every time:
 
@@ -1144,10 +1156,11 @@ folder on your PATH.)
 
 `flipperemu fbt …` is `./fbt …` of the tree you are in, with the emulated port named
 as for ufbt, and the same targets refused. `fbt launch APPSRC=my_app`, `fbt cli` and
-`fbt flash_usb` talk to the emulated Flipper. `fbt flash_usb_full` is refused: its
-package has a radio stack in it. `./fbt updater_package` builds that package, and
-`flipperemu update` installs it without the stage. In the window that is Device >
-Update with a package, and F6 after each build from then on.
+`fbt flash_usb` talk to the emulated Flipper. `fbt flash_usb_full` is refused: it sends
+its package with the radio stack in it as it is, whichever stack that is.
+`./fbt updater_package` builds that package, and `flipperemu update` installs it,
+without the radio stage when its stack is not the device's. In the window that is
+Device > Update with a package, and F6 after each build from then on.
 
 What `./fbt` builds is a debug build (the `D` of `f7-firmware-D`) unless you give it
 `DEBUG=0`. A debug build does not start again after a crash: it
@@ -1160,12 +1173,21 @@ Then `./flipperemu log -f` for what the firmware says, at the level you set
 ## When it goes wrong
 
 - **"Update Failed! CRC mismatch #[3-99]" on the Flipper's screen.** An update package
-  with a radio stack in it was installed (`flash_usb_full`, a release's package sent
-  with the official tools). The emulated second core is ST's FUS without a radio
-  stack, and cannot install one. The updater stops at that stage and gives it this
-  name; nothing was written. Hold Back, and the Flipper starts as it was. `./flipperemu
-  update PACKAGE` installs the same package without that stage on a device that runs,
-  `./flipperemu run --update PACKAGE` on one that does not.
+  with a radio stack in it was installed on a device with no stack
+  (`run --radio-stack none`): with `--keep-radio`, or by something other than the
+  launcher (`flash_usb_full`, a package sent with the official tools). The emulated
+  second core installs no stack. The updater stops at that stage and gives it this
+  name; nothing was written. Hold Back, and the Flipper starts as it was.
+  `./flipperemu update PACKAGE` installs the same package without that stage on a
+  device that runs, `./flipperemu run --update PACKAGE` on one that does not.
+- **"[CRASH] Waiting for FUS->radio stack transition" in the log at every start, with
+  the updater's screen.** An update package with another radio stack than the
+  device's was installed by something other than the launcher on a device that runs a
+  stack (`run --radio-stack VERSION`). Its updater has CPU2 restart into its FUS to
+  install the package's stack, which the emulator does not do yet, and the firmware
+  gives up after ten seconds, and starts the updater again. `./flipperemu stop`, then
+  `./flipperemu run --radio-stack none`: the updater stops at "CRC mismatch" (above),
+  and a held Back starts the firmware.
 - **`./flipperemu update` takes a minute or more.** That is the firmware's updater,
   which works with no USB and starts the Flipper a few times: a minute and a half for
   the official firmware, two minutes for Unleashed, four for Momentum, seven and a
@@ -1238,7 +1260,8 @@ Then `./flipperemu log -f` for what the firmware says, at the level you set
 `examples/hello` and the `ufbt` on the PATH: build, `launch`, the app's log lines,
 buttons, `launch` over the app that runs, the crash and the restart, `ufbt cli` in a
 terminal of its own with a second command kept waiting, the refused targets,
-`ufbt flash_usb` (the SDK's package sent without its radio stack, and installed), a
+`ufbt flash_usb` (the SDK's package sent with its radio stage, whose stack the updater
+finds up to date, and installed), a
 stopped device. For `fbt` it has a stand-in that says what it was called with: the
 tree's `fbt` is found from a folder inside it and run in its root, the emulated port
 is named, a port you name yourself is left alone, and the same targets are refused.
@@ -1553,10 +1576,13 @@ within seconds, the card in its slot again and the firmware using it, the launch
 waiting until the Flipper is back and saying what runs on it, a file that was on the
 card still there, the emulator's own Sub-GHz keystores (`keystores/overlay`) on the
 card again after the updater unpacked the package's over them and the launcher saying
-so, a manifest on the card without the radio stage, the updater's stages in the log,
-no crash, and the log level as before or else named. Then the same
-with the radio stage kept and through the CLI (`--cli`): what was written to the
-card's image is the same to the firmware, so only the two changed files are sent, the
+so, a manifest on the card with its radio stage, whose stack is the device's, and the
+updater finding that stack up to date, the updater's stages in the log, no crash, and
+the log level as before or else named. Then the same on the Flipper started with no
+radio stack (`run --radio-stack none`), with the radio stage kept (`--keep-radio`) and
+through the CLI (`--cli`): what was written to the
+card's image is the same to the firmware, so no file is sent again (the radio stage's
+neither), the
 updater's error is reported with the way out of it, and a held Back brings the
 firmware back. That part runs with the firmware's log level at none: the launcher has
 to lend the updater a level to see its error, and to give none back. And the
@@ -1564,11 +1590,12 @@ refusals: a folder and a file that are no package, a pulled USB cable, a card th
 out of its slot, a device that does not run. At the end the Flipper is stopped and
 started with `run --update`: the updater has to start, the keystores to be on the card
 again when it is done and the run to say so, the package's firmware to run with its
-CLI answering, and no crash. 33 checks; it passes on the official
-1.5.1, Momentum, Unleashed and RogueMaster with their own packages (4, 9, 6 and 15
-minutes), on the official dev build with its own, and from the official firmware to
-Unleashed and to the dev build with `--package`.
-`ufbt_check.py` has the real `ufbt flash_usb` go through the wrapper (29 checks now).
+CLI answering, and no crash. 34 checks; it passes on the official 1.5.1, Unleashed
+and the official dev build with their own packages (10, 6 and 5 minutes, on a machine
+that other programs kept busy). With 33, before a package's radio stage stayed in, it passed on Momentum and
+RogueMaster with their own packages (9 and 15 minutes) and from the official firmware
+to Unleashed and to the dev build with `--package`.
+`ufbt_check.py` has the real `ufbt flash_usb` go through the wrapper (31 checks now).
 
 `scripts/snapshot_check.py FIRMWARE` starts a device with a TMP105, an EEPROM and a
 serial flash on its header. Before that it wants what a device with no snapshot and one

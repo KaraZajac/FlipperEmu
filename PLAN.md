@@ -5,8 +5,8 @@ without flashing the device, with a debugger-first workflow. QEMU-based by desig
 RESEARCH.md §5).
 
 ## M1: boots real firmware ☑ (2026-11-07)
-- ☑ STM32WB55 SoC: RCC/clock tree, PWR, FLASH (+OB, OTP, UID), HSEM, IPCC + FUS-only CPU2,
-  EXTI, SYSCFG (+MEMRMP, VREFBUF), RTC (backup domain), LPTIM×2, SPI×2, I2C×2,
+- ☑ STM32WB55 SoC: RCC/clock tree, PWR, FLASH (+OB, OTP, UID), HSEM, IPCC + CPU2 (FUS,
+  BLE stack), EXTI, SYSCFG (+MEMRMP, VREFBUF), RTC (backup domain), LPTIM×2, SPI×2, I2C×2,
   DMA1/2 + DMAMUX, RNG, DWT, DBGMCU; QEMU L4x5 GPIO/USART reused
 - ☑ Board: ST7567 LCD, buttons, microSD, BQ27220, BQ25896, LP5562, CC1101, ST25R3916
 - ☑ Official 1.5.1 to the desktop, menus, SD mount/read/write, dolphin animations, FAPs
@@ -37,7 +37,25 @@ qFlipper / lab.flipper.net / `ufbt launch` only run over USB CDC.
       CDC event queue (`furi_check` in USB_LP; BRINGUP_LOG 36). Since 2026-11-10 the
       host waits for the firmware to go idle rather than for the clock: file
       transfers over the CLI are up to twice as fast (BRINGUP_LOG 74)
-- ☐ A minimal BLE stack on CPU2, so qFlipper's updates (radio stage) and the BT service work
+- ☐ A minimal BLE stack on CPU2, so qFlipper's updates (radio stage) and the BT service work.
+      In four parts:
+    - ☑ The stack starts (2026-11-13): CPU2 runs ST's BLE Light 1.20.0, the stack of the
+          five firmwares' update packages, as a Flipper from the factory does; the firmware
+          starts it, its GATT services are in the model's database, Settings > Bluetooth
+          switches advertising on and off, `status` has a `bluetooth` row, a snapshot keeps
+          it; `run --radio-stack none` is a FUS with no stack. An update package whose
+          stack is the device's keeps its radio stage, which the updater finds up to
+          date. `scripts/ble_check.py`: 10 on the five (BRINGUP_LOG 138)
+    - ☐ A central on the host: a link through which a program on the computer sees the
+          advertising, connects, pairs with the PIN on the Flipper's screen, and reads,
+          writes and subscribes to characteristics (the serial service's RPC, as the phone
+          app has it)
+    - ☐ The radio update path: the switches between the stack and the FUS with the resets
+          that go with them, and the FUS deleting and installing a stack from an update
+          package (one with another version than the installed one). Until then such a
+          package's radio stage is left out, and `--keep-radio` is refused for it on a
+          device that runs a stack (its updater would crash waiting for the FUS)
+    - ☐ The window: Bluetooth on the bench
 - ☐ Stretch: second CDC port of the dual-CDC mode; mass storage
 
 The double-buffer question from the notes was settled by what libusb_stm32 requires:
@@ -51,7 +69,8 @@ NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
       the stock updater over USB. The whole chain runs: /int backup, RAM updater (MEMRMP,
       option-byte check, DFU validate, flash write + verify), post-update (restore /int,
       resources, splash), normal boot. Verified official ⇄ Unleashed, official → Momentum.
-      The radio stage is blanked, because a FUS-only CPU2 cannot install a stack.
+      The radio stage was blanked, because a FUS-only CPU2 could not install a stack;
+      since 2026-11-13 a stage whose stack is the device's stays in (up to date).
 - ☐ XIP app loaders (custom firmwares that program FAP code into internal flash and
       execute it there)
 - ◐ Firmware matrix: official 1.5.1, the official dev build 3060cee9 (a debug build;
@@ -322,7 +341,7 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         `[CRASH][ISR MemMgmt] NULL pointer dereference`, the Desktop's slideshow view
         drawn before it has a slideshow (9 of 82 updates, eight to eleven emulators at
         a time; none of 16 with the official 1.5.1). The firmware restarts and the
-        update is complete, but `update_check.py` has 32 of 33 then. Not known:
+        update is complete, but `update_check.py` has 33 of 34 then. Not known:
         whether a real Flipper does it, how often an emulator that runs alone does,
         and what brings a redraw at that moment (BRINGUP_LOG 120)
   - ☑ A quicker way for a big package onto the card of a running device than the CLI's

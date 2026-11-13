@@ -3885,6 +3885,155 @@ big lock, entry 92).
       QEMU stops its log of dirty pages at the end of a migration
       (`ram_save_cleanup()`).
 
+138. **Bluetooth, part 1: CPU2 runs a BLE stack.** The emulated CPU2 had
+    been ST's FUS with no wireless stack since the start (a real device's
+    state, "Stack isn't installed!", and no Bluetooth). It runs one now, as
+    a Flipper from the factory does: ST's BLE Light 1.20.0, the stack of the
+    five firmwares' update packages (all five manifests:
+    `Radio version: 01 14 00 00 02 03`, the same CRC). The stack is a model
+    of what CPU1 sees of it (`stm32wb55_ble.c`); `radio-stack=none`
+    (`run --radio-stack none`) keeps the old state.
+    - Start-up. With a stack CPU2 writes the stack's device table
+      (`MB_DeviceInfoTable_t`: SafeBoot, FUS 1.2.0, the stack's version word
+      `0x01140002`, BLE Light, 29 pages) and says `WIRELESS_FW_RUNNING`. The
+      firmware: "C2 boot completed, mode: Stack", "Core2: Stack: 1.20.0,
+      branch 0, reltype 2, stacktype 3, flash 29 pages", "Radio stack
+      started", and `info device` has `radio.mode: Stack` and the version.
+      The system channel takes the stack's commands: `BLE_INIT`,
+      `C2_CONFIG`, the two flash commands, `C2_REINIT`; `FUS_GET_STATE`
+      answers 0xFF, as the stack does.
+    - The commands. The firmware sends some forty on the BLE channel (IPCC
+      1), the same on the five; the model answers each as ST's stack does
+      (opcodes, parameters and answers from ST's generated `*_aci.c` in the
+      firmware's tree) and keeps what they build: the GATT database with
+      ST's layout of handles (a characteristic's value after its
+      declaration, its CCCD after that: the firmware's services look for
+      writes there), and GAP's state (advertising, the name, the address).
+      On 1.5.1: five services and 41 attributes. Momentum's three commands
+      that were not in the list (`hci_le_set_default_phy`, the filter accept
+      list, an extra beacon's data) were found with `-d unimp`, and are now;
+      any other is answered as done, with the status alone.
+    - Found on the way: the answers. A first version took every event's
+      buffer from CPU1's pool (`blepool`), as the system channel's ready
+      event takes the spare. The Bluetooth service crashed half a minute
+      after start (`furi_check failed`, r0 `0xfffffffe`, a semaphore's
+      timeout, r8 `0xfd01`, `aci_gatt_init`): five commands had their
+      answers, the sixth waited for a buffer, and the pool has five. CPU1
+      gives an answer's buffer back never: `hci_send_req()` takes it from
+      its queue and keeps it. So ST's CPU2 writes a Command Complete over
+      the command in the command buffer, and a Command Status into the BLE
+      table's CS buffer, and only the other events take the pool's (and come
+      back on IPCC 4). A debug property of the model's buffers showed it
+      (all five busy, one event waiting); it is the `ble` property of
+      `status` now.
+    - Found on the way: the restart. At every start the Bluetooth service
+      changes its profile (`furi_hal_bt_reinit()`): `C2_REINIT`, the shared
+      memory cleared, the IPCC's clock off and on, and the transport set up
+      again. ST's CPU2 waits after `C2_REINIT` for CPU1's next
+      `HW_IPCC_Enable()`, which sends an event (`SEV`) and sets `C2BOOT`
+      again. That set changes nothing in the register, and the PWR model had
+      reported the bit's rise only: it reports every write that sets it now,
+      and a CPU2 that waits restarts on it, with the IPCC's channels as a
+      reset leaves them (the clock's off and on reset it on the chip).
+    - Found on the way: a CLI that hung for good. Now and then
+      `info device`, asked right after a start, did not answer, nor did the
+      CLI after it. The firmware's enclave check in it loads key after key
+      with `furi_hal_crypto_enclave_load_key()`, which takes the crypto
+      mutex, then core 2's lock, and gives up when CPU2 is not alive,
+      without giving the mutex back: the next load in the same thread waits
+      for that mutex forever. The reinit above holds core 2's lock all
+      along, and lets it go right after the `HW_IPCC_Enable()` that restarts
+      CPU2. The model restarted CPU2 5 ms (of the machine's time) after that
+      write, as at a cold start: a key load that had waited for the lock got
+      it first, found CPU2 not alive and kept the mutex. CPU2 now restarts
+      at the write itself after a `C2_REINIT` (a cold start keeps its 5 ms:
+      CPU1's event thread is not there yet). The ready event is in the queue
+      before `HW_IPCC_Enable()` returns, and the firmware's BLE event
+      thread, which runs at a higher priority, has it before the lock is
+      free. The leak is in the firmware's source (1.5.1's
+      `furi_hal_crypto.c`); the emulator's slow reinit, below, gave it its
+      window.
+    - Bluetooth is off on a new Flipper (`bt_settings.c`: `enabled = false`
+      with no file). Settings > Bluetooth on and Back (the app hands its
+      settings over as it closes): it advertises, "Flipper NAME" on the
+      official firmware, the name alone on Momentum, from 80:E1:26 (Flipper
+      Devices' block of addresses; the firmware's `radio.ble.mac` has the
+      same six bytes the other way round). `bt hci_info`: HCI 5.4 (13), ST's
+      company identifier (48), and the subversions of the emulator's
+      choosing. `status` has a `bluetooth` row, from the IPCC's `ble`
+      property (JSON). A saved state has the stack's whole state in the
+      IPCC's section (its version goes to 2): a loaded Flipper advertises as
+      before and answers.
+    - Updates. The updater's radio stage compares the package's stack with
+      the one that CPU2 runs: the same version and type is "Stack version is
+      up2date", and the stage is done. So the launcher's `update` and
+      `run --update` (and `ufbt flash_usb`, and the window's Update) keep
+      the radio stage of a package whose stack is the device's: the five
+      firmwares' packages, on a device with the default stack. Another
+      stack's stage is still left out, as before. `--keep-radio` keeps it on
+      a device with no stack, where the updater stops at it ("CRC mismatch
+      #[3-99]"); on a device that runs another stack the launcher refuses
+      it, because that updater has CPU2 restart into its FUS (the second
+      `FUS_GET_STATE`), which comes with part 3. Tried without the launcher,
+      the official package put on the card as it is and `update install` at
+      the CLI, on a device with 1.19.0: "Restarting to FUS", and ten seconds
+      later "[CRASH] Waiting for FUS->radio stack transition", at every
+      start, for as long as one waits. `run --radio-stack none` then has the
+      updater stop at "CRC mismatch #[3-99]", and a held Back starts the
+      firmware (DEVELOPING's "When it goes wrong"). `update_check.py`
+      restarts its device with no stack for its part with the stage kept.
+    - Start-up is 0.8 to 0.9 s longer than with the FUS alone, on the same
+      device and firmware at the debug log level: the desktop's animation
+      was chosen at 3.3 s of uptime against 2.6 s, the CLI started at 3.9 s
+      against 3.0 s. The reinit is the difference. Under load (other
+      programs busy) the reinit took 3.2 to 3.8 s from "Reset SHCI" to
+      "Start BT initialization": samples of CPU1's PC through the monitor in
+      that time are in the card's SPI transfers, `xEventGroupWaitBits()`
+      (`furi_timer_flush()`, which waits for the timer task as the threads
+      that the reinit stops free their timers) and the scheduler. CPU1 works
+      in that time; it does not wait for CPU2. The idle cost is the same
+      with the stack and without (29 % of a host core).
+    - The smoke test failed more often today than in the runs at night, with
+      the stack and without: in four runs in turn (with, without, with,
+      without) 6, 1, 1 and 6 of 28 failed. The Metakom read failed in all
+      four, as 136 has it; the runs with six also lost NFC's four checks,
+      and one more for a crash. On a device of its own, eight rounds of the
+      smoke test's Metakom step (`ikey emulate Metakom` for 1.5 s and
+      Ctrl+C, then `ikey read` for 15 s with the key on the contact): no
+      read, and the CLI answered again after 1 to over 60 s, so the steps
+      after it time out. It is not the stack's: it goes with the plan's item
+      on checks that hold up on a busy machine.
+    - Not there: a radio (nothing goes into the air), connections and
+      pairing, the bonds in CPU1's RAM, the FUS installing or deleting a
+      stack. Not tried: an app's own BLE profile (the BLE remote), the extra
+      beacon apps, qFlipper.
+    - The checks, with CPU2's restart at once. `scripts/ble_check.py` (new):
+      10 on the five firmwares. `update_check.py`: 34 on the official 1.5.1,
+      on Unleashed and on the official dev build with their own packages
+      (one more than before: the device started again with no stack for the
+      part with the stage kept; that part sends no file again now, the radio
+      stage's neither, where it sent two). Its first run on Unleashed had
+      33: the new restart waited for the log's "Startup complete", and
+      Unleashed's updater leaves the log level at none; it waits at the CLI
+      now. `ufbt_check.py`: 31, with `ufbt flash_usb` sending the SDK's
+      package with its radio stage and the updater finding the stack up to
+      date. On the official 1.5.1: `snapshot_check.py` 68,
+      `enclave_check.py` 35, `files_check.py` passes, `u2f_check.py` 39.
+      Before that change, with the stack and CPU2 restarting 5 ms after the
+      write: `snapshot_check.py` 66 on Momentum, Unleashed and RogueMaster
+      and 68 on the dev build (the enclave app's step skipped on each),
+      `keystore_check.py` 45, `setup_check.py` 36, and on the official 1.5.1
+      `spi_check.py` 45, `gpio_check.py` 111, `uart_check.py` 79,
+      `i2c_check.py` 66, `app_check.py` 32, `gdb_check.py` 30 and
+      `wait_check.py` 38 (and `spi_check.py` 30 on Momentum and 25 on the
+      dev build, `gpio_check.py` 82 on RogueMaster, `wait_check.py` 40 on
+      the dev build, `u2f_check.py` 39 on Unleashed). The window's check
+      failed steps then under load (a load average of 10 to 16): its first
+      click on the official 1.5.1, four early steps on Unleashed, as 137 has
+      it for a busy machine. Still running as this is written: the update
+      check with Momentum's and RogueMaster's packages and from the official
+      firmware to Unleashed and to the dev build, and the window's check.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

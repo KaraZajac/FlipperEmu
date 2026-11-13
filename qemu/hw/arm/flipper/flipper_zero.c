@@ -224,6 +224,7 @@ struct FlipperZeroState {
     Notifier done_notifier;
     char *nvram;                 /* battery-backed state file */
     char *enclave;               /* the FUS's key store (flipper_enclave.c) */
+    char *radio_stack;           /* CPU2's wireless stack: a version, "none" */
     QEMUTimer *halt_watch;       /* has the firmware halted? */
     uint32_t halt_at;            /* where, when it last looked (0: it has not) */
     bool halt_rest;              /* ... and the CPU rests because of it */
@@ -2171,6 +2172,9 @@ static void flipper_zero_init(MachineState *machine)
     if (s->enclave) {
         qdev_prop_set_string(soc, "fus-keys", s->enclave);
     }
+    if (s->radio_stack) {
+        qdev_prop_set_string(soc, "radio-stack", s->radio_stack);
+    }
     sysbus_realize(SYS_BUS_DEVICE(&s->soc), &error_fatal);
     flipper_provision(s, uid64);
 
@@ -2368,6 +2372,20 @@ static void flipper_set_enclave(Object *obj, const char *value, Error **errp)
 
     g_free(s->enclave);
     s->enclave = *value ? g_strdup(value) : NULL;
+}
+
+static char *flipper_get_radio_stack(Object *obj, Error **errp)
+{
+    return g_strdup(FLIPPER_ZERO(obj)->radio_stack);
+}
+
+static void flipper_set_radio_stack(Object *obj, const char *value,
+                                    Error **errp)
+{
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+
+    g_free(s->radio_stack);
+    s->radio_stack = *value ? g_strdup(value) : NULL;
 }
 
 static char *flipper_get_usb_serial(Object *obj, Error **errp)
@@ -2628,6 +2646,12 @@ static void flipper_zero_class_init(ObjectClass *oc, const void *data)
     object_class_property_set_description(oc, "enclave",
         "File keeping the secure enclave's keys; made with FlipperEmu's own "
         "factory keys if it doesn't exist");
+    object_class_property_add_str(oc, "radio-stack", flipper_get_radio_stack,
+                                  flipper_set_radio_stack);
+    object_class_property_set_description(oc, "radio-stack",
+        "The wireless stack that CPU2 has installed and runs: its version "
+        "(default 1.20.0, BLE Light, as the update packages carry it), or "
+        "'none': a FUS with no stack");
     object_class_property_set_description(oc, "name",
         "Device name programmed into OTP (max 8 chars)");
 }

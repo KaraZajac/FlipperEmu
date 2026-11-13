@@ -86,7 +86,7 @@ class Bench:
                 and "pplication" in lines[0]
                 and lines[1].startswith("Uptime:")), r.stdout + r.stderr
 
-    def start(self, first=False, wait=True):
+    def start(self, first=False, wait=True, more=()):
         self.dir.mkdir(parents=True, exist_ok=True)
         if self.uart.exists():          # each run its own log
             self.uart.rename(self.dir / f"uart-run{self.runs}.log")
@@ -95,6 +95,7 @@ class Bench:
                "--headless", "--audio", "none", "--serial", f"file:{self.uart}"]
         if first:
             cmd += ["-f", self.firmware]
+        cmd += [str(a) for a in more]   # (more words for `run`)
         self.log = open(self.dir / "qemu.log", "ab")
         self.proc = subprocess.Popen(cmd, stdout=self.log, stderr=subprocess.STDOUT)
         if not wait:                    # (wait_check.py: the launcher's `wait`)

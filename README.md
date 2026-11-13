@@ -212,8 +212,11 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
   key, registers and logs in for a host (`scripts/fe_u2f.py`, over USB/IP). The keys
   persist in `devices/NAME/enclave.keys`;
   `./flipperemu enclave` shows them and computes what the firmware encrypts.
-- CPU2 modelled as ST's FUS with no wireless stack. That's a real device state, and it
-  keeps the BT paths healthy.
+- Bluetooth up to the radio: CPU2 runs ST's BLE stack, as on a Flipper from the
+  factory (1.20.0, BLE Light, the stack that the update packages carry). The firmware
+  starts it, Settings > Bluetooth switches it on and off, the Flipper advertises under
+  its name, and the firmware's GATT services are in the stack. `status` says what it
+  does. No radio: nothing goes into the air, and no phone or computer connects yet.
 - gdb on a device that runs, with the firmware's symbols and those of the apps it
   loads: a breakpoint in an app's code, and a stop at a crash. `gdb --vscode` writes
   the debug configuration for VS Code into the app's folder.
@@ -224,17 +227,18 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
   (`./flipperemu snapshot save`, `snapshot load`).
 
 **Not yet** (see [PLAN.md](PLAN.md))
-- qFlipper's firmware *update* includes a radio-stack stage that the emulated CPU2
-  cannot install (the updater stops there with "CRC mismatch #[3-99]"); use
-  `./flipperemu update`, or `run --update` for a device that does not run: both leave
-  that stage out.
-- Bluetooth (needs a radio stack).
+- Another radio stack than the one CPU2 has (1.20.0, the stack of the five firmwares'
+  update packages, unless `run --radio-stack` names another): the emulated CPU2
+  installs none. `./flipperemu update` and `run --update` leave such a package's radio
+  stage out (the plan's Bluetooth item, part 3).
+- Bluetooth beyond the stack: a phone or a computer that connects, pairing (the next
+  part of the plan's Bluetooth item).
 - NFC: Ultralight C, ISO14443-4 (DESFire, bank cards), ISO14443B, ISO15693 and FeliCa
   cards. When the Flipper emulates a MIFARE Classic, the virtual reader gets as far as
   its UID, ATQA and SAK: the Crypto1 answers go out through a bit-banged pin that the
   model does not decode.
 - Not yet exercised: XIP app loaders that run code from internal flash, and the
-  radio-stack stage of updates (the emulated CPU2 can't install a stack).
+  radio-stack stage of updates (the emulated CPU2 can't install another stack).
 - The window has been checked off-screen (Qt's offscreen platform, `scripts/gui_check.py`),
   not yet by hand on a desktop session.
 - DFU mode (Left held through a reboot) shows the firmware's DFU splash, but there is
@@ -446,6 +450,7 @@ picture of the save to the pixel and the tag, and goes on with Pause.
 | `run --update PKG` | install an update package through the firmware's own updater (keeps settings and files) |
 | `update PKG [--cli] [--keep-radio] [--no-wait] [--timeout S]` | the same on a device that runs: the package is written to its card, which is out of its slot for that moment (`--cli`: sent through the firmware's CLI), and the launcher waits until the Flipper is back |
 | `run --unplugged` \| `run --battery PERCENT` \| `run --gtk` | start on battery (USB cable out); with this charge; in QEMU's own window (the bare LCD) |
+| `run --radio-stack none` \| `run --radio-stack VERSION` | start with no wireless stack on CPU2 (a FUS alone: no Bluetooth), or with another version of the BLE stack than 1.20.0 |
 | `stop` | shut a running device down cleanly (saves its NVRAM) |
 | `gui [--scale N]` | the window that looks like a Flipper, for a device that runs already |
 | `status [--json]` | what is plugged into a running device and held to it; whether its firmware has halted, or has started again after a crash |
@@ -775,9 +780,9 @@ app. `./flipperemu fbt …` does the same for the `fbt` of the firmware tree you
 
 Targets that talk to the Flipper over USB work as on a real one: `launch`, `cli`,
 and `fbt flash_usb`. `ufbt flash_usb` sends the SDK's update package, which has a radio
-stack in it that the emulated second core cannot install: the launcher installs that
-package itself, without the stage (`./flipperemu update`,
-[below](#updating-like-qflipper-does)).
+stack in it: the launcher installs that package itself (`./flipperemu update`,
+[below](#updating-like-qflipper-does)), with its radio stage when that stack is the
+device's, and without it when it is another.
 Targets that go through a debug probe (`flash`, `debug`, `blackmagic`, …) are refused,
 with the launcher's command for it, and so is `fbt flash_usb_full`, which builds a
 package with a radio stack and sends it in one go.
@@ -989,7 +994,7 @@ The launcher waits for it and says what runs at the end:
 
 ```console
 $ ./flipperemu -d mine update firmware/official-1.5.1/flipper-z-f7-update-1.5.1.tgz
-[mine] 1.5.1 (2.5 MB, without its radio stage) goes to /ext/update/f7-update-1.5.1
+[mine] 1.5.1 (2.6 MB; its radio stack 1.20.0 is the device's: the updater finds it up to date) goes to /ext/update/f7-update-1.5.1
 [mine] its card is out of the slot for a moment: the package is written to its image
   f7-update-1.5.1/firmware.dfu -> /ext/update/f7-update-1.5.1/firmware.dfu (771593 bytes)
   …
@@ -1017,9 +1022,18 @@ is not sent again.
 The package is a `.tgz`, the folder that was in one (`dist/f7-D/f7-update-local` of a
 firmware tree, ufbt's `current/f7-update-*`), or its `update.fuf`.
 `./flipperemu ufbt flash_usb` is this command with the SDK's package. `--no-wait`
-leaves when the updater has started. `--keep-radio` leaves the radio stage in, for a
-look at what the updater does with it: it stops, the launcher says so within seconds,
-and a held Back (`press --hold 1500 back`) starts the firmware that is there.
+leaves when the updater has started.
+
+A package's radio stage stays in when its stack is the one that the device's CPU2
+runs: the updater finds that stack up to date and goes on, as on a Flipper whose stack
+is current. The five firmwares' packages have the stack that a device gets unless
+`run --radio-stack` names another (1.20.0). A stage with another stack is left out,
+because the emulated CPU2 installs none. On a device with no stack
+(`run --radio-stack none`), `--keep-radio` leaves it in, for a look at what the
+updater does with it: it stops, the launcher says so within seconds, and a held Back
+(`press --hold 1500 back`) starts the firmware that is there. On a device with another
+stack the launcher refuses `--keep-radio`: that updater would have CPU2 restart into
+its FUS, which the emulator does not do yet.
 
 An updater decides on the firmware's log level when it is done, on a real Flipper too:
 the official one sets the default, the other three set none, and the log is silent
@@ -1041,13 +1055,12 @@ this does it, for a device that runs and for one that is stopped:
 ```
 
 `scripts/update_check.py FIRMWARE [--package PKG]` checks all of that on a throwaway
-device (33 checks: the official firmware, its dev build, Momentum, Unleashed and
-RogueMaster with their own packages, and the official one updated to Unleashed and to
-the dev build).
+device (34 checks), with each firmware's own package or with another one: the official
+firmware updated to Unleashed and to the dev build.
 
 | | |
 |:-:|:-:|
-| ![ota](docs/img/10-ota-writing-flash.png) | The stock updater writing the emulated flash. The radio stage of the package is left out: the emulated CPU2 is a FUS without a radio stack and can't install one. |
+| ![ota](docs/img/10-ota-writing-flash.png) | The stock updater writing the emulated flash. Before that it found the package's radio stack up to date: the emulated CPU2 runs that stack. |
 
 ### USB: CLI, RPC and Bad USB
 
@@ -2560,6 +2573,26 @@ it says `Found Winbond device` and `Device ID: W25Q32`.
 `scripts/setup_qemu.sh` once more**, for the patch and for the machine's side of all
 this (the bus by its name, the chip selects, what was clocked). On an emulator that
 was built before, `spi` says that it needs a newer one.
+
+### Bluetooth
+
+CPU2 runs ST's BLE stack, as on a Flipper from the factory: version 1.20.0, BLE Light,
+the stack that the five firmwares' update packages carry. The firmware starts it at
+every start, and what asks for Bluetooth works up to the radio: Settings > Bluetooth
+switches it on and off (it is off on a new Flipper, as on a real one), the Flipper
+advertises under its name, and its GATT services (the phone app's serial service, the
+battery, the device information) are in the stack. `status` says what the stack does:
+
+```
+$ ./flipperemu -d bletry status
+…
+bluetooth: the radio stack 1.20.0 runs; advertising as "Flipper bletry"; 5 GATT services; its address 80:E1:26:54:47:B7
+```
+
+There is no radio: nothing goes into the air, and no phone or computer can connect yet.
+`run --radio-stack none` starts a Flipper whose CPU2 has no stack, which is a real
+device's state too: the firmware says "Stack isn't installed!" and has no Bluetooth.
+How the stack is modelled: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#the-ble-stack-stm32wb55_blec).
 
 ### The secure enclave
 

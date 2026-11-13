@@ -17,7 +17,7 @@ it; the file comments name that function. Register layouts come from RM0434 and 
         ┌───────────────┴──────────────────────────────────────────┐
   stm32wb55_soc.c  (SoC: memory map, NVIC lines, DMA requests, GPIO fan-out)
         │   Cortex-M4F (QEMU armv7m, 63 IRQs, MPU, FPU)
-        │   rcc pwr flash hsem ipcc(+CPU2, FUS key store) aes×2 exti syscfg rtc
+        │   rcc pwr flash hsem ipcc(+CPU2: FUS, BLE stack) aes×2 exti syscfg rtc
         │   lptim×2 spi×2 i2c×2 dma(+dmamux) rng dwt dbgmcu usb(+virtual host) tim2
         │   adc comp×2
         │   gpio×6 usart1 lpuart1 (QEMU L4x5 models)
@@ -82,8 +82,8 @@ the port (BRINGUP_LOG 104).
 
 New devices use the firmware's default Sleep Method, **STOP2**. Before stopping, CPU1 asks
 CPU2 (`SHCI_C2_SetSystemClock`) to move SYSCLK from PLL to HSE, and back to PLL after
-waking. The CPU2 model performs that switch on the RCC. It's the one radio-stack command
-it answers: without it, `furi_hal_power_deep_sleep()` returns before its WFI, and the
+waking. The CPU2 model performs that switch on the RCC, with a stack or without one:
+without it, `furi_hal_power_deep_sleep()` returns before its WFI, and the
 idle task spins at 100 % of a host core. Updates clear the firmware's legacy-sleep flag,
 so every updated device takes this path. `--legacy-sleep` starts a new device with Sleep
 Method = Legacy (light sleep only). Either way, timekeeping holds: RTOS uptime matches
@@ -155,26 +155,101 @@ for a device only when it is idle, and would give the START to the device that h
 it, whatever the address. So the first device is told of a STOP that the wire did
 not have.
 
-## CPU2: ST FUS without a wireless stack (`stm32wb55_ipcc.c`)
+## CPU2: ST's FUS and its BLE stack (`stm32wb55_ipcc.c`)
 
-CPU2 runs ST's closed radio firmware, so it's modelled by behaviour instead:
-- `PWR_CR4.C2BOOT` (set by `HW_IPCC_Enable()`) boots it after 5 ms.
-- It writes `MB_FUS_DeviceInfoTable_t` (FUS 1.2.0, no stack, UID64) where the
-  transport table at SRAM2A + 4·`IPCCBR` points.
-- It links an `SHCI_SUB_EVT_CODE_READY / FUS_FW_RUNNING` event into CPU1's
-  system queue (spare buffer from the memory-manager table) and raises IPCC channel 2.
+CPU2 runs ST's closed radio firmware, so it's modelled by behaviour instead. As on a
+Flipper from the factory it has a wireless stack and runs it: ST's BLE Light 1.20.0, the
+stack that the update packages of the five firmwares here carry (their manifests say
+`Radio version: 01 14 00 00 02 03`). The machine's `radio-stack=VERSION` gives it
+another version of that stack, and `radio-stack=none` (`run --radio-stack none`) a FUS
+with no stack, which is a real device's state too.
+- `PWR_CR4.C2BOOT` (set by `HW_IPCC_Enable()`) boots it after 5 ms. With a stack it
+  writes `MB_DeviceInfoTable_t` (the SafeBoot, FUS 1.2.0 and stack versions, the stack's
+  type and its 29 pages of flash) where the transport table at SRAM2A + 4·`IPCCBR`
+  points, and links an `SHCI_SUB_EVT_CODE_READY / WIRELESS_FW_RUNNING` event into CPU1's
+  system queue. Without one it writes `MB_FUS_DeviceInfoTable_t` (no stack, UID64) and
+  says `FUS_FW_RUNNING`. (`SHCI_GetWirelessFwInfo()` tells the two tables apart by the
+  FUS's keyword in the first word.)
 - System commands are answered synchronously in the command buffer: `FUS_GET_STATE` →
-  idle, `SET_SYSTEM_CLOCK` → the clock switch STOP2 needs (see Clocks and time), the four
-  key commands → the key store (next section), and everything else → status 0x01, as a
-  FUS with no stack would. The answer is a command-complete event in the form of
-  AN5185 6.3.4 (NumHCI 0xFF, the opcode, the status, then any payload). It is written
-  over the command, so the command's payload is copied out first.
-- Buffers released on channel 4 are taken back.
+  idle (the stack does not know it: 0xFF), `SET_SYSTEM_CLOCK` → the clock switch STOP2
+  needs (see Clocks and time), the four key commands → the key store (next section), and
+  with a stack also `BLE_INIT`, `C2_CONFIG` (where its bonds are to go), the two flash
+  commands and `C2_REINIT`. Everything else → status 0x01, as the FUS refuses. The
+  answer is a command-complete event in the form of AN5185 6.3.4 (NumHCI 0xFF, the
+  opcode, the status, then any payload). It is written over the command, so the
+  command's payload is copied out first.
+- `C2_REINIT` (the firmware sends it when it changes its BLE profile,
+  `furi_hal_bt_reinit()`, and once at every start): CPU2 restarts its firmware when CPU1
+  next enables the IPCC, which sets `C2BOOT` again. That set changes nothing in the
+  register, so the PWR model reports every write that sets it. This restart is at once
+  (the 5 ms of a cold boot are for CPU1's event thread, which does not run yet then):
+  the reinit lets go of core 2's lock right after that write, and a key load that
+  waited for the lock has to find CPU2 alive (below). The IPCC's channels are as a
+  reset leaves them (CPU1 switched its clock off and on), and the stack starts from
+  nothing.
+- Buffers released on channel 4 are taken back (next sections).
 
-The firmware reacts exactly as on a stackless device: "C2 boot completed, mode: FUS",
-"Stack isn't installed!", "Radio stack start failed". A **dead** CPU2 is not an option:
-`furi_hal_crypto_enclave_load_key()` leaks its mutex when BT isn't alive, and the desktop
-then deadlocks.
+The firmware's log with a stack: "C2 boot completed, mode: Stack", "Core2: Stack:
+1.20.0, branch 0, reltype 2, stacktype 3, flash 29 pages", "Radio stack started".
+Without one: "Stack isn't installed!", "Radio stack start failed". A **dead** CPU2 is
+not an option: `furi_hal_crypto_enclave_load_key()` leaks its mutex when BT isn't alive,
+and the desktop then deadlocks. Nor is a CPU2 that is not alive yet when the reinit
+lets go of core 2's lock: an `info device` that waited for the lock kept the mutex, and
+the CLI hung for good (BRINGUP_LOG 138).
+
+## The BLE stack (`stm32wb55_ble.c`)
+
+What CPU1 sees of ST's stack is commands and events: HCI commands, most of them ST's own
+(ACI, OGF 0x3F), in the BLE table's command buffer with IPCC channel 1, each answered by
+a Command Complete or a Command Status event in the BLE event queue, with channel 1 the
+other way. The model answers the commands that the Flipper firmwares send (some forty,
+the same on the five here) as ST's stack answers them, with what each returns
+(`aci_gap_init` the GAP service's handles, `aci_gatt_add_service` the service's, …),
+and keeps what they build:
+- **The GATT database.** `aci_gatt_init` puts the GATT service in it (Service Changed),
+  `aci_gap_init` the GAP service (Device Name, Appearance, a peripheral's preferred
+  connection parameters), and the firmware its own: on 1.5.1 its serial service (the
+  phone app's RPC), the battery and the device information, five services with 41
+  attributes. A service has the range of handles that `Max_Attribute_Records` asks for.
+  A characteristic is its declaration, its value at the next handle and a CCCD after
+  that if it notifies or indicates (the firmware's services look for writes at those
+  handles); a descriptor takes the next free one. Values are kept with their lengths
+  (`aci_gatt_update_char_value`, `…_ext` for a long one).
+- **GAP.** The role, the public address (`aci_hal_write_config_data`), whether it
+  advertises (`aci_gap_set_discoverable`, `…_non_discoverable`) with the type, the
+  intervals, the local name, the service UUIDs and the scan response, the IO capability
+  and the authentication requirements, the TX power, the extra beacon on or off.
+- What needs a connection is answered as ST's stack answers it with none:
+  `aci_gap_terminate`, the security request and the connection parameter update with a
+  Command Status "unknown connection", `hci_le_read_phy` likewise. The radio's tests (a
+  tone, a receiver) start and stop and hear nothing.
+- A command that is none of these is answered as done, with the status alone: an answer
+  that is shorter than the caller's structure fills what it has (`hci_tl.c` copies the
+  MIN of the two lengths into a structure the caller zeroed). It is named once in QEMU's
+  log of what is not done (`-d unimp`).
+
+**The events' buffers.** A command's answer goes back in a buffer of the command's own:
+a Command Complete over the command in its buffer, a Command Status in the BLE table's
+CS buffer. CPU1 gives neither back (`hci_send_req()` keeps nothing). A first version
+took the answers from CPU1's pool of event buffers, and the pool's five buffers were
+gone after five commands. The other events (none yet: they come with connections) go
+into that pool (`MB_MemManagerTable_t.blepool`, five buffers of 268 bytes in 1.5.1) or
+its spare, and come back through the free queue (channel 4). An event waits in the model
+while its buffer is busy and while CPU1 has not cleared the channel's flag: CPU1 clears
+it after it has emptied the queue, so it misses none.
+
+**`status`** has a row of the stack, from a property (`/machine/soc/ipcc` `ble`, JSON):
+its version, what CPU2 runs, whether the firmware has started BLE, whether it advertises
+and as what, its address (80:E1:26 is Flipper Devices' block of addresses), the number
+of services and attributes.
+
+**A saved state** has the stack's whole state, in the IPCC's section: the database, GAP,
+the buffers that CPU1 has and the events that wait.
+
+Not there: a radio, so nothing goes into the air and no phone or computer can connect;
+connections, pairing and the bonds that the stack keeps in CPU1's RAM (`C2_CONFIG`'s
+address is noted); the FUS's deleting and installing of a stack (an update whose stack
+is another version).
 
 ## The secure enclave (`stm32wb55_fus.c`, `stm32wb55_aes.c`, `flipper_enclave.c`)
 
@@ -456,10 +531,11 @@ reset hook, which does what silicon does around the core's reset:
    telling anyone, which left the LCD's A0 line stuck high after warm resets.
 
 `./flipperemu run --update PKG` stages an update package on the SD card as qFlipper
-does, then sends `update install` over the USB CLI. The emulated CPU2 can't install a
-radio stack, so the launcher blanks the package's radio stage. It keeps every manifest
-line, because the firmware reads the manifest's optional keys in order and stops at the
-first missing one.
+does, then sends `update install` over the USB CLI. The emulated CPU2 runs one radio
+stack and installs no other, so the launcher keeps the package's radio stage only when
+its stack is the one that the device runs (the updater finds it up to date), and
+blanks it otherwise. A blanked stage keeps every manifest line, because the firmware
+reads the manifest's optional keys in order and stops at the first missing one.
 
 `./flipperemu update PKG` is for a device that runs, whose card image is the firmware's
 to write and not the launcher's. So the launcher takes the card out first: the

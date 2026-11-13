@@ -60,7 +60,9 @@ static void wb55_pwr_write(void *opaque, hwaddr addr, uint64_t val64,
         s->regs[R_SR1] &= ~val; /* clear wakeup flags */
         break;
     case R_CR4:
-        if ((val & CR4_C2BOOT) && !(s->regs[idx] & CR4_C2BOOT)) {
+        /* each write that sets it: a CPU2 that was told to reinit waits
+         * for CPU1 to enable the IPCC again (stm32wb55_ipcc.c) */
+        if (val & CR4_C2BOOT) {
             qemu_irq_raise(s->c2boot);
         }
         s->regs[idx] = val;

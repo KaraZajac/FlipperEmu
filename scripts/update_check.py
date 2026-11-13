@@ -14,13 +14,16 @@ firmware's CLI.  What is looked at: the card is in again and the firmware
 has it; the launcher waits until the Flipper is back and says what runs on
 it; a file that was on the card is still there; the emulator's own Sub-GHz
 keystores (keystores/overlay) are on the card again, after the updater
-unpacked the package's over them; the manifest on the card has no radio
-stage; nothing crashed.  Then with the radio stage left in,
-which the emulated second core cannot install, and through the firmware's
-CLI as a real Flipper gets a package (`--cli`): the files that are on the
-card are not sent again (what the launcher wrote to the image is what the
-firmware reads there), the updater's error is seen and said with the way
-out of it, and that way works.  That is done with the firmware's log level
+unpacked the package's over them; the manifest on the card has its radio
+stage, whose stack is the device's (CPU2 runs the update packages' own), and
+the updater found that stack up to date; nothing crashed.  Then on the
+Flipper started with no radio stack (`run --radio-stack none`), with the
+radio stage left in (`--keep-radio`), which the emulated second core cannot
+install, and through the firmware's CLI as a real Flipper gets a package
+(`--cli`): the files that are on the card are not sent again (what the
+launcher wrote to the image is what the firmware reads there), the
+updater's error is seen and said with the way out of it, and that way
+works.  That is done with the firmware's log level
 at none, where the updater would say nothing: the launcher lends it another
 level, and gives the old one back.  And what is refused: a folder and a file
 that are no package, a Flipper with its cable pulled or its card out, one
@@ -274,11 +277,18 @@ def update_checks(b, pkg, work, other):
     else:
         print("  (no keystores/overlay here: not looked at)")
     code, text2 = b.fe("cli", f"storage read /ext/update/{name}/update.fuf")
-    check("the manifest on the card: no radio stage, and its keys in place",
-          code == 0 and re.search(r"(?m)^Radio: *\r?$", text2)
-          and "Radio version: 00 00 00 00 00 00" in text2
-          and "Radio address:" in text2 and "Resources:" in text2
-          and "without its radio stage" in text, text2)
+    if radio:
+        check("the manifest on the card has its radio stage, whose stack is "
+              "the device's, and the updater found that stack up to date",
+              code == 0 and re.search(r"(?m)^Radio: *\S", text2)
+              and "Radio address:" in text2 and "Resources:" in text2
+              and "is the device's: the updater finds it up to date" in text
+              and "Stack version is up2date" in b.uart_text(),
+              text2 + text[-600:])
+    else:
+        check("the manifest on the card: no radio stage, and its keys in "
+              "place", code == 0 and re.search(r"(?m)^Radio: *\r?$", text2)
+              and "Radio address:" in text2 and "Resources:" in text2, text2)
     code, text2 = b.fe("status")
     check("status: the firmware, as installed by update",
           code == 0 and "(installed by update)" in text2, text2)
@@ -294,6 +304,17 @@ def update_checks(b, pkg, work, other):
               "tried)")
         return ours, after
 
+    # a Flipper with no radio stack: the updater would install the package's,
+    # which the emulated CPU2 cannot, and stops there
+    # (waited for at its CLI: an updater may have left the log level at
+    # none, and then "Startup complete" is not logged)
+    b.stop()
+    started = b.start(wait=False, more=("--radio-stack", "none"))
+    code, text = b.fe("wait", "--timeout", 180, timeout=240)
+    check("started again with no radio stack (`run --radio-stack none`)",
+          started and code == 0
+          and "no radio stack installed" in b.fe("status")[1],
+          text + b.uart_text()[-800:])
     # at this level the updater says nothing, and its error would not be
     # seen: the launcher lends it one for as long as it works
     code, text = b.fe("log", "--set-level", "none")
@@ -304,11 +325,12 @@ def update_checks(b, pkg, work, other):
     took = time.time() - start
     sent = re.findall(r"^  \S+ -> /ext/update/\S+/(\S+) \(", text, re.M)
     check("with the radio stage kept, and through the CLI: the files that "
-          "were written to the card's image are the same to the firmware, and "
-          f"not sent again (sent: {', '.join(sent)})",
+          "were written to the card's image (its radio stage too: the stack "
+          "was the device's) are the same to the firmware, and not sent "
+          f"again (sent: {', '.join(sent) or 'none'})",
           "through the Flipper's CLI" in text and "out of the slot" not in text
-          and "(unchanged)" in text and "radio.bin" in sent
-          and "firmware.dfu" not in sent, text)
+          and re.search(r"radio\.bin = /ext/update/\S+/radio\.bin "
+                        r"\(unchanged\)", text) and not sent, text)
     check("... and the updater's error is seen, with a log level lent to it, "
           f"and said with the way out ({took:.0f} s)",
           code == 1 and "stopped at an error" in text

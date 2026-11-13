@@ -18,8 +18,9 @@ closed and the new one started; its crash is in the log, and the Flipper
 restarts.  Then `ufbt cli` in a terminal of its own, with a command typed
 and a second command kept waiting; the targets that are refused, because
 they go to a debug probe; `ufbt flash_usb`, which the launcher does itself,
-with the SDK's update package less its radio stack; and what a stopped
-device takes.  Then the app's own test, examples/hello/test.sh, which has a
+with the SDK's update package and its radio stage, whose stack is the
+device's (the updater finds it up to date); and what a stopped device
+takes.  Then the app's own test, examples/hello/test.sh, which has a
 device of its own and goes by `wait`: the log's lines and the screen as text.
 Exit status 0 = pass.
 
@@ -194,19 +195,20 @@ def flash_usb_checks(b, folder):
     start = time.time()
     code, text = tool(b, folder, "flash_usb")
     m = re.search(r"updated in (\d+) s: it runs (\S+)", text)
-    check("`ufbt flash_usb`: the launcher sends the SDK's package without "
-          "its radio stack, and the firmware installs it "
-          f"({time.time() - start:.0f} s)",
+    check("`ufbt flash_usb`: the launcher sends the SDK's package with its "
+          "radio stage, whose stack is the device's, and the firmware "
+          f"installs it ({time.time() - start:.0f} s)",
           code == 0 and m and "radio stack" in text
-          and "without its radio stage" in text
+          and "is the device's: the updater finds it up to date" in text
           and "Traceback" not in text, text[-2500:])
     ok, text = b.answers()
     check("and its CLI answers after that", ok, text)
     log = b.uart_text()
     at = log.rfind("UpdWorker")
     crash = CRASH.search(log, at) if at >= 0 else None
-    check("no crash in the firmware's log while it updated", at >= 0 and
-          not crash, log[-1500:])
+    check("no crash in the firmware's log while it updated, and its "
+          "updater found the radio stack up to date", at >= 0 and not crash
+          and "Stack version is up2date" in log, log[-1500:])
 
 
 def stand_in_tree(work):

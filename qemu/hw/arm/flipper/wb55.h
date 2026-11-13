@@ -198,14 +198,102 @@ typedef struct WB55FusKey {
     uint8_t data[32];            /* the key itself, decrypted if it came so */
 } WB55FusKey;
 
+/*
+ * CPU2's BLE stack, behavioural (stm32wb55_ble.c): what ST's wireless
+ * firmware keeps for CPU1, its GATT database and its GAP state, and the
+ * events on their way to CPU1.  Sized above what the Flipper firmwares ask
+ * of the stack in SHCI_C2_BLE_Init (8 services, 68 attribute records, 1344
+ * bytes of values in 1.5.1).
+ */
+#define WB55_BLE_SERVICES    24
+#define WB55_BLE_ATTRS       192
+#define WB55_BLE_VALUES      4096
+#define WB55_BLE_SLOTS       16      /* event buffers in CPU1's pool, at most */
+#define WB55_BLE_PENDING     8       /* events waiting for a buffer */
+#define WB55_BLE_EVT_LEN     255     /* an event's parameters, at most */
+
+enum { WB55_BLE_ATTR_FREE, WB55_BLE_ATTR_SERVICE, WB55_BLE_ATTR_CHAR,
+       WB55_BLE_ATTR_VALUE, WB55_BLE_ATTR_CCCD, WB55_BLE_ATTR_DESC };
+
+typedef struct WB55BleAttr {
+    uint16_t handle;
+    uint16_t service;            /* its service's declaration */
+    uint8_t kind;                /* WB55_BLE_ATTR_*: FREE is an unused record */
+    uint8_t uuid_type;           /* 1: 16 bits, 2: 128 bits */
+    uint8_t uuid[16];            /* as the command has it, little-endian */
+    uint8_t props;               /* a characteristic's properties */
+    uint8_t perms;               /* security permissions */
+    uint8_t evt_mask;            /* GATT_Evt_Mask: what CPU1 hears of */
+    uint8_t variable;            /* its value's length may change */
+    uint16_t max_len;            /* room for its value */
+    uint16_t len;                /* its value's length */
+    uint16_t at;                 /* where its value is in WB55BleState.values */
+} WB55BleAttr;
+
+typedef struct WB55BleService {
+    uint16_t handle;             /* its declaration; 0: a free entry */
+    uint16_t last;               /* the last handle of its range */
+    uint16_t next;               /* the next handle that is free in it */
+} WB55BleService;
+
+/* where an event goes: which buffer of CPU1's, and so which channel */
+enum { WB55_BLE_BUF_POOL, WB55_BLE_BUF_CMD, WB55_BLE_BUF_CS, WB55_BLE_BUF_SYS };
+
+typedef struct WB55BleEvent {
+    uint8_t buf;                 /* WB55_BLE_BUF_* */
+    uint8_t code;                /* the event code */
+    uint8_t len;                 /* the length of its parameters */
+    uint8_t data[WB55_BLE_EVT_LEN];
+} WB55BleEvent;
+
+typedef struct WB55BleState {
+    bool up;                     /* SHCI_C2_BLE_Init has been done */
+    uint16_t max_attrs, max_services, max_values;  /* what BLE_Init asked */
+    WB55BleService svc[WB55_BLE_SERVICES];
+    WB55BleAttr attr[WB55_BLE_ATTRS];
+    uint8_t values[WB55_BLE_VALUES];
+    uint16_t nattrs, values_used, next_handle;
+    /* GAP */
+    uint16_t gap_service, name_char, appearance_char;
+    uint8_t role;
+    uint8_t adv;                 /* advertising: discoverable */
+    uint8_t adv_type, own_addr_type, adv_filter;
+    uint16_t adv_min, adv_max, conn_min, conn_max;
+    uint8_t name_len;            /* the local name's AD structure, type first */
+    uint8_t name[32];
+    uint8_t uuids_len;           /* the service UUIDs' AD structure */
+    uint8_t uuids[32];
+    uint8_t scan_rsp_len;
+    uint8_t scan_rsp[31];
+    uint8_t public_addr[6];
+    uint8_t io_cap, bonding, mitm, sc, fixed_pin_used;
+    uint32_t fixed_pin;
+    uint8_t tx_high, tx_level;
+    uint8_t beacon;              /* the additional beacon is on */
+    /* SHCI_C2_Config: where the stack keeps its bonds in CPU1's RAM */
+    uint32_t nvm_ram, evt_mask1;
+    /* the event buffers (the pool and the two spares are in CPU1's RAM) */
+    uint32_t slots_busy;         /* a bit for each buffer of the pool */
+    bool spare_ble_busy, spare_sys_busy;
+    WB55BleEvent pending[WB55_BLE_PENDING];
+    uint8_t npending;
+    uint32_t unknown_log;
+} WB55BleState;
+
 struct WB55IpccState {
     SysBusDevice parent_obj;
     MemoryRegion mmio;
     qemu_irq irq_rx, irq_tx;
     uint32_t c1cr, c1mr, c1toc2sr, c2cr, c2mr, c2toc1sr;
-    /* behavioural CPU2: ST FUS without a wireless stack */
+    /* behavioural CPU2: ST's FUS, and a BLE stack if one is installed */
     QEMUTimer *boot_timer;
     bool c2_booted;
+    bool c2_stack;               /* it runs the stack (else the FUS) */
+    bool c2_reinit;              /* told to restart: waits for CPU1's enable */
+    char *radio_stack;           /* property: "1.20.0" (the version), "none" */
+    uint32_t stack_version;      /* its InfoTable Version word, 0: none */
+    uint8_t stack_type;          /* INFO_STACK_TYPE_BLE_*: 3 = Light */
+    WB55BleState ble;
     uint32_t fus_version;
     uint64_t uid64;
     WB55FlashState *flash;       /* IPCCBR option byte -> table address */
@@ -239,6 +327,20 @@ uint8_t wb55_fus_lock_key(WB55IpccState *s, uint8_t index);
 /* A saved state was loaded and the machine runs: the store on the host is
  * the loaded one, and AES1 has its answer again if it had one */
 void wb55_fus_loaded(WB55IpccState *s);
+
+/* stm32wb55_ipcc.c, for the stack's model */
+hwaddr wb55_ipcc_ref_table(WB55IpccState *s);
+void wb55_ipcc_update_irq(WB55IpccState *s);
+/* stm32wb55_ble.c */
+void wb55_ble_reset(WB55IpccState *s);
+uint8_t wb55_ble_init(WB55IpccState *s, const uint8_t *p, int plen);
+uint8_t wb55_ble_config(WB55IpccState *s, const uint8_t *p, int plen);
+void wb55_ble_command(WB55IpccState *s);
+void wb55_ble_post(WB55IpccState *s, int buf, uint8_t code,
+                   const uint8_t *data, int len);
+void wb55_ble_released(WB55IpccState *s, hwaddr buf);
+void wb55_ble_flush(WB55IpccState *s);
+extern const VMStateDescription vmstate_wb55_ble;
 
 /* ---------------------------------------------------------------- EXTI */
 #define TYPE_WB55_EXTI "stm32wb55-exti"
