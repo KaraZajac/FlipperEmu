@@ -41,6 +41,10 @@ you flash stays flashed, settings and files persist across runs.
   ./flipperemu spi                           the SPI bus of its header, where `run
                                              --spi w25q32@PA4` put a serial flash:
                                              the devices, what the firmware clocked
+  ./flipperemu ble scan | ble gatt | ble rpc its Bluetooth, as a phone sees it: the
+                                             advertising, its services and their
+                                             values, RPC over the air (pairing with
+                                             the PIN it shows)
   ./flipperemu reset                         reboot it, as Left + Back do on a real one
   ./flipperemu pause | continue              time stands still on it, and goes on
   ./flipperemu snapshot save NAME | snapshot load NAME
@@ -212,6 +216,7 @@ class Device:
         self.usart_sock = self.dir / "usart.sock"   # ... for pins 13 and 14
         self.subghz_sock = self.dir / "subghz.sock"     # a radio bridge (fe_sdr.py)
         self.nfc_sock = self.dir / "nfc.sock"           # a card on the link (fe_nfc_link.py)
+        self.ble_sock = self.dir / "ble.sock"           # a central: `ble` (fe_ble.py)
         self.panel_sock = self.dir / "panel.sock"       # its face: the window (fe_gui.py)
         self.held_file = self.dir / "held.json"         # names of what is held to it
         self.gdb_sock = self.dir / "gdb.sock"           # its gdb stub, once asked for
@@ -1144,6 +1149,9 @@ def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
            # and a card on the NFC link (a program, or a real reader's antenna)
            "-chardev", f"socket,id=nfc-link,path={dev.nfc_sock},server=on,wait=off",
            "-global", "st25r3916.link=nfc-link",
+           # and a central on the Bluetooth link, as a phone is: `ble`
+           "-chardev", f"socket,id=ble-link,path={dev.ble_sock},server=on,wait=off",
+           "-global", "stm32wb55-ipcc.ble-link=ble-link",
            # the front panel: the LCD, the lights and the buttons, for the
            # window drawn around them (docs/PANEL_LINK.md)
            "-chardev", f"socket,id=panel,path={dev.panel_sock},server=on,wait=off",
@@ -1555,11 +1563,54 @@ def bluetooth_text(bt):
                                 else ""))
     if not bt.get("up"):
         return f"the radio stack {bt['stack']} runs; the firmware has not started BLE"
-    return (f"the radio stack {bt['stack']} runs; "
-            + (f"advertising as \"{bt.get('name') or '?'}\"" if bt.get("advertising")
-               else "not advertising")
+    conn = bt.get("connection")
+    if conn:
+        how = ("paired" if conn.get("authenticated") else "encrypted"
+               if conn.get("encrypted") else "not paired")
+        if conn.get("pairing") not in (None, "none"):
+            how = f"pairing ({conn['pairing']})"
+        state = f"connected to {conn.get('central')} ({how}, MTU {conn.get('mtu')})"
+    elif bt.get("advertising"):
+        state = f"advertising as \"{bt.get('name') or '?'}\""
+    else:
+        state = "not advertising"
+    return (f"the radio stack {bt['stack']} runs; {state}"
             + f"; {bt.get('services', 0)} GATT services"
-            + (f"; its address {bt['address']}" if bt.get("address") else ""))
+            + (f"; its address {bt['address']}" if bt.get("address") else "")
+            + ("; a program is on its Bluetooth link (ble.sock)"
+               if bt.get("link") and not conn else ""))
+
+
+def cmd_ble(args):
+    """A running device's Bluetooth, as a phone sees it: the advertising
+    (`scan`), its services and their values (`gatt`), one value read or
+    written, and an RPC session over the air (`rpc`).  All but `scan`
+    connect and pair, with the PIN that the Flipper shows.  Nothing: what its
+    stack does, and who is connected (scripts/fe_ble.py)."""
+    import fe_ble
+    dev = Device(args.device)
+    if not dev.running():
+        sys.exit(f"[{dev.name}] not running")
+    if args.action == "status":
+        m = open_monitor(dev)
+        try:
+            bt = read_bluetooth(m)
+        finally:
+            m.close()
+        if args.json:
+            print(json.dumps(bt, indent=2))
+        else:
+            print(f"[{dev.name}] {bluetooth_text(bt)}")
+        return 0
+    if args.action in ("read", "write") and not args.what:
+        sys.exit(f"ble {args.action}: a characteristic's UUID (2a26) or "
+                 "handle (0x0012)" + (", and the bytes in hex" if
+                                      args.action == "write" else ""))
+    if not dev.ble_sock.exists():
+        sys.exit(f"[{dev.name}] has no Bluetooth link (ble.sock): an emulator "
+                 "from before 2026-11-14 started it. Stop it and run it again")
+    return fe_ble.run(dev.ble_sock, args.action, args.what, args.pin, dev.uart,
+                      args.timeout, args.json)
 
 
 def stopped(m):
@@ -2288,7 +2339,7 @@ def snapshot_load(args, dev):
             session.tidy()
             # (a QEMU that refuses a state leaves by exit(), sockets and all)
             for stale in (dev.monitor, dev.panel_sock, dev.nfc_sock,
-                          dev.subghz_sock, dev.gdb_sock):
+                          dev.subghz_sock, dev.ble_sock, dev.gdb_sock):
                 try:
                     stale.unlink()
                 except FileNotFoundError:
@@ -6102,6 +6153,27 @@ def main():
 
     p = sub.add_parser("stop", help="shut a running device down (saves its NVRAM)")
     p.set_defaults(func=cmd_stop)
+
+    p = sub.add_parser("ble", help="its Bluetooth, as a phone sees it: `ble "
+                       "scan` (the advertising), `ble gatt` (connect, pair "
+                       "with the PIN it shows, its services and their "
+                       "values), `ble read` / `ble write` one, `ble rpc` (an "
+                       "RPC session over the air: a ping, the device's "
+                       "info).  Nothing: what its stack does, and who is "
+                       "connected.  A program of your own: scripts/fe_ble.py")
+    p.add_argument("action", nargs="?", default="status",
+                   choices=("status", "scan", "gatt", "read", "write", "rpc"))
+    p.add_argument("what", nargs="*",
+                   help="read: a characteristic's UUID (2a26) or handle "
+                        "(0x0012); write: that, and the bytes in hex")
+    p.add_argument("--pin", help="the PIN that the Flipper shows when it "
+                   "pairs: its six digits; `ask` (on a terminal, the "
+                   "default); `log`: from the firmware's log (the default "
+                   "otherwise; not on a locked Flipper)")
+    p.add_argument("--timeout", type=float, default=10.0,
+                   help="seconds to wait for each answer (default 10)")
+    p.add_argument("--json", action="store_true", help="for a program")
+    p.set_defaults(func=cmd_ble)
 
     p = sub.add_parser("snapshot", help="a running device as it stands, kept "
                        "with its card and what is on its header: `snapshot "

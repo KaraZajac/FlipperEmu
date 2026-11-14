@@ -231,9 +231,34 @@ Bluetooth runs as on a real one up to the radio: `furi_hal_bt_is_alive()` and
 `furi_hal_bt_is_gatt_gap_supported()` are true, Settings > Bluetooth switches
 advertising on and off, and the services that a profile registers are in the stack.
 `./flipperemu status` has a `bluetooth` row: whether the firmware has started the
-stack, whether it advertises and under which name, how many GATT services it has. No
-phone or computer can connect yet. `run --radio-stack none` is a Flipper without a
-stack, to see what your app does on one.
+stack, whether it advertises and under which name, how many GATT services it has, and
+who is connected. `run --radio-stack none` is a Flipper without a stack, to see what
+your app does on one.
+
+A program on the computer plays the phone, through the stack's link
+(`devices/NAME/ble.sock`): `./flipperemu ble gatt` connects, pairs with the PIN that
+the Flipper shows and lists what your profile's services hold; `ble read` and
+`ble write` take one characteristic, and `ble rpc` is the phone app's RPC session. A
+test of your own goes through `scripts/fe_ble.py`:
+
+```python
+import fe_ble
+
+with fe_ble.Central("devices/NAME/ble.sock") as c:
+    c.connect()
+    c.mtu(517)
+    mark = fe_ble.log_size("devices/NAME/uart.log")
+    c.pair(lambda: fe_ble.pin_from_log("devices/NAME/uart.log", mark))
+    level = c.char("2a19")              # a characteristic by its UUID
+    print(c.read(level))                # the battery's level: one byte
+    c.subscribe(level)                  # its notifications, from now on
+    # (`./flipperemu battery 50` in another shell: the firmware notifies)
+    print(c.take(level.value, timeout=60))
+```
+
+What your service gets is what it would get from a phone: the connection's events,
+the pairing's, `ACI_GATT_ATTRIBUTE_MODIFIED` for a write, a confirmation for each
+indication. The stack keeps no bond yet, so a central pairs at every connection.
 
 ## The LED and the backlight
 

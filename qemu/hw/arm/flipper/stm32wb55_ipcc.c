@@ -42,6 +42,7 @@
 #include "qemu/error-report.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "qapi/error.h"
 #include "migration/vmstate.h"
 #include "system/runstate.h"
@@ -49,6 +50,7 @@
 #include "qobject/qjson.h"
 #include "wb55.h"
 #include "wb55_tl.h"
+#include "flipper.h"
 
 #define C1CR      0x00
 #define C1MR      0x04
@@ -465,7 +467,9 @@ static void wb55_ipcc_realize(DeviceState *dev, Error **errp)
                    "and not 'none'", v);
         return;
     }
-    wb55_fus_realize(s, errp);
+    if (wb55_fus_realize(s, errp)) {
+        wb55_ble_realize(s);
+    }
 }
 
 static void wb55_ipcc_init_props(Object *obj);
@@ -490,6 +494,8 @@ static const Property wb55_ipcc_props[] = {
     DEFINE_PROP_STRING("keys", WB55IpccState, key_file),
     /* the wireless stack that is installed: its version, or "none" */
     DEFINE_PROP_STRING("radio-stack", WB55IpccState, radio_stack),
+    /* a central on the host, as lines (docs/RADIO_LINK.md) */
+    DEFINE_PROP_CHR("ble-link", WB55IpccState, ble_chr),
 };
 
 /*
@@ -508,6 +514,7 @@ static void wb55_ipcc_loaded(void *opaque, bool running, RunState state)
     qemu_del_vm_change_state_handler(s->loaded);
     s->loaded = NULL;
     wb55_fus_loaded(s);
+    wb55_ble_loaded(s);
 }
 
 static int wb55_ipcc_post_load(void *opaque, int version_id)
@@ -534,8 +541,8 @@ static const VMStateDescription vmstate_wb55_fus_key = {
 
 static const VMStateDescription vmstate_wb55_ipcc = {
     .name = "stm32wb55-ipcc",
-    .version_id = 2,
-    .minimum_version_id = 2,
+    .version_id = 3,
+    .minimum_version_id = 3,
     .post_load = wb55_ipcc_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(c1cr, WB55IpccState),
@@ -607,6 +614,30 @@ static char *wb55_ipcc_get_ble(Object *obj, Error **errp)
     qdict_put_int(d, "attributes", n);
     qdict_put_bool(d, "beacon", b->beacon);
     qdict_put_int(d, "events_waiting", b->npending);
+    /* a program on the link (ble.sock), and its connection */
+    qdict_put_bool(d, "link", s->ble_link && s->ble_link->open);
+    if (b->conn) {
+        QDict *c = qdict_new();
+        char *a = g_strdup_printf("%02X:%02X:%02X:%02X:%02X:%02X",
+                                  b->peer[5], b->peer[4], b->peer[3],
+                                  b->peer[2], b->peer[1], b->peer[0]);
+
+        qdict_put_int(c, "handle", b->conn);
+        qdict_put_str(c, "central", a);
+        qdict_put_int(c, "interval", b->interval);
+        qdict_put_int(c, "mtu", b->mtu);
+        qdict_put_bool(c, "encrypted", b->sec & WB55_BLE_SEC_ENCRYPTED);
+        qdict_put_bool(c, "authenticated",
+                       b->sec & WB55_BLE_SEC_AUTHENTICATED);
+        qdict_put_bool(c, "bonded", b->sec & WB55_BLE_SEC_BONDED);
+        qdict_put_str(c, "pairing", b->pair == WB55_BLE_PAIR_PASSKEY
+                      ? "passkey" : b->pair == WB55_BLE_PAIR_COMPARE
+                      ? "compare" : "none");
+        qdict_put(d, "connection", c);
+        g_free(a);
+    } else {
+        qdict_put_null(d, "connection");
+    }
     js = qobject_to_json(QOBJECT(d));
     out = g_string_free(js, false);
     qobject_unref(d);

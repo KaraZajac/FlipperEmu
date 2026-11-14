@@ -11,12 +11,25 @@ A throwaway device starts with the stack of a Flipper from the factory
 advertised (Bluetooth is off on a new Flipper).  The firmware's own view
 (`info device`: the stack's mode, version and type) and `bt hci_info` (the
 stack answers a command of its own) have to agree.  Settings > Bluetooth on:
-it advertises, under its name, from the Flipper Devices address block.  A
-reboot keeps it so (the firmware has the stack start again).  A snapshot keeps
-it so too, and the loaded stack answers.  Settings > Bluetooth off: it does
-not advertise.  `run --radio-stack none` is a Flipper with no stack: the
-firmware says so and runs on, and a plain `run` after it has the stack again.
-No crash in any of the runs' logs.  Exit status 0 = pass.
+it advertises, under its name, from the Flipper Devices address block.
+
+Then a central on the link (ble.sock, scripts/fe_ble.py), as a phone is: it
+sees the advertising; it connects, and the firmware asks it to pair; the MTU
+is the stack's 414; before pairing the device information and the serial
+service refuse a read.  A wrong PIN fails, and the Flipper ends the
+connection.  The PIN it shows (taken from its log) pairs: authenticated,
+bonded, LE Secure Connections.  Then GATT has the firmware's five services
+and its commit; `battery 42` comes as a notification; an RPC session goes
+through the serial service (a ping, the device's info); the central's
+disconnect closes it, and a central that goes away times out.
+
+A reboot keeps Bluetooth on (the firmware has the stack start again).  A
+snapshot saved with a central connected loads with the connection gone (the
+firmware hears so) and the stack answering.  Settings > Bluetooth off: it
+does not advertise, and the link says so.  `run --radio-stack none` is a
+Flipper with no stack: the firmware says so and runs on, and a plain `run`
+after it has the stack again.  No crash in any of the runs' logs.  Exit
+status 0 = pass.
 """
 import argparse
 import json
@@ -28,8 +41,10 @@ import time
 
 from files_check import Bench, CRASH, check, results
 from uart_check import fe
+import fe_ble
 
 QUIET = ("--headless", "--audio", "none")
+PHONE = "C6:89:67:45:23:01"     # the link's central, when it names none
 logs = []
 
 
@@ -77,6 +92,143 @@ def stop(b):
     except OSError:
         pass
     fe(b, "stop")
+
+
+def pairs(c, pin):
+    """c.pair() -> (its words, the failure's reason)"""
+    try:
+        return c.pair(pin), None
+    except fe_ble.PairingFailed as e:
+        return None, e.reason
+
+
+def central(b, name, version, commit):
+    """A central on the link (ble.sock), as a phone is: what it sees, a
+    pairing that fails and one that works, GATT, RPC, and the ends of a
+    connection"""
+    sock = b.dir / "ble.sock"
+    with fe_ble.Central(sock, timeout=15) as c:
+        adv = c.advertising(15)
+        check("the link (ble.sock): a scanner sees the advertising: "
+              "connectable, LE General Discoverable, its name, Flipper "
+              "Devices' address, the serial profile's service",
+              adv["connectable"] and adv.get("flags") == 0x06
+              and name in (adv.get("name") or "")
+              and (adv.get("addr") or "").startswith("80:E1:26")
+              and len(adv.get("uuids") or []) == 1, adv)
+
+        c.connect()
+        asked = until(lambda: c.pump(0.2) or c.security_request, 10)
+        s = bt(b)
+        conn = s.get("connection") or {}
+        check("a central connects: the firmware asks it to pair (a Security "
+              "Request: bonding, MITM), and stops advertising; `status` has "
+              "the connection",
+              asked and asked.get("bond") == "1" and asked.get("mitm") == "1"
+              and c.adv is None and s.get("advertising") is False
+              and conn.get("central") == PHONE, f"{asked} {s}")
+
+        mtu = c.mtu(517)
+        check("the MTU: the most that the firmware's stack takes (414)",
+              mtu == 414, mtu)
+
+        c.gatt()
+        refused = []
+        for uuid in ("2a29", fe_ble.SERIAL_FLOW):
+            try:
+                c.read(c.char(uuid))
+                refused.append(None)
+            except fe_ble.LinkError as e:
+                refused.append(e.code)
+        check("before pairing, the device information and the serial "
+              "service refuse a read: insufficient authentication (0x05)",
+              refused == [5, 5], refused)
+
+        mark = fe_ble.log_size(b.uart)
+
+        def wrong():
+            real = fe_ble.pin_from_log(b.uart, mark)
+            return None if real is None else f"{(int(real) + 1) % 1000000:06d}"
+        paired, reason = pairs(c, wrong)
+        ended = c.wait_disconnected(10)
+        again = c.advertising(15)
+        check("a wrong PIN: the pairing fails (confirm value failed, 0x04), "
+              "the Flipper ends the connection itself (authentication "
+              "failure, 0x05), and advertises again",
+              paired is None and reason == 0x04 and ended == ("flipper", 0x05)
+              and again is not None, f"{paired} {reason} {ended} {again}")
+
+        c.connect()
+        c.mtu(517)
+        mark = fe_ble.log_size(b.uart)
+        paired, reason = pairs(c, lambda: fe_ble.pin_from_log(b.uart, mark))
+        s = bt(b)
+        conn = s.get("connection") or {}
+        check("the PIN that the Flipper shows (its log has it too): paired, "
+              "authenticated and bonded, by LE Secure Connections; `status` "
+              "says so",
+              paired == {"authenticated": "1", "bonded": "1", "sc": "1"}
+              and conn.get("authenticated") is True
+              and conn.get("bonded") is True, f"{paired} {reason} {s}")
+
+        c.gatt()
+        uuids = {svc.uuid for svc in c.services}
+        maker = c.read(c.char("2a29")).decode(errors="replace")
+        soft = c.read(c.char("2a28")).decode(errors="replace")
+        # (the software revision is the firmware's commit, branch, branch
+        # number and build date: "9e810dc3 1.5.1 0 15-10-2026")
+        check("GATT: the firmware's five services (GAP, GATT, device "
+              "information, battery, serial); the device information names "
+              "its maker, and the firmware by its commit",
+              uuids >= {"1800", "1801", "180a", "180f", fe_ble.SERIAL}
+              and maker and commit and soft.startswith(commit + " "),
+              f"{sorted(uuids)} {maker!r} {soft!r} {commit!r}")
+
+        level = c.char("2a19")
+        c.subscribe(level)
+        fe(b, "battery", "42")
+        try:
+            got = c.take(level.value, timeout=20)[2]
+        except TimeoutError:
+            got = None
+        now = c.read(level)
+        check("the battery level: `battery 42` comes to the central as a "
+              "notification, and a read has it", got == b"\x2a"
+              and now == b"\x2a", f"{got} {now}")
+
+        try:
+            rpc = fe_ble.Rpc(c, timeout=20)
+            back = rpc.ping(b"ble_check over the air")
+            info = rpc.device_info()
+        except (fe_ble.LinkError, TimeoutError, KeyError) as e:
+            back, info = None, {"error": str(e)}
+        check("RPC through the serial service, as the phone app has it: a "
+              "ping comes back whole, and the device's info names its "
+              "firmware and the stack 1.20",
+              back == b"ble_check over the air"
+              and info.get("firmware_version") == version
+              and info.get("radio_stack_minor") == "20",
+              f"{back} {dict(list(info.items())[:8])}")
+
+        c.disconnect()
+        s = until(lambda: (bt(b).get("advertising") or None) and bt(b), 15)
+        check("the central ends the connection: the firmware closes its RPC "
+              "session and advertises again",
+              s and s.get("connection") is None
+              and until(lambda: "Close RPC connection" in b.uart_text(), 5),
+              s)
+
+    mark = len(b.uart_text())
+    gone = fe_ble.Central(sock, timeout=15)
+    gone.connect()
+    gone.close()
+    s = until(lambda: (bt(b).get("advertising") or None) and bt(b), 15)
+    check("a central that goes away while connected: the connection times "
+          "out at the firmware (0x08), which advertises again",
+          s and s.get("connection") is None
+          and until(lambda: re.search(r"Reason: 0?8\b",
+                                      b.uart_text()[mark:]), 5),
+          f"{s} {b.uart_text()[mark:][-300:]}")
 
 
 def bluetooth(b, on):
@@ -140,6 +292,9 @@ def main():
               not said and s and name in (s.get("name") or "")
               and (s.get("address") or "").startswith("80:E1:26"),
               f"{said} {s}")
+        if s:
+            central(b, name, field("firmware.version"),
+                    field("firmware.commit.hash"))
 
         code, out, err, took = fe(b, "wait", "--timeout", args.timeout, "--",
                                   "reset")
@@ -148,21 +303,41 @@ def main():
               "advertises again", code == 0 and s and s.get("up") is True,
               f"{out + err} {s}")
 
+        # saved with a central connected, which stays until the run ends:
+        # the loaded firmware has to hear that the connection is gone.  (A
+        # load puts the saved log back, and the run goes on from it: the
+        # timeouts are counted.)
+        timeouts = lambda: len(re.findall(r"Reason: 0?8\b", b.uart_text()))
+        before = timeouts()
+        held = fe_ble.Central(b.dir / "ble.sock", timeout=15)
+        try:
+            held.connect()
+        except (TimeoutError, fe_ble.LinkError) as e:
+            print(f"  (no connection for the snapshot: {e})")
         code, out, err, took = fe(b, "snapshot", "save", "ble")
         stop(b)
+        held.close()
         ok, said = up(b, args.timeout, "snapshot", "load", "ble")
-        s = bt(b) if ok else {}
+        s = until(lambda: (bt(b).get("advertising") or None) and bt(b),
+                  15) if ok else {}
         hci = cli(b, "bt hci_info") if ok else ""
-        check("a snapshot: after a load it advertises as before, and the "
-              "loaded stack answers",
-              code == 0 and ok and s.get("advertising") is True
-              and s.get("services", 0) >= 4 and "Ret: 0" in hci,
-              f"{said[-400:]} {s} {hci[-200:]}")
+        check("a snapshot saved with a central connected: after the load "
+              "the firmware hears that the connection is gone (a timeout), "
+              "advertises as before, and the loaded stack answers",
+              code == 0 and ok and s and s.get("connection") is None
+              and s.get("services", 0) >= 4 and "Ret: 0" in hci
+              and until(lambda: timeouts() > before, 10),
+              f"{said[-400:]} {s} {hci[-200:]} {before} {timeouts()}")
 
-        said = bluetooth(b, False)
-        s = until(lambda: bt(b).get("advertising") is False and bt(b), 15)
-        check("Settings > Bluetooth off: it does not advertise",
-              not said and s and s.get("up") is True, f"{said} {s}")
+        with fe_ble.Central(b.dir / "ble.sock", timeout=15) as watch:
+            watch.advertising(15)
+            said = bluetooth(b, False)
+            s = until(lambda: bt(b).get("advertising") is False and bt(b), 15)
+            watch.pump(1.0)
+            check("Settings > Bluetooth off: it does not advertise, and the "
+                  "link says so (adv off)",
+                  not said and s and s.get("up") is True
+                  and watch.adv is None, f"{said} {s}")
         stop(b)
 
         ok, said = up(b, args.timeout, "run", "--radio-stack", "none")

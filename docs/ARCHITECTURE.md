@@ -219,10 +219,10 @@ and keeps what they build:
   advertises (`aci_gap_set_discoverable`, `…_non_discoverable`) with the type, the
   intervals, the local name, the service UUIDs and the scan response, the IO capability
   and the authentication requirements, the TX power, the extra beacon on or off.
-- What needs a connection is answered as ST's stack answers it with none:
-  `aci_gap_terminate`, the security request and the connection parameter update with a
-  Command Status "unknown connection", `hci_le_read_phy` likewise. The radio's tests (a
-  tone, a receiver) start and stop and hear nothing.
+- What needs a connection (`aci_gap_terminate`, the security request, the connection
+  parameter update, the passkey, `hci_le_read_phy`) is answered as ST's stack answers it
+  with the connection there is, and with none as it answers then: "unknown connection".
+  The radio's tests (a tone, a receiver) start and stop and hear nothing.
 - A command that is none of these is answered as done, with the status alone: an answer
   that is shorter than the caller's structure fills what it has (`hci_tl.c` copies the
   MIN of the two lengths into a structure the caller zeroed). It is named once in QEMU's
@@ -232,24 +232,56 @@ and keeps what they build:
 a Command Complete over the command in its buffer, a Command Status in the BLE table's
 CS buffer. CPU1 gives neither back (`hci_send_req()` keeps nothing). A first version
 took the answers from CPU1's pool of event buffers, and the pool's five buffers were
-gone after five commands. The other events (none yet: they come with connections) go
+gone after five commands. The other events (a connection's, below) go
 into that pool (`MB_MemManagerTable_t.blepool`, five buffers of 268 bytes in 1.5.1) or
 its spare, and come back through the free queue (channel 4). An event waits in the model
 while its buffer is busy and while CPU1 has not cleared the channel's flag: CPU1 clears
 it after it has emptied the queue, so it misses none.
 
+**The connection.** The air is a line link (`ble-link`, `devices/NAME/ble.sock`;
+[RADIO_LINK.md](RADIO_LINK.md#bluetooth-blesock)), and the program on it is the central
+(a phone, as far as the firmware can tell). What it does becomes the events that ST's
+stack gives CPU1 when a real central does it:
+
+| the central | CPU1 hears |
+|---|---|
+| `connect` | `HCI_LE_CONNECTION_COMPLETE` (handle 0x0801, the Flipper peripheral, 30 ms); the advertising stops |
+| `mtu N` | `ACI_ATT_EXCHANGE_MTU_RESP`: the smaller of N and BLE_Init's `AttMtu` (414 on 1.5.1) |
+| `pair` | by both sides' IO capabilities: `ACI_GAP_PASS_KEY_REQ` (the firmware picks a PIN, answers `aci_gap_pass_key_resp` and shows it), `ACI_GAP_NUMERIC_COMPARISON_VALUE`, or nothing (Just Works); then `HCI_ENCRYPTION_CHANGE` and `ACI_GAP_PAIRING_COMPLETE`, or that with SMP's reason for a failure |
+| `write` | `ACI_GATT_ATTRIBUTE_MODIFIED` if the attribute's event mask asks for it (a CCCD's always), in parts of 245 bytes with bit 15 of the offset set while more follow |
+| `ack` | `ACI_GATT_SERVER_CONFIRMATION` (the firmware's serial service sends its next indication on it) |
+| `disconnect`, the program gone | `HCI_DISCONNECTION_COMPLETE`, with the central's reason, or a timeout (0x08) |
+
+And what CPU1 does goes to the central: `aci_gap_slave_security_req` a Security Request,
+`aci_gap_terminate` a disconnection (CPU1 hears "terminated by local host", 0x16),
+`aci_l2cap_connection_parameter_update_req` new parameters that the central takes
+(`ACI_L2CAP_CONNECTION_UPDATE_RESP`, then `HCI_LE_CONNECTION_UPDATE_COMPLETE`), and a
+value updated by `aci_gatt_update_char_value` a notification or an indication, as far as
+the characteristic has the property, its CCCD asks for it and the MTU carries it
+(`…_ext`'s update type says which; the serial service sends its chunks with none and the
+last one with an indication of the whole). A read or a write is checked against the
+attribute's properties and permissions: authentication needs a pairing with a PIN or a
+comparison, encryption any pairing (ATT's 0x05 otherwise). The CCCDs go back to nothing
+when a connection ends: no bond is kept.
+
+The firmware takes events from a queue of eight; while fewer than four are free the link
+reads nothing more (`FlipperLink.ready`), and goes on as CPU1 frees them, so a fast
+central loses none of its writes.
+
 **`status`** has a row of the stack, from a property (`/machine/soc/ipcc` `ble`, JSON):
 its version, what CPU2 runs, whether the firmware has started BLE, whether it advertises
 and as what, its address (80:E1:26 is Flipper Devices' block of addresses), the number
-of services and attributes.
+of services and attributes, whether a program is on the link, and the connection (the
+central's address, the MTU, encrypted, authenticated, bonded, a pairing under way).
 
 **A saved state** has the stack's whole state, in the IPCC's section: the database, GAP,
-the buffers that CPU1 has and the events that wait.
+the connection, the buffers that CPU1 has and the events that wait. A connection was in
+the air: at the loaded machine's first run CPU1 hears that it timed out.
 
-Not there: a radio, so nothing goes into the air and no phone or computer can connect;
-connections, pairing and the bonds that the stack keeps in CPU1's RAM (`C2_CONFIG`'s
-address is noted); the FUS's deleting and installing of a stack (an update whose stack
-is another version).
+Not there: a radio (the central is a program on the link); the bonds that the stack
+keeps in CPU1's RAM (`C2_CONFIG`'s address is noted), so a central pairs at every
+connection; a second connection; the FUS's deleting and installing of a stack (an
+update whose stack is another version).
 
 ## The secure enclave (`stm32wb55_fus.c`, `stm32wb55_aes.c`, `flipper_enclave.c`)
 

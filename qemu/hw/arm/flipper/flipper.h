@@ -24,7 +24,12 @@ typedef struct FlipperLink {
     void (*on_line)(void *opaque, char *line);
     void (*on_open)(void *opaque, bool open);
     void *opaque;
+    /* optional: false = the device can take no line now; reading stops until
+     * it calls flipper_link_resume() */
+    bool (*ready)(void *opaque);
+    bool held, busy;
 } FlipperLink;
+void flipper_link_resume(FlipperLink *l);
 void flipper_link_init(FlipperLink *l, CharFrontend *chr, const char *name,
                        void (*on_line)(void *opaque, char *line),
                        void (*on_open)(void *opaque, bool open), void *opaque);

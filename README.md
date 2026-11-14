@@ -78,6 +78,11 @@ another build refused with the device left as it was, file for file; a load whos
 launcher was killed undone by the next start; a save at a gdb's step and a load of
 it; a crashed firmware's report after a load; a key of the enclave loaded across a
 save, by an app of the check's own on the official 1.5.1) passes on the same five.
+`scripts/ble_check.py` (CPU2's BLE stack as the firmware starts it, and a central on its
+link as a phone is: the advertising, a connection that the firmware asks to pair, a
+wrong PIN refused and the right one paired, the firmware's services and their values,
+a battery level as a notification, the phone app's RPC session through the serial
+service, the ends of a connection, a snapshot saved with one) passes on the same five.
 `scripts/ufbt_check.py` (ufbt 0.2.6 building `examples/hello`, launching it there, and
 `ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's symbols, that
 app's and a stock app's, and its debug configuration for VS Code used the way that
@@ -212,11 +217,13 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
   key, registers and logs in for a host (`scripts/fe_u2f.py`, over USB/IP). The keys
   persist in `devices/NAME/enclave.keys`;
   `./flipperemu enclave` shows them and computes what the firmware encrypts.
-- Bluetooth up to the radio: CPU2 runs ST's BLE stack, as on a Flipper from the
-  factory (1.20.0, BLE Light, the stack that the update packages carry). The firmware
-  starts it, Settings > Bluetooth switches it on and off, the Flipper advertises under
-  its name, and the firmware's GATT services are in the stack. `status` says what it
-  does. No radio: nothing goes into the air, and no phone or computer connects yet.
+- Bluetooth: CPU2 runs ST's BLE stack, as on a Flipper from the factory (1.20.0, BLE
+  Light, the stack that the update packages carry). The firmware starts it, Settings >
+  Bluetooth switches it on and off, and the Flipper advertises under its name. A
+  program on the computer plays the phone: it sees the advertising, connects, pairs
+  with the PIN that the Flipper shows, reads and subscribes to the firmware's services,
+  and has the phone app's RPC session over the air (`./flipperemu ble`,
+  `scripts/fe_ble.py`). No radio: the air is a socket.
 - gdb on a device that runs, with the firmware's symbols and those of the apps it
   loads: a breakpoint in an app's code, and a stop at a crash. `gdb --vscode` writes
   the debug configuration for VS Code into the app's folder.
@@ -231,8 +238,9 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
   update packages, unless `run --radio-stack` names another): the emulated CPU2
   installs none. `./flipperemu update` and `run --update` leave such a package's radio
   stage out (the plan's Bluetooth item, part 3).
-- Bluetooth beyond the stack: a phone or a computer that connects, pairing (the next
-  part of the plan's Bluetooth item).
+- Bluetooth's bonds: a central pairs at every connection, where a real Flipper would
+  remember it (the stack keeps no bond, nor writes one where the firmware saves it). A
+  real phone or computer: the central is a program on the link, not a Bluetooth adapter.
 - NFC: Ultralight C, ISO14443-4 (DESFire, bank cards), ISO14443B, ISO15693 and FeliCa
   cards. When the Flipper emulates a MIFARE Classic, the virtual reader gets as far as
   its UID, ATQA and SAK: the Crypto1 answers go out through a bit-banged pin that the
@@ -2592,7 +2600,44 @@ $ ./flipperemu -d bletry status
 bluetooth: the radio stack 1.20.0 runs; advertising as "Flipper bletry"; 5 GATT services; its address 80:E1:26:54:47:B7
 ```
 
-There is no radio: nothing goes into the air, and no phone or computer can connect yet.
+There is no radio. The air is a socket, `devices/NAME/ble.sock`, and a program on it
+plays the phone (a central): it sees the advertising, connects, pairs with the PIN that
+the Flipper shows, and reads, writes and subscribes to what the firmware's services
+hold. `./flipperemu ble` is such a program:
+
+```sh
+./flipperemu ble                     # what the stack does, and who is connected
+./flipperemu ble scan                # the advertising, as a phone's scanner sees it
+./flipperemu ble gatt                # connect, pair, the services and their values
+./flipperemu ble read 2a26           # one value (a UUID, or a handle: 0x0012)
+./flipperemu ble write 0x002b 00000000
+./flipperemu ble rpc                 # the phone app's RPC session: a ping, the device's info
+```
+
+Each of them but `scan` connects and pairs. The Flipper shows a six-digit PIN, as it
+does for a phone, and `--pin` says where it comes from: typed in (`ask`, the default on
+a terminal; the window shows the screen), from the firmware's log (`log`, the default
+in a script; not on a locked Flipper), or the digits themselves. A wrong one fails as on
+a real Flipper, which then ends the connection.
+
+```
+$ ./flipperemu -d bletry ble rpc
+connected to Flipper bletry (80:E1:26:94:C0:EE); pairing: the Flipper shows a PIN
+The PIN on the Flipper's screen: 257032
+RPC over Bluetooth: a ping came back whole
+  hardware_name            bletry
+  firmware_version         1.5.1
+  …
+```
+
+`scripts/fe_ble.py` is the same as a library, for a test of a firmware's Bluetooth or of
+an app's own profile; the link's lines are in [docs/RADIO_LINK.md](docs/RADIO_LINK.md#bluetooth-blesock).
+The stack keeps no bond yet: a central pairs at every connection, where a real Flipper
+would remember a phone it has paired with.
+
+**An emulator that was built before this came (2026-11-14) wants
+`scripts/setup_qemu.sh --build`**: the launcher gives every device the link, and such a
+QEMU stops at the start ("Property 'stm32wb55-ipcc.ble-link' not found").
 `run --radio-stack none` starts a Flipper whose CPU2 has no stack, which is a real
 device's state too: the firmware says "Stack isn't installed!" and has no Bluetooth.
 How the stack is modelled: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#the-ble-stack-stm32wb55_blec).

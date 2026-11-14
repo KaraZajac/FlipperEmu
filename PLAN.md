@@ -38,7 +38,7 @@ qFlipper / lab.flipper.net / `ufbt launch` only run over USB CDC.
       host waits for the firmware to go idle rather than for the clock: file
       transfers over the CLI are up to twice as fast (BRINGUP_LOG 74)
 - ☐ A minimal BLE stack on CPU2, so qFlipper's updates (radio stage) and the BT service work.
-      In four parts:
+      In five parts:
     - ☑ The stack starts (2026-11-13): CPU2 runs ST's BLE Light 1.20.0, the stack of the
           five firmwares' update packages, as a Flipper from the factory does; the firmware
           starts it, its GATT services are in the model's database, Settings > Bluetooth
@@ -46,10 +46,15 @@ qFlipper / lab.flipper.net / `ufbt launch` only run over USB CDC.
           it; `run --radio-stack none` is a FUS with no stack. An update package whose
           stack is the device's keeps its radio stage, which the updater finds up to
           date. `scripts/ble_check.py`: 10 on the five (BRINGUP_LOG 138)
-    - ☐ A central on the host: a link through which a program on the computer sees the
-          advertising, connects, pairs with the PIN on the Flipper's screen, and reads,
-          writes and subscribes to characteristics (the serial service's RPC, as the phone
-          app has it)
+    - ☑ A central on the host (2026-11-14): a link (`devices/NAME/ble.sock`) through which
+          a program on the computer sees the advertising, connects, pairs with the PIN on
+          the Flipper's screen (or a numeric comparison, or Just Works, as both sides' IO
+          capabilities have it), and reads, writes and subscribes to characteristics; the
+          serial service carries the phone app's RPC session. `./flipperemu ble`,
+          `scripts/fe_ble.py`; `scripts/ble_check.py`: 21 on the five (BRINGUP_LOG 140)
+    - ☐ Bonds: the stack's security database in CPU1's RAM (`C2_CONFIG`'s address), which
+          the firmware saves to `/int/.bt.keys`, so that a central that has paired connects
+          again without a PIN, after a reboot too, and "Unpair All Devices" forgets it
     - ☐ The radio update path: the switches between the stack and the FUS with the resets
           that go with them, and the FUS deleting and installing a stack from an update
           package (one with another version than the installed one). Until then such a

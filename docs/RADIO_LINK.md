@@ -1,17 +1,20 @@
 # The radio links
 
-An emulated radio can have a real one, or any program, as its antenna. Two radios have
-such a link: the CC1101 (Sub-GHz) and the ST25R3916 (NFC).
+An emulated radio can have a real one, or any program, as its antenna. Three radios have
+such a link: the CC1101 (Sub-GHz), the ST25R3916 (NFC) and CPU2's BLE stack (Bluetooth).
 - `scripts/fe_sdr.py` drives the CC1101's from an SDR. So can anything else that speaks
   the protocol: another SDR stack, a GNU Radio flowgraph, a simulator, a test.
 - `scripts/fe_nfc_link.py` is the card on the ST25R3916's, written in Python or relayed.
+- `scripts/fe_ble.py` is the phone on the BLE stack's (`./flipperemu ble`).
 
 ## Where
 
-Each device has two Unix sockets, `devices/NAME/subghz.sock` and `devices/NAME/nfc.sock`.
-QEMU listens on each and takes one client at a time. The launcher passes `-chardev
-socket,id=subghz-link,path=…,server=on,wait=off -global cc1101.link=subghz-link`, and the
-same for `st25r3916`. Running QEMU by hand, give the device any chardev as `link`.
+Each device has three Unix sockets, `devices/NAME/subghz.sock`, `devices/NAME/nfc.sock`
+and `devices/NAME/ble.sock`. QEMU listens on each and takes one client at a time. The
+launcher passes `-chardev socket,id=subghz-link,path=…,server=on,wait=off -global
+cc1101.link=subghz-link`, the same for `st25r3916`, and `-global
+stm32wb55-ipcc.ble-link=ble-link` for Bluetooth. Running QEMU by hand, give the device
+any chardev as `link` (`ble-link` for the IPCC).
 
 ## Lines
 
@@ -156,3 +159,98 @@ socat - UNIX-CONNECT:devices/NAME/nfc.sock       # and answer them yourself
 
 Start `scanner` in the `nfc` shell. The first poll is a WUPA, `poll 7 52 mode=a`; answer
 `answer 16 4400` within a second, and the next poll is the anticollision, `poll 16 9320 01 mode=a`.
+
+# Bluetooth (`ble.sock`)
+
+The program is a central in range of the Flipper: a phone, as far as the firmware can
+tell. The link carries what goes through the air at the level of GAP, SMP and ATT, not
+packets and not keys. To the firmware, ST's stack on CPU2 says what a real central did
+(the connection's events, the pairing's, a client's writes), and what the firmware
+updates goes to the central as a notification or an indication, if the central asked
+for them in the characteristic's CCCD. One connection at a time.
+
+Numbers are hex with `0x` (handles, reasons) or decimal; data is hex, two digits a
+byte. Handles are those of the stack's GATT table, which `gatt` lists.
+
+### From the emulator
+
+`hello flipperemu ble 1` comes first, on connecting.
+
+```
+adv on addr=80:E1:26:94:C0:EE addr_type=public connectable=1 interval=128-160 data=0201060d09466c6970706572206274326103028130 scan=
+adv off
+```
+
+The advertising, sent on connecting and whenever it changes: the address and its type,
+whether a central may connect, the interval in units of 0.625 ms (128-160 is the
+Flipper's fast advertising, 1600-4000 its slow one after a minute), the advertising data
+as the stack builds it (the flags, the local name, the services' UUIDs: AD structures,
+each a length and a type) and the scan response's. `adv off` while it does not
+advertise, and while a central is connected.
+
+| line | when |
+|---|---|
+| `connected handle=0x0801 interval=24 latency=0 timeout=400 mtu=23` | the answer to `connect`; the interval in 1.25 ms, the supervision timeout in 10 ms |
+| `security-request bond=1 mitm=1 sc=1` | the firmware asks the central to pair (it does at every connection) |
+| `mtu 414` | the answer to `mtu`: what both take (the Flipper's stack takes 414 at most) |
+| `params interval=6 latency=0 timeout=400` | the firmware asked for other connection parameters, and the central took them |
+| `pairing passkey enter` | the Flipper shows a PIN: the central is to send it (`passkey`) |
+| `pairing passkey show` | the central is to show a PIN of its own, for the Flipper to enter (no firmware here asks for it) |
+| `pairing compare 123456` | numeric comparison: both are to confirm that they show this value (`confirm`) |
+| `paired authenticated=1 bonded=1 sc=1` | the link is encrypted; authenticated: by a PIN or a comparison; sc: LE Secure Connections |
+| `pairing failed reason=0x04` | SMP's reason: 0x01 passkey entry failed, 0x03 authentication requirements, 0x04 confirm value failed (a wrong PIN), 0x0C numeric comparison failed |
+| `value 0x0012 312e352e31` | the answer to `read` |
+| `written 0x0023` | the answer to `write` |
+| `notify 0x0028 00000400` | a notification: a value that the firmware updated, its CCCD's bit 0 set |
+| `indicate 0x0025 18080732…` | an indication: the same with bit 1; the central confirms it with `ack`, and the firmware waits for that before the next one |
+| `disconnected by=flipper reason=0x05` | the connection ended: `by=central` (its `disconnect`), or `by=flipper` with the reason the firmware gave (0x05 after a failed pairing, 0x13 when Bluetooth goes off) or 0x08 when its stack stopped |
+| `error op=read handle=0x000e code=0x05` | a request refused: ATT's code (0x01 invalid handle, 0x02 read not permitted, 0x03 write not permitted, 0x05 insufficient authentication: pair first, 0x0D invalid length), or `reason=` for the link's own (`not-connected`, `not-advertising`, ...) |
+
+A notification or an indication carries as much of the value as the MTU does (MTU − 3
+bytes): 20 until an `mtu` exchange.
+
+### To the emulator
+
+| line | |
+|---|---|
+| `connect [addr=C6:89:67:45:23:01] [addr_type=random\|public] [interval=24]` | connect, while it advertises connectably |
+| `disconnect [reason=0x13]` | end the connection |
+| `mtu 517` | exchange MTUs |
+| `pair [io=keyboard-display\|keyboard\|display\|yesno\|none] [bond=0] [sc=0] [mitm=0]` | the central's pairing request. The method follows from both sides' IO capabilities as Bluetooth's table has it: with the Flipper's (DisplayOnly for the serial profile) and the default `keyboard-display`, a PIN that the Flipper shows. Just Works, where the capabilities give it, fails when either side wants protection against a man in the middle (the Flipper does) |
+| `passkey 123456` \| `passkey cancel` | the PIN, as the central's user typed it |
+| `confirm yes` \| `confirm no` | the central's side of a numeric comparison |
+| `read 0x0012` | a characteristic's value, a descriptor, or a declaration |
+| `write 0x0023 HEX` \| `write-cmd 0x0023 HEX` | a Write Request (answered `written`) or a Write Command; at most MTU − 3 bytes |
+| `ack` | the confirmation of an indication |
+| `gatt` | the table: `service`, `char`, `cccd` and `desc` lines, then `gatt end` |
+| `adv` | the advertising line again |
+
+Permissions are the firmware's own: a characteristic that wants authentication (the
+device information, the battery, the serial service) answers 0x05 until the link is
+paired with a PIN. A write to a CCCD reaches the firmware too, as on ST's stack.
+
+### Time and flow
+
+What the central sends becomes the stack's events at once, in order, and waits for
+nothing but room: the firmware takes events from a queue of a few, and while it is full
+the link stops reading (the central's lines wait in its socket, as a controller holds
+back its acknowledgements), so a fast central loses nothing. The serial service has
+flow control of its own on top (its flow-control value: how many bytes the firmware's
+RPC buffer takes), which `fe_ble.Rpc` keeps to.
+
+A program that goes away while connected is a central out of range: the firmware hears
+of a supervision timeout (0x08). So does a machine loaded from a snapshot that was saved
+with a connection: the program of then is gone.
+
+### Trying it by hand
+
+```sh
+./flipperemu ble scan                              # the advertising
+socat - UNIX-CONNECT:devices/NAME/ble.sock         # or the lines themselves
+```
+
+Settings > Bluetooth on (it is off on a new Flipper), then `connect`, `mtu 517`, `pair`;
+the Flipper shows a PIN (`./flipperemu log` has it too): `passkey` and the PIN. Then
+`gatt`, and `read` a handle of the device information. An RPC session: `write` the
+serial TX characteristic's CCCD `0200`, then a protobuf request to RX, and the answer
+comes as an indication on TX; `ack` it.

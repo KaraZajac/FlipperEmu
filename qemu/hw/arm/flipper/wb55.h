@@ -18,6 +18,9 @@
 #include "qom/object.h"
 #include "qemu/timer.h"
 #include "qemu/notify.h"
+#include "chardev/char-fe.h"
+
+struct FlipperLink;                     /* flipper.h */
 
 /* ---------------------------------------------------------------- memory map */
 #define WB55_FLASH_BASE      0x08000000u
@@ -223,6 +226,7 @@ typedef struct WB55BleAttr {
     uint8_t uuid[16];            /* as the command has it, little-endian */
     uint8_t props;               /* a characteristic's properties */
     uint8_t perms;               /* security permissions */
+    uint8_t access;              /* a descriptor's: read 1, write 2, w/o rsp 4 */
     uint8_t evt_mask;            /* GATT_Evt_Mask: what CPU1 hears of */
     uint8_t variable;            /* its value's length may change */
     uint16_t max_len;            /* room for its value */
@@ -266,8 +270,22 @@ typedef struct WB55BleState {
     uint8_t scan_rsp_len;
     uint8_t scan_rsp[31];
     uint8_t public_addr[6];
+    uint8_t random_addr[6];      /* the static random one (config data 0x2E) */
     uint8_t io_cap, bonding, mitm, sc, fixed_pin_used;
     uint32_t fixed_pin;
+    /* The connection: a central on the link (docs/RADIO_LINK.md), one at a
+     * time.  What a stack restart or a reset ends. */
+    uint16_t att_mtu;            /* the server's ATT MTU (BLE_Init's AttMtu) */
+    uint16_t conn;               /* its handle; 0: no connection */
+    uint8_t peer[6], peer_type;  /* the central's address, LSB first */
+    uint16_t interval, latency, timeout;   /* 1.25 ms, events, 10 ms */
+    uint16_t mtu;                /* the ATT MTU agreed: 23 until an exchange */
+    uint8_t sec;                 /* WB55_BLE_SEC_*: what the link has */
+    uint8_t pair;                /* WB55_BLE_PAIR_*: a pairing under way */
+    uint8_t pair_flags;          /* WB55_BLE_PF_*: who has answered, how */
+    uint32_t pair_key;           /* CPU1's passkey, or the value compared */
+    uint32_t pair_entered;       /* the central's passkey */
+    uint8_t indications;         /* sent, and not yet confirmed */
     uint8_t tx_high, tx_level;
     uint8_t beacon;              /* the additional beacon is on */
     /* SHCI_C2_Config: where the stack keeps its bonds in CPU1's RAM */
@@ -294,6 +312,9 @@ struct WB55IpccState {
     uint32_t stack_version;      /* its InfoTable Version word, 0: none */
     uint8_t stack_type;          /* INFO_STACK_TYPE_BLE_*: 3 = Light */
     WB55BleState ble;
+    CharFrontend ble_chr;        /* property "ble-link": a central's line link */
+    struct FlipperLink *ble_link;
+    char *ble_adv;               /* the advertising line it was sent last */
     uint32_t fus_version;
     uint64_t uid64;
     WB55FlashState *flash;       /* IPCCBR option byte -> table address */
@@ -340,7 +361,27 @@ void wb55_ble_post(WB55IpccState *s, int buf, uint8_t code,
                    const uint8_t *data, int len);
 void wb55_ble_released(WB55IpccState *s, hwaddr buf);
 void wb55_ble_flush(WB55IpccState *s);
+/* The link to a central on the host: set up at realize; a loaded machine's
+ * connection ends at its first run (it was in the air) */
+void wb55_ble_realize(WB55IpccState *s);
+void wb55_ble_loaded(WB55IpccState *s);
 extern const VMStateDescription vmstate_wb55_ble;
+
+/* WB55BleState.sec */
+#define WB55_BLE_SEC_ENCRYPTED       0x01
+#define WB55_BLE_SEC_AUTHENTICATED   0x02    /* MITM: a passkey or a compare */
+#define WB55_BLE_SEC_BONDED          0x04
+/* WB55BleState.pair: how a pairing goes */
+enum { WB55_BLE_PAIR_NONE, WB55_BLE_PAIR_PASSKEY, WB55_BLE_PAIR_COMPARE };
+/* WB55BleState.pair_flags */
+#define WB55_BLE_PF_FLIPPER          0x01    /* CPU1 has answered */
+#define WB55_BLE_PF_CENTRAL          0x02    /* the central has answered */
+#define WB55_BLE_PF_FLIPPER_YES      0x04    /* (a compare: what they said) */
+#define WB55_BLE_PF_CENTRAL_YES      0x08
+#define WB55_BLE_PF_ASKED            0x10    /* the central was asked */
+#define WB55_BLE_PF_AUTH             0x20    /* it will be authenticated */
+#define WB55_BLE_PF_BOND             0x40    /* both sides bond */
+#define WB55_BLE_PF_SC               0x80    /* LE Secure Connections */
 
 /* ---------------------------------------------------------------- EXTI */
 #define TYPE_WB55_EXTI "stm32wb55-exti"

@@ -4057,6 +4057,92 @@ big lock, entry 92).
     module, stopped at its first line; it makes the module from the
     loader's spec now. No other call that 3.15 took away is in the scripts.
 
+140. **Bluetooth, part 2: a central on the link.** Part 1 had the stack
+    start and advertise, with nobody to see it. The stack has a link now,
+    `devices/NAME/ble.sock` (the IPCC's `ble-link` chardev, a line protocol
+    as the NFC and Sub-GHz links have: RADIO_LINK.md), and a program on it is
+    a central in range: a phone, as far as the firmware can tell. It sees
+    the advertising (the AD structures that ST's stack builds: the flags,
+    the local name, the profile's service UUID), connects, exchanges MTUs,
+    pairs, reads and writes and subscribes. The launcher's `ble` (`scan`,
+    `gatt`, `read`, `write`, `rpc`) and `scripts/fe_ble.py` are such a
+    program.
+    - To CPU1 the stack says what a real central did, in ST's events:
+      `HCI_LE_CONNECTION_COMPLETE`, `ACI_ATT_EXCHANGE_MTU_RESP`,
+      `ACI_GAP_PASS_KEY_REQ`, `HCI_ENCRYPTION_CHANGE`,
+      `ACI_GAP_PAIRING_COMPLETE`, `ACI_GATT_ATTRIBUTE_MODIFIED`,
+      `ACI_GATT_SERVER_CONFIRMATION`, `HCI_DISCONNECTION_COMPLETE`. The
+      commands that part 1 answered with "unknown connection" (the security
+      request, the passkey's answer, `aci_gap_terminate`, the connection
+      parameter update, `hci_le_read_phy`) have one to act on now. On a
+      connection the firmware sends its Security Request at once; the
+      central's `pair` then goes by both sides' IO capabilities, as
+      Bluetooth's table has them. The serial profile's DisplayOnly with
+      MITM required gives a passkey that the Flipper shows: the stack asks
+      CPU1 for it, the firmware draws one (`rand() % 999999`), answers it,
+      shows it on a full screen ("Pairing code") and logs it, in that order:
+      a program that takes the PIN from the log waits for the line. A wrong
+      PIN fails with "confirm value failed" (0x04), and the firmware ends
+      the connection itself (0x05). The right one: encrypted,
+      authenticated, bonded, LE Secure Connections; the firmware's bt
+      service opens its RPC session ("Open RPC connection").
+    - ATT as ST's stack keeps it: the firmware's permissions (the device
+      information, the battery and the serial service want authentication:
+      0x05 before pairing), the properties (a write to the battery level is
+      refused), notifications and indications as far as the client's CCCD
+      asks for them and the MTU (414 at most, BLE_Init's `AttMtu`) carries
+      them. The serial service sends an answer in chunks of 243 bytes with
+      `aci_gatt_update_char_value_ext`, the last with update type 2: one
+      indication of the whole value; its RPC thread waits for the
+      confirmation before the next packet. Through it the phone app's
+      session works: a ping comes back whole, and device info names the
+      firmware and the stack, on the five firmwares (66 keys on the official
+      1.5.1).
+    - The link takes the central's lines as far as CPU1 takes events: its
+      queue holds eight, and while fewer than four are free the link reads
+      nothing more (`FlipperLink.ready`, new; the NFC and Sub-GHz links have
+      none and are as before), so a central that writes fast loses no write.
+      A program that goes away while connected is a central out of range:
+      CPU1 hears of a supervision timeout (0x08). A saved state keeps the
+      connection, and at a loaded machine's first run CPU1 hears that it
+      timed out: the program of then is gone (the IPCC's section, version
+      3).
+    - Found: the serial service's RPC status is a 4-byte value made from a
+      1-byte enum (`ble_svc_serial_update_rpc_char()` hands
+      `ble_gatt_characteristic_update()` the enum's address): three bytes of
+      the stack go with it, `01 2c 14 0a` for "active". The firmware's own,
+      in 1.5.1's source; a real Flipper sends the same, and a reader looks at
+      the first byte.
+    - Found: the device information's Software Revision is the commit, the
+      branch, the branch's number and the build date
+      (`9e810dc3 1.5.1 0 15-10-2026`): a release's branch is its version,
+      the dev build's is `dev` and RogueMaster's `420`. The check compares
+      the commit (`info device`'s `firmware.commit.hash`).
+    - `scripts/ble_check.py`: 21 (11 new) on the official 1.5.1, the dev
+      build, Momentum, Unleashed and RogueMaster, 35 s each: the scan, the
+      Security Request, the MTU, a read refused before pairing, a wrong PIN
+      and the right one, GATT with the firmware's commit, `battery 42` as a
+      notification, RPC (ping, device info), a disconnect, a central gone, a
+      snapshot saved with a connection, `adv off` when Bluetooth goes off.
+    - The rest on the official 1.5.1 with this build (the line link is
+      the NFC and Sub-GHz links' too, the IPCC's saved state changed):
+      `nfc_link_check` 4, `sdr_check` 4, `snapshot_check` 68,
+      `update_check` 34, `enclave_check` 35, `gui_check` 71, the smoke test
+      28, `ufbt_check` 31 (ufbt's venv made anew, 139). Found on the
+      way, in a runner of mine: with ufbt's venv first on the PATH, the
+      launcher (`#!/usr/bin/env python3`) runs in that venv, which has no
+      numpy, and `subghz --sdr` stops at once ("fe_sdr needs numpy");
+      `sdr_check` and the smoke test's SDR step then fail with nothing
+      decoded, because they do not show the bridge's output. A venv for
+      ufbt goes last on the PATH.
+    - Not there: bonds. The stack keeps its security database in CPU1's RAM
+      (`C2_CONFIG`'s address), which the firmware saves to `/int/.bt.keys`;
+      the model keeps none, so a central pairs at every connection where a
+      real Flipper would remember it. Not tried: a numeric comparison with a
+      firmware that asks for one (the method is there; the serial profile
+      shows a PIN), an app's own profile (the BLE remote), a real phone (the
+      central is a program, not a radio).
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

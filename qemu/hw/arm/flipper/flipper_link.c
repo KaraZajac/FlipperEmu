@@ -64,16 +64,27 @@ void flipper_link_send(FlipperLink *l, const char *fmt, ...)
 
 static int flipper_link_can_read(void *opaque)
 {
-    return 65536;
+    FlipperLink *l = opaque;
+
+    return l->held ? 0 : 65536;
 }
 
-static void flipper_link_read(void *opaque, const uint8_t *buf, int size)
+/* The whole lines that have come, each to its device: as far as it can take
+ * them (its `ready`), and the rest when it calls flipper_link_resume() */
+static void flipper_link_lines(FlipperLink *l)
 {
-    FlipperLink *l = opaque;
     char *nl;
 
-    g_string_append_len(l->in, (const char *)buf, size);
+    if (l->busy) {
+        return;                         /* (a line's handling called back) */
+    }
+    l->busy = true;
+    l->held = false;
     while ((nl = memchr(l->in->str, '\n', l->in->len))) {
+        if (l->ready && !l->ready(l->opaque)) {
+            l->held = true;             /* no more read until it says so */
+            break;
+        }
         *nl = 0;
         if (nl > l->in->str && nl[-1] == '\r') {
             nl[-1] = 0;
@@ -89,6 +100,25 @@ static void flipper_link_read(void *opaque, const uint8_t *buf, int size)
     if (l->in->len > LINK_LINE_MAX) {
         g_string_truncate(l->in, 0);
     }
+    l->busy = false;
+}
+
+static void flipper_link_read(void *opaque, const uint8_t *buf, int size)
+{
+    FlipperLink *l = opaque;
+
+    g_string_append_len(l->in, (const char *)buf, size);
+    flipper_link_lines(l);
+}
+
+void flipper_link_resume(FlipperLink *l)
+{
+    if (l->held && !l->busy) {
+        flipper_link_lines(l);
+        if (!l->held) {
+            qemu_chr_fe_accept_input(l->chr);
+        }
+    }
 }
 
 static void flipper_link_event(void *opaque, QEMUChrEvent event)
@@ -98,12 +128,15 @@ static void flipper_link_event(void *opaque, QEMUChrEvent event)
     switch (event) {
     case CHR_EVENT_OPENED:
         l->open = true;
+        l->held = false;
         g_string_truncate(l->in, 0);
         g_string_truncate(l->out, 0);
         l->on_open(l->opaque, true);
         break;
     case CHR_EVENT_CLOSED:
         l->open = false;
+        l->held = false;
+        g_string_truncate(l->in, 0);
         g_string_truncate(l->out, 0);
         l->on_open(l->opaque, false);
         break;
