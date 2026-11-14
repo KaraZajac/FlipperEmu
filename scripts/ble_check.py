@@ -23,9 +23,16 @@ and its commit; `battery 42` comes as a notification; an RPC session goes
 through the serial service (a ping, the device's info); the central's
 disconnect closes it, and a central that goes away times out.
 
-A reboot keeps Bluetooth on (the firmware has the stack start again).  A
-snapshot saved with a central connected loads with the connection gone (the
-firmware hears so) and the stack answering.  Settings > Bluetooth off: it
+The pairing bonded: the stack keeps the bond and the firmware saves it to
+/int/.bt.keys; the central comes back with it, encrypted with no PIN, its
+CCCDs as it left them.  A reboot keeps Bluetooth on (the firmware has the
+stack start again) and the bond.  A central that has lost its side of the
+bond pairs anew (bond lost, rebond).  Settings > Bluetooth > Unpair All
+Devices forgets it: the central's encryption fails, and the Flipper ends
+the connection.
+
+A snapshot saved with a central connected loads with the connection gone
+(the firmware hears so) and the stack answering.  Settings > Bluetooth off: it
 does not advertise, and the link says so.  `run --radio-stack none` is a
 Flipper with no stack: the firmware says so and runs on, and a plain `run`
 after it has the stack again.  No crash in any of the runs' logs.  Exit
@@ -231,6 +238,108 @@ def central(b, name, version, commit):
           f"{s} {b.uart_text()[mark:][-300:]}")
 
 
+def encrypts(c):
+    """c.encrypt() -> its words, or {"error": why}"""
+    try:
+        return c.encrypt()
+    except (fe_ble.EncryptionFailed, TimeoutError) as e:
+        return {"error": str(e)}
+
+
+def bond_kept(b):
+    """After the first pairing, which bonded: the bond kept and saved, and
+    the central back with it"""
+    keys = b.dir / "bt.keys.pulled"
+    code, out, err, took = fe(b, "pull", "/int/.bt.keys", str(keys))
+    data = keys.read_bytes() if keys.exists() else b""
+    keys.unlink(missing_ok=True)
+    s = bt(b)
+    check("the bond: the stack keeps it in the RAM that CPU1 gave it, and "
+          "the firmware saves that to /int/.bt.keys",
+          s.get("bonds") == 1 and b"FEbd" in data,
+          f"{s.get('bonds')} {len(data)} bytes {out + err}")
+
+    with fe_ble.Central(b.dir / "ble.sock", timeout=15) as c:
+        c.connect()
+        c.mtu(517)
+        words = encrypts(c)
+        level = c.char("2a19")
+        fe(b, "battery", "77")
+        # (the firmware notifies the level it has at once on a connection:
+        # 42, from before; then 77)
+        got, end = [], time.time() + 20
+        while bytes([77]) not in got and time.time() < end:
+            try:
+                got.append(c.take(level.value,
+                                  timeout=max(0.1, end - time.time()))[2])
+            except TimeoutError:
+                break
+        try:
+            back = fe_ble.Rpc(c, timeout=20).ping(b"bonded")
+        except (fe_ble.LinkError, TimeoutError, KeyError) as e:
+            back = str(e)
+        c.disconnect()
+    check("the central comes back with its bond: encrypted with no PIN, "
+          "authenticated as before; the battery level's CCCD as it left it "
+          "(`battery 77` notifies with no new subscription); RPC",
+          words.get("authenticated") == "1" and words.get("bonded") == "1"
+          and bytes([77]) in got and back == b"bonded",
+          f"{words} {got} {back}")
+
+
+def bond_rebooted(b):
+    with fe_ble.Central(b.dir / "ble.sock", timeout=15) as c:
+        c.connect()
+        words = encrypts(c)
+        c.disconnect()
+    check("a reboot keeps the bond (the firmware put its file back into the "
+          "stack's RAM): the central encrypts again with no PIN",
+          words.get("bonded") == "1", words)
+
+
+def rebond(b):
+    """A central that has lost its side of the bond pairs anew"""
+    with fe_ble.Central(b.dir / "ble.sock", timeout=15) as c:
+        c.connect()
+        c.mtu(517)
+        mark = fe_ble.log_size(b.uart)
+        paired, reason = pairs(c, lambda: fe_ble.pin_from_log(b.uart, mark))
+        c.disconnect()
+    s = bt(b)
+    check("a central that has lost its side of the bond pairs anew: the "
+          "firmware lets it (bond lost, rebond), with the PIN, and the stack "
+          "keeps the new bond", paired is not None
+          and paired.get("bonded") == "1" and s.get("bonds") == 1,
+          f"{paired} {reason} {s.get('bonds')}")
+
+
+def unpair(b):
+    """Settings > Bluetooth > Unpair All Devices, and the central's bond"""
+    fe(b, "app", "Bluetooth")
+    time.sleep(1.5)
+    fe(b, "press", "down")
+    time.sleep(0.3)
+    fe(b, "press", "ok")
+    time.sleep(0.8)
+    code, out, err, took = fe(b, "wait", "--timeout", 10, "--log",
+                              "Root keys regen", "--", "press", "right")
+    time.sleep(1)
+    fe(b, "press", "back")
+    time.sleep(0.5)
+    fe(b, "press", "back")
+    s = until(lambda: (bt(b).get("advertising") or None) and bt(b), 15)
+    with fe_ble.Central(b.dir / "ble.sock", timeout=15) as c:
+        c.connect()
+        words = encrypts(c)
+        ended = c.wait_disconnected(10)
+    check("Settings > Bluetooth > Unpair All Devices: the stack forgets the "
+          "bond; the central's encryption fails (key missing), and the "
+          "Flipper ends the connection",
+          code == 0 and s and s.get("bonds") == 0 and "key-missing" in
+          words.get("error", "") and ended == ("flipper", 0x05),
+          f"{out + err} {s} {words} {ended}")
+
+
 def bluetooth(b, on):
     """Settings > Bluetooth, on or off: the app, the value, and Back (the
     app hands its settings to the BT service as it closes)"""
@@ -295,6 +404,7 @@ def main():
         if s:
             central(b, name, field("firmware.version"),
                     field("firmware.commit.hash"))
+            bond_kept(b)
 
         code, out, err, took = fe(b, "wait", "--timeout", args.timeout, "--",
                                   "reset")
@@ -302,6 +412,10 @@ def main():
         check("a reboot: the firmware has the stack start again, and it "
               "advertises again", code == 0 and s and s.get("up") is True,
               f"{out + err} {s}")
+        if s:
+            bond_rebooted(b)
+            rebond(b)
+            unpair(b)
 
         # saved with a central connected, which stays until the run ends:
         # the loaded firmware has to hear that the connection is gone.  (A

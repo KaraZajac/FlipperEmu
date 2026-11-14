@@ -197,7 +197,9 @@ advertise, and while a central is connected.
 | `pairing passkey enter` | the Flipper shows a PIN: the central is to send it (`passkey`) |
 | `pairing passkey show` | the central is to show a PIN of its own, for the Flipper to enter (no firmware here asks for it) |
 | `pairing compare 123456` | numeric comparison: both are to confirm that they show this value (`confirm`) |
-| `paired authenticated=1 bonded=1 sc=1` | the link is encrypted; authenticated: by a PIN or a comparison; sc: LE Secure Connections |
+| `paired authenticated=1 bonded=1 sc=1` | the link is encrypted; authenticated: by a PIN or a comparison; sc: LE Secure Connections; bonded: both sides keep the bond |
+| `encrypted authenticated=1 bonded=1 sc=1` | the answer to `encrypt`: the Flipper has the central's bond, and the link is encrypted with it, no PIN |
+| `encryption failed reason=key-missing` | the Flipper has no bond with this central (it was forgotten there): the firmware ends the connection, and a phone pairs again |
 | `pairing failed reason=0x04` | SMP's reason: 0x01 passkey entry failed, 0x03 authentication requirements, 0x04 confirm value failed (a wrong PIN), 0x0C numeric comparison failed |
 | `value 0x0012 312e352e31` | the answer to `read` |
 | `written 0x0023` | the answer to `write` |
@@ -216,6 +218,7 @@ bytes): 20 until an `mtu` exchange.
 | `connect [addr=C6:89:67:45:23:01] [addr_type=random\|public] [interval=24]` | connect, while it advertises connectably |
 | `disconnect [reason=0x13]` | end the connection |
 | `mtu 517` | exchange MTUs |
+| `encrypt` | a central with a bond: encryption with the key it keeps, as a phone does when it comes back |
 | `pair [io=keyboard-display\|keyboard\|display\|yesno\|none] [bond=0] [sc=0] [mitm=0]` | the central's pairing request. The method follows from both sides' IO capabilities as Bluetooth's table has it: with the Flipper's (DisplayOnly for the serial profile) and the default `keyboard-display`, a PIN that the Flipper shows. Just Works, where the capabilities give it, fails when either side wants protection against a man in the middle (the Flipper does) |
 | `passkey 123456` \| `passkey cancel` | the PIN, as the central's user typed it |
 | `confirm yes` \| `confirm no` | the central's side of a numeric comparison |
@@ -228,6 +231,17 @@ bytes): 20 until an `mtu` exchange.
 Permissions are the firmware's own: a characteristic that wants authentication (the
 device information, the battery, the serial service) answers 0x05 until the link is
 paired with a PIN. A write to a CCCD reaches the firmware too, as on ST's stack.
+
+### Bonds
+
+A pairing in which both sides bond (the Flipper's profiles do) leaves a bond: the stack
+keeps the central's address and how it was paired, and the firmware saves that to
+`/int/.bt.keys`, so it outlives a reboot. The central keeps its side (a phone does;
+`./flipperemu ble` in `devices/NAME/ble-central.json`) and comes back with `encrypt`:
+encrypted, no PIN, its CCCDs as it left them. A central that has lost its side and sends
+`pair` again pairs anew, with the PIN: the firmware hears that the bond was lost and
+allows it. Settings > Bluetooth > Unpair All Devices forgets every bond, and an
+`encrypt` after it fails.
 
 ### Time and flow
 

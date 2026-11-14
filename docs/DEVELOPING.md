@@ -258,7 +258,9 @@ with fe_ble.Central("devices/NAME/ble.sock") as c:
 
 What your service gets is what it would get from a phone: the connection's events,
 the pairing's, `ACI_GATT_ATTRIBUTE_MODIFIED` for a write, a confirmation for each
-indication. The stack keeps no bond yet, so a central pairs at every connection.
+indication. A pairing bonds, as with a phone: `c.encrypt()` on a later connection gets
+in with no PIN, and the client's CCCDs are as it left them (`fe_ble.Bonds` keeps a
+central's side in a file, as `./flipperemu ble` does).
 
 ## The LED and the backlight
 

@@ -4143,6 +4143,59 @@ big lock, entry 92).
       shows a PIN), an app's own profile (the BLE remote), a real phone (the
       central is a program, not a radio).
 
+141. **Bluetooth: bonds.** Part 2's central paired at every connection:
+    the stack kept nothing of a pairing. ST's stack keeps its security
+    database in a buffer of CPU1's that `SHCI_C2_Config` names (Config1
+    bit 0; on the Flipper `ble_app_nvm`, 507 words in SRAM2a), and says when
+    it has changed it, if EvtMask1 bit 1 asks (the system event
+    `BLE_NVM_RAM_UPDATE`, 0x9202: start and size). The firmware's bt
+    service then saves the buffer to `/int/.bt.keys` (a saved struct: its
+    own root keys, then the buffer's bytes up to start + size), and copies
+    the file back into it before the stack starts, at every start and every
+    change of profile.
+    - What is in the buffer is the stack's business, and ST's format is not
+      public: the model keeps a table of its own there ("FEbd", version 1:
+      up to eight centrals, each its address, whether it was paired with a
+      PIN or a comparison and by LE Secure Connections, and up to six CCCDs
+      that it had set). A real Flipper's file holds no bond for it. A
+      pairing in which both sides bond adds the central (the firmware:
+      "Size changed: 40"); a bonded client's CCCDs are written back when it
+      leaves; `aci_gap_clear_security_db` empties the table ("Size changed:
+      8").
+    - The link's `encrypt` is a central back with its bond: CPU1 hears
+      `HCI_ENCRYPTION_CHANGE` and a successful `ACI_GAP_PAIRING_COMPLETE`,
+      as after a pairing (the firmware opens its RPC session on it), and the
+      client's CCCDs are as it left them. With no bond for it (Settings >
+      Bluetooth > Unpair All Devices), `ACI_GAP_PAIRING_COMPLETE` with
+      status 3, encryption failed: the firmware ends the connection (0x05),
+      and a phone pairs again. A `pair` from a central that the table has
+      (it lost its side) gives CPU1 `ACI_GAP_BOND_LOST` first; the firmware
+      answers `aci_gap_allow_rebond`, and the pairing goes on with the PIN.
+    - The launcher's central keeps its side in
+      `devices/NAME/ble-central.json` (`fe_ble.Bonds`): with a bond it
+      encrypts, and when the Flipper has forgotten it, it forgets too and
+      pairs again; `ble forget` is a phone's "forget this device".
+    - Found: a deadlock in the model's events. They went to CPU1 strictly in
+      order, and a central that came back fast (connect, MTU, encrypt, three
+      CCCDs in a few milliseconds) filled CPU1's pool of five while CPU1's
+      BLE thread sat in `aci_gap_slave_security_req`, waiting for its
+      Command Status. That answer has a buffer of its own, but it waited
+      behind the events that waited for the pool, and the pool's buffers
+      come back only when that thread goes on: `[CRASH][BleEventWorker]
+      furi_check failed`, r8 0xfc8d, r0 a timeout. An event that has no
+      buffer no longer holds up one behind it that has; events of one kind
+      of buffer keep their order. Part 2's pairing, with a PIN in it, had
+      been too slow to meet it.
+    - Found: the firmware notifies the battery level that it has at once on
+      every connection: a bonded client whose CCCD came back gets the old
+      level first.
+    - `scripts/ble_check.py`: 26 (5 new) on the five firmwares, 45 s each:
+      the bond kept and saved (the file holds the table), the central back
+      with no PIN and its CCCD, the bond after a reboot, a rebond, Unpair
+      All Devices. With this build on the official 1.5.1: `enclave_check`
+      35, `snapshot_check` 68, `update_check` 34, `u2f_check` 39, the smoke
+      test 28, `gui_check` 71.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

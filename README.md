@@ -238,9 +238,8 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
   update packages, unless `run --radio-stack` names another): the emulated CPU2
   installs none. `./flipperemu update` and `run --update` leave such a package's radio
   stage out (the plan's Bluetooth item, part 3).
-- Bluetooth's bonds: a central pairs at every connection, where a real Flipper would
-  remember it (the stack keeps no bond, nor writes one where the firmware saves it). A
-  real phone or computer: the central is a program on the link, not a Bluetooth adapter.
+- A real phone or computer over Bluetooth: the central is a program on the link, not a
+  Bluetooth adapter.
 - NFC: Ultralight C, ISO14443-4 (DESFire, bank cards), ISO14443B, ISO15693 and FeliCa
   cards. When the Flipper emulates a MIFARE Classic, the virtual reader gets as far as
   its UID, ATQA and SAK: the Crypto1 answers go out through a bit-banged pin that the
@@ -2612,6 +2611,7 @@ hold. `./flipperemu ble` is such a program:
 ./flipperemu ble read 2a26           # one value (a UUID, or a handle: 0x0012)
 ./flipperemu ble write 0x002b 00000000
 ./flipperemu ble rpc                 # the phone app's RPC session: a ping, the device's info
+./flipperemu ble forget              # the phone forgets the Flipper: it pairs again next time
 ```
 
 Each of them but `scan` connects and pairs. The Flipper shows a six-digit PIN, as it
@@ -2632,8 +2632,11 @@ RPC over Bluetooth: a ping came back whole
 
 `scripts/fe_ble.py` is the same as a library, for a test of a firmware's Bluetooth or of
 an app's own profile; the link's lines are in [docs/RADIO_LINK.md](docs/RADIO_LINK.md#bluetooth-blesock).
-The stack keeps no bond yet: a central pairs at every connection, where a real Flipper
-would remember a phone it has paired with.
+The first pairing bonds, as with a phone: the stack keeps the bond, the firmware saves
+it to `/int/.bt.keys`, and the launcher's central keeps its side beside the device
+(`devices/NAME/ble-central.json`). After that it comes back without a PIN, after a
+reboot too, until Settings > Bluetooth > Unpair All Devices on the Flipper (its next
+connection fails, and it pairs again) or `ble forget` on its side.
 
 **An emulator that was built before this came (2026-11-14) wants
 `scripts/setup_qemu.sh --build`**: the launcher gives every device the link, and such a

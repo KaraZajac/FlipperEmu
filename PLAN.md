@@ -52,9 +52,11 @@ qFlipper / lab.flipper.net / `ufbt launch` only run over USB CDC.
           capabilities have it), and reads, writes and subscribes to characteristics; the
           serial service carries the phone app's RPC session. `./flipperemu ble`,
           `scripts/fe_ble.py`; `scripts/ble_check.py`: 21 on the five (BRINGUP_LOG 140)
-    - ☐ Bonds: the stack's security database in CPU1's RAM (`C2_CONFIG`'s address), which
-          the firmware saves to `/int/.bt.keys`, so that a central that has paired connects
-          again without a PIN, after a reboot too, and "Unpair All Devices" forgets it
+    - ☑ Bonds (2026-11-14): the stack's security database in CPU1's RAM (`C2_CONFIG`'s
+          address), which the firmware saves to `/int/.bt.keys`: a central that has paired
+          comes back without a PIN (`encrypt`), after a reboot too, with its CCCDs as it
+          left them; one that has lost its side pairs anew (bond lost, rebond); Unpair All
+          Devices forgets them. `scripts/ble_check.py`: 26 on the five (BRINGUP_LOG 141)
     - ☐ The radio update path: the switches between the stack and the FUS with the resets
           that go with them, and the FUS deleting and installing a stack from an update
           package (one with another version than the installed one). Until then such a

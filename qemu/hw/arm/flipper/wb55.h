@@ -285,7 +285,10 @@ typedef struct WB55BleState {
     uint8_t pair_flags;          /* WB55_BLE_PF_*: who has answered, how */
     uint32_t pair_key;           /* CPU1's passkey, or the value compared */
     uint32_t pair_entered;       /* the central's passkey */
+    uint8_t pair_io;             /* the central's IO capability */
+    uint8_t pair_opts;           /* WB55_BLE_PO_*: what it asked for */
     uint8_t indications;         /* sent, and not yet confirmed */
+    uint8_t config1;             /* SHCI_C2_Config's Config1 */
     uint8_t tx_high, tx_level;
     uint8_t beacon;              /* the additional beacon is on */
     /* SHCI_C2_Config: where the stack keeps its bonds in CPU1's RAM */
@@ -365,6 +368,7 @@ void wb55_ble_flush(WB55IpccState *s);
  * connection ends at its first run (it was in the air) */
 void wb55_ble_realize(WB55IpccState *s);
 void wb55_ble_loaded(WB55IpccState *s);
+int wb55_ble_bonds(WB55IpccState *s);   /* the centrals it is bonded with */
 extern const VMStateDescription vmstate_wb55_ble;
 
 /* WB55BleState.sec */
@@ -382,6 +386,11 @@ enum { WB55_BLE_PAIR_NONE, WB55_BLE_PAIR_PASSKEY, WB55_BLE_PAIR_COMPARE };
 #define WB55_BLE_PF_AUTH             0x20    /* it will be authenticated */
 #define WB55_BLE_PF_BOND             0x40    /* both sides bond */
 #define WB55_BLE_PF_SC               0x80    /* LE Secure Connections */
+/* WB55BleState.pair_opts: the central's pairing request */
+#define WB55_BLE_PO_MITM             0x01
+#define WB55_BLE_PO_SC               0x02
+#define WB55_BLE_PO_BOND             0x04
+#define WB55_BLE_PO_REBOND           0x08    /* bond lost: CPU1 to allow it */
 
 /* ---------------------------------------------------------------- EXTI */
 #define TYPE_WB55_EXTI "stm32wb55-exti"

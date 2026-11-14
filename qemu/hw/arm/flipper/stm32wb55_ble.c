@@ -84,6 +84,7 @@
 #define VS_GAP_PAIRING_COMPLETE       0x0401
 #define VS_GAP_PASS_KEY_REQ           0x0402
 #define VS_GAP_PERIPHERAL_SEC_INIT    0x0404
+#define VS_GAP_BOND_LOST              0x0405
 #define VS_GAP_NUMERIC_COMPARISON     0x0409
 #define VS_L2CAP_CONN_UPDATE_RESP     0x0800
 #define VS_GATT_ATTRIBUTE_MODIFIED    0x0C01
@@ -102,8 +103,13 @@
 #define ATT_INSUFFICIENT_AUTHEN 0x05
 #define ATT_INVALID_LENGTH    0x0D
 
+/* the system channel's events: SHCI's code, and the bonds' subevent */
+#define SHCI_EVTCODE          0xFF
+#define SHCI_SUB_EVT_BLE_NVM_RAM_UPDATE 0x9202
+
 /* SMP: a pairing's end (ACI_GAP_PAIRING_COMPLETE: status, reason) */
 #define SMP_FAILED            0x02
+#define SMP_ENCRYPT_FAILED    0x03     /* no key for the central: no bond */
 #define SMP_PASSKEY_ENTRY_FAILED 0x01
 #define SMP_AUTH_REQUIREMENTS 0x03
 #define SMP_CONFIRM_VALUE_FAILED 0x04
@@ -249,29 +255,42 @@ void wb55_ble_released(WB55IpccState *s, hwaddr buf)
     }
 }
 
-/* The events that wait, into their queues, as far as there are buffers and
- * CPU1 has taken the last ones */
+/*
+ * The events that wait, into their queues, as far as there are buffers and
+ * CPU1 has taken the last ones.  An event that has no buffer yet does not
+ * hold up one behind it that has: a command's answer has a buffer of its
+ * own, and CPU1's BLE thread, which waits for that answer, gives the pool's
+ * buffers back only once it has it.  (In order, a fast central's events
+ * filled the pool while that thread waited, the answer waited behind them,
+ * and the firmware ended in `furi_check failed` on its timeout.)  Events of
+ * one kind of buffer keep their order: they wait for the same buffers.
+ */
 void wb55_ble_flush(WB55IpccState *s)
 {
     WB55BleState *b = &s->ble;
     hwaddr ref = wb55_ipcc_ref_table(s);
-    uint32_t posted = 0;
+    uint32_t posted = 0, held = 0;      /* (held: kinds of buffer that wait) */
+    int i = 0;
 
-    while (b->npending) {
-        WB55BleEvent *e = &b->pending[0];
+    while (i < b->npending) {
+        WB55BleEvent *e = &b->pending[i];
         bool sys = e->buf == WB55_BLE_BUF_SYS;
         uint32_t ch = sys ? CH(2) : CH(1);
         hwaddr table = tl_rd32(ref + (sys ? TL_REF_SYS : TL_REF_BLE));
         hwaddr queue = table ? tl_rd32(table + (sys ? TL_SYS_QUEUE
                                                     : TL_BLE_EVT_QUEUE)) : 0;
-        hwaddr buf;
+        hwaddr buf = 0;
 
-        if (!queue || ((s->c2toc1sr & ch) && !(posted & ch))) {
-            break;                      /* not set up yet, or not taken yet */
+        /* not set up yet, or CPU1 has not taken the last ones yet, or one
+         * of its kind waits already */
+        if (queue && !((s->c2toc1sr & ch) && !(posted & ch)) &&
+            !(held & (1u << e->buf))) {
+            buf = ble_take_buffer(s, e->buf);
         }
-        buf = ble_take_buffer(s, e->buf);
         if (!buf) {
-            break;
+            held |= 1u << e->buf;
+            i++;
+            continue;
         }
         tl_wr8(buf + TL_PKT_HEADER, sys ? TL_SYSEVT_PKT_TYPE
                                         : TL_BLEEVT_PKT_TYPE);
@@ -281,8 +300,8 @@ void wb55_ble_flush(WB55IpccState *s)
         tl_lst_insert_tail(queue, buf);
         posted |= ch;
         b->npending--;
-        memmove(&b->pending[0], &b->pending[1],
-                b->npending * sizeof(b->pending[0]));
+        memmove(&b->pending[i], &b->pending[i + 1],
+                (b->npending - i) * sizeof(b->pending[0]));
     }
     if (posted) {
         s->c2toc1sr |= posted;
@@ -786,6 +805,8 @@ static void ble_conn_drop(WB55BleState *b)
     }
 }
 
+static void bond_keep_cccds(WB55IpccState *s);
+
 /* It ends, and CPU1 hears so (HCI_DISCONNECTION_COMPLETE, the reason as
  * CPU1's side has it) */
 static void ble_disconnected(WB55IpccState *s, uint8_t reason)
@@ -793,6 +814,9 @@ static void ble_disconnected(WB55IpccState *s, uint8_t reason)
     WB55BleState *b = &s->ble;
     uint8_t d[4] = { 0x00, b->conn & 0xFF, b->conn >> 8, reason };
 
+    if (b->sec & WB55_BLE_SEC_BONDED) {
+        bond_keep_cccds(s);
+    }
     wb55_ble_post(s, WB55_BLE_BUF_POOL, EVT_DISCONNECTION, d, sizeof(d));
     ble_conn_drop(b);
 }
@@ -884,6 +908,177 @@ static void ble_conn_update(WB55IpccState *s, uint16_t min, uint16_t latency,
             b->latency, b->timeout);
 }
 
+/* ---- bonds: the stack's security database, in CPU1's RAM */
+/*
+ * ST's stack keeps its bonds, and a bonded client's CCCDs, in a buffer of
+ * CPU1's that SHCI_C2_Config names (Config1 bit 0: the NVM data in SRAM; the
+ * Flipper's `ble_app_nvm`, 2028 bytes), and says when it has changed them
+ * (the system event BLE_NVM_RAM_UPDATE, if EvtMask1 bit 1 asks for it).  The
+ * firmware then saves the buffer to /int/.bt.keys, and copies that file back
+ * into it before the stack starts: a bond outlives a reboot.  What is in the
+ * buffer is the stack's own business (ST's format is not public), so the
+ * model keeps a table of its own there: a real Flipper's file holds no bond
+ * for it, and its file none for a real Flipper.
+ */
+#define BOND_MAGIC      0x64624546      /* "FEbd" */
+#define BOND_VERSION    1
+#define BOND_SLOTS      8
+#define BOND_CCCDS      6
+#define BOND_HEADER     8               /* magic, version, count, 2 spare */
+#define BOND_SIZE       32              /* type, address, flags, the CCCDs */
+#define BOND_AUTH       0x01            /* paired with a PIN or a compare */
+#define BOND_SC         0x02            /* by LE Secure Connections */
+#define C2_CONFIG1_NVM_TO_SRAM    0x01
+#define C2_EVTMASK1_NVM_UPDATE    0x02
+
+typedef struct Bond {
+    uint8_t type, addr[6], flags;
+    uint16_t cccd[BOND_CCCDS][2];       /* a CCCD's handle and value */
+} Bond;
+
+static bool bonds_kept(WB55BleState *b)
+{
+    return b->nvm_ram && (b->config1 & C2_CONFIG1_NVM_TO_SRAM);
+}
+
+/* The table in CPU1's RAM -> how many bonds (0: none, or not a table) */
+static int bonds_read(WB55BleState *b, Bond *out)
+{
+    uint8_t h[BOND_HEADER], r[BOND_SIZE];
+    int n;
+
+    if (!bonds_kept(b)) {
+        return 0;
+    }
+    tl_read(b->nvm_ram, h, sizeof(h));
+    if (ldl_le_p(h) != BOND_MAGIC || h[4] != BOND_VERSION) {
+        return 0;
+    }
+    n = MIN(h[5], BOND_SLOTS);
+    for (int i = 0; i < n; i++) {
+        tl_read(b->nvm_ram + BOND_HEADER + i * BOND_SIZE, r, sizeof(r));
+        out[i].type = r[0];
+        memcpy(out[i].addr, r + 1, 6);
+        out[i].flags = r[7];
+        for (int j = 0; j < BOND_CCCDS; j++) {
+            out[i].cccd[j][0] = le16(r + 8 + 4 * j);
+            out[i].cccd[j][1] = le16(r + 10 + 4 * j);
+        }
+    }
+    return n;
+}
+
+/* ... the table written back, and the firmware told, so that it saves it */
+static void bonds_write(WB55IpccState *s, const Bond *in, int n)
+{
+    WB55BleState *b = &s->ble;
+    uint8_t h[BOND_HEADER] = { 0 }, r[BOND_SIZE], d[10];
+
+    if (!bonds_kept(b)) {
+        return;
+    }
+    stl_le_p(h, BOND_MAGIC);
+    h[4] = BOND_VERSION;
+    h[5] = n;
+    tl_write(b->nvm_ram, h, sizeof(h));
+    for (int i = 0; i < n; i++) {
+        memset(r, 0, sizeof(r));
+        r[0] = in[i].type;
+        memcpy(r + 1, in[i].addr, 6);
+        r[7] = in[i].flags;
+        for (int j = 0; j < BOND_CCCDS; j++) {
+            put16(r + 8 + 4 * j, in[i].cccd[j][0]);
+            put16(r + 10 + 4 * j, in[i].cccd[j][1]);
+        }
+        tl_write(b->nvm_ram + BOND_HEADER + i * BOND_SIZE, r, sizeof(r));
+    }
+    if (b->evt_mask1 & C2_EVTMASK1_NVM_UPDATE) {
+        put16(d, SHCI_SUB_EVT_BLE_NVM_RAM_UPDATE);
+        stl_le_p(d + 2, b->nvm_ram);                    /* StartAddress */
+        stl_le_p(d + 6, BOND_HEADER + n * BOND_SIZE);   /* Size */
+        wb55_ble_post(s, WB55_BLE_BUF_SYS, SHCI_EVTCODE, d, sizeof(d));
+    }
+}
+
+static int bond_find(const Bond *list, int n, uint8_t type,
+                     const uint8_t *addr)
+{
+    for (int i = 0; i < n; i++) {
+        if (list[i].type == type && !memcmp(list[i].addr, addr, 6)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* The CCCDs that the connection's client has set, into its bond */
+static void bond_cccds(WB55BleState *b, Bond *bond)
+{
+    int j = 0;
+
+    memset(bond->cccd, 0, sizeof(bond->cccd));
+    for (int i = 0; i < b->nattrs && j < BOND_CCCDS; i++) {
+        WB55BleAttr *a = &b->attr[i];
+
+        if (a->kind == WB55_BLE_ATTR_CCCD && le16(&b->values[a->at])) {
+            bond->cccd[j][0] = a->handle;
+            bond->cccd[j][1] = le16(&b->values[a->at]);
+            j++;
+        }
+    }
+}
+
+/* A pairing that bonded: the central's record, new or anew (a full table
+ * gives up its oldest) */
+static void bond_store(WB55IpccState *s)
+{
+    WB55BleState *b = &s->ble;
+    Bond list[BOND_SLOTS];
+    int n = bonds_read(b, list);
+    int i = bond_find(list, n, b->peer_type, b->peer);
+
+    if (i < 0) {
+        if (n == BOND_SLOTS) {
+            memmove(&list[0], &list[1], (n - 1) * sizeof(list[0]));
+            n--;
+        }
+        i = n++;
+    }
+    list[i].type = b->peer_type;
+    memcpy(list[i].addr, b->peer, 6);
+    list[i].flags =
+        (b->sec & WB55_BLE_SEC_AUTHENTICATED ? BOND_AUTH : 0) |
+        (b->pair_flags & WB55_BLE_PF_SC ? BOND_SC : 0);
+    bond_cccds(b, &list[i]);
+    bonds_write(s, list, n);
+}
+
+/* A bonded client leaves: its CCCDs are kept for its next connection */
+static void bond_keep_cccds(WB55IpccState *s)
+{
+    WB55BleState *b = &s->ble;
+    Bond list[BOND_SLOTS], now;
+    int n = bonds_read(b, list);
+    int i = bond_find(list, n, b->peer_type, b->peer);
+
+    if (i < 0) {
+        return;
+    }
+    now = list[i];
+    bond_cccds(b, &now);
+    if (memcmp(now.cccd, list[i].cccd, sizeof(now.cccd))) {
+        list[i] = now;
+        bonds_write(s, list, n);
+    }
+}
+
+int wb55_ble_bonds(WB55IpccState *s)
+{
+    Bond list[BOND_SLOTS];
+
+    return bonds_read(&s->ble, list);
+}
+
 /* ---- pairing (SMP), the Flipper the responder */
 
 enum { METHOD_JUST_WORKS, METHOD_PASSKEY, METHOD_PASSKEY_SHOW,
@@ -933,6 +1128,9 @@ static void ble_pair_done(WB55IpccState *s, uint8_t reason)
         b->sec = WB55_BLE_SEC_ENCRYPTED |
             (b->pair_flags & WB55_BLE_PF_AUTH ? WB55_BLE_SEC_AUTHENTICATED : 0) |
             (b->pair_flags & WB55_BLE_PF_BOND ? WB55_BLE_SEC_BONDED : 0);
+        if (b->sec & WB55_BLE_SEC_BONDED) {
+            bond_store(s);              /* the stack keeps it, CPU1 saves it */
+        }
     }
     put16(d, b->conn);
     d[2] = reason ? SMP_FAILED : 0x00;
@@ -975,43 +1173,23 @@ static void ble_pair_progress(WB55IpccState *s)
     }
 }
 
-/* pair [io=keyboard-display|keyboard|display|yesno|none] [bond=0|1]
- *      [sc=0|1] [mitm=0|1]: the central's Pairing Request */
-static void ble_pair(WB55IpccState *s, char **w)
+/* The pairing proper, by the request that ble_pair() kept */
+static void ble_pair_begin(WB55IpccState *s)
 {
-    static const char *const ios[] = { "display", "yesno", "keyboard", "none",
-                                       "keyboard-display" };
     WB55BleState *b = &s->ble;
-    const char *t;
-    int io = IO_KEYBOARD_DISPLAY, method;
-    bool sc, mitm;
+    bool sc = (b->pair_opts & WB55_BLE_PO_SC) && b->sc;
+    int method = pair_method(b->pair_io, b->io_cap, sc);
     uint8_t d[6];
 
-    if (!b->conn) {
-        ble_say(s, "error op=pair reason=not-connected");
-        return;
-    }
-    if (b->pair) {
-        ble_say(s, "error op=pair reason=pairing");
-        return;
-    }
-    if ((t = arg(w, "io"))) {
-        for (io = 0; io < (int)ARRAY_SIZE(ios) && strcmp(t, ios[io]); io++) {
-        }
-        if (io == (int)ARRAY_SIZE(ios)) {
-            ble_say(s, "error op=pair reason=io");
-            return;
-        }
-    }
-    sc = g_strcmp0(arg(w, "sc"), "0") && b->sc;
-    mitm = g_strcmp0(arg(w, "mitm"), "0");
-    method = pair_method(io, b->io_cap, sc);
+    b->pair_opts &= ~WB55_BLE_PO_REBOND;
     b->pair_flags = (sc ? WB55_BLE_PF_SC : 0) |
-        (g_strcmp0(arg(w, "bond"), "0") && b->bonding ? WB55_BLE_PF_BOND : 0);
+        ((b->pair_opts & WB55_BLE_PO_BOND) && b->bonding ? WB55_BLE_PF_BOND
+                                                         : 0);
     if (method == METHOD_JUST_WORKS) {
         /* no protection against a man in the middle: whoever wants one
          * makes it fail */
-        ble_pair_done(s, b->mitm || mitm ? SMP_AUTH_REQUIREMENTS : 0);
+        ble_pair_done(s, b->mitm || (b->pair_opts & WB55_BLE_PO_MITM)
+                         ? SMP_AUTH_REQUIREMENTS : 0);
         return;
     }
     b->pair_flags |= WB55_BLE_PF_AUTH;
@@ -1033,6 +1211,101 @@ static void ble_pair(WB55IpccState *s, char **w)
         ble_say(s, "pairing passkey show");
     }
     ble_vendor(s, VS_GAP_PASS_KEY_REQ, d, 2);
+}
+
+/* pair [io=keyboard-display|keyboard|display|yesno|none] [bond=0|1]
+ *      [sc=0|1] [mitm=0|1]: the central's Pairing Request */
+static void ble_pair(WB55IpccState *s, char **w)
+{
+    static const char *const ios[] = { "display", "yesno", "keyboard", "none",
+                                       "keyboard-display" };
+    WB55BleState *b = &s->ble;
+    Bond list[BOND_SLOTS];
+    const char *t;
+    int io = IO_KEYBOARD_DISPLAY;
+    uint8_t d[2];
+
+    if (!b->conn) {
+        ble_say(s, "error op=pair reason=not-connected");
+        return;
+    }
+    if (b->pair || (b->pair_opts & WB55_BLE_PO_REBOND)) {
+        ble_say(s, "error op=pair reason=pairing");
+        return;
+    }
+    if ((t = arg(w, "io"))) {
+        for (io = 0; io < (int)ARRAY_SIZE(ios) && strcmp(t, ios[io]); io++) {
+        }
+        if (io == (int)ARRAY_SIZE(ios)) {
+            ble_say(s, "error op=pair reason=io");
+            return;
+        }
+    }
+    b->pair_io = io;
+    b->pair_opts = (g_strcmp0(arg(w, "mitm"), "0") ? WB55_BLE_PO_MITM : 0) |
+                   (g_strcmp0(arg(w, "sc"), "0") ? WB55_BLE_PO_SC : 0) |
+                   (g_strcmp0(arg(w, "bond"), "0") ? WB55_BLE_PO_BOND : 0);
+    if (bond_find(list, bonds_read(b, list), b->peer_type, b->peer) >= 0) {
+        /* A central that the Flipper has a bond with asks to pair anew (it
+         * lost its side of the bond): the stack asks CPU1 first, which
+         * answers with aci_gap_allow_rebond, and the pairing goes on then */
+        b->pair_opts |= WB55_BLE_PO_REBOND;
+        put16(d, b->conn);
+        ble_vendor(s, VS_GAP_BOND_LOST, d, sizeof(d));
+        return;
+    }
+    ble_pair_begin(s);
+}
+
+/* encrypt: a central that has a bond with the Flipper starts encryption
+ * with the key it keeps, as a phone does when it comes back: no PIN */
+static void ble_encrypt(WB55IpccState *s)
+{
+    WB55BleState *b = &s->ble;
+    Bond list[BOND_SLOTS];
+    int i;
+    uint8_t d[4];
+
+    if (!b->conn) {
+        ble_say(s, "error op=encrypt reason=not-connected");
+        return;
+    }
+    if (b->pair || (b->pair_opts & WB55_BLE_PO_REBOND)) {
+        ble_say(s, "error op=encrypt reason=pairing");
+        return;
+    }
+    i = bond_find(list, bonds_read(b, list), b->peer_type, b->peer);
+    put16(d, b->conn);
+    if (i < 0) {
+        /* the Flipper has no key for it (it was forgotten): the stack's
+         * encryption fails, and CPU1 hears so as a pairing that failed */
+        d[2] = SMP_ENCRYPT_FAILED;
+        d[3] = 0x00;
+        ble_vendor(s, VS_GAP_PAIRING_COMPLETE, d, sizeof(d));
+        ble_say(s, "encryption failed reason=key-missing");
+        return;
+    }
+    {
+        uint8_t e[4] = { 0x00, b->conn & 0xFF, b->conn >> 8, 0x01 };
+
+        wb55_ble_post(s, WB55_BLE_BUF_POOL, EVT_ENCRYPTION_CHANGE, e,
+                      sizeof(e));
+    }
+    b->sec = WB55_BLE_SEC_ENCRYPTED | WB55_BLE_SEC_BONDED |
+             (list[i].flags & BOND_AUTH ? WB55_BLE_SEC_AUTHENTICATED : 0);
+    /* the client's CCCDs, as it left them */
+    for (int j = 0; j < BOND_CCCDS; j++) {
+        WB55BleAttr *a = list[i].cccd[j][0]
+                         ? attr_find(b, list[i].cccd[j][0]) : NULL;
+
+        if (a && a->kind == WB55_BLE_ATTR_CCCD) {
+            put16(&b->values[a->at], list[i].cccd[j][1]);
+        }
+    }
+    d[2] = d[3] = 0x00;
+    ble_vendor(s, VS_GAP_PAIRING_COMPLETE, d, sizeof(d));
+    ble_say(s, "encrypted authenticated=%d bonded=1 sc=%d",
+            !!(list[i].flags & BOND_AUTH), !!(list[i].flags & BOND_SC));
 }
 
 static void ble_passkey(WB55IpccState *s, char **w)
@@ -1369,6 +1642,8 @@ static void ble_link_line(void *opaque, char *line)
         }
     } else if (!strcmp(w[0], "pair")) {
         ble_pair(s, w);
+    } else if (!strcmp(w[0], "encrypt")) {
+        ble_encrypt(s);
     } else if (!strcmp(w[0], "passkey")) {
         ble_passkey(s, w);
     } else if (!strcmp(w[0], "confirm")) {
@@ -1479,6 +1754,7 @@ uint8_t wb55_ble_init(WB55IpccState *s, const uint8_t *p, int plen)
 uint8_t wb55_ble_config(WB55IpccState *s, const uint8_t *p, int plen)
 {
     if (plen >= 8) {
+        s->ble.config1 = p[1];          /* bit 0: the bonds in that RAM */
         s->ble.evt_mask1 = p[2];
         s->ble.nvm_ram = ldl_le_p(p + 4);
     }
@@ -1493,6 +1769,7 @@ static void ble_command(WB55IpccState *s, uint16_t op, const uint8_t *p,
     int rlen = 1;
     bool ours = b->conn && plen >= 2 && le16(p) == b->conn;
     bool pairing = false;               /* an answer that a pairing waited for */
+    bool rebond = false;                /* CPU1 lets a lost bond pair anew */
     WB55BleService *svc;
     WB55BleAttr *a;
 
@@ -1631,8 +1908,9 @@ static void ble_command(WB55IpccState *s, uint16_t op, const uint8_t *p,
             pairing = true;
         }
         break;
-    case OP_GAP_ALLOW_REBOND:
+    case OP_GAP_ALLOW_REBOND:           /* after a bond lost: pair anew */
         rp[0] = ours ? ST_OK : ST_UNKNOWN_CONN;
+        rebond = ours && (b->pair_opts & WB55_BLE_PO_REBOND);
         break;
     case OP_GAP_PERIPHERAL_SEC_REQ:     /* a Security Request to the central */
         ble_status(s, op, ours ? ST_OK : ST_UNKNOWN_CONN);
@@ -1661,9 +1939,11 @@ static void ble_command(WB55IpccState *s, uint16_t op, const uint8_t *p,
     case OP_GAP_BEACON_STOP:
         b->beacon = 0;
         break;
+    case OP_GAP_CLEAR_SECURITY_DB:      /* "Unpair All Devices" */
+        bonds_write(s, NULL, 0);
+        break;
     case OP_GAP_BEACON_SET_DATA:        /* (an extra beacon's data: not kept) */
     case OP_GAP_CONFIGURE_FILTER:
-    case OP_GAP_CLEAR_SECURITY_DB:      /* (no bonds are kept yet) */
     case OP_LE_SET_DEFAULT_PHY:
     /* the radio's tests: no radio, nothing sent or heard */
     case OP_HAL_TONE_START:
@@ -1805,6 +2085,9 @@ static void ble_command(WB55IpccState *s, uint16_t op, const uint8_t *p,
     if (pairing) {
         ble_pair_progress(s);
     }
+    if (rebond) {
+        ble_pair_begin(s);
+    }
     ble_adv_announce(s);
 }
 
@@ -1903,8 +2186,8 @@ static const VMStateDescription vmstate_wb55_ble_event = {
  */
 const VMStateDescription vmstate_wb55_ble = {
     .name = "stm32wb55-ble",
-    .version_id = 2,
-    .minimum_version_id = 2,
+    .version_id = 3,
+    .minimum_version_id = 3,
     .fields = (const VMStateField[]) {
         VMSTATE_BOOL(up, WB55BleState),
         VMSTATE_UINT16(max_attrs, WB55BleState),
@@ -1951,7 +2234,10 @@ const VMStateDescription vmstate_wb55_ble = {
         VMSTATE_UINT8(pair_flags, WB55BleState),
         VMSTATE_UINT32(pair_key, WB55BleState),
         VMSTATE_UINT32(pair_entered, WB55BleState),
+        VMSTATE_UINT8(pair_io, WB55BleState),
+        VMSTATE_UINT8(pair_opts, WB55BleState),
         VMSTATE_UINT8(indications, WB55BleState),
+        VMSTATE_UINT8(config1, WB55BleState),
         VMSTATE_UINT8(io_cap, WB55BleState),
         VMSTATE_UINT8(bonding, WB55BleState),
         VMSTATE_UINT8(mitm, WB55BleState),

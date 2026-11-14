@@ -541,8 +541,8 @@ static const VMStateDescription vmstate_wb55_fus_key = {
 
 static const VMStateDescription vmstate_wb55_ipcc = {
     .name = "stm32wb55-ipcc",
-    .version_id = 3,
-    .minimum_version_id = 3,
+    .version_id = 4,
+    .minimum_version_id = 4,
     .post_load = wb55_ipcc_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(c1cr, WB55IpccState),
@@ -616,6 +616,8 @@ static char *wb55_ipcc_get_ble(Object *obj, Error **errp)
     qdict_put_int(d, "events_waiting", b->npending);
     /* a program on the link (ble.sock), and its connection */
     qdict_put_bool(d, "link", s->ble_link && s->ble_link->open);
+    /* the centrals it has a bond with (in the RAM that CPU1 saves) */
+    qdict_put_int(d, "bonds", wb55_ble_bonds(s));
     if (b->conn) {
         QDict *c = qdict_new();
         char *a = g_strdup_printf("%02X:%02X:%02X:%02X:%02X:%02X",

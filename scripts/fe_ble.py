@@ -26,7 +26,9 @@ The link's lines are in docs/RADIO_LINK.md; this is a client of them.
 
 The PIN is on the Flipper's screen (the window shows it), and in its log
 ("Pass key request event. Pin: ...") unless the Flipper is locked:
-`pin_from_log()` reads it there.
+`pin_from_log()` reads it there.  The pairing bonds: a central that keeps
+its side (`Bonds`) comes back with `encrypt()`, no PIN, until the Flipper
+forgets it (Settings > Bluetooth > Unpair All Devices).
 """
 import argparse
 import dataclasses
@@ -120,6 +122,51 @@ class PairingFailed(Exception):
         self.reason = reason
         super().__init__("the pairing failed: " +
                          SMP_REASONS.get(reason, f"reason 0x{reason:02x}"))
+
+
+class EncryptionFailed(Exception):
+    """The Flipper has no bond with this central (any more): it ends the
+    connection, and a phone would pair again"""
+
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__(f"the Flipper has no bond with this central "
+                         f"({reason}): it was forgotten there")
+
+
+class Bonds:
+    """What a central keeps of the Flipper it has bonded with, as a phone
+    does: a small JSON file ({"80:E1:26:...": {"authenticated": "1", ...}})"""
+
+    def __init__(self, path):
+        self.path = pathlib.Path(path)
+
+    def _load(self):
+        import json
+        try:
+            return json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def _save(self, data):
+        import json
+        if data:
+            self.path.write_text(json.dumps(data, indent=2) + "\n")
+        else:
+            self.path.unlink(missing_ok=True)
+
+    def has(self, flipper):
+        return flipper in self._load()
+
+    def add(self, flipper, words):
+        data = self._load()
+        data[flipper] = words
+        self._save(data)
+
+    def forget(self, flipper=None):
+        data = self._load() if flipper else {}
+        data.pop(flipper, None)
+        self._save(data)
 
 
 def parse_ad(data):
@@ -357,6 +404,18 @@ class Central:
                 ok = confirm(value) if confirm else True
                 self.say(f"confirm {'yes' if ok else 'no'}")
 
+    def encrypt(self, timeout=None):
+        """A central with a bond: encryption with the key it keeps, no PIN.
+        -> the `encrypted` line's words; EncryptionFailed when the Flipper
+        has none (it ends the connection then)"""
+        self.say("encrypt")
+        line = self._until(lambda l: l.startswith(("encrypted",
+                                                   "encryption failed")),
+                           "the encryption", timeout, op="encrypt")
+        if line.startswith("encryption failed"):
+            raise EncryptionFailed(fields(line).get("reason", "?"))
+        return fields(line)
+
     # ---- ATT / GATT
 
     def gatt(self):
@@ -579,18 +638,38 @@ def pin_source(how, log):
 
 
 def connected_central(path, pin=None, log=None, timeout=10.0, mtu=517,
-                      quiet=False):
-    """A central that has connected and paired: what `gatt`, `read`, `write`
-    and `rpc` start with"""
+                      quiet=False, bonds=None):
+    """A central that has connected, and paired or encrypted: what `gatt`,
+    `read`, `write` and `rpc` start with.  bonds: a Bonds, kept as a phone
+    keeps them (a central with a bond encrypts, no PIN; one that the
+    Flipper has forgotten forgets it too, and pairs again)"""
+    def say(text):
+        if not quiet:
+            print(text, file=sys.stderr)
+
     c = Central(path, timeout)
     try:
         adv = c.advertising(timeout)
         c.connect()
         c.mtu(mtu)
-        if not quiet:
-            print(f"connected to {adv.get('name') or '?'} ({adv['addr']}); "
-                  "pairing: the Flipper shows a PIN", file=sys.stderr)
-        c.pair(pin_source(pin, log))
+        if bonds and bonds.has(adv["addr"]):
+            try:
+                c.encrypt()
+                say(f"connected to {adv.get('name') or '?'} ({adv['addr']}), "
+                    "with the bond from before: no PIN")
+                return c
+            except EncryptionFailed as e:
+                say(f"{e}: pairing again")
+                bonds.forget(adv["addr"])
+                c.wait_disconnected(10)
+                adv = c.advertising(15)
+                c.connect()
+                c.mtu(mtu)
+        say(f"connected to {adv.get('name') or '?'} ({adv['addr']}); "
+            "pairing: the Flipper shows a PIN")
+        paired = c.pair(pin_source(pin, log))
+        if bonds and paired.get("bonded") == "1":
+            bonds.add(adv["addr"], paired)
     except BaseException:
         c.close()
         raise
@@ -646,24 +725,36 @@ def show_gatt(c, values=True):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("link", help="devices/NAME/ble.sock")
-    ap.add_argument("action", choices=("scan", "gatt", "read", "write", "rpc"))
+    ap.add_argument("action", choices=("scan", "gatt", "read", "write", "rpc",
+                                       "forget"))
     ap.add_argument("what", nargs="*", help="read: a characteristic's UUID "
                     "(2a26) or a handle (0x0010); write: that and the bytes "
                     "in hex")
     ap.add_argument("--pin", help="the six digits; `ask`; `log`: the "
                     "firmware's log (--log)")
     ap.add_argument("--log", help="the firmware's log (devices/NAME/uart.log)")
+    ap.add_argument("--bonds", help="where this central keeps its bonds (a "
+                    "JSON file): with one, it comes back without a PIN")
     ap.add_argument("--timeout", type=float, default=10.0)
     args = ap.parse_args(argv)
     return run(args.link, args.action, args.what, args.pin, args.log,
-               args.timeout)
+               args.timeout, bonds=args.bonds)
 
 
 def run(link, action, what=(), pin=None, log=None, timeout=10.0,
-        as_json=False):
-    """The launcher's `ble` actions"""
+        as_json=False, bonds=None):
+    """The launcher's `ble` actions.  bonds: the file in which this central
+    keeps its bonds, or None (it pairs every time)"""
     import json
+    bonds = Bonds(bonds) if bonds else None
     try:
+        if action == "forget":
+            if bonds:
+                bonds.forget()
+            print("this central has forgotten its bonds: it pairs again "
+                  "next time (the Flipper's side: Settings > Bluetooth > "
+                  "Unpair All Devices)")
+            return 0
         if action == "scan":
             with Central(link, timeout) as c:
                 adv = c.advertising(timeout)
@@ -672,8 +763,8 @@ def run(link, action, what=(), pin=None, log=None, timeout=10.0,
                 else:
                     show_adv(adv)
             return 0
-        with connected_central(link, pin, log, timeout,
-                               quiet=as_json) as c:
+        with connected_central(link, pin, log, timeout, quiet=as_json,
+                               bonds=bonds) as c:
             c.gatt()
             if action == "gatt":
                 show_gatt(c)
@@ -711,7 +802,7 @@ def run(link, action, what=(), pin=None, log=None, timeout=10.0,
                             print(f"  {key:24s} {info[key]}")
             c.disconnect()
         return 0
-    except PairingFailed as e:
+    except (PairingFailed, EncryptionFailed) as e:
         print(e, file=sys.stderr)
         return 1
     except (LinkError, KeyError, TimeoutError, EOFError, OSError) as e:

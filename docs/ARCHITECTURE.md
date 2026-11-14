@@ -236,7 +236,10 @@ gone after five commands. The other events (a connection's, below) go
 into that pool (`MB_MemManagerTable_t.blepool`, five buffers of 268 bytes in 1.5.1) or
 its spare, and come back through the free queue (channel 4). An event waits in the model
 while its buffer is busy and while CPU1 has not cleared the channel's flag: CPU1 clears
-it after it has emptied the queue, so it misses none.
+it after it has emptied the queue, so it misses none. One that waits for a buffer does
+not hold up one behind it that has its own (a command's answer): CPU1's BLE thread, which
+waits for that answer, gives the pool's buffers back only once it has it. Events of one
+kind of buffer keep their order.
 
 **The connection.** The air is a line link (`ble-link`, `devices/NAME/ble.sock`;
 [RADIO_LINK.md](RADIO_LINK.md#bluetooth-blesock)), and the program on it is the central
@@ -261,8 +264,23 @@ the characteristic has the property, its CCCD asks for it and the MTU carries it
 (`…_ext`'s update type says which; the serial service sends its chunks with none and the
 last one with an indication of the whole). A read or a write is checked against the
 attribute's properties and permissions: authentication needs a pairing with a PIN or a
-comparison, encryption any pairing (ATT's 0x05 otherwise). The CCCDs go back to nothing
-when a connection ends: no bond is kept.
+comparison, encryption any pairing (ATT's 0x05 otherwise). A client's CCCDs go back to
+nothing when its connection ends, unless it is bonded.
+
+**Bonds.** `SHCI_C2_Config` gives the stack a buffer of CPU1's RAM for its security
+database (the Flipper's `ble_app_nvm`, 2028 bytes; Config1 bit 0), and asks to hear when
+it changes (EvtMask1 bit 1: the system event `BLE_NVM_RAM_UPDATE`, start and size). The
+firmware then saves the buffer to `/int/.bt.keys`, and copies the file back into it
+before the stack starts again. ST's format for it is not public and only the stack
+reads it, so the model keeps a table of its own there ("FEbd": up to eight centrals,
+each its address, how it was paired, and the CCCDs it had set). A pairing in which both
+sides bond adds the central; a bonded client's CCCDs are written back when it leaves;
+`aci_gap_clear_security_db` (Unpair All Devices) empties it. A central's `encrypt` with
+a bond gives CPU1 `HCI_ENCRYPTION_CHANGE` and `ACI_GAP_PAIRING_COMPLETE` as a pairing
+does (the firmware opens its RPC session on it), and the CCCDs back; without one,
+`ACI_GAP_PAIRING_COMPLETE` with status 3 (encryption failed), on which the firmware ends
+the connection. A `pair` from a central that the table has gives CPU1
+`ACI_GAP_BOND_LOST` first, and goes on at its `aci_gap_allow_rebond`.
 
 The firmware takes events from a queue of eight; while fewer than four are free the link
 reads nothing more (`FlipperLink.ready`), and goes on as CPU1 frees them, so a fast
@@ -278,10 +296,8 @@ central's address, the MTU, encrypted, authenticated, bonded, a pairing under wa
 the connection, the buffers that CPU1 has and the events that wait. A connection was in
 the air: at the loaded machine's first run CPU1 hears that it timed out.
 
-Not there: a radio (the central is a program on the link); the bonds that the stack
-keeps in CPU1's RAM (`C2_CONFIG`'s address is noted), so a central pairs at every
-connection; a second connection; the FUS's deleting and installing of a stack (an
-update whose stack is another version).
+Not there: a radio (the central is a program on the link); a second connection; the
+FUS's deleting and installing of a stack (an update whose stack is another version).
 
 ## The secure enclave (`stm32wb55_fus.c`, `stm32wb55_aes.c`, `flipper_enclave.c`)
 
