@@ -733,8 +733,12 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
     - ☐ The Metakom read of the smoke test under load (0 of 10 at a load of 20 on 16
           cores, BRINGUP_LOG 136 and 141). Not reproduced on 2026-11-14 with busy loops
           and with other emulated checks at a load of 15 to 20 (BRINGUP_LOG 146): to be
-          caught when it comes back, with its device kept. And the window check under
-          other programs' load
+          caught when it comes back, with its device kept
+    - ☑ The window check under load (2026-11-14): 77 of 79 at a load of 21, an I2C
+          scan's call that the firmware skips when more than 2 ms pass between two of
+          its instructions (about one in three thousand calls); the scan's checks take a
+          skipped address now (BRINGUP_LOG 147). Not tried: QEMU's `-icount` with a fixed
+          shift, which would keep a busy host out of the emulated time altogether
 - ☐ TCG plugin for coverage/trace of firmware or a single FAP
 - ☐ Fuzzing harness (AFL++/libafl QEMU mode) for parsers in the firmware
 - ☐ Upstream the thirteen QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:

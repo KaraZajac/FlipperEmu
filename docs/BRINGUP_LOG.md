@@ -4396,6 +4396,38 @@ big lock, entry 92).
     builds or emulators) is not known. The plan's item stays open, to be
     caught with its device kept when it comes back.
 
+147. **Under load, the firmware's I2C scan skips an address now and then.**
+    The window check beside four checks with their own emulators and 16
+    busy loops (a load of 21 on 16 cores): 77 of 79. The two that failed
+    were one thing: the record of the firmware's scan had 127 of its 128
+    calls, address 0x00 missing.
+    - Not the record's: the firmware made no call. `furi_hal_i2c_is_device_
+      ready()` gives each address 2 ms on a FuriHalCortexTimer (the cycle
+      counter), and its wait for an idle bus looks at the timer before it
+      looks at the bus (a do-while). When more than 2 ms of the emulated
+      time pass between taking the timer and that first look, it says "not
+      ready" with no START: on silicon a few instructions, here the
+      emulator's thread off its core, or the scanning thread put aside by
+      another of the firmware's, which a busy host makes slower against the
+      clock.
+    - How often: the scan 25 times in a row with the shell's `i2c record`
+      counting the STARTs, 24 busy loops on the 16 cores: 3200 of 3200 (a
+      load of 16); with QEMU's instruction counting (`-icount shift=auto`)
+      3199 (a load of 21), 0x44 missing in the 21st scan. About one call in
+      three thousand, at any address. `shift=auto` keeps the emulated time
+      near the real one, so it does not help; the emulator runs under it
+      (the smoke test, 28 of 28, in 79 s against 67). A fixed `shift`
+      (the emulated CPU at one speed whatever the host does, its time
+      falling behind the real one when the host cannot keep up) was not
+      tried.
+    - A check that wants a scan's 128 calls thus fails about once in 25
+      scans on a busy computer. `i2c_check.py` (seven places) and the
+      window check (three) take a scan as the 128 addresses in their order,
+      each at most once, up to two of them missing (the window check: 126
+      at least), and every count that the window and the launcher say is
+      the record's own; the two devices still have to answer. 66 and 79 on
+      the official 1.5.1.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
