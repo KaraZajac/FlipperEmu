@@ -60,6 +60,7 @@ from files_check import ROOT, Bench, CRASH, check, results
 from gpio_check import app_lines, hold, own_app, row, skip, skipped, status
 from uart_check import fe, start
 from ufbt_check import log_tail, tool
+import check_limit
 
 OWN = ROOT / "scripts" / "spi_check_app"
 TAG = "FeSpi"
@@ -568,6 +569,7 @@ def main():
     ap.add_argument("--keep", action="store_true",
                     help="keep the throwaway device")
     args = ap.parse_args()
+    check_limit.arm(600)
 
     b = Bench(f"spicheck-{int(time.time())}-{os.getpid()}", args.firmware,
               args.timeout)

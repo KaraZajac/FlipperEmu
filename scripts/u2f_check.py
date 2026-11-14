@@ -47,6 +47,7 @@ import fe_u2f
 from files_check import ROOT, Bench, CRASH, check, results
 from gpio_check import skip, skipped
 from uart_check import fe, start
+import check_limit
 
 APP = "u2f.fap"                         # found on the card, by this name
 CONTROL = 0xAA5500FF                    # U2F_COUNTER_CONTROL_VAL, u2f_data.c
@@ -427,6 +428,7 @@ def main():
     ap.add_argument("--keep", action="store_true",
                     help="keep the throwaway device")
     args = ap.parse_args()
+    check_limit.arm(600)
 
     b = Bench(f"u2fcheck-{int(time.time())}-{os.getpid()}", args.firmware,
               args.timeout)

@@ -42,6 +42,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fe_apps                                              # noqa: E402
 from files_check import Bench, CRASH, check, results        # noqa: E402
 from gpio_check import skip, skipped                        # noqa: E402
+import check_limit  # noqa: E402
 
 # apps that end when the loader asks them to, smallest first
 WANTED = ("gpio.fap", "ibutton.fap", "lfrfid.fap", "infrared.fap")
@@ -335,6 +336,7 @@ def main():
     ap.add_argument("--keep", action="store_true",
                     help="keep the throwaway device")
     args = ap.parse_args()
+    check_limit.arm(900)
 
     b = Bench(f"appcheck-{int(time.time())}-{os.getpid()}", args.firmware, args.timeout)
     work = pathlib.Path(tempfile.mkdtemp(prefix="fe-app-"))

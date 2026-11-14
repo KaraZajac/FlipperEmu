@@ -22,6 +22,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fe_rfid  # noqa: E402
 from fe_cli import FlipperCli, usb_endpoint  # noqa: E402
 from fe_monitor import Monitor  # noqa: E402
+import check_limit  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -142,6 +143,7 @@ def write_check(mon, cli, name, data):
 
 
 def main():
+    check_limit.arm(900)
     args = sys.argv[1:]
     checks = ("emulate", "read", "write")
     if "--checks" in args:

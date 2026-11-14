@@ -4340,6 +4340,38 @@ big lock, entry 92).
       (the shell's `snapshot load` goes through the same function, and the
       window check's second phase loads that way on all five).
 
+145. **Checks: a time limit in every one.** A window check waited three
+    hours in a dialog (143) and nobody saw it: a check had no time of its
+    own, and a runner's `timeout`, where there was one, killed it from
+    outside and left its emulators running (one from the FUS work ran four
+    hours after its folder was gone).
+    - `scripts/check_limit.py`: `arm(SECONDS)` first in each check's
+      `main()` (after its arguments, so `--help` stays as it was). Past the
+      limit, a timer thread prints a FAIL, every thread's stack
+      (`faulthandler`), stops the devices the check named (`Bench` names its
+      own, the window check its device) as `flipperemu stop` does, then
+      sends SIGTERM and SIGKILL to what the check started that still runs
+      (its descendants, by the parents in `/proc`: launchers, QEMUs,
+      helpers), keeps the devices' folders, and exits with 124. A check
+      that ends says how long it took, and its limit.
+    - The limits, about three times the longest run seen (RogueMaster's
+      take about two and a half times the official firmware's), ten minutes
+      at least: 10 minutes for ble, enclave, gdb, ibutton, nfc_link, sdr,
+      setup, spi, u2f, wait and the smoke test; 15 for app, gpio, i2c,
+      keystore, rfid, uart and ufbt; 20 for files and snapshot; 40 for the
+      window check, 45 for the update check. `FLIPPEREMU_CHECK_LIMIT`:
+      seconds for every check, a factor (`x2`), or `0` for none.
+    - `sdr_check.py`'s helpers (`synth`, and `rtl-tcp-sim`, a server) are
+      not checks and have none.
+    - Tried: a script that hangs with a child and a grandchild: the FAIL
+      after its 2 s, the stack where it waited, both processes gone, exit
+      124. Every check once on the official 1.5.1 with its limit armed,
+      three at a time: all pass, each with its time (the window check 264
+      s, update 249, snapshot 168, files 129, rfid 106, gpio 96, ufbt 92,
+      app 84, uart 82, keystore 79, i2c 69, smoke 67, wait 61, u2f 55, ble
+      52, gdb 46, spi 37, enclave 36, ibutton 33, sdr 20, nfc_link 7, setup
+      6).
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

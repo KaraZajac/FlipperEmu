@@ -32,6 +32,7 @@ import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from files_check import ROOT, check, results                # noqa: E402
+import check_limit  # noqa: E402
 
 SCRIPT = ROOT / "scripts" / "setup_qemu.sh"
 PATCHES = sorted((ROOT / "qemu" / "patches").glob("*.patch"))
@@ -111,6 +112,7 @@ class Stand:
 
 
 def main():
+    check_limit.arm(600)
     if len(sys.argv) > 1:
         print(__doc__.strip())
         return 0 if sys.argv[1] in ("-h", "--help") else 2

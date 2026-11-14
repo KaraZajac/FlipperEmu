@@ -46,6 +46,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 from fe_monitor import Monitor  # noqa: E402
 from fe_cli import FlipperCli, usb_endpoint  # noqa: E402
+import check_limit  # noqa: E402
 
 CRASH = re.compile(r"\[CRASH\]|furi_check failed|HardFault|Kernel is Dead")
 
@@ -855,6 +856,7 @@ def main() -> int:
                     help="keep the device directory (UART and QEMU logs)")
     ap.add_argument("qemu_args", nargs="*", help="extra QEMU arguments after --")
     args = ap.parse_args()
+    check_limit.arm(600)
 
     name = f"smoke-{int(time.time())}-{os.getpid()}"
     devdir = ROOT / "devices" / name

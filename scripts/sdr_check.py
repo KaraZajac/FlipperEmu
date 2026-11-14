@@ -39,6 +39,7 @@ import time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fe_sdr  # noqa: E402
 import fe_subghz  # noqa: E402
+import check_limit  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 KEY = 0x5A3C96
@@ -364,6 +365,7 @@ def main():
     if len(sys.argv) < 2:
         print(__doc__)
         return 2
+    check_limit.arm(600)                # (the checks: not the helpers)
     dev, names = sys.argv[1], sys.argv[2:] or list(CHECKS)
     failed = 0
     for name in names:

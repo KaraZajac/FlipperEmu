@@ -58,6 +58,7 @@ import tty
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fe_header  # noqa: E402
 from files_check import ROOT, Bench, CRASH, check, results  # noqa: E402
+import check_limit  # noqa: E402
 
 ECHO = ROOT / "examples" / "uart" / "echo.js"
 ONCE = """let serial = require("serial");
@@ -757,6 +758,7 @@ def main():
     ap.add_argument("--keep", action="store_true",
                     help="keep the throwaway device")
     args = ap.parse_args()
+    check_limit.arm(900)
 
     b = Bench(f"uartcheck-{int(time.time())}-{os.getpid()}", args.firmware,
               args.timeout)

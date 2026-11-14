@@ -42,6 +42,7 @@ import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from files_check import Bench, CRASH, ROOT, check, results   # noqa: E402
+import check_limit  # noqa: E402
 
 SKIPPED = 77
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -314,6 +315,7 @@ def main():
     ap.add_argument("--keep", action="store_true",
                     help="keep the throwaway device")
     args = ap.parse_args()
+    check_limit.arm(900)
 
     if not shutil.which("ufbt"):
         print("skipped: no `ufbt` on the PATH (`pipx install ufbt` gets it)")

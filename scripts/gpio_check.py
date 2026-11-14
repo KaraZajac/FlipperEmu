@@ -80,6 +80,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fe_header  # noqa: E402
 from files_check import ROOT, Bench, CRASH, check, results  # noqa: E402
 from ufbt_check import ANSI, log_tail, logged, tool  # noqa: E402
+import check_limit  # noqa: E402
 
 SIGNALS = "PA7 PA6 PA4 PB3 PB2 PC3 PA14 PA13 PB6 PB7 PC1 PC0 PB14".split()
 APP = ROOT / "scripts" / "gpio_check_app"
@@ -1232,6 +1233,7 @@ def main():
     ap.add_argument("--keep", action="store_true",
                     help="keep the throwaway device")
     args = ap.parse_args()
+    check_limit.arm(900)
 
     b = Bench(f"gpiocheck-{int(time.time())}-{os.getpid()}", args.firmware,
               args.timeout)

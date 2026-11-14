@@ -45,6 +45,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import fe_enclave  # noqa: E402
 from fe_cli import ANSI, FlipperCli, usb_endpoint  # noqa: E402
 from fe_monitor import Monitor  # noqa: E402
+import check_limit  # noqa: E402
 
 QEMU = ROOT / "build" / "qemu" / "qemu-system-arm"
 
@@ -1359,6 +1360,7 @@ def main() -> int:
     ap.add_argument("--keep", action="store_true",
                     help="keep the device directory (UART and QEMU logs)")
     args = ap.parse_args()
+    check_limit.arm(600)
 
     results = []
     model_part(results)

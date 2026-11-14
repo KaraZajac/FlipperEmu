@@ -70,6 +70,7 @@ from gdb_check import Gdb, free_port
 from gpio_check import skip, skipped
 from uart_check import fe
 from ufbt_check import ANSI, logged, tool
+import check_limit
 
 QEMU = ROOT / "build" / "qemu" / "qemu-system-arm"
 HEADER = ("--i2c", "tmp105@0x48", "--i2c", "eeprom@0x50", "--spi", "flash")
@@ -970,6 +971,7 @@ def main():
     ap.add_argument("--keep", action="store_true",
                     help="keep the throwaway device")
     args = ap.parse_args()
+    check_limit.arm(1200)
 
     os.umask(0o022)     # (what is the user's alone is so by the launcher)
     b = Bench(f"snapcheck-{int(time.time())}-{os.getpid()}", args.firmware,

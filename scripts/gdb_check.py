@@ -52,6 +52,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from fe_monitor import Monitor                                # noqa: E402
 from files_check import Bench, ROOT, check, results          # noqa: E402
 from ufbt_check import APP, SKIPPED, log_tail, logged, tool   # noqa: E402
+import check_limit  # noqa: E402
 
 # (the flag the firmware has for a debug probe: see scripts/fe_gdb.py)
 FLAG = 'printf "debug flag %d\\n", furi_hal_debug_gdb_session_active'
@@ -484,6 +485,7 @@ def main():
     ap.add_argument("--keep", action="store_true",
                     help="keep the throwaway device")
     args = ap.parse_args()
+    check_limit.arm(600)
 
     if not shutil.which("ufbt"):
         print("skipped: no `ufbt` on the PATH (`pipx install ufbt` gets it)")

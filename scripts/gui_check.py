@@ -75,6 +75,7 @@ import fe_gui  # noqa: E402
 import fe_gui_view  # noqa: E402
 import fe_header  # noqa: E402
 from app_check import other_api  # noqa: E402
+import check_limit  # noqa: E402
 
 # a PWM on pin 2, another one when pin 3 is held high, none when it is low
 PWM_JS = """\
@@ -1753,8 +1754,10 @@ def main():
     ap.add_argument("--out", help="keep the pictures here")
     ap.add_argument("--keep", action="store_true", help="keep the device directory")
     args = ap.parse_args()
+    check_limit.arm(2400)
 
     name = f"guicheck-{int(time.time())}-{os.getpid()}"
+    check_limit.device(name)
     devdir = ROOT / "devices" / name
     out = pathlib.Path(args.out) if args.out else pathlib.Path(
         tempfile.mkdtemp(prefix="fe-gui-"))

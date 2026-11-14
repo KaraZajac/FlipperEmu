@@ -35,6 +35,7 @@ import types
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fe_screen                                            # noqa: E402
 from files_check import ROOT, Bench, CRASH, check, results  # noqa: E402
+import check_limit  # noqa: E402
 
 # apps whose first screen stands still, smallest first
 WANTED = ("gpio.fap", "ibutton.fap", "lfrfid.fap", "infrared.fap")
@@ -323,6 +324,7 @@ def main():
     ap.add_argument("--keep", action="store_true",
                     help="keep the throwaway device")
     args = ap.parse_args()
+    check_limit.arm(600)
 
     b = Bench(f"waitcheck-{int(time.time())}-{os.getpid()}", args.firmware,
               args.timeout)

@@ -898,6 +898,13 @@ After an upgrade of the system's Python (3.14 to 3.15, say), the build's meson s
 with "No module named 'mesonbuild'" and ninja cannot start: `scripts/setup_qemu.sh`,
 with `--build` too, sees that and configures again with the options of the first time.
 
+Every check has a time limit, about three times its longest run here (ten to twenty
+minutes for most, 40 for the window check and 45 for the update check). A check that hangs says so when it runs out: a FAIL, where
+each of its threads stands, then it stops the emulators it started (their folders are
+kept for a look) and exits with 124, as `timeout` does. On a busy computer
+`FLIPPEREMU_CHECK_LIMIT=x2` gives every check twice its time (`900`: that many seconds,
+`0`: none). A check that ends says how long it took.
+
 ### qFlipper, lab.flipper.net and other PC tools (USB/IP)
 
 ```sh

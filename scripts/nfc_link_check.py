@@ -29,6 +29,7 @@ import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fe_nfc  # noqa: E402
+import check_limit  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 UID = "04A1B2C3D4E5F6"
@@ -116,6 +117,7 @@ CHECKS = {
 
 
 def main():
+    check_limit.arm(600)
     if len(sys.argv) < 2:
         print(__doc__)
         return 2

@@ -28,6 +28,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fe_ibutton  # noqa: E402
 from fe_cli import FlipperCli, usb_endpoint  # noqa: E402
 from fe_monitor import Monitor  # noqa: E402
+import check_limit  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -171,6 +172,7 @@ def emulate_wave(mon, cli, kind):
 
 
 def main():
+    check_limit.arm(600)
     if len(sys.argv) < 2:
         print(__doc__)
         return 2

@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import check_limit
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CRASH = re.compile(r"\[CRASH\]|furi_check failed|HardFault|Kernel is Dead")
@@ -55,6 +56,7 @@ def same_tree(a, b):
 class Bench:
     def __init__(self, name, firmware, timeout):
         self.name, self.firmware, self.timeout = name, firmware, timeout
+        check_limit.device(name)        # (stopped if the check's time is up)
         self.dir = ROOT / "devices" / name
         self.uart = self.dir / "uart.log"
         self.proc = self.log = None
@@ -349,6 +351,7 @@ def main():
     ap.add_argument("--timeout", type=float, default=60)
     ap.add_argument("--keep", action="store_true", help="keep the device directory")
     args = ap.parse_args()
+    check_limit.arm(1200)
 
     b = Bench(f"filescheck-{int(time.time())}-{os.getpid()}", args.firmware, args.timeout)
     work = pathlib.Path(tempfile.mkdtemp(prefix="fe-files-"))

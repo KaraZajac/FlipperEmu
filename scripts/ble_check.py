@@ -50,6 +50,7 @@ import time
 from files_check import Bench, CRASH, check, results
 from uart_check import fe
 import fe_ble
+import check_limit
 
 QUIET = ("--headless", "--audio", "none")
 PHONE = "C6:89:67:45:23:01"     # the link's central, when it names none
@@ -370,6 +371,7 @@ def main():
     ap.add_argument("--keep", action="store_true",
                     help="keep the throwaway device")
     args = ap.parse_args()
+    check_limit.arm(600)
 
     b = Bench(f"blecheck-{int(time.time())}-{os.getpid()}", args.firmware,
               args.timeout)

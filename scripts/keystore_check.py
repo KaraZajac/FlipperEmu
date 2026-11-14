@@ -59,6 +59,7 @@ import fe_enclave                                       # noqa: E402
 import make_sdcard                                      # noqa: E402
 import rekey_keystore as rk                             # noqa: E402
 from files_check import check, results                  # noqa: E402
+import check_limit  # noqa: E402
 
 OVERLAY = ROOT / "keystores" / "overlay"
 ASSETS = OVERLAY / "subghz" / "assets"
@@ -704,6 +705,7 @@ def main():
     ap.add_argument("--keep", action="store_true",
                     help="keep the throwaway device")
     args = ap.parse_args()
+    check_limit.arm(900)
     if not ASSETS.is_dir():
         sys.exit(f"{OVERLAY}: no keystores here to check")
     host_part()

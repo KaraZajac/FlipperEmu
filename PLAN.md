@@ -725,6 +725,13 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
             same window, running on or standing still. One that cannot be loaded is
             refused before anything stops. `scripts/gui_check.py` 79 (80 with an SPI
             script; BRINGUP_LOG 144)
+- ☐ Checks that hold on a busy computer (Kara, 2026-11-13)
+    - ☑ A time limit in every check (2026-11-14): past it, a FAIL, where each of its
+          threads stands, its emulators stopped, exit status 124; `FLIPPEREMU_CHECK_LIMIT`
+          changes them (`x2`, seconds, `0`). After a window check waited three hours in a
+          dialog unseen (BRINGUP_LOG 145)
+    - ☐ The Metakom read of the smoke test under load (0 of 10 at a load of 20 on 16
+          cores, BRINGUP_LOG 136), and the window check under other programs' load
 - ☐ TCG plugin for coverage/trace of firmware or a single FAP
 - ☐ Fuzzing harness (AFL++/libafl QEMU mode) for parsers in the firmware
 - ☐ Upstream the thirteen QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:

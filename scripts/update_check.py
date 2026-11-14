@@ -54,6 +54,7 @@ import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from files_check import ROOT, Bench, CRASH, check, results  # noqa: E402
+import check_limit  # noqa: E402
 
 OVERLAY = pathlib.Path(__file__).resolve().parent.parent / "keystores" / "overlay"
 VERSION = re.compile(r"(?m)^firmware\.version *: (.*)$")
@@ -408,6 +409,7 @@ def main():
     ap.add_argument("--keep", action="store_true",
                     help="keep the throwaway device")
     args = ap.parse_args()
+    check_limit.arm(2700)
     pkg = pathlib.Path(args.package or args.firmware).resolve()
 
     b = Bench(f"updcheck-{int(time.time())}-{os.getpid()}", args.firmware, args.timeout)
