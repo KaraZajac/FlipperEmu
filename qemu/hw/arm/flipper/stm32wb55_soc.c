@@ -291,6 +291,8 @@ static void wb55_soc_init(Object *obj)
     object_property_add_alias(obj, "fus-keys", OBJECT(&s->ipcc), "keys");
     object_property_add_alias(obj, "radio-stack", OBJECT(&s->ipcc),
                               "radio-stack");
+    object_property_add_alias(obj, "radio-state", OBJECT(&s->ipcc),
+                              "radio-state");
     object_property_add_alias(obj, "rtc-bkp1", OBJECT(&s->rtc), "bkp1");
 
     qdev_init_gpio_out_named(DEVICE(obj), s->gpio_out, "gpio-out", WB55_PINS);

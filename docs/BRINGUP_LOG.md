@@ -4196,6 +4196,79 @@ big lock, entry 92).
       35, `snapshot_check` 68, `update_check` 34, `u2f_check` 39, the smoke
       test 28, `gui_check` 71.
 
+142. **Bluetooth, part 3: the FUS installs a stack.** Until now the
+    emulated CPU2 had the stack it was started with, and the launcher left
+    out the radio stage of a package with another one: its updater would
+    have had CPU2 restart into its FUS, which never came ("[CRASH] Waiting
+    for FUS->radio stack transition", at every start). The FUS does its
+    part now, and a package's radio stage is installed as on a Flipper.
+    - The updater's radio stage (`update_task_manage_radiostack()`) is a
+      state machine across restarts of the whole MCU, with an RTC flag
+      (`C2Update`) for what it was doing. Under a stack of another version
+      it sets the flag and has CPU2 restart into the FUS
+      (`ble_glue_force_c2_mode()`: the stack answers `FUS_GET_STATE` with
+      0xFF, and a second one has the FUS restart the MCU into itself). In
+      the FUS it waits for idle; a stack of another version it deletes
+      (`FUS_FW_DELETE`, a restart); with none it checks the package's
+      `radio.bin` against the manifest's CRC, writes it into the flash at
+      the manifest's address and has the FUS install it from there
+      (`FUS_FW_UPGRADE`, a restart); the version that matches with the flag
+      still set it deletes and installs once more ("Forcing stack removal
+      (match)"); then `FUS_START_WS` (a restart), and under the stack:
+      "Stack version is up2date". From 1.19.0 to 1.20.0 that is six starts
+      of the Flipper, 57 s with the official 1.5.1.
+    - The model: `FUS_GET_STATE` in the FUS answers idle, 0x10 (an install
+      under way), 0x30 (a delete) or 0xFF with an error code; the delete
+      takes 0.4 s of the machine's time, the install 1.5 s, each then
+      restarts the MCU (`qemu_system_reset_request`). The install reads the
+      image as fbt's `coprobin.py` does: ST's signature footer at its end
+      (magic 0xD3A12C5E, its byte 8 the signature's size), the FUS footer
+      before the signature (magic 0x23372991: the version, and the flash
+      it takes, 29 sectors of 4 KB for 1.20.0). No footers: "image not
+      found" (or "corrupt"), no restart, and the updater stops. The stack
+      that runs then is the model's, of that version; the image's
+      encrypted body is ST's business.
+    - CPU2 keeps what its FUS installed, as a chip's flash does: in a file
+      (`radio=FILE`, the launcher's `devices/NAME/radio.state`: the stack's
+      version, branch, release type, type and size, and whether CPU2 stays
+      in its FUS), read at the start and written at every change; a saved
+      state has it too. A plain `run` keeps it; `run --radio-stack
+      VERSION` (or `none`) is a CPU2 from the factory again. Before, every
+      `run` had 1.20.0 unless it said otherwise.
+    - Found: the updater writes the flash in doublewords. `radio.bin` is
+      116956 bytes, so its last doubleword has four bytes of the updater's
+      buffer after the image (zeros here): the FUS looks for the
+      signature's magic within the last eight bytes, not at the last one
+      that is not erased.
+    - Found: the updater checks that the image fits below the secure area
+      (`FLASH->SFR.SFSA`, the flash's "free end"), and the model's option
+      bytes had SFSA at 0xD7 always: the factory's, for a 29-page stack.
+      After a delete the image at 0x080D7000 did not fit, and the updater
+      stopped at its radio stage. The FUS moves SFSA now, in the option
+      byte memory too: to the stack's first page, or to its own (0xF4)
+      without one. The update manifests do not compare SFR.
+    - The launcher keeps a package's radio stage whenever its stack is BLE
+      Light, of any version. The model is a BLE Light stack, so a stage
+      with another kind is still left out (its updater would install it,
+      find the kind it asked for not running, and begin again), and
+      `--keep-radio` for one is refused.
+    - `scripts/update_check.py`: 35. Its second half was the updater's
+      error with the stage that could not be installed; now it is a device
+      with 1.19.0 (which a plain `run` keeps), a package whose `radio.bin`
+      is damaged through the CLI (the FUS deletes 1.19.0, the CRC stops the
+      updater, the error and the way out of it, no stack after it), then
+      the package as it is: installed by the FUS and started. 35 on the
+      five firmwares' packages (official 3.5 minutes, the dev build 4.7,
+      Unleashed 6.5, Momentum 10.5, RogueMaster 15, three at a time) and
+      from the official firmware to Unleashed and to the dev build.
+      `scripts/ble_check.py`: 27 on the five (a plain `run` after
+      `--radio-stack none` has none still). On the official 1.5.1:
+      `enclave_check` 35, `ufbt_check` 31, `snapshot_check` 68,
+      `u2f_check` 39, the smoke test 28, `gui_check` 71.
+    - Not tried: qFlipper's own update, a real stack image of another
+      version (all five packages carry 1.20.0; the check's older stack is
+      the model's 1.19.0), the FUS's own upgrade (a FUS image).
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

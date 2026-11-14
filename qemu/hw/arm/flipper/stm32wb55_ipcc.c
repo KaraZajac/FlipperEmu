@@ -93,6 +93,32 @@
 #define STACK_TYPE_BLE_LIGHT           0x03
 #define STACK_FLASH_SECTORS            29
 
+/* The FUS's own operations on the wireless stack (AN5185; shci.h) */
+#define SHCI_OPCODE_FUS_FW_UPGRADE     0xFC54
+#define SHCI_OPCODE_FUS_FW_DELETE      0xFC55
+#define SHCI_OPCODE_FUS_START_WS       0xFC5A
+#define FUS_STATE_IDLE                 0x00
+#define FUS_STATE_FW_UPGRD_ONGOING     0x10
+#define FUS_STATE_SERVICE_ONGOING      0x30
+#define FUS_STATE_ERROR                0xFF
+#define FUS_ERROR_IMG_NOT_FOUND        0x01
+#define FUS_ERROR_IMG_CORRUPT          0x02
+/* A wireless stack's image, as ST builds them (fbt's coprobin.py): at its
+ * end ST's signature footer, and before the signature the FUS footer with
+ * the stack's version.  Each footer is 20 bytes, its last 8 the version
+ * (build and branch, sub, minor, major) and a magic word. */
+#define IMG_FOOTER                     20
+#define IMG_MAGIC_SIG_ST               0xD3A12C5Eu
+#define IMG_MAGIC_SIG_CUSTOMER         0xE2B51D4Au
+#define IMG_MAGIC_STACK                0x23372991u
+/* where the FUS begins in the flash: a stack image is written below it */
+#define FUS_BASE                       0x080F4000u
+#define FLASH_BASE_ADDR                0x08000000u
+/* how long an operation takes, in the machine's time (seconds on a chip) */
+#define FUS_SWITCH_MS                  20
+#define FUS_DELETE_MS                  400
+#define FUS_UPGRADE_MS                 1500
+
 hwaddr wb55_ipcc_ref_table(WB55IpccState *s)
 {
     uint32_t ipccdba = 0;
@@ -127,9 +153,11 @@ static void cpu2_write_device_info(WB55IpccState *s, hwaddr ref)
     tl_wr32(info + 8, SAFE_BOOT_VERSION);  /* SafeBootVersion */
     tl_wr32(info + 12, s->fus_version);    /* FusVersion */
     tl_wr32(info + 16, 0x00000000);        /* FusMemorySize */
-    tl_wr32(info + 20, 0);                 /* WirelessStackVersion: none */
-    tl_wr32(info + 24, 0);                 /* WirelessStackMemorySize */
-    tl_wr32(info + 28, 0);                 /* WirelessFirmwareBleInfo */
+    /* the stack that is installed, which the FUS does not run: the
+     * updater compares its version with the package's (0.0: none) */
+    tl_wr32(info + 20, s->stack_version);  /* WirelessStackVersion */
+    tl_wr32(info + 24, s->stack_version ? s->stack_sectors : 0);
+    tl_wr32(info + 28, s->stack_version ? s->stack_type : 0);
     tl_wr32(info + 32, 0);                 /* WirelessFirmwareThreadInfo */
     tl_wr32(info + 36, 0);                 /* Reserved2 */
     tl_wr32(info + 40, (uint32_t)s->uid64);
@@ -154,7 +182,7 @@ static void cpu2_write_stack_info(WB55IpccState *s, hwaddr ref)
     /* WirelessFwInfoTable: Version, MemorySize (its low byte: the flash
      * that the stack takes, in 4 KB sectors), InfoStack, Reserved */
     tl_wr32(info + 16, s->stack_version);
-    tl_wr32(info + 20, STACK_FLASH_SECTORS);
+    tl_wr32(info + 20, s->stack_sectors);
     tl_wr32(info + 24, s->stack_type);
     tl_wr32(info + 28, 0);
 }
@@ -180,7 +208,10 @@ static void cpu2_boot(void *opaque)
     s->c1toc2sr = s->c2toc1sr = 0;
     wb55_ipcc_update_irq(s);
     wb55_ble_reset(s);
-    s->c2_stack = s->stack_version != 0;
+    /* the FUS starts the stack, if there is one and it was not told to stay
+     * (a second FUS_GET_STATE under the stack, until FUS_START_WS) */
+    s->c2_stack = s->stack_version != 0 && !s->c2_fus_boot;
+    s->fus_asked = 0;
     if (s->c2_stack) {
         cpu2_write_stack_info(s, ref);
         ready[2] = WIRELESS_FW_RUNNING;
@@ -218,6 +249,209 @@ static void cpu2_c2boot(void *opaque, int n, int level)
               qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 5 * SCALE_MS);
 }
 
+/* ------------------------------------------- the FUS and the wireless stack */
+/*
+ * The FUS installs and deletes the wireless stack, and starts it or stays.
+ * What it keeps of that is in CPU2's flash on a chip, and in a file on the
+ * host here ("radio-state"; the launcher's devices/NAME/radio.state), one
+ * line each:
+ *
+ *   stack 1.20.0 branch 0 release 2 type 3 sectors 29     (or: stack none)
+ *   boot stack                                            (or: boot fus)
+ *
+ * The updater's radio stage drives it (update_task_worker_flasher.c): a
+ * stack of another version has CPU2 restart into the FUS (a second
+ * FUS_GET_STATE under the stack), FUS_FW_DELETE deletes it, CPU1 writes the
+ * package's image into its flash and FUS_FW_UPGRADE installs it from there,
+ * FUS_START_WS starts it.  Each of these ends in a restart of the whole MCU,
+ * for which the updater waits.
+ */
+
+static void radio_save(WB55IpccState *s)
+{
+    g_autoptr(GString) g = g_string_new(
+        "# CPU2 of this Flipper: its wireless stack, and whether it stays in\n"
+        "# its FUS at its next start (the emulator writes this)\n");
+    g_autoptr(GError) err = NULL;
+
+    if (!s->radio_file) {
+        return;
+    }
+    if (s->stack_version) {
+        g_string_append_printf(g, "stack %u.%u.%u branch %u release %u type %u "
+                               "sectors %u\n", s->stack_version >> 24,
+                               (s->stack_version >> 16) & 0xFF,
+                               (s->stack_version >> 8) & 0xFF,
+                               (s->stack_version >> 4) & 0x0F,
+                               s->stack_version & 0x0F, s->stack_type,
+                               s->stack_sectors);
+    } else {
+        g_string_append(g, "stack none\n");
+    }
+    g_string_append_printf(g, "boot %s\n", s->c2_fus_boot ? "fus" : "stack");
+    if (!g_file_set_contents(s->radio_file, g->str, g->len, &err)) {
+        warn_report("flipper-cpu2: %s: %s", s->radio_file, err->message);
+    }
+}
+
+/* The file of before, if there is one: true when it said something */
+static bool radio_load(WB55IpccState *s)
+{
+    g_autofree char *text = NULL;
+    g_auto(GStrv) lines = NULL;
+    bool said = false;
+
+    if (!s->radio_file || !g_file_get_contents(s->radio_file, &text, NULL,
+                                               NULL)) {
+        return false;
+    }
+    lines = g_strsplit(text, "\n", -1);
+    for (int i = 0; lines[i]; i++) {
+        g_auto(GStrv) w = g_strsplit_set(g_strstrip(lines[i]), " \t", -1);
+        unsigned major, minor, sub;
+        char end;
+
+        if (!w[0] || w[0][0] == '#' || !w[1]) {
+            continue;
+        }
+        if (!strcmp(w[0], "stack") && !strcmp(w[1], "none")) {
+            s->stack_version = 0;
+            s->stack_type = 0;
+            s->stack_sectors = 0;
+            said = true;
+        } else if (!strcmp(w[0], "stack") &&
+                   sscanf(w[1], "%u.%u.%u%c", &major, &minor, &sub, &end) == 3 &&
+                   major && major < 256 && minor < 256 && sub < 256) {
+            unsigned branch = 0, release = STACK_RELEASE_TYPE;
+            unsigned type = STACK_TYPE_BLE_LIGHT, sectors = STACK_FLASH_SECTORS;
+
+            for (int j = 2; w[j] && w[j + 1]; j += 2) {
+                unsigned v = strtoul(w[j + 1], NULL, 10);
+
+                if (!strcmp(w[j], "branch")) {
+                    branch = v & 0x0F;
+                } else if (!strcmp(w[j], "release")) {
+                    release = v & 0x0F;
+                } else if (!strcmp(w[j], "type")) {
+                    type = v & 0xFF;
+                } else if (!strcmp(w[j], "sectors")) {
+                    sectors = v & 0xFF;
+                }
+            }
+            s->stack_version = major << 24 | minor << 16 | sub << 8 |
+                               branch << 4 | release;
+            s->stack_type = type;
+            s->stack_sectors = sectors;
+            said = true;
+        } else if (!strcmp(w[0], "boot")) {
+            s->c2_fus_boot = !strcmp(w[1], "fus");
+        }
+    }
+    return said;
+}
+
+/* The secure area starts at the stack, or at the FUS when there is none:
+ * CPU1 may write below it (the updater checks that its image fits) */
+static void fus_sfsa(WB55IpccState *s)
+{
+    if (s->flash) {
+        wb55_flash_set_sfsa(s->flash, (FUS_BASE - FLASH_BASE_ADDR) / 4096 -
+                            (s->stack_version ? s->stack_sectors : 0));
+    }
+}
+
+/* An operation of the FUS's, done in `ms` of the machine's time */
+static void fus_after(WB55IpccState *s, uint8_t op, int ms)
+{
+    s->fus_op = op;
+    timer_mod(s->fus_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + ms * SCALE_MS);
+}
+
+/*
+ * FUS_FW_UPGRADE: the image that CPU1 wrote into its flash at `src`, up to
+ * where the FUS begins (the updater puts it so that it ends in the last
+ * page below it; the rest of that page is erased).  The FUS checks it and
+ * installs it: here its footers are read for the stack's version.  The
+ * encrypted body is ST's business; the model runs a stack of that version.
+ */
+static bool fus_install(WB55IpccState *s)
+{
+    uint32_t src = s->fus_src, n, last, sig;
+    g_autofree uint8_t *img = NULL;
+    const uint8_t *foot;
+
+    if (src < FLASH_BASE_ADDR || src >= FUS_BASE - 2 * IMG_FOOTER) {
+        s->fus_error = FUS_ERROR_IMG_NOT_FOUND;
+        return false;
+    }
+    n = FUS_BASE - src;
+    img = g_malloc(n);
+    address_space_read(&address_space_memory, src, MEMTXATTRS_UNSPECIFIED,
+                       img, n);
+    while (n && img[n - 1] == 0xFF) {
+        n--;                            /* the erased end of the last page */
+    }
+    /* The flash is programmed in doublewords: the last one may hold up to
+     * seven bytes past the image (what the updater's buffer had there).
+     * The image ends with the signature footer's magic word. */
+    last = n;
+    for (sig = 0; n >= 2 * IMG_FOOTER && n + 8 > last; n--) {
+        sig = ldl_le_p(img + n - 4);
+        if (sig == IMG_MAGIC_SIG_ST || sig == IMG_MAGIC_SIG_CUSTOMER) {
+            break;
+        }
+    }
+    if (sig != IMG_MAGIC_SIG_ST && sig != IMG_MAGIC_SIG_CUSTOMER) {
+        s->fus_error = FUS_ERROR_IMG_NOT_FOUND;
+        return false;
+    }
+    foot = img + n - IMG_FOOTER;
+    /* the signature: its size in the footer's byte 8, then the footer */
+    if (n < 2u * IMG_FOOTER + foot[8]) {
+        s->fus_error = FUS_ERROR_IMG_CORRUPT;
+        return false;
+    }
+    foot = img + n - IMG_FOOTER - foot[8] - IMG_FOOTER;
+    if (ldl_le_p(foot + 16) != IMG_MAGIC_STACK || !foot[15]) {
+        s->fus_error = FUS_ERROR_IMG_CORRUPT;   /* no stack's (a FUS image) */
+        return false;
+    }
+    /* the version: major, minor, sub, then branch and build in one byte,
+     * which is the InfoTable word's low byte as it is */
+    s->stack_version = foot[15] << 24 | foot[14] << 16 | foot[13] << 8 |
+                       foot[12];
+    s->stack_type = STACK_TYPE_BLE_LIGHT;   /* (what the model is) */
+    s->stack_sectors = foot[8] ? foot[8] : DIV_ROUND_UP(n, 4096);
+    return true;
+}
+
+static void fus_operation_done(void *opaque)
+{
+    WB55IpccState *s = opaque;
+    uint8_t op = s->fus_op;
+
+    s->fus_op = WB55_FUS_OP_NONE;
+    if (op == WB55_FUS_OP_DELETE) {
+        s->stack_version = 0;
+        s->stack_type = 0;
+        s->stack_sectors = 0;
+        fus_sfsa(s);
+        radio_save(s);
+    } else if (op == WB55_FUS_OP_UPGRADE) {
+        if (!fus_install(s)) {
+            /* no restart: FUS_GET_STATE has the error for CPU1 */
+            warn_report("flipper-cpu2: FUS_FW_UPGRADE: no stack image at "
+                        "0x%08x (error 0x%02x)", s->fus_src, s->fus_error);
+            return;
+        }
+        fus_sfsa(s);
+        radio_save(s);
+    }
+    /* done: the FUS restarts the whole MCU, and boots itself or the stack */
+    qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+}
+
 static void cpu2_system_command(WB55IpccState *s)
 {
     hwaddr sys = tl_rd32(wb55_ipcc_ref_table(s) + TL_REF_SYS);
@@ -241,14 +475,55 @@ static void cpu2_system_command(WB55IpccState *s)
     switch (opcode) {
     case SHCI_OPCODE_FUS_GET_STATE:
         if (s->c2_stack) {
-            /* The stack does not know it (and a second one would have the
-             * FUS restart the whole MCU into itself: not done here) */
+            /* The stack does not know it.  The FUS hears of a second one,
+             * and restarts the whole MCU into itself, where it stays
+             * (ble_glue_force_c2_mode() counts on that) */
             status = SHCI_FUS_CMD_NOT_SUPPORTED;
+            if (++s->fus_asked >= 2 && !s->fus_op) {
+                s->c2_fus_boot = true;
+                radio_save(s);
+                fus_after(s, WB55_FUS_OP_SWITCH, FUS_SWITCH_MS);
+            }
             break;
         }
-        status = 0x00;                  /* FUS_STATE_IDLE */
-        extra[0] = 0x00;                /* FUS_STATE_NO_ERROR */
+        status = s->fus_error ? FUS_STATE_ERROR
+               : s->fus_op == WB55_FUS_OP_UPGRADE ? FUS_STATE_FW_UPGRD_ONGOING
+               : s->fus_op == WB55_FUS_OP_DELETE ? FUS_STATE_SERVICE_ONGOING
+               : FUS_STATE_IDLE;
+        extra[0] = s->fus_error;
         nextra = 1;
+        break;
+    /* the FUS's work on the stack: each ends in a restart of the MCU */
+    case SHCI_OPCODE_FUS_FW_DELETE:
+        if (s->c2_stack || s->fus_op) {
+            status = s->c2_stack ? SHCI_FUS_CMD_NOT_SUPPORTED : 0x01;
+            break;
+        }
+        status = 0x00;
+        s->fus_error = 0;
+        fus_after(s, WB55_FUS_OP_DELETE, FUS_DELETE_MS);
+        break;
+    case SHCI_OPCODE_FUS_FW_UPGRADE:
+        if (s->c2_stack || s->fus_op) {
+            status = s->c2_stack ? SHCI_FUS_CMD_NOT_SUPPORTED : 0x01;
+            break;
+        }
+        /* the image's address (and where to put it, which is the FUS's own
+         * business when it is 0, as the Flipper sends it) */
+        s->fus_src = plen >= 4 ? ldl_le_p(payload) : 0;
+        status = 0x00;
+        s->fus_error = 0;
+        fus_after(s, WB55_FUS_OP_UPGRADE, FUS_UPGRADE_MS);
+        break;
+    case SHCI_OPCODE_FUS_START_WS:
+        if (s->c2_stack || s->fus_op || !s->stack_version) {
+            status = s->c2_stack ? SHCI_FUS_CMD_NOT_SUPPORTED : 0x01;
+            break;
+        }
+        status = 0x00;
+        s->c2_fus_boot = false;
+        radio_save(s);
+        fus_after(s, WB55_FUS_OP_SWITCH, FUS_SWITCH_MS);
         break;
     /* the stack's own */
     case SHCI_OPCODE_C2_BLE_INIT:
@@ -442,6 +717,12 @@ static void wb55_ipcc_reset_hold(Object *obj, ResetType type)
     s->c2_stack = false;
     s->c2_reinit = false;
     timer_del(s->boot_timer);
+    /* an operation of the FUS's that was under way is cut short; what is
+     * installed, and whether CPU2 stays in its FUS, stay as they were */
+    timer_del(s->fus_timer);
+    s->fus_op = WB55_FUS_OP_NONE;
+    s->fus_asked = 0;
+    s->fus_error = 0;
     wb55_ble_reset(s);
     wb55_fus_reset(s);
     qemu_set_irq(s->irq_rx, 0);
@@ -467,6 +748,12 @@ static void wb55_ipcc_realize(DeviceState *dev, Error **errp)
                    "and not 'none'", v);
         return;
     }
+    s->stack_sectors = s->stack_version ? STACK_FLASH_SECTORS : 0;
+    /* What the FUS installed before: the file has it, when there is one
+     * (a run that names a stack has the launcher remove the file first) */
+    radio_load(s);
+    radio_save(s);
+    fus_sfsa(s);                        /* (the flash is realized already) */
     if (wb55_fus_realize(s, errp)) {
         wb55_ble_realize(s);
     }
@@ -484,6 +771,7 @@ static void wb55_ipcc_init(Object *obj)
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq_tx);
     qdev_init_gpio_in_named(DEVICE(obj), cpu2_c2boot, "c2boot", 1);
     s->boot_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, cpu2_boot, s);
+    s->fus_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, fus_operation_done, s);
     wb55_ipcc_init_props(obj);
 }
 
@@ -496,6 +784,8 @@ static const Property wb55_ipcc_props[] = {
     DEFINE_PROP_STRING("radio-stack", WB55IpccState, radio_stack),
     /* a central on the host, as lines (docs/RADIO_LINK.md) */
     DEFINE_PROP_CHR("ble-link", WB55IpccState, ble_chr),
+    /* what the FUS keeps of the stack: a file on the host */
+    DEFINE_PROP_STRING("radio-state", WB55IpccState, radio_file),
 };
 
 /*
@@ -515,6 +805,7 @@ static void wb55_ipcc_loaded(void *opaque, bool running, RunState state)
     s->loaded = NULL;
     wb55_fus_loaded(s);
     wb55_ble_loaded(s);
+    radio_save(s);                      /* the loaded CPU2's stack, on disk */
 }
 
 static int wb55_ipcc_post_load(void *opaque, int version_id)
@@ -541,8 +832,8 @@ static const VMStateDescription vmstate_wb55_fus_key = {
 
 static const VMStateDescription vmstate_wb55_ipcc = {
     .name = "stm32wb55-ipcc",
-    .version_id = 4,
-    .minimum_version_id = 4,
+    .version_id = 5,
+    .minimum_version_id = 5,
     .post_load = wb55_ipcc_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(c1cr, WB55IpccState),
@@ -559,6 +850,15 @@ static const VMStateDescription vmstate_wb55_ipcc = {
         VMSTATE_UINT8(key_loaded, WB55IpccState),
         VMSTATE_BOOL(c2_stack, WB55IpccState),
         VMSTATE_BOOL(c2_reinit, WB55IpccState),
+        VMSTATE_UINT32(stack_version, WB55IpccState),
+        VMSTATE_UINT8(stack_type, WB55IpccState),
+        VMSTATE_UINT8(stack_sectors, WB55IpccState),
+        VMSTATE_BOOL(c2_fus_boot, WB55IpccState),
+        VMSTATE_UINT8(fus_asked, WB55IpccState),
+        VMSTATE_UINT8(fus_op, WB55IpccState),
+        VMSTATE_UINT8(fus_error, WB55IpccState),
+        VMSTATE_UINT32(fus_src, WB55IpccState),
+        VMSTATE_TIMER_PTR(fus_timer, WB55IpccState),
         VMSTATE_STRUCT(ble, WB55IpccState, 2, vmstate_wb55_ble, WB55BleState),
         VMSTATE_END_OF_LIST()
     }
@@ -586,6 +886,13 @@ static char *wb55_ipcc_get_ble(Object *obj, Error **errp)
     qdict_put_str(d, "runs", !s->c2_booted ? "nothing" :
                   s->c2_stack ? "stack" : "fus");
     qdict_put_bool(d, "up", b->up);
+    /* the FUS: whether CPU2 stays in it, what it is doing */
+    qdict_put_bool(d, "stays_in_fus", s->c2_fus_boot);
+    qdict_put_str(d, "fus_operation",
+                  s->fus_op == WB55_FUS_OP_DELETE ? "deleting"
+                  : s->fus_op == WB55_FUS_OP_UPGRADE ? "installing"
+                  : s->fus_op == WB55_FUS_OP_SWITCH ? "restarting" : "none");
+    qdict_put_int(d, "fus_error", s->fus_error);
     qdict_put_bool(d, "advertising", b->adv);
     if (b->name_len > 1) {
         /* the local name's AD structure: its type, then the name */

@@ -217,6 +217,7 @@ class Device:
         self.subghz_sock = self.dir / "subghz.sock"     # a radio bridge (fe_sdr.py)
         self.nfc_sock = self.dir / "nfc.sock"           # a card on the link (fe_nfc_link.py)
         self.ble_sock = self.dir / "ble.sock"           # a central: `ble` (fe_ble.py)
+        self.radio_state = self.dir / "radio.state"     # CPU2's stack, as its FUS keeps it
         self.panel_sock = self.dir / "panel.sock"       # its face: the window (fe_gui.py)
         self.held_file = self.dir / "held.json"         # names of what is held to it
         self.gdb_sock = self.dir / "gdb.sock"           # its gdb stub, once asked for
@@ -352,9 +353,23 @@ def package_radio(pdir):
     return f"{b[0]}.{b[1]}.{b[2]}", (b[3], b[4], b[5])
 
 
-def run_stack(args):
-    """The radio stack that a `run` gives CPU2: a version, or None"""
-    v = getattr(args, "radio_stack", None) or STACK_DEFAULT
+def radio_state(dev):
+    """What a device's CPU2 has installed, as its FUS keeps it in
+    devices/NAME/radio.state (QEMU writes it): "1.20.0", "none", or None
+    (no file yet: a new device, or one from before 2026-11-14)"""
+    try:
+        text = dev.radio_state.read_text()
+    except OSError:
+        return None
+    m = re.search(r"(?m)^stack (\S+)", text)
+    return m.group(1) if m else None
+
+
+def run_stack(args, dev):
+    """The radio stack that CPU2 has at a `run`'s start: what --radio-stack
+    says, else what its FUS installed before, else the factory's: a
+    version, or None"""
+    v = getattr(args, "radio_stack", None) or radio_state(dev) or STACK_DEFAULT
     return None if v == "none" else v
 
 
@@ -372,16 +387,17 @@ def unpack_update(pkg: pathlib.Path, tmp: pathlib.Path, keep_radio: bool,
                   stack=None):
     """An update package (a .tgz, its folder, or the update.fuf in that), made
     ready for the card under tmp: (its folder, what its manifest calls it,
-    what became of its radio stage: "none", "same", "kept" or "dropped").
+    what became of its radio stage: "none", "same", "install" or "dropped").
 
-    The emulated CPU2 runs one radio stack (stack: its version, None when it
-    has none) and installs no other.  A package whose stack is that one
-    keeps its radio stage, which the updater finds up to date, as on a
-    Flipper whose stack is current.  Another one's stage is blanked (unless
-    keep_radio) exactly as `fbt updater_package` writes a package without a
-    stack.  Every key stays in place: the firmware reads the manifest's
-    optional keys in file order, and a missing one would hide all the keys
-    after it.
+    The emulated CPU2's FUS installs a BLE Light stack of any version from
+    the package's radio stage, as on a Flipper (stack: the version the
+    device has, None when it has none; it changes only the words).  The
+    model is a BLE Light stack, so another kind's stage (BLE Full, BLE
+    Basic) is blanked, exactly as `fbt updater_package` writes a package
+    without a stack: its updater would install it, find the type it asked
+    for not running, and begin again, for ever.  Every key stays in place:
+    the firmware reads the manifest's optional keys in file order, and a
+    missing one would hide all the keys after it.
     """
     from make_sdcard import safe_extract
     def one(manifests):
@@ -405,19 +421,18 @@ def unpack_update(pkg: pathlib.Path, tmp: pathlib.Path, keep_radio: bool,
                      "that was in one)")
     pdir = one(sorted(tmp.rglob("update.fuf")))
     radio = package_radio(pdir)
-    same = bool(radio and stack and radio == (stack, STACK_KIND))
-    word = "none" if not radio else "same" if same else \
-        "kept" if keep_radio else "dropped"
-    if word == "kept" and stack:
-        theirs = radio[0] if radio[0] != stack else \
-            f"{radio[0]} of another kind (branch, release type, type: {radio[1]})"
-        sys.exit(f"{pkg}: --keep-radio: this device's CPU2 runs the radio "
-                 f"stack {stack}, and the package's is {theirs}.  Its updater "
-                 "would have CPU2 restart into its FUS to install that one, "
-                 "which the emulator does not do yet: the firmware would "
-                 "crash waiting for it, at every start.  Without --keep-radio "
-                 "the stage is left out; on a device with no stack (run "
-                 "--radio-stack none) the updater stops at it")
+    if not radio:
+        word = "none"
+    elif radio[1][2] == STACK_KIND[2]:
+        word = "same" if stack and radio == (stack, STACK_KIND) else "install"
+    elif keep_radio:
+        sys.exit(f"{pkg}: --keep-radio: the package's radio stack {radio[0]} "
+                 f"is of type {radio[1][2]}, and the emulated stack is BLE "
+                 f"Light ({STACK_KIND[2]}): its updater would install it, find "
+                 "the type it asked for not running, and begin again, for "
+                 "ever.  Without --keep-radio the stage is left out")
+    else:
+        word = "dropped"
     if word == "dropped":
         fuf = pdir / "update.fuf"
         text = fuf.read_text()
@@ -436,10 +451,10 @@ def radio_words(radio):
     word, version = radio
     return {"same": f"its radio stack {version} is the device's: the updater "
                     "finds it up to date",
-            "kept": f"with its radio stage ({version}), which the emulated "
-                    "CPU2 cannot install: the updater stops there",
+            "install": f"with its radio stage: CPU2's FUS installs its stack "
+                       f"{version} (the Flipper restarts a few times)",
             "dropped": f"without its radio stage: its stack {version} is not "
-                       "the device's, and the emulated CPU2 installs no other",
+                       "BLE Light, the kind that the emulated CPU2 runs",
             }.get(word, "")
 
 
@@ -1108,7 +1123,9 @@ def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
     """gauge: {property: value} of /machine/gauge to start with"""
     machine = (f"flipper-zero,name={args.name or dev.name[:8]}"
                f",lcd-scale={args.scale or 4}"
-               f",nvram={dev.nvram},enclave={dev.enclave}")
+               f",nvram={dev.nvram},enclave={dev.enclave}"
+               # what CPU2's FUS has installed, kept across runs
+               f",radio={dev.radio_state}")
     if args.legacy_sleep:
         machine += ",legacy-sleep=on"
     if getattr(args, "radio_stack", None):
@@ -1277,6 +1294,9 @@ def cmd_run(args):
         if args.detach and args.serial == "stdio":
             args.serial = "null"        # (the log is `flipperemu log`'s to show)
         snap_undo(dev)
+    if args.radio_stack and not args.print_cmd:
+        # a CPU2 from the factory with that stack: what its FUS kept goes
+        dev.radio_state.unlink(missing_ok=True)
     if args.update and (args.usb == "none" or args.unplugged):
         sys.exit("--update starts the install over the USB CLI; drop --usb none "
                  "and --unplugged")
@@ -1306,7 +1326,8 @@ def cmd_run(args):
         if args.no_sd:
             sys.exit("--update needs the SD card")
         manifest, label, radio = stage_update(dev, pathlib.Path(args.update),
-                                              args.keep_radio, run_stack(args))
+                                              args.keep_radio,
+                                              run_stack(args, dev))
         words = radio_words(radio)
         print(f"[{dev.name}] staged {manifest}" + (f" ({words})" if words else ""))
     info = dev.info()
@@ -6050,10 +6071,10 @@ def main():
                    help="install an update package (.tgz or folder) through the "
                         "firmware's own updater, like qFlipper: settings and files stay")
     p.add_argument("--keep-radio", action="store_true",
-                   help="with --update: keep the radio stack stage on a device "
-                        "with no stack (--radio-stack none), whose updater then "
-                        "stops there: the emulated CPU2 installs no stack.  A "
-                        "package whose stack is the device's keeps it anyway")
+                   help="with --update: keep the radio stage of a package "
+                        "whose stack is not BLE Light (refused: its updater "
+                        "would never be done).  A BLE Light stage of any "
+                        "version is kept anyway, and CPU2's FUS installs it")
     p.add_argument("--erase-all", action="store_true", help="wipe flash before programming")
     p.add_argument("--headless", action="store_true", help="no window")
     p.add_argument("--detach", action="store_true",
@@ -6507,10 +6528,10 @@ def main():
     p.add_argument("package", metavar="PKG",
                    help="a .tgz, its unpacked folder, or the update.fuf in it")
     p.add_argument("--keep-radio", action="store_true",
-                   help="keep the radio stack stage on a device with no stack "
-                        "(run --radio-stack none), whose updater then stops there: "
-                        "the emulated CPU2 installs no stack.  A package whose "
-                        "stack is the device's keeps it anyway")
+                   help="keep the radio stage of a package whose stack is not "
+                        "BLE Light (refused: its updater would never be done).  "
+                        "A BLE Light stage of any version is kept anyway, and "
+                        "CPU2's FUS installs it")
     p.add_argument("--cli", action="store_true",
                    help="send the package through the firmware's CLI, as the "
                         "firmware's own tools send one to a real Flipper: the "

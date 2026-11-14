@@ -122,6 +122,15 @@ static uint32_t sfsa_page(WB55FlashState *s)
     return s->ob[14] & 0xFF;
 }
 
+/* The FUS moves the start of the secure area (SFR.SFSA) when it installs
+ * or deletes the wireless stack: to the stack's first page, or to its own.
+ * In the option byte memory too, which a reset loads. */
+void wb55_flash_set_sfsa(WB55FlashState *s, uint8_t page)
+{
+    s->ob[14] = (s->ob[14] & ~0xFFu) | page;
+    flash_ob_store(s);
+}
+
 static void flash_erase_page(WB55FlashState *s, unsigned page)
 {
     if (page >= WB55_FLASH_SIZE / WB55_FLASH_PAGE) {

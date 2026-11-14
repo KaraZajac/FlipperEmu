@@ -16,16 +16,20 @@ it; a file that was on the card is still there; the emulator's own Sub-GHz
 keystores (keystores/overlay) are on the card again, after the updater
 unpacked the package's over them; the manifest on the card has its radio
 stage, whose stack is the device's (CPU2 runs the update packages' own), and
-the updater found that stack up to date; nothing crashed.  Then on the
-Flipper started with no radio stack (`run --radio-stack none`), with the
-radio stage left in (`--keep-radio`), which the emulated second core cannot
-install, and through the firmware's CLI as a real Flipper gets a package
-(`--cli`): the files that are on the card are not sent again (what the
-launcher wrote to the image is what the firmware reads there), the
-updater's error is seen and said with the way out of it, and that way
-works.  That is done with the firmware's log level
+the updater found that stack up to date; nothing crashed.
+
+Then the radio stage proper, on the Flipper started with another stack
+(`run --radio-stack 1.19.0`), which a plain `run` keeps (CPU2's FUS keeps
+what it has).  A package whose radio image is damaged, through the
+firmware's CLI as a real Flipper gets a package (`--cli`): the files that
+are on the card are not sent again (what the launcher wrote to the image is
+what the firmware reads there), the updater has the FUS delete the old
+stack and stops at the image's CRC, its error is seen and said with the way
+out of it, and that way works.  That is done with the firmware's log level
 at none, where the updater would say nothing: the launcher lends it another
-level, and gives the old one back.  And what is refused: a folder and a file
+level, and gives the old one back.  Then the package as it is (`--no-wait`):
+the FUS installs its stack from the image and starts it, and the updater
+finds it up to date.  And what is refused: a folder and a file
 that are no package, a Flipper with its cable pulled or its card out, one
 that does not run.  At the end the Flipper is stopped and started with
 `run --update`, which puts the package on the card of one that does not run:
@@ -300,61 +304,96 @@ def update_checks(b, pkg, work, other):
     check("no crash in the firmware's log", not crash,
           crash and log[max(0, crash.start() - 300):crash.end() + 300])
     if not radio:
-        print("  (the package has no radio stage: the updater's error is not "
+        print("  (the package has no radio stage: the FUS's install is not "
               "tried)")
         return ours, after
 
-    # a Flipper with no radio stack: the updater would install the package's,
-    # which the emulated CPU2 cannot, and stops there
+    # A Flipper whose CPU2 has another stack: its FUS keeps that one across
+    # runs, as a chip's flash does
     # (waited for at its CLI: an updater may have left the log level at
     # none, and then "Startup complete" is not logged)
     b.stop()
-    started = b.start(wait=False, more=("--radio-stack", "none"))
+    started = b.start(wait=False, more=("--radio-stack", "1.19.0"))
     code, text = b.fe("wait", "--timeout", 180, timeout=240)
-    check("started again with no radio stack (`run --radio-stack none`)",
-          started and code == 0
-          and "no radio stack installed" in b.fe("status")[1],
+    check("started again with another radio stack (`run --radio-stack "
+          "1.19.0`)", started and code == 0
+          and "radio stack 1.19.0 runs" in b.fe("status")[1],
           text + b.uart_text()[-800:])
-    # at this level the updater says nothing, and its error would not be
-    # seen: the launcher lends it one for as long as it works
+    b.stop()
+    started = b.start(wait=False)
+    code, text = b.fe("wait", "--timeout", 180, timeout=240)
+    check("a plain `run` after it: the stack that CPU2's FUS installed, "
+          "1.19.0 (devices/NAME/radio.state)", started and code == 0
+          and "radio stack 1.19.0 runs" in b.fe("status")[1],
+          text + b.uart_text()[-800:])
+
+    # A package whose radio image is damaged: the updater has the FUS
+    # delete the old stack, then finds that the new one's CRC is not the
+    # manifest's, and stops at its error.  At the log level none the updater
+    # says nothing, and its error would not be seen: the launcher lends it
+    # one for as long as it works.
+    damaged = work / "damaged"
+    if pkg.is_file():
+        shutil.unpack_archive(str(pkg), str(damaged), "gztar")
+    else:
+        shutil.copytree(pkg, damaged)
+    image = next(damaged.rglob("radio.bin"))
+    data = bytearray(image.read_bytes())
+    data[len(data) // 2] ^= 0xFF
+    image.write_bytes(bytes(data))
     code, text = b.fe("log", "--set-level", "none")
     check("the firmware's log level set to none", code == 0
           and log_level(b) == "none", text)
     start = time.time()
-    code, text = b.fe("update", "--keep-radio", "--cli", pkg, timeout=1800)
+    code, text = b.fe("update", "--cli", image.parent, timeout=1800)
     took = time.time() - start
     sent = re.findall(r"^  \S+ -> /ext/update/\S+/(\S+) \(", text, re.M)
-    check("with the radio stage kept, and through the CLI: the files that "
-          "were written to the card's image (its radio stage too: the stack "
-          "was the device's) are the same to the firmware, and not sent "
-          f"again (sent: {', '.join(sent) or 'none'})",
+    check("a package whose radio image is damaged, through the CLI: the "
+          "files that the card has already are not sent again, the damaged "
+          f"image is (sent: {', '.join(sent) or 'none'})",
           "through the Flipper's CLI" in text and "out of the slot" not in text
-          and re.search(r"radio\.bin = /ext/update/\S+/radio\.bin "
-                        r"\(unchanged\)", text) and not sent, text)
-    check("... and the updater's error is seen, with a log level lent to it, "
-          f"and said with the way out ({took:.0f} s)",
+          and sent == ["radio.bin"], text)
+    log = b.uart_text()
+    check("... the updater has the FUS delete 1.19.0, finds the new image's "
+          "CRC wrong, and stops: its error is seen, with a log level lent to "
+          f"it, and said with the way out ({took:.0f} s)",
           code == 1 and "stopped at an error" in text
           and "log level is none: info while" in text
-          and "press --hold 1500 back" in text and "shot" in text, text)
+          and "press --hold 1500 back" in text and "shot" in text
+          and "Removing stack" in log and "Writing stack" in log, text)
     ok, text = leave_error(b)
-    check("a held Back leaves the updater: the firmware runs, and its CLI "
-          "answers", ok and version(b) == after, text)
+    check("a held Back leaves the updater: the firmware runs, its CLI "
+          "answers, and CPU2 has no stack now (the FUS deleted it)",
+          ok and version(b) == after
+          and "no radio stack installed" in b.fe("status")[1], text)
     left = log_level(b)
     check(f"the log level that was lent is as it was: {left}", left == "none",
           left)
 
+    # The package as it is: the FUS installs its stack from the image (at the
+    # level info again, for the updater's lines: --no-wait lends it none)
+    b.fe("log", "--set-level", "info")
+    mark = len(b.uart_text())
     start = time.time()
-    code, text = b.fe("update", "--keep-radio", "--no-wait", pkg, timeout=1800)
+    code, text = b.fe("update", "--no-wait", pkg, timeout=1800)
     took = time.time() - start
     check(f"--no-wait: back when the updater has started ({took:.0f} s)"
           + (", and how the emulator's keystores get to the card after it"
              if ours else ""),
           code == 0 and "updater started" in text and "updated in" not in text
+          and "CPU2's FUS installs its stack 1.20.0" in text
           and (not ours or ("push " in text and "/ext/`, when it is back"
                             in text)), text)
-    time.sleep(12)
-    ok, text = leave_error(b)
-    check("and the firmware runs again after that one too", ok, text)
+    code, text = b.fe("wait", "--timeout", 600, timeout=660)
+    log = b.uart_text()[mark:]
+    status = b.fe("status")[1]
+    check("the updater had CPU2's FUS install the package's stack from its "
+          "image (Writing stack, Installing stack) and start it, and found "
+          "it up to date: the firmware runs with 1.20.0, and CPU2's FUS "
+          "keeps it", code == 0 and "radio stack 1.20.0 runs" in status
+          and "Installing stack" in log and "Stack version is up2date" in log
+          and "stack 1.20.0" in (b.dir / "radio.state").read_text(),
+          text + status + log[-1500:])
     return ours, after
 
 

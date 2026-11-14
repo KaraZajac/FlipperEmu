@@ -225,6 +225,7 @@ struct FlipperZeroState {
     char *nvram;                 /* battery-backed state file */
     char *enclave;               /* the FUS's key store (flipper_enclave.c) */
     char *radio_stack;           /* CPU2's wireless stack: a version, "none" */
+    char *radio;                 /* ... and the file in which the FUS keeps it */
     QEMUTimer *halt_watch;       /* has the firmware halted? */
     uint32_t halt_at;            /* where, when it last looked (0: it has not) */
     bool halt_rest;              /* ... and the CPU rests because of it */
@@ -2175,6 +2176,9 @@ static void flipper_zero_init(MachineState *machine)
     if (s->radio_stack) {
         qdev_prop_set_string(soc, "radio-stack", s->radio_stack);
     }
+    if (s->radio) {
+        qdev_prop_set_string(soc, "radio-state", s->radio);
+    }
     sysbus_realize(SYS_BUS_DEVICE(&s->soc), &error_fatal);
     flipper_provision(s, uid64);
 
@@ -2386,6 +2390,19 @@ static void flipper_set_radio_stack(Object *obj, const char *value,
 
     g_free(s->radio_stack);
     s->radio_stack = *value ? g_strdup(value) : NULL;
+}
+
+static char *flipper_get_radio(Object *obj, Error **errp)
+{
+    return g_strdup(FLIPPER_ZERO(obj)->radio);
+}
+
+static void flipper_set_radio(Object *obj, const char *value, Error **errp)
+{
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+
+    g_free(s->radio);
+    s->radio = *value ? g_strdup(value) : NULL;
 }
 
 static char *flipper_get_usb_serial(Object *obj, Error **errp)
@@ -2652,6 +2669,12 @@ static void flipper_zero_class_init(ObjectClass *oc, const void *data)
         "The wireless stack that CPU2 has installed and runs: its version "
         "(default 1.20.0, BLE Light, as the update packages carry it), or "
         "'none': a FUS with no stack");
+    object_class_property_add_str(oc, "radio", flipper_get_radio,
+                                  flipper_set_radio);
+    object_class_property_set_description(oc, "radio",
+        "A file in which the FUS keeps what it installed and whether CPU2 "
+        "stays in it, across runs; when it exists, it says what is "
+        "installed (radio-stack then counts only for a new file)");
     object_class_property_set_description(oc, "name",
         "Device name programmed into OTP (max 8 chars)");
 }

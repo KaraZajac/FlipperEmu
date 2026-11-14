@@ -34,8 +34,9 @@ the connection.
 A snapshot saved with a central connected loads with the connection gone
 (the firmware hears so) and the stack answering.  Settings > Bluetooth off: it
 does not advertise, and the link says so.  `run --radio-stack none` is a
-Flipper with no stack: the firmware says so and runs on, and a plain `run`
-after it has the stack again.  No crash in any of the runs' logs.  Exit
+Flipper with no stack: the firmware says so and runs on; a plain `run` after
+it has none still (CPU2's FUS keeps what it has), and `run --radio-stack
+1.20.0` has the stack again.  No crash in any of the runs' logs.  Exit
 status 0 = pass.
 """
 import argparse
@@ -465,7 +466,13 @@ def main():
         stop(b)
         ok, said = up(b, args.timeout, "run")
         s = bt(b) if ok else {}
-        check("a plain `run` after it: the stack again", ok
+        check("a plain `run` after it: still no stack (CPU2's FUS keeps what "
+              "it has, as a chip's flash does)", ok and s.get("stack") is None
+              and s.get("runs") == "fus", f"{said[-400:]} {s}")
+        stop(b)
+        ok, said = up(b, args.timeout, "run", "--radio-stack", "1.20.0")
+        s = bt(b) if ok else {}
+        check("`run --radio-stack 1.20.0`: the stack again", ok
               and s.get("runs") == "stack" and s.get("up") is True,
               f"{said[-400:]} {s}")
         stop(b)

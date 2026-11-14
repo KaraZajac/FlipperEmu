@@ -924,10 +924,9 @@ than `default`. It also
 - refuses the targets that go through a debug probe (`flash`, `debug`, `blackmagic`,
   `jflash`, …). They would reach the real Flipper on your desk, or nothing.
   `./flipperemu flash` and `./flipperemu gdb` are what does that here;
-- does `ufbt flash_usb` itself: the SDK's update package has a radio stack in it, and
-  the emulated Flipper installs no other stack than the one it runs, so the launcher
-  installs that package (`./flipperemu update`): with its radio stage when that stack
-  is the device's, without it when it is another. See [below](#when-it-goes-wrong).
+- does `ufbt flash_usb` itself: the launcher installs the SDK's update package
+  (`./flipperemu update`), with its radio stage (the updater finds the stack up to
+  date, or has CPU2's FUS install it). See [below](#when-it-goes-wrong).
 
 Without the wrapper it is one argument, and it has to be there every time:
 
@@ -1186,8 +1185,9 @@ as for ufbt, and the same targets refused. `fbt launch APPSRC=my_app`, `fbt cli`
 `fbt flash_usb` talk to the emulated Flipper. `fbt flash_usb_full` is refused: it sends
 its package with the radio stack in it as it is, whichever stack that is.
 `./fbt updater_package` builds that package, and `flipperemu update` installs it,
-without the radio stage when its stack is not the device's. In the window that is
-Device > Update with a package, and F6 after each build from then on.
+with its radio stage (a BLE Light stack of any version: CPU2's FUS installs it). In
+the window that is Device > Update with a package, and F6 after each build from then
+on.
 
 What `./fbt` builds is a debug build (the `D` of `f7-firmware-D`) unless you give it
 `DEBUG=0`. A debug build does not start again after a crash: it
@@ -1199,22 +1199,18 @@ Then `./flipperemu log -f` for what the firmware says, at the level you set
 
 ## When it goes wrong
 
-- **"Update Failed! CRC mismatch #[3-99]" on the Flipper's screen.** An update package
-  with a radio stack in it was installed on a device with no stack
-  (`run --radio-stack none`): with `--keep-radio`, or by something other than the
-  launcher (`flash_usb_full`, a package sent with the official tools). The emulated
-  second core installs no stack. The updater stops at that stage and gives it this
-  name; nothing was written. Hold Back, and the Flipper starts as it was.
-  `./flipperemu update PACKAGE` installs the same package without that stage on a
-  device that runs, `./flipperemu run --update PACKAGE` on one that does not.
-- **"[CRASH] Waiting for FUS->radio stack transition" in the log at every start, with
-  the updater's screen.** An update package with another radio stack than the
-  device's was installed by something other than the launcher on a device that runs a
-  stack (`run --radio-stack VERSION`). Its updater has CPU2 restart into its FUS to
-  install the package's stack, which the emulator does not do yet, and the firmware
-  gives up after ten seconds, and starts the updater again. `./flipperemu stop`, then
-  `./flipperemu run --radio-stack none`: the updater stops at "CRC mismatch" (above),
-  and a held Back starts the firmware.
+- **"Update Failed! CRC mismatch #[3-99]" on the Flipper's screen.** The package's
+  radio image is not the one its manifest names (a damaged or edited `radio.bin`).
+  The updater stops at that stage; CPU2's FUS may have deleted the old stack already
+  (the order of the radio stage), so the Flipper has none until a good package is
+  installed. Hold Back, and the Flipper starts.
+- **The updater starts again and again, with CPU2 in its FUS (`status`), after a
+  package whose stack is not BLE Light was installed by something other than the
+  launcher** (`flash_usb_full`, a package sent with the official tools). The FUS
+  installs it, but the emulated stack is BLE Light, and the updater finds the kind it
+  asked for not running, and begins again. `./flipperemu stop`, then
+  `./flipperemu run --radio-stack 1.20.0` (a CPU2 from the factory), and the launcher
+  installs such a package without that stage.
 - **`./flipperemu update` takes a minute or more.** That is the firmware's updater,
   which works with no USB and starts the Flipper a few times: a minute and a half for
   the official firmware, two minutes for Unleashed, four for Momentum, seven and a
@@ -1605,14 +1601,16 @@ card still there, the emulator's own Sub-GHz keystores (`keystores/overlay`) on 
 card again after the updater unpacked the package's over them and the launcher saying
 so, a manifest on the card with its radio stage, whose stack is the device's, and the
 updater finding that stack up to date, the updater's stages in the log, no crash, and
-the log level as before or else named. Then the same on the Flipper started with no
-radio stack (`run --radio-stack none`), with the radio stage kept (`--keep-radio`) and
-through the CLI (`--cli`): what was written to the
-card's image is the same to the firmware, so no file is sent again (the radio stage's
-neither), the
-updater's error is reported with the way out of it, and a held Back brings the
-firmware back. That part runs with the firmware's log level at none: the launcher has
-to lend the updater a level to see its error, and to give none back. And the
+the log level as before or else named. Then the radio stage proper, on the Flipper
+started with another stack (`run --radio-stack 1.19.0`, which a plain `run` keeps): a
+package whose radio image is damaged, through the CLI (`--cli`), where what was
+written to the card's image is the same to the firmware and only the damaged image is
+sent; the updater has the FUS delete the old stack and stops at the image's CRC, its
+error is reported with the way out of it, and a held Back brings the firmware back,
+with no stack now. That part runs with the firmware's log level at none: the launcher
+has to lend the updater a level to see its error, and to give none back. Then the
+package as it is (`--no-wait`): the FUS installs its stack from the image and starts
+it, and the updater finds it up to date. And the
 refusals: a folder and a file that are no package, a pulled USB cable, a card that is
 out of its slot, a device that does not run. At the end the Flipper is stopped and
 started with `run --update`: the updater has to start, the keystores to be on the card

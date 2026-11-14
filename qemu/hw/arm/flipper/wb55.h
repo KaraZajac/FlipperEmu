@@ -141,6 +141,8 @@ struct WB55FlashState {
     VMChangeStateEntry *loaded;  /* a saved state came: the image follows */
 };
 uint8_t *wb55_flash_info_ptr(WB55FlashState *s);
+/* the secure area's first page (SFR.SFSA), as the FUS sets it */
+void wb55_flash_set_sfsa(WB55FlashState *s, uint8_t page);
 
 /* ---------------------------------------------------------------- HSEM */
 #define TYPE_WB55_HSEM "stm32wb55-hsem"
@@ -314,6 +316,16 @@ struct WB55IpccState {
     char *radio_stack;           /* property: "1.20.0" (the version), "none" */
     uint32_t stack_version;      /* its InfoTable Version word, 0: none */
     uint8_t stack_type;          /* INFO_STACK_TYPE_BLE_*: 3 = Light */
+    /* What the FUS keeps of the wireless stack, as CPU2's flash keeps it
+     * on a chip: in a file on the host (property "radio-state") */
+    char *radio_file;
+    uint8_t stack_sectors;       /* the flash that the stack takes, 4 KB each */
+    bool c2_fus_boot;            /* CPU2 stays in its FUS at its next start */
+    uint8_t fus_asked;           /* FUS_GET_STATEs while the stack runs */
+    uint8_t fus_op;              /* WB55_FUS_OP_*: an operation under way */
+    uint8_t fus_error;           /* FUS_GET_STATE's error code */
+    uint32_t fus_src;            /* FUS_FW_UPGRADE's image, in CPU1's flash */
+    QEMUTimer *fus_timer;        /* an operation's end: the MCU restarts */
     WB55BleState ble;
     CharFrontend ble_chr;        /* property "ble-link": a central's line link */
     struct FlipperLink *ble_link;
@@ -370,6 +382,10 @@ void wb55_ble_realize(WB55IpccState *s);
 void wb55_ble_loaded(WB55IpccState *s);
 int wb55_ble_bonds(WB55IpccState *s);   /* the centrals it is bonded with */
 extern const VMStateDescription vmstate_wb55_ble;
+
+/* WB55IpccState.fus_op */
+enum { WB55_FUS_OP_NONE, WB55_FUS_OP_DELETE, WB55_FUS_OP_UPGRADE,
+       WB55_FUS_OP_SWITCH };
 
 /* WB55BleState.sec */
 #define WB55_BLE_SEC_ENCRYPTED       0x01

@@ -162,17 +162,20 @@ Flipper from the factory it has a wireless stack and runs it: ST's BLE Light 1.2
 stack that the update packages of the five firmwares here carry (their manifests say
 `Radio version: 01 14 00 00 02 03`). The machine's `radio-stack=VERSION` gives it
 another version of that stack, and `radio-stack=none` (`run --radio-stack none`) a FUS
-with no stack, which is a real device's state too.
+with no stack, which is a real device's state too. What the FUS installs later it
+keeps, as a chip's flash keeps it: in a file (`radio=FILE`; the launcher's
+`devices/NAME/radio.state`), which says what is installed when it exists.
 - `PWR_CR4.C2BOOT` (set by `HW_IPCC_Enable()`) boots it after 5 ms. With a stack it
   writes `MB_DeviceInfoTable_t` (the SafeBoot, FUS 1.2.0 and stack versions, the stack's
   type and its 29 pages of flash) where the transport table at SRAM2A + 4·`IPCCBR`
   points, and links an `SHCI_SUB_EVT_CODE_READY / WIRELESS_FW_RUNNING` event into CPU1's
-  system queue. Without one it writes `MB_FUS_DeviceInfoTable_t` (no stack, UID64) and
-  says `FUS_FW_RUNNING`. (`SHCI_GetWirelessFwInfo()` tells the two tables apart by the
-  FUS's keyword in the first word.)
-- System commands are answered synchronously in the command buffer: `FUS_GET_STATE` →
-  idle (the stack does not know it: 0xFF), `SET_SYSTEM_CLOCK` → the clock switch STOP2
-  needs (see Clocks and time), the four key commands → the key store (next section), and
+  system queue. Without one, or when it was told to stay in its FUS, it writes
+  `MB_FUS_DeviceInfoTable_t` (the installed stack's version, size and type, if any,
+  UID64) and says `FUS_FW_RUNNING`. (`SHCI_GetWirelessFwInfo()` tells the two tables
+  apart by the FUS's keyword in the first word.)
+- System commands are answered synchronously in the command buffer: `FUS_GET_STATE`,
+  `SET_SYSTEM_CLOCK` → the clock switch STOP2 needs (see Clocks and time), the four key
+  commands → the key store (next section), the FUS's work on the stack (below), and
   with a stack also `BLE_INIT`, `C2_CONFIG` (where its bonds are to go), the two flash
   commands and `C2_REINIT`. Everything else → status 0x01, as the FUS refuses. The
   answer is a command-complete event in the form of AN5185 6.3.4 (NumHCI 0xFF, the
@@ -188,6 +191,23 @@ with no stack, which is a real device's state too.
   reset leaves them (CPU1 switched its clock off and on), and the stack starts from
   nothing.
 - Buffers released on channel 4 are taken back (next sections).
+- **The FUS's work on the stack**, which the updater's radio stage drives
+  (`update_task_worker_flasher.c`). Under the stack, `FUS_GET_STATE` gets 0xFF, and a
+  second one has the FUS restart the whole MCU into itself and stay
+  (`ble_glue_force_c2_mode()`). In the FUS it answers idle, an operation under way
+  (0x10 install, 0x30 delete), or an error with its code. `FUS_FW_DELETE` and
+  `FUS_FW_UPGRADE` (the address where CPU1 wrote the image) answer at once and take
+  their time (0.4 and 1.5 s of the machine's); each then restarts the whole MCU, for
+  which the updater waits. The install reads the image's footers: ST's signature
+  footer at its end (magic 0xD3A12C5E), the FUS footer before the signature (magic
+  0x23372991) with the stack's version and its size in 4 KB sectors, as fbt's
+  `coprobin.py` reads them; the flash is programmed in doublewords, so up to seven
+  bytes after the image may not be erased. An image without them is "not found" or
+  "corrupt" (`FUS_GET_STATE`'s error), and no restart: the updater stops. The model
+  runs a BLE Light stack of the image's version; the encrypted body is ST's business.
+  `FUS_START_WS` restarts the MCU into the stack. Each change moves the start of the
+  secure area (`FLASH->SFR.SFSA`, in the option bytes too) to the stack's first page, or
+  to the FUS's (0xF4) without one: the updater checks that its image fits below it.
 
 The firmware's log with a stack: "C2 boot completed, mode: Stack", "Core2: Stack:
 1.20.0, branch 0, reltype 2, stacktype 3, flash 29 pages", "Radio stack started".
@@ -296,8 +316,8 @@ central's address, the MTU, encrypted, authenticated, bonded, a pairing under wa
 the connection, the buffers that CPU1 has and the events that wait. A connection was in
 the air: at the loaded machine's first run CPU1 hears that it timed out.
 
-Not there: a radio (the central is a program on the link); a second connection; the
-FUS's deleting and installing of a stack (an update whose stack is another version).
+Not there: a radio (the central is a program on the link); a second connection; a
+stack of another kind than BLE Light.
 
 ## The secure enclave (`stm32wb55_fus.c`, `stm32wb55_aes.c`, `flipper_enclave.c`)
 
@@ -579,10 +599,10 @@ reset hook, which does what silicon does around the core's reset:
    telling anyone, which left the LCD's A0 line stuck high after warm resets.
 
 `./flipperemu run --update PKG` stages an update package on the SD card as qFlipper
-does, then sends `update install` over the USB CLI. The emulated CPU2 runs one radio
-stack and installs no other, so the launcher keeps the package's radio stage only when
-its stack is the one that the device runs (the updater finds it up to date), and
-blanks it otherwise. A blanked stage keeps every manifest line, because the firmware
+does, then sends `update install` over the USB CLI. The package's radio stage stays in:
+the updater finds the stack up to date, or has CPU2's FUS install it. The emulated
+stack is BLE Light, so a stage with another kind of stack is blanked (its updater would
+begin again for ever). A blanked stage keeps every manifest line, because the firmware
 reads the manifest's optional keys in order and stops at the first missing one.
 
 `./flipperemu update PKG` is for a device that runs, whose card image is the firmware's

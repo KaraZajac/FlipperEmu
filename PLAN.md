@@ -57,11 +57,15 @@ qFlipper / lab.flipper.net / `ufbt launch` only run over USB CDC.
           comes back without a PIN (`encrypt`), after a reboot too, with its CCCDs as it
           left them; one that has lost its side pairs anew (bond lost, rebond); Unpair All
           Devices forgets them. `scripts/ble_check.py`: 26 on the five (BRINGUP_LOG 141)
-    - ☐ The radio update path: the switches between the stack and the FUS with the resets
-          that go with them, and the FUS deleting and installing a stack from an update
-          package (one with another version than the installed one). Until then such a
-          package's radio stage is left out, and `--keep-radio` is refused for it on a
-          device that runs a stack (its updater would crash waiting for the FUS)
+    - ☑ The radio update path (2026-11-14): the switches between the stack and the FUS
+          with the restarts of the whole MCU that go with them, and the FUS deleting a
+          stack and installing one from the image that the updater wrote into the
+          flash (its version from the image's footers; the secure area's start moved
+          with it), so a package's radio stage of another version, or for a device with
+          none, is installed as on a Flipper. CPU2 keeps what its FUS installed across
+          runs (`devices/NAME/radio.state`). A stack of another kind than BLE Light is
+          still left out (the model is BLE Light). `scripts/update_check.py`: 35,
+          `scripts/ble_check.py`: 27 (BRINGUP_LOG 142)
     - ☐ The window: Bluetooth on the bench
 - ☐ Stretch: second CDC port of the dual-CDC mode; mass storage
 
@@ -77,7 +81,8 @@ NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
       option-byte check, DFU validate, flash write + verify), post-update (restore /int,
       resources, splash), normal boot. Verified official ⇄ Unleashed, official → Momentum.
       The radio stage was blanked, because a FUS-only CPU2 could not install a stack;
-      since 2026-11-13 a stage whose stack is the device's stays in (up to date).
+      since 2026-11-13 a stage whose stack is the device's stays in (up to date), and
+      since 2026-11-14 CPU2's FUS installs a BLE Light stack of any version from it.
 - ☐ XIP app loaders (custom firmwares that program FAP code into internal flash and
       execute it there)
 - ◐ Firmware matrix: official 1.5.1, the official dev build 3060cee9 (a debug build;
