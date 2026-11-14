@@ -1351,6 +1351,7 @@ class Session:
         self.update = (manifest, label)
         self.proc = None
         self.snapshot = None            # the one this run began at (a load)
+        self.build = None               # the emulator's build (snapshots())
 
     def start(self, unplugged=None, gauge=None, incoming=None):
         """unplugged, gauge: as it was left when it went off (default: as
@@ -1402,6 +1403,31 @@ class Session:
     def poll(self):
         """QEMU's exit code once it is gone, None while it runs"""
         return self.proc.poll() if self.proc else 0
+
+    def snapshots(self):
+        """The device's snapshots for the window's menu, the oldest first:
+        [(name, its note, whether this build of the emulator made it)]"""
+        if self.build is None and QEMU.exists():
+            self.build = emulator_build()["sha256"]   # (100 MB: once)
+        return [(folder.name, note,
+                 (note.get("emulator") or {}).get("sha256") == self.build)
+                for folder, note in snap_list(self.dev)]
+
+    def load(self, name, paused=False):
+        """The window's Device > Load a snapshot: this session's emulator
+        stops, and the session goes on with one started at the snapshot,
+        as `snapshot load` starts one.  What would refuse the load is looked
+        at first (no such snapshot, another build, a damaged state): then
+        SystemExit, with the words, and the emulator still runs as it was.
+        A load that fails later leaves the device's files as they were at
+        the stop, and no emulator."""
+        a = self.args
+        args = argparse.Namespace(
+            name=name, paused=paused, any_build=False, headless=False,
+            gtk=False, detach=False, scale=getattr(a, "scale", None),
+            audio=getattr(a, "audio", None), gdb=getattr(a, "gdb", False),
+            gdb_port=getattr(a, "gdb_port", None))
+        return snapshot_load(args, self.dev, session=self)
 
     def tidy(self):
         """Behind a QEMU that is gone: what only meant something while it ran"""
@@ -2273,13 +2299,17 @@ def snap_enter(dev, proc, snap, paused):
             m.close()
 
 
-def snapshot_load(args, dev):
+def snapshot_load(args, dev, session=None):
+    """`snapshot load`; or, with a session, the window's load into its own
+    (Session.load()): its emulator stops once the snapshot is known to be
+    one that can be loaded, and the session has the loaded one after"""
     if not QEMU.exists():
         sys.exit(f"QEMU not built yet: run scripts/setup_qemu.sh ({QEMU})")
-    detached = os.environ.pop(DETACHED, None)
+    detached = os.environ.pop(DETACHED, None) if session is None else None
     snap, note = snap_find(dev, args.name)
     name = snap.name
-    dev.refuse_if_running()
+    if session is None:
+        dev.refuse_if_running()
     machine = note.get("machine")
     if not isinstance(machine, dict):
         sys.exit(f"[{dev.name}] the snapshot {name} does not say how its "
@@ -2321,16 +2351,24 @@ def snapshot_load(args, dev):
         run.serial = "null" if args.detach else "stdio"
     i2c_args(run.i2c)
     spi_parse(run.spi)
-    window = pick_window(run)
-    if window == "qt":
-        need_display()
-    if args.detach and not detached:
-        try:
-            dev.run_file.unlink()
-        except FileNotFoundError:
-            pass
-        return run_detached(dev, ready=lambda: (run_noted(dev) or {})
-                            .get("snapshot") == name)
+    if session is not None:
+        window = session.window
+        # all is known to be in order: the window's emulator stops (QEMU
+        # saves the NVRAM on its way out, and a load that fails from here
+        # leaves the device's files as they are now)
+        session.stop()
+        session.tidy()
+    else:
+        window = pick_window(run)
+        if window == "qt":
+            need_display()
+        if args.detach and not detached:
+            try:
+                dev.run_file.unlink()
+            except FileNotFoundError:
+                pass
+            return run_detached(dev, ready=lambda: (run_noted(dev) or {})
+                                .get("snapshot") == name)
     snap_undo(dev)
     if other:
         print(f"[{dev.name}] {other}: tried all the same")
@@ -2344,7 +2382,12 @@ def snapshot_load(args, dev):
     aside.mkdir(mode=0o700)
     load = {"snapshot": name}
     (aside / "load.json").write_text(json.dumps(load) + "\n")
-    session = Session(dev, run, window)
+    fresh = session is None
+    if fresh:
+        session = Session(dev, run, window)
+    else:
+        before = session.args           # (for a start after a failed load)
+        session.args, session.snapshot = run, None
     done = False
     try:
         for path in put + [dev.uart_old]:
@@ -2359,7 +2402,8 @@ def snapshot_load(args, dev):
             if (snap / path.name).is_file():
                 copy_file(snap / path.name, path)
         session.start(incoming=snap / "state")
-        session.signals()
+        if fresh:
+            session.signals()           # (the main thread's: not a window's)
         snap_enter(dev, session.proc, snap, args.paused)
         os.rename(aside, gone)          # loaded: no way back from here
         done = True
@@ -2376,6 +2420,8 @@ def snapshot_load(args, dev):
         if not done:
             session.stop()
             session.tidy()
+            if not fresh:
+                session.args = before
             # (a QEMU that refuses a state leaves by exit(), sockets and all)
             for stale in (dev.monitor, dev.panel_sock, dev.nfc_sock,
                           dev.subghz_sock, dev.ble_sock, dev.gdb_sock):
@@ -2393,7 +2439,7 @@ def snapshot_load(args, dev):
     run_note(dev, session.proc.pid, run, snapshot=name,
              saved=note.get("saved"))
     session.snapshot = {"name": name, "saved": note.get("saved")}
-    return session.front()
+    return session.front() if fresh else 0
 
 
 def cmd_snapshot(args):

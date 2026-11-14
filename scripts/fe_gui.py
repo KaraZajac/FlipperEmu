@@ -182,6 +182,8 @@ def human_size(n):
 class MainWindow(QtWidgets.QMainWindow):
     recorded = QtCore.Signal(str, str, str)     # a recording is written: the
     # file, what it holds, or what went wrong (from the thread that wrote it)
+    loaded = QtCore.Signal(bool, str)   # a load from the Device menu is over:
+    # whether it loaded, or what went wrong (from the thread that loaded it)
 
     def __init__(self, name, directory, launcher, session=None, settings=None,
                  scale=None):
@@ -247,6 +249,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.started_at = time.monotonic()
         self.started_by_us = False      # (not by `flipperemu run`)
         self.installing = None          # a firmware to flash while it is off
+        self.loading = None             # the snapshot that is being loaded
+        self.close_after_load = False   # (the window was closed meanwhile)
         self.cable = "computer"
         self.gauge = {}                 # the battery as it was last reported
         self.muted = False
@@ -415,8 +419,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.a_snapshot = A(m, "Save a snapshot…", self.ask_snapshot,
                             live=True,
                             tip="The Flipper as it stands, kept with its card "
-                                "(`snapshot save`): `./flipperemu snapshot "
-                                "load NAME` starts it at this moment again")
+                                "(`snapshot save`): Load a snapshot starts it "
+                                "at this moment again")
+        self.menu_load = m.addMenu("Load a snapshot")
+        self.menu_load.setToolTipsVisible(True)
+        self.menu_load.aboutToShow.connect(self.fill_load_menu)
+        self.a_load_paused = QtGui.QAction("Standing still after the load",
+                                           self, checkable=True)
+        self.a_load_paused.setToolTip("As it was at the save, until Device > "
+                                      "Pause lets it go on")
         self.a_off = A(m, "Switch off now" if owner else "Stop the emulator",
                        self.hard_off, live=True,
                        tip="Pull its battery, as it were: the firmware is not "
@@ -739,6 +750,7 @@ class MainWindow(QtWidgets.QMainWindow):
         L.frame.connect(V.set_frame)
         L.frame.connect(self.on_frame)
         self.recorded.connect(self.on_recorded)
+        self.loaded.connect(self.on_loaded)
         L.backlight.connect(V.set_backlight)
         L.led.connect(V.set_led)
         L.vibro.connect(V.set_vibro)
@@ -778,6 +790,7 @@ class MainWindow(QtWidgets.QMainWindow):
                      "for it to close"),
             "lost": ("Not running", f"flipperemu -d {name} run starts it"),
             "installing": ("Installing", "the firmware, into its flash"),
+            "loading": ("Loading", f"the snapshot {self.loading}"),
         }.get(state, ("",))
 
     def set_state(self, state):
@@ -859,6 +872,89 @@ class MainWindow(QtWidgets.QMainWindow):
         self.command("snapshot", "save", *([name] if name else []),
                      then=done)
 
+    def fill_load_menu(self):
+        """Device > Load a snapshot: the device's snapshots, the newest
+        first, and whether it stands still after the load"""
+        m = self.menu_load
+        m.clear()
+        found = self.session.snapshots() if self.session else []
+        for name, note, ours in reversed(found):
+            a = m.addAction(f"{name}   ({note.get('firmware') or '?'}, saved "
+                            f"{note.get('saved') or '?'})")
+            if ours:
+                a.triggered.connect(lambda _=False, n=name: self.load_snapshot(n))
+            else:
+                a.setEnabled(False)
+                a.setText(a.text() + ": of another build of the emulator")
+        if not found:
+            a = m.addAction("None yet: Save a snapshot… makes one")
+            a.setEnabled(False)
+        m.addSeparator()
+        m.addAction(self.a_load_paused)
+
+    def load_snapshot(self, name, ask=True):
+        """The snapshot loaded into this window's own run: its emulator
+        stops, and one starts at the moment of the snapshot (Session.load,
+        in a thread of its own: it takes a few seconds)"""
+        if not self.session or self.loading or self.updating:
+            return
+        ok = not ask or QtWidgets.QMessageBox.question(
+            self, "Load a snapshot",
+            f"Load the snapshot {name} on {self.name}?\n\nIt starts at the "
+            "moment of the snapshot, with its flash, its microSD card and its "
+            "settings as they were then: what changed on them since is "
+            "lost.") == QtWidgets.QMessageBox.Yes
+        if not ok:
+            return
+        paused = self.a_load_paused.isChecked()
+        self.loading = name
+        self.qemu_up = False            # (its thread stops this emulator)
+        self.stop_links()
+        self.link.close()               # ... and the link waits for the new
+        self.phone.disconnect_()
+        self.set_state("loading")
+        self.update_actions()
+        self.log.add(f"Loading the snapshot {name}"
+                     + (", standing still after it" if paused else "") + "…",
+                     "you")
+
+        def work():
+            try:
+                self.session.load(name, paused=paused)
+                self.loaded.emit(True, "")
+            except SystemExit as e:     # (the launcher's words)
+                self.loaded.emit(False, str(e.code or "it stopped"))
+            except Exception as e:      # noqa: BLE001  (said, not lost)
+                self.loaded.emit(False, f"{type(e).__name__}: {e}")
+        threading.Thread(target=work, daemon=True,
+                         name="window-snapshot-load").start()
+
+    def on_loaded(self, ok, why):
+        name, self.loading = self.loading, None
+        if ok:
+            # what this window held to the Flipper before is of another
+            # time: the snapshot has its own (held again by the load)
+            self.held_args, self.switches = {}, {}
+            self.expect_off = False
+            self.started_at = time.monotonic()
+            self.started_by_us = True
+            self.qemu_up = True
+            self.set_state("starting")
+        else:
+            # (the launcher's words, without its "[device] ")
+            self.log.add(f"Load of {name}: " + why.split("] ", 1)[-1],
+                         "error")
+            if self.session.poll() is None:     # refused before the stop
+                self.qemu_up = True
+                self.set_state("connecting")
+            else:
+                self.expect_off = False
+                self.set_state("off")
+        self.link.start()
+        self.update_actions()
+        if self.close_after_load:
+            self.close()
+
     def set_paused(self, on):
         # (the mark stays as it is until the emulator says it has changed)
         self.a_pause.setChecked(bool(self.stopped))
@@ -884,6 +980,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.a_off.setEnabled(self.is_live() and (owner or not updating))
         self.a_install.setEnabled(owner and not updating
                                   and self.state in ("on", "off", "busy"))
+        self.menu_load.setEnabled(owner and not updating and not self.loading
+                                  and self.state in ("on", "off"))
         again = self.recent("update")
         self.a_update.setText("Stop waiting for its updater" if updating
                               else "Update with a package…")
@@ -928,7 +1026,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_lost(self):
         self.view.release_all()
         self.combo.stop()
-        if self.closing:
+        if self.closing or self.loading:
             return
         if self.expect_off:
             self.set_state("off")
@@ -952,7 +1050,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def qemu_gone(self, proc):
         s = self.session
-        if self.closing or s.proc is not proc:
+        if self.closing or self.loading or s.proc is not proc:
             return                      # (and switched on again since)
         code = s.poll()
         s.tidy()
@@ -3038,6 +3136,12 @@ class MainWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------ closing
 
     def closeEvent(self, e):
+        if self.loading:                # (its thread has the emulator)
+            self.close_after_load = True
+            self.statusBar().showMessage("The window closes once the load "
+                                         "is over")
+            e.ignore()
+            return
         self.closing = True
         self.phone.close()
         self.save_settings()

@@ -93,7 +93,14 @@ class Phone(QtCore.QObject):
                                            reason, f"0x{reason:02x}") + ")",
                                        "info")
                         self._drop()
-            except (OSError, EOFError, TimeoutError, fe_ble.LinkError,
+            except EOFError:
+                # the emulator went away under the connection: switched
+                # off, or loaded from a snapshot
+                if self.central:
+                    self.said.emit("Bluetooth: the phone's connection ended "
+                                   "with the emulator", "info")
+                self._drop()
+            except (OSError, TimeoutError, fe_ble.LinkError,
                     fe_ble.PairingFailed, fe_ble.EncryptionFailed) as e:
                 self.said.emit(f"Bluetooth: {e}", "error")
                 self._drop()

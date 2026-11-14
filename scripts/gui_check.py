@@ -295,6 +295,72 @@ class Driver:
         self.spin(1.0)
         self.settle()
 
+    def load_here(self):
+        """Device > Load a snapshot, in this window: one whose state was
+        changed is refused before anything stops (the Flipper runs on), and
+        the snapshot of snapshot_save() is loaded standing still: the same
+        window, the screen of the save to the pixel, its tag held again"""
+        w, v = self.win, self.win.view
+        if not SAVED.get("frame"):
+            return
+        snaps = self.uart.parent / "snapshots"
+        bad = snaps / "damaged"         # (its note and its state are enough)
+        bad.mkdir()
+        note = json.loads((snaps / "gui" / "snapshot.json").read_text())
+        note["at"] = (note.get("at") or 0) + 1          # (the newest)
+        (bad / "snapshot.json").write_text(json.dumps(note))
+        shutil.copyfile(snaps / "gui" / "state", bad / "state")
+        with open(bad / "state", "r+b") as f:
+            f.seek((bad / "state").stat().st_size // 2)
+            byte = f.read(1)[0]
+            f.seek(-1, os.SEEK_CUR)
+            f.write(bytes([byte ^ 0xff]))
+        w.fill_load_menu()
+        listed = [a.text().split()[0] for a in w.menu_load.actions()
+                  if a.isEnabled() and a.text()]
+        proc = w.session.proc
+        w.load_snapshot("damaged", ask=False)
+        over = self.until(lambda: not w.loading, 30)
+        back = over and self.until(lambda: w.state == "on", 15)
+        self.settle()
+        check("load here: Device > Load a snapshot lists the device's, the "
+              "newest first; one whose state was changed is refused before "
+              "anything stops: the same emulator runs on, the console says "
+              "why", listed[:2] == ["damaged", "gui"] and back
+              and w.session.proc is proc and w.session.poll() is None
+              and "Load of damaged: the snapshot damaged is not loaded: its "
+                  "state is not the file that was saved" in self.console(),
+              f"{listed} {over} {back} {self.console()[-400:]}")
+        shutil.rmtree(bad)
+
+        w.a_load_paused.setChecked(True)
+        w.load_snapshot("gui", ask=False)
+        on = self.until(lambda: not w.loading and w.state == "on"
+                        and w.stopped == "paused", 60)
+        self.settle()
+        self.spin(1.0)
+        check("load here: Device > Load a snapshot > gui, standing still: "
+              "the same window on the loaded Flipper, the screen of the save "
+              "to the pixel, its tag held again, the console names it",
+              on and w.session.proc is not proc and v.frame == SAVED["frame"]
+              and "EM4100" in self.tile("rfid")
+              and "Loaded from the snapshot gui (saved" in self.console(),
+              f"{on} {w.state} {w.stopped} {self.tile('rfid')} "
+              f"{self.console()[-400:]}")
+        self.shot("loaded-here")
+        self.seen = self.boots()        # (the log is the snapshot's now)
+        w.a_load_paused.setChecked(False)
+        w.a_pause.trigger()
+        went = self.until(lambda: not w.stopped, 10)
+        w.take_away("rfid")
+        self.click("back")              # out of the menu
+        self.spin(1.0)
+        self.settle()
+        made = self.launcher("cli", "storage mkdir /ext/fe-gui-here")
+        check("load here: Pause lets it go on, and it writes to its card",
+              went and made.returncode == 0,
+              made.stdout[-300:] + made.stderr[-300:])
+
     def launcher(self, *args):
         """the launcher, from outside the window"""
         w = self.win
@@ -1555,6 +1621,7 @@ class Driver:
         self.i2c_bus()
         self.i2c_record()
         self.spi_bus()
+        self.load_here()
 
         w.hold("nfc", ["ntag215", "04A1B2C3D4E5F6", "https://example.com"])
         w.set_cable("unplugged")

@@ -416,9 +416,13 @@ instead, and `--headless` no window at all.
   terminal, and the window shows it, as it shows a debugger that has the firmware
   stopped at a breakpoint.
 - **Device > Save a snapshot…** keeps the Flipper as it stands, with its card and what
-  is held to it, under a name of yours or the date and the time:
-  `./flipperemu snapshot load NAME` starts it at that moment again, in a window of its
-  own ([Snapshots](#snapshots)).
+  is held to it, under a name of yours or the date and the time. **Device > Load a
+  snapshot** has the device's snapshots, the newest first: the window's emulator stops,
+  and one starts in its place at that moment again, in the same window (running on, or
+  standing still if you tick that). One that cannot be loaded (of another build of the
+  emulator, or damaged) is refused before anything stops. `./flipperemu snapshot load
+  NAME` does the same from a shell, with a window of its own
+  ([Snapshots](#snapshots)).
 
 Closing the window stops the emulator, as `./flipperemu stop` does. `./flipperemu gui`
 opens the window for a device that runs already (started with `--headless`); closing
@@ -2834,10 +2838,10 @@ snapshot's files in the places of its own. `./flipperemu stop`, and the next `ru
 
 `status` says which snapshot a run began at (`snapshot : the run began at menu (saved
 …)`, and `"snapshot"` in `--json`). In the window, Device > Save a snapshot… saves one
-of the Flipper as it stands, and `snapshot load NAME` opens the window on it. Not there:
-a load from the window's own menu. Not tried: `--gtk`, a save with a PC attached over
-USB/IP, a file system that cannot share data between two files, and a snapshot carried
-to another computer. How it works, and what QEMU's migration needed for it:
+of the Flipper as it stands, and Device > Load a snapshot loads one in the same window
+(`snapshot load NAME` opens a window on it). Not tried: `--gtk`, a save with a PC
+attached over USB/IP, a file system that cannot share data between two files, and a
+snapshot carried to another computer. How it works, and what QEMU's migration needed for it:
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#snapshots-the-launchers-snapshot).
 
 ### Debugging firmware

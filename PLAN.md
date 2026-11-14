@@ -719,9 +719,12 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           snapshot…, and `scripts/gui_check.py` loads a snapshot that its window saved, in
           a new window that has the picture of the save to the pixel and the tag that was
           held, and goes on with Pause (2026-11-13; BRINGUP_LOG 137)
-      - ☐ A load from the window's own menu: the window's emulator is its session's, and
-            a load would be a new start of that session with the snapshot's files and
-            `-incoming` (`snapshot load NAME` opens a window on the loaded Flipper)
+      - ☑ A load from the window's own menu (2026-11-14): Device > Load a snapshot, the
+            device's newest first; the window's emulator stops and its session starts
+            again with the snapshot's files and `-incoming` (`Session.load()`), in the
+            same window, running on or standing still. One that cannot be loaded is
+            refused before anything stops. `scripts/gui_check.py` 79 (80 with an SPI
+            script; BRINGUP_LOG 144)
 - ☐ TCG plugin for coverage/trace of firmware or a single FAP
 - ☐ Fuzzing harness (AFL++/libafl QEMU mode) for parsers in the firmware
 - ☐ Upstream the thirteen QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:

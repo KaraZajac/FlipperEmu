@@ -1950,9 +1950,15 @@ card. The state of that step loads.
 
 The note of a loaded run (`run.json`) names its snapshot and the time of its save, and
 `status` says them. A `run` names none. The window's Device > Save a snapshot… is the
-launcher's `snapshot save`. Not there: a load from the window's menu (the window's
-emulator is its session's, and a load would be a start of that session with the
-snapshot's files and `-incoming`). Not tried: `--gtk` (QEMU's own window on a loaded
+launcher's `snapshot save`. Its Device > Load a snapshot is `Session.load()`: the window's
+emulator is its session's, so the load is `snapshot_load()` into that session, in a
+thread of the window's. What would refuse the load (no such snapshot, another build, a
+state whose sum is not the saved one) is looked at before the session's emulator stops;
+then the emulator stops (its NVRAM saved), and the session starts again with the
+snapshot's files and `-incoming`. A load that fails after the stop leaves the device's
+files as they were at the stop, and the session's arguments as they were, so Switch on
+starts the device as before. The window's link waits while the state goes in, and
+connects to the loaded machine. Not tried: `--gtk` (QEMU's own window on a loaded
 machine), a snapshot of a machine on USB/IP with a PC attached, a file system without
 shared data (the copy by holes was not run: the disk here is btrfs), and a snapshot
 carried to another computer.

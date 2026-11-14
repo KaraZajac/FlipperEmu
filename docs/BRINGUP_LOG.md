@@ -4308,6 +4308,38 @@ big lock, entry 92).
       one at a time. `scripts/ble_check.py`: 28 on the five (one central
       at a time), 50 s each, five at once.
 
+144. **Snapshots: a load from the window's menu.** Device > Load a snapshot
+    has the device's snapshots, the newest first, each with its firmware
+    and the time of its save (one of another build of the emulator is
+    there, greyed), and "Standing still after the load".
+    - The window's emulator is its session's (`flipperemu run`'s), so the
+      load is the launcher's `snapshot_load()` into that session
+      (`Session.load()`), in a thread of the window's: the state takes a
+      few seconds to go in, and is saved once more to compare its parts.
+      What would refuse it (no such snapshot, another build, a state whose
+      sum is not the saved one) is looked at before anything stops, and
+      the Flipper runs on as it was. Then the session's emulator stops (its
+      NVRAM saved), and the session starts again with the snapshot's files
+      and `-incoming`; the window's link waits while the state goes in,
+      then connects to the loaded machine, and the console names the
+      snapshot. A load that fails after the stop leaves the device's files
+      as they were at the stop and the session's arguments as they were:
+      Switch on starts it as before.
+    - What the window held to the Flipper before the load is of another
+      time and is forgotten (a Switch on after the load does not hold it
+      again); the snapshot's own things are held by the load.
+    - The window's phone hears the end of its Bluetooth connection with the
+      emulator (switched off, or loaded) as news, not as an error.
+    - `scripts/gui_check.py`: three more, in the same window as the save: a
+      copy of the save with one byte of its state changed is listed first
+      and refused before anything stops (the same QEMU runs on); the save
+      itself loaded standing still (the screen of the save to the pixel,
+      its RFID tag held again, a new QEMU); Pause, and it writes to its card.
+      79 on the official 1.5.1 and the dev build, 80 on Momentum, Unleashed
+      and RogueMaster. `scripts/snapshot_check.py` 68 on the official 1.5.1
+      (the shell's `snapshot load` goes through the same function, and the
+      window check's second phase loads that way on all five).
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
