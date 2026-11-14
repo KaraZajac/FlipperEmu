@@ -1590,11 +1590,11 @@ refusals: a folder and a file that are no package, a pulled USB cable, a card th
 out of its slot, a device that does not run. At the end the Flipper is stopped and
 started with `run --update`: the updater has to start, the keystores to be on the card
 again when it is done and the run to say so, the package's firmware to run with its
-CLI answering, and no crash. 34 checks; it passes on the official 1.5.1, Unleashed
-and the official dev build with their own packages (10, 6 and 5 minutes, on a machine
-that other programs kept busy). With 33, before a package's radio stage stayed in, it passed on Momentum and
-RogueMaster with their own packages (9 and 15 minutes) and from the official firmware
-to Unleashed and to the dev build with `--package`.
+CLI answering, and no crash. 34 checks; it passes on the five firmwares with their own
+packages: the official 1.5.1, Unleashed and the official dev build in 10, 6 and 5
+minutes on a machine that other programs kept busy, Momentum and RogueMaster in 7 and
+10 minutes with four checks at a time. With `--package` it passes from the official
+firmware to Unleashed and to the dev build (4 and 3 minutes).
 `ufbt_check.py` has the real `ufbt flash_usb` go through the wrapper (31 checks now).
 
 `scripts/snapshot_check.py FIRMWARE` starts a device with a TMP105, an EEPROM and a

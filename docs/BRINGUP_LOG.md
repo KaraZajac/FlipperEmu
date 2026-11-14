@@ -4030,9 +4030,12 @@ big lock, entry 92).
       the dev build, `u2f_check.py` 39 on Unleashed). The window's check
       failed steps then under load (a load average of 10 to 16): its first
       click on the official 1.5.1, four early steps on Unleashed, as 137 has
-      it for a busy machine. Still running as this is written: the update
-      check with Momentum's and RogueMaster's packages and from the official
-      firmware to Unleashed and to the dev build, and the window's check.
+      it for a busy machine. Run after the push (2026-11-14; a reboot had
+      taken the first runs' results with it): the update check passes 34 with
+      Momentum's and RogueMaster's packages (7 and 10 minutes, four checks at
+      a time) and from the official firmware to Unleashed and to the dev build
+      (4 and 3 minutes), and the window's check 71 on the official 1.5.1 (once
+      it ran on Python 3.15 again, 139).
 
 139. **A Python upgrade under the build.** Fedora moved its Python from 3.14
     to 3.15 (2026-11-13). The venv that QEMU's configure had made for its
@@ -4049,7 +4052,10 @@ big lock, entry 92).
     them on a stand-in build whose meson fails as this one did. The same
     upgrade left this machine's ufbt (`third_party/ufbt/venv`, not part of
     the repository) without its packages; it was made anew with the same
-    versions (ufbt 0.2.6).
+    versions (ufbt 0.2.6). And Python 3.15 has no `load_module()` any more:
+    `gui_check.py`, which loads the launcher (a file with no `.py`) as a
+    module, stopped at its first line; it makes the module from the
+    loader's spec now. No other call that 3.15 took away is in the scripts.
 
 ## Things that were right the first time (and why)
 

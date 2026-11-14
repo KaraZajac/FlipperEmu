@@ -51,6 +51,7 @@ Pictures are kept in --out.
 """
 import argparse
 import importlib.machinery
+import importlib.util
 import json
 import os
 import pathlib
@@ -1610,8 +1611,14 @@ def main():
     uart = devdir / "uart.log"
     os.environ["FLIPPEREMU_GUI_CONFIG"] = str(out / "gui.ini")
     fe_gui.run = Driver(uart, out, args.timeout, str(pathlib.Path(args.firmware).resolve()))
-    launcher = importlib.machinery.SourceFileLoader(
-        "flipperemu_launcher", str(ROOT / "flipperemu")).load_module()
+    # (the launcher is a file with no .py: its loader by name.  Python 3.15
+    # has no load_module() any more: a module from the spec, then run)
+    loader = importlib.machinery.SourceFileLoader(
+        "flipperemu_launcher", str(ROOT / "flipperemu"))
+    launcher = importlib.util.module_from_spec(
+        importlib.util.spec_from_loader(loader.name, loader))
+    sys.modules[loader.name] = launcher
+    loader.exec_module(launcher)
     sys.argv = ["flipperemu", "-d", name, "run", "-f", args.firmware,
                 "--audio", "none", "--serial", f"file:{uart}",
                 "--i2c", "tmp105@0x48,temperature=23.5", "--i2c", "eeprom@0x50",
