@@ -12,7 +12,10 @@ files_check.Bench names its own), stopped as `flipperemu stop` stops one,
 then whatever it started that still runs (its launchers and QEMUs, found by
 their parents), with SIGTERM and then SIGKILL.  The devices' folders are
 kept for a look.  At its end, a check that ran its course says how long it
-took.
+took.  A check that is stopped (SIGTERM, as `kill` sends it, or SIGHUP, a
+terminal that closes) stops its emulators the same way.  (A check that runs
+the launcher in its own process, as the window check does, has the
+launcher's handler instead, which stops the emulator.)
 
 FLIPPEREMU_CHECK_LIMIT changes every check's limit: seconds (`900`), a
 factor (`x3`, on a busy machine) or `0` (none).
@@ -58,7 +61,11 @@ def limit_of(default):
 
 
 def arm(default):
-    """The check's limit, counted from its start"""
+    """The check's limit, counted from its start; and its emulators stopped
+    with it when it is stopped"""
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        if signal.getsignal(sig) == signal.SIG_DFL:
+            signal.signal(sig, _stopped)
     seconds = limit_of(default)
     _state["limit"] = seconds
     if seconds is None:
@@ -111,6 +118,20 @@ def _time_up():
     sys.stderr.flush()
     faulthandler.dump_traceback(file=sys.stdout, all_threads=True)
     sys.stdout.flush()
+    _clean_up()
+    os._exit(EXIT)
+
+
+def _stopped(signum, frame):
+    print(f"\n  FAIL  stopped by {signal.Signals(signum).name}: its "
+          "emulators are stopped too", flush=True)
+    _clean_up()
+    os._exit(128 + signum)
+
+
+def _clean_up():
+    """The devices it named stopped, what it started ended; their folders
+    kept"""
     for name in _devices:
         try:
             subprocess.run([sys.executable, str(ROOT / "flipperemu"), "-d",
@@ -134,7 +155,6 @@ def _time_up():
             if not left:
                 break
             time.sleep(0.1)
-    os._exit(EXIT)
 
 
 def _alive(pid):

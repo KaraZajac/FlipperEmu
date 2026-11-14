@@ -4371,6 +4371,30 @@ big lock, entry 92).
       app 84, uart 82, keystore 79, i2c 69, smoke 67, wait 61, u2f 55, ble
       52, gdb 46, spi 37, enclave 36, ibutton 33, sdr 20, nfc_link 7, setup
       6).
+    - A check that is stopped (SIGTERM, as `kill` sends it; SIGHUP, a
+      terminal that closes) does the same cleanup and exits with 143 or
+      129. Found while trying it: the window check that hung in 143 was
+      still there five hours later, after a `kill`. The launcher runs in
+      that check's own process, and its handler passes SIGTERM on to QEMU:
+      QEMU went, the check stayed in the dialog's loop. (The dialog cannot
+      hold it now, and that check keeps the launcher's handler.) A
+      `ble_check` killed in its middle: 143, its emulator gone, its device's
+      folder kept and named.
+
+146. **The Metakom read under load, not reproduced.** 136 and 141 had the
+    smoke test's Metakom step fail while other programs kept the computer
+    busy (0 of 10 reads, three with another key; the CLI silent for up to a
+    minute after it). On a device of its own, with today's emulator: the
+    read alone, 5 of 5 idle (0.3 s each) and 6 of 6 beside 20 busy loops
+    on the 16 cores (0.4 to 0.8 s); the smoke test's whole step (emulate,
+    capture, decode, read), 4 of 4 idle, 6 of 6 at a load of 16 to 18
+    (24 busy loops), 8 of 8 at 15 to 20 beside four checks with their own
+    emulators and 16 busy loops (3.4 to 4.7 s each, about a second more
+    than idle). This fits entry 43: each edge's time is the edge's own,
+    whatever the delay of the interrupt, so a slow guest reads the key as a
+    fast one does. What the load of those two days was (other sessions'
+    builds or emulators) is not known. The plan's item stays open, to be
+    caught with its device kept when it comes back.
 
 ## Things that were right the first time (and why)
 
