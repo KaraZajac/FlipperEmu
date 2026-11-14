@@ -15,9 +15,11 @@ time, applies nothing.  A tree from before each patch gets that one and those
 after it; a tree that lacks one patch alone gets that one.  A tree the script
 damaged as it was until 2026-11-11 (a second run applied 0007 again, in part,
 because 0008 builds on it in the same file) is refused with the way out, and
-so is a file that is not this QEMU's: both without a change to the tree.
-Last, the tree in third_party/ here: it has every patch and nothing else in
-those files.  Exit status 0 = pass.
+so is a file that is not this QEMU's: both without a change to the tree.  A
+build whose meson does not run (the system's Python was upgraded under its
+venv) is configured again before it is built, with --build too, and then
+not again.  Last, the tree in third_party/ here: it has every patch and
+nothing else in those files.  Exit status 0 = pass.
 """
 import hashlib
 import os
@@ -78,10 +80,11 @@ class Stand:
         self.made = all([patch(self.src, p, "--no-backup-if-mismatch")
                          for p in have])
 
-    def run(self):
+    def run(self, *args):
         """The script on it: (exit status, the patches it said it applied,
         whether it went on to build, all it said)"""
-        r = subprocess.run(["bash", str(self.root / "scripts" / "setup_qemu.sh")],
+        r = subprocess.run(["bash", str(self.root / "scripts" / "setup_qemu.sh"),
+                            *args],
                            env=self.env, capture_output=True, text=True,
                            stdin=subprocess.DEVNULL)
         out = r.stdout + r.stderr
@@ -201,6 +204,39 @@ def main():
               "tree and does not fit it" in out, out)
         check("that tree: not changed, also not by the patches that would "
               "have fitted", not applied and s.digest() == before, out)
+
+        # a build whose venv the system's Python left behind (3.14 to 3.15,
+        # 2026-11-13): its meson stops at "No module named 'mesonbuild'"
+        s = Stand(work, "python", PATCHES)
+        build = s.root / "build" / "qemu"
+        meson = build / "pyvenv" / "bin" / "meson"
+        meson.parent.mkdir(parents=True)
+        configured = build / "configured.txt"
+        status = build / "config.status"            # configure, as the first time
+        status.write_text("#!/bin/sh\necho \"config.status $*\" >> configured.txt\n"
+                          "printf '#!/bin/sh\\nexit 0\\n' > pyvenv/bin/meson\n")
+        status.chmod(0o755)
+        for args in ((), ("--build",)):
+            how = " ".join(("the script", *args))
+            meson.write_text("#!/bin/sh\necho \"No module named 'mesonbuild'\" >&2\n"
+                             "exit 1\n")
+            meson.chmod(0o755)
+            configured.unlink(missing_ok=True)
+            code, applied, built, out = s.run(*args)
+            ran = configured.read_text().splitlines() if configured.exists() else []
+            check(f"{how}, on a build whose meson does not run (the system's "
+                  "Python upgraded under it): configured again with its "
+                  "options, then built",
+                  code == 0 and built and ran == ["config.status "]
+                  and "configuring again" in out
+                  and out.index("configuring again") < out.index("ninja -C"),
+                  out + "\n".join(ran))
+            code, applied, built, out = s.run(*args)
+            ran = configured.read_text().splitlines()
+            check(f"{how} once more, now that its meson runs: built, not "
+                  "configured again",
+                  code == 0 and built and len(ran) == 1
+                  and "configuring again" not in out, out)
 
         left = sorted(p.name for p in (work / "tmp").iterdir())
         check("no copy of the script's left in the temporary folder, after a "

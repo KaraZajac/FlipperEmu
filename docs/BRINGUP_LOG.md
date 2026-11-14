@@ -4034,6 +4034,23 @@ big lock, entry 92).
       check with Momentum's and RogueMaster's packages and from the official
       firmware to Unleashed and to the dev build, and the window's check.
 
+139. **A Python upgrade under the build.** Fedora moved its Python from 3.14
+    to 3.15 (2026-11-13). The venv that QEMU's configure had made for its
+    meson kept its packages in the old version's folder, and ninja's next
+    regeneration of the build files stopped at "No module named
+    'mesonbuild'": no build could start. `config.status` (QEMU's configure
+    again, with the options of the first time) made the venv anew, and
+    ninja then compiled the one file that had changed since the last build
+    (`stm32wb55_ipcc.c`: names for the offsets in the stack's table, with
+    the same values; the binary came out the same size).
+    `scripts/setup_qemu.sh` does that by itself now, with `--build` too: it
+    asks the build's meson for its version before it builds, and
+    configures again when that does not run. `setup_check.py`: 40, four of
+    them on a stand-in build whose meson fails as this one did. The same
+    upgrade left this machine's ufbt (`third_party/ufbt/venv`, not part of
+    the repository) without its packages; it was made anew with the same
+    versions (ufbt 0.2.6).
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

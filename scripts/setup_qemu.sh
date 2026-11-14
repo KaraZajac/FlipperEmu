@@ -21,7 +21,22 @@ SRC="$TP/qemu-$QEMU_VERSION"
 BUILD="$ROOT/build/qemu"
 TARBALL="$TP/qemu-$QEMU_VERSION.tar.xz"
 
+# ninja runs the build's own meson whenever the build files are to be made
+# again, and that meson lives in a Python venv that QEMU's configure made.
+# An upgrade of the system's Python (3.14 to 3.15, say) leaves the venv's
+# packages in the old version's folder, and the meson there stops running:
+# "No module named 'mesonbuild'". Configure again then, with the options of
+# the first time (config.status has them): it makes the venv anew.
+revive_venv() {
+    local meson="$BUILD/pyvenv/bin/meson"
+    if [[ -e "$meson" ]] && ! "$meson" --version >/dev/null 2>&1; then
+        echo ">> the build's meson does not run (Python upgraded?): configuring again"
+        (cd "$BUILD" && ./config.status)
+    fi
+}
+
 if [[ "${1:-}" == "--build" ]]; then
+    revive_venv
     exec ninja -C "$BUILD" qemu-system-arm
 fi
 
@@ -124,6 +139,7 @@ if [[ ! -f "$BUILD/build.ninja" ]]; then
         --disable-xen \
         --disable-werror)
 fi
+revive_venv
 
 echo ">> building"
 ninja -C "$BUILD" qemu-system-arm qemu-img
