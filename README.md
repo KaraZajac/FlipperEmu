@@ -9,8 +9,9 @@ update `.tgz` you would flash.
 ![The window: a Flipper drawn around the emulated LCD, with a bench of virtual devices under it](docs/img/26-window-nfc-read.png)
 
 *The window. The NFC app has just read the NTAG215 that the bench holds to the emulated
-Flipper. Click its buttons, plug its USB cable in and out, pull its microSD card, hold
-cards, tags and keys to it, and switch it off and on: [The window](#the-window).*
+Flipper, and the window's phone is connected to it over Bluetooth. Click its buttons,
+plug its USB cable in and out, pull its microSD card, hold cards, tags and keys to it,
+pair a phone with it, and switch it off and on: [The window](#the-window).*
 
 | | |
 |:-:|:-:|
