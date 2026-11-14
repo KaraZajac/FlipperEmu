@@ -1636,6 +1636,15 @@ def cmd_ble(args):
     if not dev.ble_sock.exists():
         sys.exit(f"[{dev.name}] has no Bluetooth link (ble.sock): an emulator "
                  "from before 2026-11-14 started it. Stop it and run it again")
+    m = open_monitor(dev)
+    try:
+        bt = read_bluetooth(m) or {}
+    finally:
+        m.close()
+    if bt.get("link"):
+        sys.exit(f"[{dev.name}] a central is on its Bluetooth link already "
+                 "(the window's phone, or a program of yours): one at a time. "
+                 "Disconnect it first (the window: Bluetooth > Disconnect)")
     # this device's phone keeps its bonds beside it: with one, it comes back
     # without a PIN, as long as the Flipper keeps its side of it
     return fe_ble.run(dev.ble_sock, args.action, args.what, args.pin, dev.uart,

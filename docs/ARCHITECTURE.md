@@ -1527,6 +1527,10 @@ own commands, run one after the other (`Runner`: the monitor and the CLI take on
 client at a time), and the command's lines come into the console as it prints them. A
 dropped `.fap` is `flipperemu app FILE`, the card's copy items are `push`: the window
 has no second way into the Flipper that could behave differently from the terminal's.
+The Bluetooth tile's phone (`fe_gui_ble.py`) is the one that keeps something open: a
+connection, which a command that runs and ends cannot hold. So it is `fe_ble.Central`
+itself, the code under `./flipperemu ble`, in a thread of its own, with the same bond
+file; its PIN dialog does not block the window (the PIN is read off its screen).
 
 ## Real radios: the CC1101's link (`flipper_rf.c`, `scripts/fe_sdr.py`)
 

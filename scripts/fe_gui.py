@@ -30,6 +30,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt
 
 import fe_files
+import fe_gui_ble
 import fe_gui_widgets as W
 import fe_header
 import fe_record
@@ -57,6 +58,7 @@ WATCHES = (
     ("/machine", "header-i2c"), ("/machine", "header-i2c-record"),
     ("/machine", "header-adc"), ("/machine", "header-pwm"),
     ("/machine", "header-spi"),
+    ("/machine/soc/ipcc", "ble"),       # CPU2's stack, as JSON (status)
 )
 
 # what can come from a file: (the menu's word for them, file filter, where
@@ -191,6 +193,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings = settings or Settings(config_path())
         self.exit_code = 0
         self.props = {}                 # (path, name): value, as reported
+        # the bench's phone: a central on its Bluetooth link (fe_gui_ble)
+        self.phone = fe_gui_ble.Phone(self.dir / "ble.sock",
+                                      self.dir / "ble-central.json", self)
+        q = Qt.QueuedConnection         # (its signals come from its thread)
+        self.phone.said.connect(lambda text, kind: self.log.add(
+            text, "info" if kind == "ok" else kind), q)
+        self.phone.changed.connect(self.refresh_tiles, q)
+        self.phone.pin_wanted.connect(self.ask_ble_pin, q)
+        self.phone.pin_over.connect(self.ble_pin_over, q)
+        self.ble_pin_dialog = None      # while the phone waits for a PIN
         self.header = []                # the GPIO header's pins (fe_header)
         self.ports = []                 # ... and its serial ports
         self.pin_record = None          # (changes, ns, the file) while they
@@ -329,11 +341,12 @@ class MainWindow(QtWidgets.QMainWindow):
         for i, (kind, title) in enumerate((
                 ("usb", "USB"), ("sd", "microSD"), ("battery", "Battery"),
                 ("nfc", "NFC"), ("rfid", "RFID 125 kHz"), ("ibutton", "iButton"),
-                ("ir", "Infrared"), ("subghz", "Sub-GHz"))):
+                ("ir", "Infrared"), ("subghz", "Sub-GHz"),
+                ("bluetooth", "Bluetooth"))):
             tile = W.Tile(title)
-            grid.addWidget(tile, i // 4, i % 4)
+            grid.addWidget(tile, i // 3, i % 3)
             self.tiles[kind] = tile
-        for c in range(4):
+        for c in range(3):
             grid.setColumnStretch(c, 1)
         box.addWidget(self.bench)
         self.bench.setVisible(self.settings.get("bench", True))
@@ -572,6 +585,25 @@ class MainWindow(QtWidgets.QMainWindow):
         r.addSeparator()
         self.a_sdr_stop = A(r, "Stop", lambda: self.stop_link("subghz"))
 
+        m = self.menu_bluetooth = bar.addMenu("&Bluetooth")
+        self.a_ble_connect = A(
+            m, "Connect as a phone", self.ble_connect,
+            tip="A central on its Bluetooth link: it pairs with the PIN that "
+                "the Flipper shows, or comes back with its bond")
+        self.a_ble_disconnect = A(m, "Disconnect", self.phone.disconnect_)
+        m.addSeparator()
+        self.a_ble_ping = A(m, "Ping it over RPC", self.phone.ping,
+                            tip="The phone app's way: a request to the serial "
+                                "service, the answer by indications")
+        self.a_ble_info = A(m, "Its device info over RPC", self.phone.info)
+        m.addSeparator()
+        A(m, "Forget it (the phone's side)", self.phone.forget,
+          tip="The next connection pairs again, with a PIN")
+        A(m, "Settings > Bluetooth on the Flipper",
+          lambda: self.command("app", "Bluetooth"), live=True,
+          tip="Where it is switched on and off, and where Unpair All "
+              "Devices is")
+
         m = self.menu_gpio = bar.addMenu("&GPIO")
         m.aboutToShow.connect(self.fill_gpio_menu)
         self.fill_gpio_menu()
@@ -633,6 +665,8 @@ class MainWindow(QtWidgets.QMainWindow):
         t["ir"].primary.clicked.connect(self.ask_ir)
         t["subghz"].set_menu(self.menu_subghz)
         t["subghz"].primary.clicked.connect(lambda: self.ask_file("subghz"))
+        t["bluetooth"].set_menu(self.menu_bluetooth)
+        t["bluetooth"].primary.clicked.connect(self.ble_primary)
 
     def dock_action(self, menu, dock, text, shortcut, tip):
         """Shows a dock; one that is a tab behind the other comes to the
@@ -1157,6 +1191,98 @@ class MainWindow(QtWidgets.QMainWindow):
         except (OSError, ValueError):
             self.held = {}
 
+    # ------------------------------------------------------------ Bluetooth
+
+    def ble_state(self):
+        """CPU2's stack as the machine reports it (the IPCC's `ble`)"""
+        raw = self.P("/machine/soc/ipcc", "ble", "")
+        try:
+            return json.loads(raw) if isinstance(raw, str) and raw else {}
+        except ValueError:
+            return {}
+
+    def ble_connect(self):
+        if not self.ble_state().get("advertising"):
+            self.log.add("Bluetooth: it does not advertise; switch it on in "
+                         "Settings > Bluetooth (the Bluetooth menu has it)",
+                         "error")
+            return
+        self.log.add("Bluetooth: connecting as a phone…", "you")
+        self.phone.connect_()
+
+    def ble_primary(self):
+        if self.phone.connected:
+            self.phone.disconnect_()
+        else:
+            self.ble_connect()
+
+    def ask_ble_pin(self):
+        """The phone's PIN: what the user reads off the Flipper's screen.  The
+        dialog does not hold up the window (the screen goes on under it), and
+        it goes away when the phone stops waiting"""
+        d = self.ble_pin_dialog = QtWidgets.QInputDialog(self)
+        d.setWindowTitle("Pairing")
+        d.setLabelText("The PIN on the Flipper's screen (six digits):")
+        d.setInputMode(QtWidgets.QInputDialog.TextInput)
+
+        def done(result):
+            if self.ble_pin_dialog is d:
+                self.ble_pin_dialog = None
+                pin = d.textValue().strip() if result else ""
+                ok = pin.isdigit() and len(pin) == 6
+                if result and not ok:
+                    self.log.add(f"Bluetooth: '{pin}' is not six digits: the "
+                                 "phone cancels the pairing", "error")
+                self.phone.give_pin(pin if ok else None)
+            d.deleteLater()
+
+        d.finished.connect(done)
+        d.open()
+
+    def ble_pin_over(self):
+        d, self.ble_pin_dialog = self.ble_pin_dialog, None
+        if d:
+            d.reject()                  # the phone gave up waiting
+
+    def refresh_ble(self, live):
+        t, bt = self.tiles["bluetooth"], self.ble_state() if live else {}
+        conn = bt.get("connection")
+        mine, busy = self.phone.connected, self.phone.busy
+        if not live or not bt:
+            line1, line2, on = "", "", False
+        elif bt.get("runs") == "nothing":
+            line1, line2, on = "CPU2 has not started yet", "", False
+        elif not bt.get("stack"):
+            line1, line2, on = "No radio stack", "CPU2 runs its FUS alone", False
+        elif bt.get("fus_operation", "none") != "none" or bt.get("runs") != "stack":
+            line1 = {"deleting": "Its FUS deletes the stack",
+                     "installing": "Its FUS installs a stack",
+                     "restarting": "CPU2 restarts"}.get(
+                         bt.get("fus_operation"), "CPU2 runs its FUS")
+            line2, on = f"stack {bt['stack']} installed", "warn"
+        elif conn:
+            how = ("paired" if conn.get("authenticated") else "encrypted"
+                   if conn.get("encrypted") else "not paired yet")
+            line1 = (("Connected to the phone" if mine else
+                      f"Connected to {conn.get('central')}") + f" ({how})")
+            line2, on = f"MTU {conn.get('mtu')}; stack {bt['stack']}", True
+        elif bt.get("advertising"):
+            line1, on = f"Advertising as {bt.get('name') or '?'}", True
+            line2 = f"{bt.get('address', '')}; stack {bt['stack']}"
+        else:
+            line1, line2, on = "Off (Settings > Bluetooth)", \
+                f"stack {bt['stack']}", False
+        if bt.get("bonds"):
+            n = bt["bonds"]
+            line2 += f"; {n} bond" + ("s" if n > 1 else "")
+        t.set_state(line1, line2, on)
+        t.set_primary("Disconnect" if mine else "Connect",
+                      live and not busy and (mine or bool(bt.get("advertising"))))
+        self.a_ble_connect.setEnabled(live and not busy and not mine
+                                      and bool(bt.get("advertising")))
+        for a in (self.a_ble_disconnect, self.a_ble_ping, self.a_ble_info):
+            a.setEnabled(not busy and mine)
+
     def refresh_tiles(self):
         t, P = self.tiles, self.P
         live = self.is_live()
@@ -1306,6 +1432,7 @@ class MainWindow(QtWidgets.QMainWindow):
                               st in ("rx", "tx", "fstxon"))
         t["subghz"].set_primary("Send…", live)
         self.update_actions()
+        self.refresh_ble(live)          # (after the live actions are set)
 
     def ir_label(self):
         a = self.last_ir or []
@@ -2912,6 +3039,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, e):
         self.closing = True
+        self.phone.close()
         self.save_settings()
         for w in list(self.remotes.values()):
             w.close()

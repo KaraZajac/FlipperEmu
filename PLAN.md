@@ -37,7 +37,7 @@ qFlipper / lab.flipper.net / `ufbt launch` only run over USB CDC.
       CDC event queue (`furi_check` in USB_LP; BRINGUP_LOG 36). Since 2026-11-10 the
       host waits for the firmware to go idle rather than for the clock: file
       transfers over the CLI are up to twice as fast (BRINGUP_LOG 74)
-- ☐ A minimal BLE stack on CPU2, so qFlipper's updates (radio stage) and the BT service work.
+- ☑ A minimal BLE stack on CPU2, so qFlipper's updates (radio stage) and the BT service work.
       In five parts:
     - ☑ The stack starts (2026-11-13): CPU2 runs ST's BLE Light 1.20.0, the stack of the
           five firmwares' update packages, as a Flipper from the factory does; the firmware
@@ -66,7 +66,13 @@ qFlipper / lab.flipper.net / `ufbt launch` only run over USB CDC.
           runs (`devices/NAME/radio.state`). A stack of another kind than BLE Light is
           still left out (the model is BLE Light). `scripts/update_check.py`: 35,
           `scripts/ble_check.py`: 27 (BRINGUP_LOG 142)
-    - ☐ The window: Bluetooth on the bench
+    - ☑ The window (2026-11-14): Bluetooth on the bench. A tile with what the stack does
+          (advertising, a connection, the bonds, the FUS at work), and a phone: Connect
+          pairs with the PIN that the Flipper shows (typed into a dialog), or comes back
+          with its bond (`./flipperemu ble`'s: the same phone); the Bluetooth menu pings
+          over RPC, asks the device info, forgets the bond, and opens Settings >
+          Bluetooth. `scripts/gui_check.py` 76 (77 with an SPI script),
+          `scripts/ble_check.py` 28 (BRINGUP_LOG 143)
 - ☐ Stretch: second CDC port of the dual-CDC mode; mass storage
 
 The double-buffer question from the notes was settled by what libusb_stm32 requires:

@@ -5,7 +5,8 @@ such a link: the CC1101 (Sub-GHz), the ST25R3916 (NFC) and CPU2's BLE stack (Blu
 - `scripts/fe_sdr.py` drives the CC1101's from an SDR. So can anything else that speaks
   the protocol: another SDR stack, a GNU Radio flowgraph, a simulator, a test.
 - `scripts/fe_nfc_link.py` is the card on the ST25R3916's, written in Python or relayed.
-- `scripts/fe_ble.py` is the phone on the BLE stack's (`./flipperemu ble`).
+- `scripts/fe_ble.py` is the phone on the BLE stack's (`./flipperemu ble`, and the
+  window's Bluetooth tile, the same phone with the same bonds).
 
 ## Where
 
@@ -167,7 +168,9 @@ tell. The link carries what goes through the air at the level of GAP, SMP and AT
 packets and not keys. To the firmware, ST's stack on CPU2 says what a real central did
 (the connection's events, the pairing's, a client's writes), and what the firmware
 updates goes to the central as a notification or an indication, if the central asked
-for them in the characteristic's CCCD. One connection at a time.
+for them in the characteristic's CCCD. One connection at a time, and one central on the
+link: a second program's connection waits until the first has gone (`./flipperemu ble`
+says so and stops, as does the window's phone).
 
 Numbers are hex with `0x` (handles, reasons) or decimal; data is hex, two digits a
 byte. Handles are those of the stack's GATT table, which `gatt` lists.

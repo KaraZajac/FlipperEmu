@@ -124,6 +124,14 @@ def central(b, name, version, commit):
               and name in (adv.get("name") or "")
               and (adv.get("addr") or "").startswith("80:E1:26")
               and len(adv.get("uuids") or []) == 1, adv)
+        # one central on the link at a time (QEMU's socket takes one, and a
+        # second would wait unanswered): `./flipperemu ble` sees this one
+        code, out, err, took = fe(b, "ble", "gatt")
+        check("one central at a time: with this one on the link, "
+              "`./flipperemu ble gatt` stops at once, and says so",
+              code != 0 and took < 10
+              and "a central is on its Bluetooth link already" in out + err,
+              f"{code} {took:.1f} s {out + err}")
 
         c.connect()
         asked = until(lambda: c.pump(0.2) or c.security_request, 10)

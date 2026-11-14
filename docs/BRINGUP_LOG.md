@@ -4269,6 +4269,45 @@ big lock, entry 92).
       version (all five packages carry 1.20.0; the check's older stack is
       the model's 1.19.0), the FUS's own upgrade (a FUS image).
 
+143. **Bluetooth, part 4: the window.** The bench has a Bluetooth tile, and
+    the window a phone.
+    - The tile says what CPU2's stack does, from the IPCC's `ble` property
+      (the JSON behind `./flipperemu ble status`): advertising under its
+      name, with its address; connected, to the window's phone or another
+      central, paired or only encrypted, and the MTU; off; the FUS at work
+      (deleting, installing, restarting); no stack at all; and how many
+      bonds the stack keeps.
+    - The phone (`scripts/fe_gui_ble.py`) is `fe_ble.Central` in a thread
+      of its own, which says what it does in the console. Connect: it
+      connects and pairs, the Flipper shows its PIN and a dialog asks for
+      it; with the bond from before it encrypts instead, no PIN. The bonds
+      are `./flipperemu ble`'s (`devices/NAME/ble-central.json`): the same
+      phone. The Bluetooth menu has Ping over RPC, the device info over
+      RPC, Forget (the phone's side) and Settings > Bluetooth on the
+      Flipper, where it is switched on and where Unpair All Devices is.
+    - One central on the link at a time: QEMU's socket takes one, and a
+      second waits in its backlog, unanswered. `./flipperemu ble` looks at
+      the `link` of the status first and stops; the window's phone says so
+      when the link does not greet it.
+    - Found, in the check: the first version asked with
+      `QInputDialog.getText()`, which runs a loop of its own until it is
+      answered. The check had set the firmware's log level to errors only
+      before it came to Bluetooth, so there was no "Pass key request event"
+      line to take the PIN from, and its own timeout could not run inside
+      the dialog's loop: it waited for three hours. A user who walked away
+      from the dialog would have had a window that waited as long. The
+      dialog is `open()`ed now (the Flipper's screen goes on under it, as
+      the PIN is read off it) and goes away when the phone stops waiting;
+      the check's Bluetooth step comes before the level changes, and a
+      Cancel is one of its checks.
+    - `scripts/gui_check.py`: five more (Bluetooth switched on from the
+      menu; Connect and Cancel; Connect with the PIN from the log typed
+      into the dialog; an RPC ping; Disconnect and Connect again with the
+      bond), 76 on the official 1.5.1 and the dev build, 77 on Momentum,
+      Unleashed and RogueMaster (their SPI script), 4 to 10 minutes each,
+      one at a time. `scripts/ble_check.py`: 28 on the five (one central
+      at a time), 50 s each, five at once.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

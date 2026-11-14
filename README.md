@@ -36,9 +36,10 @@ build, as `./fbt` makes them), **Momentum mntm-012**, **Unleashed unlshd-094** a
 a recording of the screen, Pause, the firmware log and its level, the backlight fading
 in, a file copied to the card, an app dropped on it, pins of the GPIO header held with
 a click, the LED blinking while NFC reads,
-the bench, switching off and on, the Left + Back reboot, a crash and what the firmware
-does after it, an update through the firmware's updater, installing firmware, a
-snapshot saved from its menu and loaded in a new window) on the same five, off-screen.
+the bench, a phone on its Bluetooth (the PIN typed in, RPC, back with its bond),
+switching off and on, the Left + Back reboot, a crash and what the firmware does after
+it, an update through the firmware's updater, installing firmware, a snapshot saved
+from its menu and loaded in a new window) on the same five, off-screen.
 `scripts/update_check.py` (an update package written to the card of a running device
 and installed there, and the updater's error screen) passes on the same five, from the
 official firmware to Unleashed, and from the release to the dev build.
@@ -82,7 +83,8 @@ save, by an app of the check's own on the official 1.5.1) passes on the same fiv
 link as a phone is: the advertising, a connection that the firmware asks to pair, a
 wrong PIN refused and the right one paired, the firmware's services and their values,
 a battery level as a notification, the phone app's RPC session through the serial
-service, the ends of a connection, a snapshot saved with one) passes on the same five.
+service, the ends of a connection, one central at a time on the link, a snapshot saved
+with one) passes on the same five.
 `scripts/ufbt_check.py` (ufbt 0.2.6 building `examples/hello`, launching it there, and
 `ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's symbols, that
 app's and a stock app's, and its debug configuration for VS Code used the way that
@@ -347,10 +349,17 @@ instead, and `--headless` no window at all.
 - **The lights and sounds** show on the body: the LED glows, the body shakes when the
   motor runs, and a speaker sign shows a tone (it plays through `--audio`).
 - **The bench** under it has a tile for each of USB, the microSD card, the battery, NFC,
-  RFID, iButton, infrared and Sub-GHz. A tile says what is plugged in or held to the
-  Flipper and what its radio is doing, with a button for what you do most and a menu
-  for the rest. The menu bar has the same menus, and so does a right click on the
+  RFID, iButton, infrared, Sub-GHz and Bluetooth. A tile says what is plugged in or held
+  to the Flipper and what its radio is doing, with a button for what you do most and a
+  menu for the rest. The menu bar has the same menus, and so does a right click on the
   Flipper.
+- **A phone on its Bluetooth**: the Bluetooth tile's Connect is a central on the
+  Flipper's link, as a phone is. The Flipper shows a PIN on its screen, and a dialog asks
+  for it; then the tile has it connected and paired, and the Bluetooth menu pings the
+  Flipper over RPC or asks its device info, the phone app's way. The bond is kept (with
+  `./flipperemu ble`'s: it is the same phone), so the next Connect needs no PIN. The menu
+  also opens Settings > Bluetooth on the Flipper, where Bluetooth goes on and off and
+  Unpair All Devices is.
 - **What can be held to it**: NFC cards (Flipper `.nfc` files, Proxmark3 `.json`
   dumps, new NTAG21x and MIFARE Classic tags), 125 kHz tags (`.rfid` files, new tags of
   24 protocols, a blank T5577) and iButton keys (`.ibtn` files, new Dallas, Cyfral and
@@ -2932,7 +2941,8 @@ scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_moni
                        (gdb's side of `flipperemu gdb`), fe_record.py (the
                        screen as a GIF), fe_usbip.py, fe_u2f.py (a U2F host
                        over USB/IP), usbip_attach.py, fe_gui.py (the window: fe_gui_view.py,
-                       fe_gui_link.py, fe_gui_widgets.py), smoke_test.py, *_check.py
+                       fe_gui_link.py, fe_gui_widgets.py, fe_gui_ble.py), smoke_test.py,
+                       *_check.py
 devices/ firmware/ build/ third_party/    generated, git-ignored
 ```
 

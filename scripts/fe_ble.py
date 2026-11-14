@@ -615,7 +615,10 @@ def log_size(log):
 
 def pin_source(how, log):
     """What `--pin` says: the digits, `ask` (the terminal), `log` (the
-    firmware's log): a function for Central.pair()"""
+    firmware's log), or a function that asks someone (the window): a
+    function for Central.pair()"""
+    if callable(how):
+        return how
     if how and re.fullmatch(r"\d{6}", how):
         return lambda: how
     mark = log_size(log) if log else 0
@@ -657,6 +660,7 @@ def connected_central(path, pin=None, log=None, timeout=10.0, mtu=517,
                 c.encrypt()
                 say(f"connected to {adv.get('name') or '?'} ({adv['addr']}), "
                     "with the bond from before: no PIN")
+                c.how = "bond"
                 return c
             except EncryptionFailed as e:
                 say(f"{e}: pairing again")
@@ -668,6 +672,7 @@ def connected_central(path, pin=None, log=None, timeout=10.0, mtu=517,
         say(f"connected to {adv.get('name') or '?'} ({adv['addr']}); "
             "pairing: the Flipper shows a PIN")
         paired = c.pair(pin_source(pin, log))
+        c.how = "paired"
         if bonds and paired.get("bonded") == "1":
             bonds.add(adv["addr"], paired)
     except BaseException:

@@ -70,6 +70,7 @@ from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 from PySide6.QtCore import QPoint, Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 
+import fe_ble  # noqa: E402
 import fe_gui  # noqa: E402
 import fe_gui_view  # noqa: E402
 import fe_header  # noqa: E402
@@ -1062,6 +1063,86 @@ class Driver:
               and lights.get("blinking") is True
               and lights.get("led") == f"{max(colours):06x}" and still)
 
+    def bluetooth(self):
+        """The bench's phone: Bluetooth switched on from its menu, Connect
+        with the PIN that the Flipper shows typed into the dialog (taken
+        from the firmware's log, where a person reads the screen), an RPC
+        ping, Disconnect, and back with its bond"""
+        w = self.win
+        acts = {a.text(): a for a in w.menu_bluetooth.actions()}
+        acts["Settings > Bluetooth on the Flipper"].trigger()
+        self.spin(2.0)
+        self.hold(Qt.Key_Right, 150)    # On
+        self.spin(0.5)
+        self.click("back")
+        advertising = self.until(
+            lambda: self.tile("bluetooth").startswith("Advertising as "), 20)
+        check("bluetooth: Settings > Bluetooth from the Bluetooth menu; "
+              "switched on, the tile has it advertising under its name",
+              advertising, self.tile("bluetooth"))
+        if not advertising:
+            return
+        dialog = lambda: next((d for d in w.findChildren(
+            QtWidgets.QInputDialog) if d.isVisible()), None)
+        # Cancel in the PIN dialog: the phone gives up, the Flipper goes on
+        # advertising
+        asked = []
+        timer = QtCore.QTimer(interval=200)
+        timer.timeout.connect(lambda: dialog() and (asked.append(1),
+                                                    dialog().reject()))
+        timer.start()
+        w.tiles["bluetooth"].primary.click()
+        gave_up = self.until(lambda: asked and not w.phone.busy and not
+                             w.phone.connected and self.tile(
+                                 "bluetooth").startswith("Advertising"), 40)
+        timer.stop()
+        check("bluetooth: Connect, then Cancel in the PIN dialog: the phone "
+              "gives up, the dialog is gone, the Flipper advertises again",
+              gave_up and not dialog() and w.ble_pin_dialog is None,
+              f"{asked} {self.tile('bluetooth')} {self.console()[-300:]}")
+        self.spin(1.0)
+
+        mark, pins = fe_ble.log_size(self.uart), []
+
+        def answer():                   # the PIN dialog, once it is there
+            d = dialog()
+            if d:
+                pin = fe_ble.pin_from_log(self.uart, mark, timeout=0)
+                if pin:
+                    pins.append(pin)
+                    d.setTextValue(pin)
+                    d.accept()
+
+        timer = QtCore.QTimer(interval=200)
+        timer.timeout.connect(answer)
+        timer.start()
+        w.tiles["bluetooth"].primary.click()
+        connected = self.until(lambda: w.phone.connected and "(paired)" in
+                               self.tile("bluetooth"), 40)
+        timer.stop()
+        check("bluetooth: Connect: the PIN that the Flipper shows, typed into "
+              "the dialog, pairs the phone; the tile has it connected, paired",
+              connected and len(pins) == 1,
+              f"{pins} {self.tile('bluetooth')} {self.console()[-400:]}")
+        self.shot("bluetooth")
+        acts["Ping it over RPC"].trigger()
+        pinged = self.until(lambda: "RPC ping went through the serial service "
+                            "and came back whole" in self.console(), 40)
+        check("bluetooth: Ping it over RPC: through the serial service, and "
+              "back whole", pinged, self.console()[-400:])
+        w.tiles["bluetooth"].primary.click()            # Disconnect
+        off = self.until(lambda: not w.phone.connected and
+                         self.tile("bluetooth").startswith("Advertising"), 20)
+        w.tiles["bluetooth"].primary.click()            # Connect
+        again = self.until(lambda: w.phone.connected and "(paired)" in
+                           self.tile("bluetooth"), 30)
+        check("bluetooth: Disconnect, then Connect again: back with the bond "
+              "from before, no PIN asked", off and again and len(pins) == 1
+              and "with the bond from before: no PIN" in self.console(),
+              f"{off} {again} {pins} {self.console()[-400:]}")
+        w.tiles["bluetooth"].primary.click()            # Disconnect
+        self.until(lambda: not w.phone.connected, 20)
+
     def console(self):
         return self.win.log.text.toPlainText()
 
@@ -1323,7 +1404,10 @@ class Driver:
         fap = self.out / "gpio.fap"
         if not check("apps: an app from its card to work with", fap.is_file()):
             return
-        runs = lambda: re.findall(r'"(.+)" runs', self.console())
+        # (from here: the Bluetooth step had an app of its own run)
+        since = len(self.console())
+        apps = lambda: self.console()[since:]
+        runs = lambda: re.findall(r'"(.+)" runs', apps())
         before = v.frame
         self.drop(fap)
         ran = self.until(lambda: len(runs()) >= 1, 90)
@@ -1337,7 +1421,7 @@ class Driver:
         again = self.until(lambda: len(runs()) >= 2, 90)
         self.settle()
         check("apps: F5 closes it and starts the same file again",
-              again and f'"{runs()[0]}" closed' in self.console())
+              again and f'"{runs()[0]}" closed' in apps())
         # Apps > Start it again when its file changes: a build puts a new
         # file in the old one's place, and the window does the F5
         w.a_app_watch.trigger()
@@ -1351,15 +1435,15 @@ class Driver:
         w.a_app_watch.trigger()
         check("apps: with Apps > Start it again when its file changes, a new "
               "build of the file is installed and started by itself",
-              calm and seen and "gpio.fap changed" in self.console()
+              calm and seen and "gpio.fap changed" in apps()
               and not w.watch_timer.isActive(),
               f"nothing before the build: {calm}, started: {seen}")
         w.close_app()
         w.command("app")
         self.settle()
         check("apps: closed from the Apps menu: no app runs",
-              ran and self.console().count(f'"{runs()[0]}" closed') >= 2
-              and "no app runs" in self.console())
+              ran and apps().count(f'"{runs()[0]}" closed') >= 2
+              and "no app runs" in apps())
         self.spin(1.0)
 
         # The same app, as if it were built for the next API.  The official
@@ -1415,6 +1499,7 @@ class Driver:
         self.recording()
         self.pausing()
         self.snapshot_save()
+        self.bluetooth()                # (while it logs at info: the PIN)
 
         # what the firmware logs: a click on the GPIO pins, where a real one
         # has its UART
