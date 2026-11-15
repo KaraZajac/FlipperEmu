@@ -90,8 +90,71 @@
  * 116956 bytes (29 sectors of 4 KB) */
 #define STACK_DEFAULT                  "1.20.0"
 #define STACK_RELEASE_TYPE             2
+#define STACK_TYPE_BLE_FULL            0x01
 #define STACK_TYPE_BLE_LIGHT           0x03
+#define STACK_TYPE_BLE_FULL_EXT_ADV    0x06
 #define STACK_FLASH_SECTORS            29
+
+/*
+ * The kinds of ST's BLE stack that the model is, and their 1.20.0 images as
+ * their FUS footers have them (stm32wb_copro v1.20.0): the flash that the
+ * image takes, in 4 KB sectors, and what it leaves CPU1 of SRAM2a and
+ * SRAM2b, in KB, which the FUS puts into the option bytes (SBRSA, SNBRSA).
+ * The footer's info words are ST's placeholders: its sizes are what tells
+ * the three apart (the running stack reports its type).  The model is the
+ * same BLE stack for all three; what it takes from the kind is the type
+ * that it reports, the flash, and SRAM2.
+ */
+typedef struct WB55StackKind {
+    const char *name;            /* in radio-stack= and in `status` */
+    const char *words;
+    uint8_t type;                /* INFO_STACK_TYPE_BLE_* */
+    uint8_t sectors, sram2a, sram2b;
+} WB55StackKind;
+
+static const WB55StackKind stack_kinds[] = {
+    { "light", "BLE Light", STACK_TYPE_BLE_LIGHT, 29, 18, 11 },
+    { "full", "BLE Full", STACK_TYPE_BLE_FULL, 38, 10, 15 },
+    { "full-ext", "BLE Full extended", STACK_TYPE_BLE_FULL_EXT_ADV, 47, 2, 10 },
+};
+
+/* what CPU1 keeps of SRAM2 on a Flipper from the factory (Light's) */
+#define C2_SRAM2A_FACTORY              18
+#define C2_SRAM2B_FACTORY              11
+
+static const WB55StackKind *stack_kind_named(const char *name)
+{
+    for (int i = 0; i < ARRAY_SIZE(stack_kinds); i++) {
+        if (!strcmp(stack_kinds[i].name, name)) {
+            return &stack_kinds[i];
+        }
+    }
+    return NULL;
+}
+
+static const WB55StackKind *stack_kind_of_type(uint8_t type)
+{
+    for (int i = 0; i < ARRAY_SIZE(stack_kinds); i++) {
+        if (stack_kinds[i].type == type) {
+            return &stack_kinds[i];
+        }
+    }
+    return NULL;
+}
+
+static const WB55StackKind *stack_kind_of_image(uint8_t sectors,
+                                                uint8_t sram2a, uint8_t sram2b)
+{
+    for (int i = 0; i < ARRAY_SIZE(stack_kinds); i++) {
+        const WB55StackKind *k = &stack_kinds[i];
+
+        if (k->sectors == sectors && k->sram2a == sram2a &&
+            k->sram2b == sram2b) {
+            return k;
+        }
+    }
+    return NULL;
+}
 
 /* The FUS's own operations on the wireless stack (AN5185; shci.h) */
 #define SHCI_OPCODE_FUS_FW_UPGRADE     0xFC54
@@ -139,6 +202,13 @@ void wb55_ipcc_update_irq(WB55IpccState *s)
 
 /* ------------------------------------------------------------- CPU2 (FUS) */
 
+/* MemorySize, as the stack's InfoTable has it (shci.h INFO_SIZE_*) */
+static uint32_t stack_memory_size(WB55IpccState *s)
+{
+    return s->stack_sectors | (uint32_t)s->c2_sram2a << 16 |
+           (uint32_t)s->c2_sram2b << 24;
+}
+
 static void cpu2_write_device_info(WB55IpccState *s, hwaddr ref)
 {
     hwaddr info = tl_rd32(ref + 0);        /* ref->p_device_info_table */
@@ -156,7 +226,7 @@ static void cpu2_write_device_info(WB55IpccState *s, hwaddr ref)
     /* the stack that is installed, which the FUS does not run: the
      * updater compares its version with the package's (0.0: none) */
     tl_wr32(info + 20, s->stack_version);  /* WirelessStackVersion */
-    tl_wr32(info + 24, s->stack_version ? s->stack_sectors : 0);
+    tl_wr32(info + 24, s->stack_version ? stack_memory_size(s) : 0);
     tl_wr32(info + 28, s->stack_version ? s->stack_type : 0);
     tl_wr32(info + 32, 0);                 /* WirelessFirmwareThreadInfo */
     tl_wr32(info + 36, 0);                 /* Reserved2 */
@@ -179,10 +249,11 @@ static void cpu2_write_stack_info(WB55IpccState *s, hwaddr ref)
     tl_wr32(info + 4, s->fus_version);
     tl_wr32(info + 8, 0);
     tl_wr32(info + 12, 0);
-    /* WirelessFwInfoTable: Version, MemorySize (its low byte: the flash
-     * that the stack takes, in 4 KB sectors), InfoStack, Reserved */
+    /* WirelessFwInfoTable: Version, MemorySize (shci.h: the flash that
+     * the stack takes in 4 KB sectors, SRAM1, and what it leaves CPU1 of
+     * SRAM2a and SRAM2b: the image footer's word), InfoStack, Reserved */
     tl_wr32(info + 16, s->stack_version);
-    tl_wr32(info + 20, s->stack_sectors);
+    tl_wr32(info + 20, stack_memory_size(s));
     tl_wr32(info + 24, s->stack_type);
     tl_wr32(info + 28, 0);
 }
@@ -288,6 +359,9 @@ static void radio_save(WB55IpccState *s)
     } else {
         g_string_append(g, "stack none\n");
     }
+    /* what the FUS put into the option bytes (it stays when a stack is
+     * deleted, until the next is installed) */
+    g_string_append_printf(g, "sram2 %u %u\n", s->c2_sram2a, s->c2_sram2b);
     g_string_append_printf(g, "boot %s\n", s->c2_fus_boot ? "fus" : "stack");
     if (!g_file_set_contents(s->radio_file, g->str, g->len, &err)) {
         warn_report("flipper-cpu2: %s: %s", s->radio_file, err->message);
@@ -343,6 +417,13 @@ static bool radio_load(WB55IpccState *s)
             s->stack_type = type;
             s->stack_sectors = sectors;
             said = true;
+        } else if (!strcmp(w[0], "sram2") && w[2]) {
+            unsigned a = strtoul(w[1], NULL, 10), b = strtoul(w[2], NULL, 10);
+
+            if (a < 32 && b < 32) {
+                s->c2_sram2a = a;
+                s->c2_sram2b = b;
+            }
         } else if (!strcmp(w[0], "boot")) {
             s->c2_fus_boot = !strcmp(w[1], "fus");
         }
@@ -351,12 +432,18 @@ static bool radio_load(WB55IpccState *s)
 }
 
 /* The secure area starts at the stack, or at the FUS when there is none:
- * CPU1 may write below it (the updater checks that its image fits) */
+ * CPU1 may write below it (the updater checks that its image fits).  CPU2
+ * boots there (SBRV, a word address), and SRAM2 is CPU2's from where the
+ * last stack's footer said */
 static void fus_sfsa(WB55IpccState *s)
 {
     if (s->flash) {
-        wb55_flash_set_sfsa(s->flash, (FUS_BASE - FLASH_BASE_ADDR) / 4096 -
-                            (s->stack_version ? s->stack_sectors : 0));
+        uint8_t page = (FUS_BASE - FLASH_BASE_ADDR) / 4096 -
+                       (s->stack_version ? s->stack_sectors : 0);
+
+        wb55_flash_set_sfsa(s->flash, page);
+        wb55_flash_set_c2_sram(s->flash, s->c2_sram2a, s->c2_sram2b,
+                               page * 4096 / 4);
     }
 }
 
@@ -387,7 +474,7 @@ static bool fus_install(WB55IpccState *s)
     }
     n = FUS_BASE - src;
     img = g_malloc(n);
-    address_space_read(&address_space_memory, src, MEMTXATTRS_UNSPECIFIED,
+    address_space_read(&address_space_memory, src, WB55_C2_ATTRS,
                        img, n);
     while (n && img[n - 1] == 0xFF) {
         n--;                            /* the erased end of the last page */
@@ -417,12 +504,34 @@ static bool fus_install(WB55IpccState *s)
         s->fus_error = FUS_ERROR_IMG_CORRUPT;   /* no stack's (a FUS image) */
         return false;
     }
+    /* the footer's memory word: the flash that the image takes (sectors),
+     * SRAM1 (unused), what it leaves CPU1 of SRAM2a and SRAM2b (KB) */
+    uint8_t sectors = foot[8] ? foot[8] : DIV_ROUND_UP(n, 4096);
+    const WB55StackKind *k = stack_kind_of_image(sectors, foot[10], foot[11]);
+
+    if (!k) {
+        warn_report("flipper-cpu2: FUS_FW_UPGRADE: a stack %u.%u.%u of %u "
+                    "sectors that leaves CPU1 %u KB of SRAM2a and %u of "
+                    "SRAM2b: no kind that the emulated CPU2 is (BLE Light, "
+                    "Full and Full extended 1.20.0)", foot[15], foot[14],
+                    foot[13], sectors, foot[10], foot[11]);
+        s->fus_error = FUS_ERROR_IMG_CORRUPT;
+        return false;
+    }
     /* the version: major, minor, sub, then branch and build in one byte,
      * which is the InfoTable word's low byte as it is */
     s->stack_version = foot[15] << 24 | foot[14] << 16 | foot[13] << 8 |
                        foot[12];
-    s->stack_type = STACK_TYPE_BLE_LIGHT;   /* (what the model is) */
-    s->stack_sectors = foot[8] ? foot[8] : DIV_ROUND_UP(n, 4096);
+    s->stack_type = k->type;
+    s->stack_sectors = sectors;
+    s->c2_sram2a = foot[10];
+    s->c2_sram2b = foot[11];
+    info_report("flipper-cpu2: the FUS installed %s %u.%u.%u: the flash "
+                "from 0x%08x and SRAM2 from 0x%08x and 0x%08x are CPU2's "
+                "after the restart", k->words, foot[15], foot[14], foot[13],
+                FUS_BASE - sectors * 4096,
+                WB55_SRAM2A_BASE + s->c2_sram2a * 1024,
+                WB55_SRAM2B_BASE + s->c2_sram2b * 1024);
     return true;
 }
 
@@ -469,7 +578,7 @@ static void cpu2_system_command(WB55IpccState *s)
     int plen = tl_rd8(buf + 11);
 
     /* the answer goes over the command: take the command out first */
-    address_space_read(&address_space_memory, buf + 12, MEMTXATTRS_UNSPECIFIED,
+    address_space_read(&address_space_memory, buf + 12, WB55_C2_ATTRS,
                        payload, plen);
 
     switch (opcode) {
@@ -733,22 +842,43 @@ static void wb55_ipcc_realize(DeviceState *dev, Error **errp)
 {
     WB55IpccState *s = WB55_IPCC(dev);
     const char *v = s->radio_stack ? s->radio_stack : STACK_DEFAULT;
+    g_autofree char *copy = g_strdup(v);
+    const char *version = copy;
+    char *kind_name = strchr(copy, ':');
+    const WB55StackKind *kind = stack_kind_named("light");
     unsigned major, minor, sub;
     char end;
 
-    if (!strcmp(v, "none")) {
+    /* VERSION, KIND, VERSION:KIND (1.20.0 and Light when left out), none */
+    if (kind_name) {
+        *kind_name++ = '\0';
+    } else if (stack_kind_named(copy)) {
+        kind_name = copy;
+        version = STACK_DEFAULT;
+    }
+    if (kind_name && !(kind = stack_kind_named(kind_name))) {
+        error_setg(errp, "radio-stack: '%s' is no kind of stack that the "
+                   "model is (light, full, full-ext)", kind_name);
+        return;
+    }
+    s->c2_sram2a = C2_SRAM2A_FACTORY;
+    s->c2_sram2b = C2_SRAM2B_FACTORY;
+    if (!strcmp(version, "none")) {
         s->stack_version = 0;
-    } else if (sscanf(v, "%u.%u.%u%c", &major, &minor, &sub, &end) == 3 &&
+    } else if (sscanf(version, "%u.%u.%u%c", &major, &minor, &sub,
+                      &end) == 3 &&
                major && major < 256 && minor < 256 && sub < 256) {
         s->stack_version = major << 24 | minor << 16 | sub << 8 |
                            STACK_RELEASE_TYPE;
-        s->stack_type = STACK_TYPE_BLE_LIGHT;
+        s->stack_type = kind->type;
+        s->c2_sram2a = kind->sram2a;
+        s->c2_sram2b = kind->sram2b;
     } else {
-        error_setg(errp, "radio-stack: '%s' is no version (MAJOR.MINOR.SUB) "
-                   "and not 'none'", v);
+        error_setg(errp, "radio-stack: '%s' is no version (MAJOR.MINOR.SUB), "
+                   "no kind (light, full, full-ext) and not 'none'", v);
         return;
     }
-    s->stack_sectors = s->stack_version ? STACK_FLASH_SECTORS : 0;
+    s->stack_sectors = s->stack_version ? kind->sectors : 0;
     /* What the FUS installed before: the file has it, when there is one
      * (a run that names a stack has the launcher remove the file first) */
     radio_load(s);
@@ -832,7 +962,7 @@ static const VMStateDescription vmstate_wb55_fus_key = {
 
 static const VMStateDescription vmstate_wb55_ipcc = {
     .name = "stm32wb55-ipcc",
-    .version_id = 5,
+    .version_id = 6,
     .minimum_version_id = 5,
     .post_load = wb55_ipcc_post_load,
     .fields = (const VMStateField[]) {
@@ -853,6 +983,8 @@ static const VMStateDescription vmstate_wb55_ipcc = {
         VMSTATE_UINT32(stack_version, WB55IpccState),
         VMSTATE_UINT8(stack_type, WB55IpccState),
         VMSTATE_UINT8(stack_sectors, WB55IpccState),
+        VMSTATE_UINT8_V(c2_sram2a, WB55IpccState, 6),
+        VMSTATE_UINT8_V(c2_sram2b, WB55IpccState, 6),
         VMSTATE_BOOL(c2_fus_boot, WB55IpccState),
         VMSTATE_UINT8(fus_asked, WB55IpccState),
         VMSTATE_UINT8(fus_op, WB55IpccState),
@@ -878,7 +1010,11 @@ static char *wb55_ipcc_get_ble(Object *obj, Error **errp)
         char *v = g_strdup_printf("%u.%u.%u", s->stack_version >> 24,
                                   (s->stack_version >> 16) & 0xFF,
                                   (s->stack_version >> 8) & 0xFF);
+        const WB55StackKind *k = stack_kind_of_type(s->stack_type);
+
         qdict_put_str(d, "stack", v);
+        qdict_put_str(d, "kind", k ? k->words : "unknown");
+        qdict_put_int(d, "type", s->stack_type);
         g_free(v);
     } else {
         qdict_put_null(d, "stack");

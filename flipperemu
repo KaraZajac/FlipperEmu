@@ -339,6 +339,26 @@ def find_resources_for(fw: pathlib.Path):
 # packages' own, 1.20.0, branch 0, release type 2, BLE Light
 STACK_DEFAULT = "1.20.0"
 STACK_KIND = (0, 2, 3)
+# The kinds of ST's BLE stack that the emulated CPU2 is (its FUS knows their
+# 1.20.0 images): the type a manifest and the running stack say, its name in
+# --radio-stack, and in words
+STACK_KINDS = {3: ("light", "BLE Light"), 1: ("full", "BLE Full"),
+               6: ("full-ext", "BLE Full extended")}
+
+
+def stack_kind(spec):
+    """--radio-stack's VERSION, KIND or VERSION:KIND: (version, type), or
+    None for `none`"""
+    if spec == "none":
+        return None
+    names = {name: t for t, (name, _) in STACK_KINDS.items()}
+    version, _, kind = spec.partition(":")
+    if not kind and version in names:
+        version, kind = STACK_DEFAULT, version
+    if kind and kind not in names:
+        sys.exit(f"--radio-stack {spec}: a kind of stack is one of "
+                 + ", ".join(names))
+    return version, names.get(kind or "light")
 
 
 def package_radio(pdir):
@@ -365,22 +385,40 @@ def radio_state(dev):
     return m.group(1) if m else None
 
 
+def radio_state_type(dev):
+    """... and its type (3, BLE Light, in a file that does not say)"""
+    try:
+        m = re.search(r"(?m)^stack \S+.*\btype (\d+)",
+                      dev.radio_state.read_text())
+    except OSError:
+        m = None
+    return int(m.group(1)) if m else 3
+
+
 def run_stack(args, dev):
     """The radio stack that CPU2 has at a `run`'s start: what --radio-stack
-    says, else what its FUS installed before, else the factory's: a
-    version, or None"""
-    v = getattr(args, "radio_stack", None) or radio_state(dev) or STACK_DEFAULT
-    return None if v == "none" else v
+    says, else what its FUS installed before, else the factory's: (its
+    version, its type), or None"""
+    spec = getattr(args, "radio_stack", None)
+    if spec:
+        return stack_kind(spec)
+    v = radio_state(dev)
+    if v == "none":
+        return None
+    return (v, radio_state_type(dev)) if v else (STACK_DEFAULT, 3)
 
 
 def device_stack(dev):
-    """The radio stack that a running device's CPU2 runs, or None"""
+    """The radio stack that a running device's CPU2 runs: (its version, its
+    type), or None"""
     m = open_monitor(dev)
     try:
         bt = read_bluetooth(m) or {}
     finally:
         m.close()
-    return bt.get("stack") if bt.get("runs") == "stack" else None
+    if bt.get("runs") != "stack" or not bt.get("stack"):
+        return None
+    return bt["stack"], bt.get("type", 3)
 
 
 def unpack_update(pkg: pathlib.Path, tmp: pathlib.Path, keep_radio: bool,
@@ -389,15 +427,15 @@ def unpack_update(pkg: pathlib.Path, tmp: pathlib.Path, keep_radio: bool,
     ready for the card under tmp: (its folder, what its manifest calls it,
     what became of its radio stage: "none", "same", "install" or "dropped").
 
-    The emulated CPU2's FUS installs a BLE Light stack of any version from
-    the package's radio stage, as on a Flipper (stack: the version the
-    device has, None when it has none; it changes only the words).  The
-    model is a BLE Light stack, so another kind's stage (BLE Full, BLE
-    Basic) is blanked, exactly as `fbt updater_package` writes a package
-    without a stack: its updater would install it, find the type it asked
-    for not running, and begin again, for ever.  Every key stays in place:
-    the firmware reads the manifest's optional keys in file order, and a
-    missing one would hide all the keys after it.
+    The emulated CPU2's FUS installs the package's radio stage as on a
+    Flipper, when the stack is a kind that the model is: BLE Light, Full or
+    Full extended (stack: the (version, type) that the device has, None when
+    it has none; it changes only the words).  Another kind's stage (BLE
+    Basic, an HCI layer) is blanked, exactly as `fbt updater_package` writes
+    a package without a stack: its updater would install it, find the type
+    it asked for not running, and begin again, for ever.  Every key stays in
+    place: the firmware reads the manifest's optional keys in file order,
+    and a missing one would hide all the keys after it.
     """
     from make_sdcard import safe_extract
     def one(manifests):
@@ -423,14 +461,16 @@ def unpack_update(pkg: pathlib.Path, tmp: pathlib.Path, keep_radio: bool,
     radio = package_radio(pdir)
     if not radio:
         word = "none"
-    elif radio[1][2] == STACK_KIND[2]:
-        word = "same" if stack and radio == (stack, STACK_KIND) else "install"
+    elif radio[1][2] in STACK_KINDS:
+        word = ("same" if stack and radio[1][:2] == STACK_KIND[:2]
+                and (radio[0], radio[1][2]) == tuple(stack) else "install")
     elif keep_radio:
         sys.exit(f"{pkg}: --keep-radio: the package's radio stack {radio[0]} "
-                 f"is of type {radio[1][2]}, and the emulated stack is BLE "
-                 f"Light ({STACK_KIND[2]}): its updater would install it, find "
-                 "the type it asked for not running, and begin again, for "
-                 "ever.  Without --keep-radio the stage is left out")
+                 f"is of type {radio[1][2]}, and the emulated CPU2 is BLE "
+                 "Light, Full or Full extended (3, 1, 6): its updater would "
+                 "install it, find the type it asked for not running, and "
+                 "begin again, for ever.  Without --keep-radio the stage is "
+                 "left out")
     else:
         word = "dropped"
     if word == "dropped":
@@ -443,18 +483,21 @@ def unpack_update(pkg: pathlib.Path, tmp: pathlib.Path, keep_radio: bool,
         (pdir / "radio.bin").unlink(missing_ok=True)
     info = re.search(r"(?m)^Info: *(.+)$", (pdir / "update.fuf").read_text())
     return pdir, (info.group(1).strip() if info else pdir.name), \
-        (word, radio and radio[0])
+        (word, radio and radio[0], radio and radio[1][2])
 
 
 def radio_words(radio):
     """What became of a package's radio stage, in words (unpack_update)"""
-    word, version = radio
-    return {"same": f"its radio stack {version} is the device's: the updater "
-                    "finds it up to date",
+    word, version, kind = radio
+    words = STACK_KINDS.get(kind, (None, f"type {kind}"))[1]
+    return {"same": f"its radio stack {version} ({words}) is the device's: "
+                    "the updater finds it up to date",
             "install": f"with its radio stage: CPU2's FUS installs its stack "
-                       f"{version} (the Flipper restarts a few times)",
-            "dropped": f"without its radio stage: its stack {version} is not "
-                       "BLE Light, the kind that the emulated CPU2 runs",
+                       f"{version} ({words}; the Flipper restarts a few "
+                       "times)",
+            "dropped": f"without its radio stage: its stack {version} is "
+                       f"{words}, no kind that the emulated CPU2 is (BLE "
+                       "Light, Full, Full extended)",
             }.get(word, "")
 
 
@@ -1129,6 +1172,7 @@ def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
     if args.legacy_sleep:
         machine += ",legacy-sleep=on"
     if getattr(args, "radio_stack", None):
+        stack_kind(args.radio_stack)    # (a kind that there is)
         machine += f",radio-stack={args.radio_stack}"
     if args.unplugged:
         machine += ",usb-cable=off"
@@ -1604,6 +1648,8 @@ def bluetooth_text(bt):
         return "this emulator has no radio stack (rebuild it: scripts/setup_qemu.sh)"
     if not bt.get("stack"):
         return "no radio stack installed: CPU2 runs the FUS alone (run --radio-stack none)"
+    if bt.get("kind") and bt["kind"] != "BLE Light":
+        bt = dict(bt, stack=f"{bt['stack']} ({bt['kind']})")
     if bt.get("runs") != "stack":
         return (f"the radio stack {bt['stack']} is installed; CPU2 has not "
                 "started it" + (" (it runs the FUS)" if bt.get("runs") == "fus"
@@ -1698,6 +1744,43 @@ def still_text(dev, why):
     return f"it stands still (QEMU's state: {why})"
 
 
+def cpu_lockup(m):
+    """Why CPU1 stopped in Lockup ("at 0x08013834: can't escalate exception
+    5 to HardFault (current priority -1)"): a fault in its HardFault
+    handler, where the chip stops until it is reset (QEMU patch 0015).
+    None: it runs, or the emulator is older and cannot say."""
+    text = qom_get(m, "/machine/soc/armv7m/nvic", "lockup")
+    return text or None
+
+
+def c2_ram(m):
+    """The parts of SRAM2 that the wireless stack keeps for CPU2, and what
+    CPU1 got a bus error for there: {"sram2a": "0x20030800" or None, "sram2b":
+    ..., "refused": n, "last": address, "last_write": bool}, or None"""
+    raw = qom_get(m, "/machine/soc/flash", "c2-ram")
+    try:
+        return json.loads(raw) if raw else None
+    except ValueError:
+        return None
+
+
+EXCEPTIONS = {3: "HardFault", 4: "MemManage", 5: "BusFault", 6: "UsageFault"}
+
+
+def sram2_text(sram2):
+    """c2_ram() in words"""
+    parts = [f"SRAM2{x} from {sram2[f'sram2{x}']}" for x in "ab"
+             if sram2.get(f"sram2{x}")]
+    text = ("CPU2's (the wireless stack's) from " + " and ".join(
+        p.replace("from ", "") for p in parts) if parts
+        else "all CPU1's (no part kept for CPU2)")
+    if sram2.get("refused"):
+        text += (f"; CPU1 got a bus error there {sram2['refused']} times, "
+                 f"the last for a {'write' if sram2.get('last_write') else 'read'}"
+                 f" of {sram2.get('last')}")
+    return text
+
+
 def halted_at(m):
     """Where the firmware sleeps for good, or None: it has not halted.  A
     debug build that crashed waits for a debugger, and furi_halt() waits for
@@ -1765,20 +1848,37 @@ def firmware_halt(dev, m=None):
     sleeps, "kind": "CRASH" or "HALT", "report": what its log says of it}
     (None and None: the log has nothing).  None: it has not halted, or the
     emulator did not say."""
+    def look(m):
+        at = halted_at(m)
+        return (at, None, None) if at is not None else \
+            (None, cpu_lockup(m), c2_ram(m))
     try:
         if m:
-            at = halted_at(m)
+            at, lockup, sram2 = look(m)
         else:
             from fe_monitor import Monitor
             m = Monitor(str(dev.monitor), timeout=2.0)
             try:
-                at = halted_at(m)
+                at, lockup, sram2 = look(m)
             finally:
                 m.close()
     except (OSError, ConnectionError):
         return None
     if at is None:
-        return None
+        if not lockup:
+            return None
+        hit = re.match(r"at (0x[0-9a-f]+): (.*)", lockup)
+        why = hit.group(2) if hit else lockup
+        why = re.sub(r"exception (\d+)", lambda x: EXCEPTIONS.get(
+            int(x.group(1)), f"exception {x.group(1)}"), why)
+        sram2 = sram2 or {}
+        if sram2.get("refused"):
+            why += (f"; CPU1 got bus errors in the SRAM2 that the wireless "
+                    f"stack keeps for CPU2, {sram2['refused']} of them, the "
+                    f"last a {'write' if sram2.get('last_write') else 'read'}"
+                    f" of {sram2.get('last')}")
+        return {"at": hit.group(1) if hit else None, "kind": "LOCKUP",
+                "report": why}
     import fe_log
     found = None
     try:
@@ -1795,6 +1895,11 @@ def firmware_halt(dev, m=None):
 def halt_text(dev, halt):
     """... in words: (what happened, what to do about it)"""
     said = f" ({halt['report']})" if halt["report"] else ""
+    if halt["kind"] == "LOCKUP":
+        return (f"locked up at {halt['at']}: a fault it could not take{said}. "
+                "A chip stops there until it is reset, its screen as it was",
+                f"`./flipperemu -d {dev.name} reset` starts it again (and "
+                "locks it up again, as long as the fault is there)")
     if halt["kind"] == "HALT":
         what = f"halted{said}: its own code asked for that"
     elif halt["kind"] == "CRASH":
@@ -2612,6 +2717,7 @@ def device_status(dev):
         st["spi"] = read_spi(m)
         st["adc"] = read_adc(m)
         st["bluetooth"] = read_bluetooth(m)
+        st["sram2"] = c2_ram(m)
         st["lights"] = {"led": g("/machine/led", "led"),
                         "blinking": g("/machine/led", "blinking"),
                         "backlight": g("/machine/led", "backlight"),
@@ -2687,6 +2793,7 @@ def cmd_status(args):
                        and radio.get("freq", "").isdigit() else "")
                     + f"; last sent: {last(st['subghz']['last_transmission'])}"),
         ("bluetooth", bluetooth_text(st["bluetooth"])),
+        *([("sram2", sram2_text(st["sram2"]))] if st["sram2"] else []),
         ("sound", "muted" if st["sound"]["muted"] else "on"),
         *([("gpio", fe_header.summary(st["gpio"]))] if st["gpio"] else []),
         *[("" if i else "serial",
@@ -6014,6 +6121,11 @@ def cmd_wait(args):
         return 1
 
     while True:
+        halt = firmware_halt(dev) if dev.running() else None
+        if halt:                        # (no CLI is coming: say why at once)
+            what, todo = halt_text(dev, halt)
+            sys.exit(f"[{dev.name}] no CLI: the firmware {what}\n"
+                     f"[{dev.name}] {todo}")
         try:
             open_cli(dev, timeout=max(1.0, min(10.0, end - time.time()))).close()
             print(f"[{dev.name}] its CLI answers ({took()})")
@@ -6026,7 +6138,8 @@ def cmd_wait(args):
             or firmware_halt(dev)
         if for_good or time.time() > end:
             sys.exit(f"{why}\n[{dev.name}] waited {took()} for its CLI"
-                     + ("" if dev.running() else ": it is not running any more"))
+                     + ("" if dev.running() else ": it is not running any more")
+                     + wait_state(dev))
         time.sleep(0.5)
 
 
@@ -6213,10 +6326,12 @@ def main():
                    help="new device starts with Sleep Method = Legacy (light sleep "
                         "only) instead of the firmware's default STOP2")
     p.add_argument("--radio-stack", metavar="VERSION",
-                   help="the wireless stack that CPU2 runs: as a Flipper from the "
-                        "factory, 1.20.0 (BLE Light, the update packages' stack); "
-                        "`none`: CPU2 runs the FUS alone, and the firmware has no "
-                        "Bluetooth")
+                   help="the wireless stack that CPU2 runs, as a Flipper from the "
+                        "factory: 1.20.0 (BLE Light, the update packages' stack), "
+                        "a kind (light, full, full-ext: 1.20.0 of BLE Light, Full, "
+                        "Full extended; or VERSION:KIND), with the flash and SRAM2 "
+                        "that the kind keeps for CPU2; `none`: CPU2 runs the FUS "
+                        "alone, and the firmware has no Bluetooth")
     p.add_argument("--print-cmd", action="store_true", help="show the QEMU command and exit")
     p.add_argument("qemu_args", nargs="*", help="extra QEMU arguments after --")
     p.set_defaults(func=cmd_run)

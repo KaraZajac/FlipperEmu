@@ -487,6 +487,43 @@ def main():
               f"{said[-400:]} {s}")
         stop(b)
 
+        # the other kinds of stack, with the flash and SRAM2 they keep for
+        # CPU2: Full leaves CPU1 10 KB of SRAM2a, as much as the firmware's
+        # shared block takes; Full extended 2 KB, which it does not fit
+        ok, said = up(b, args.timeout, "run", "--radio-stack", "full")
+        st = state(b) if ok else {}
+        s, ram = st.get("bluetooth") or {}, st.get("sram2") or {}
+        info = cli(b, "info device") if ok else ""
+        check("`run --radio-stack full`: BLE Full 1.20.0 (type 1), which "
+              "the firmware sees too (SRAM2a 10K, SRAM2b 15K, flash 152K); "
+              "SRAM2 is CPU2's from 0x20032800 and 0x2003bc00, and the "
+              "firmware touches none of it",
+              ok and s.get("runs") == "stack" and s.get("type") == 1
+              and s.get("up") is True
+              and re.search(r"radio\.stack\.type\s*:\s*1\b", info)
+              and re.search(r"radio\.stack\.sram2a\s*:\s*10K", info)
+              and re.search(r"radio\.stack\.sram2b\s*:\s*15K", info)
+              and re.search(r"radio\.stack\.flash\s*:\s*152K", info)
+              and (ram.get("sram2a"), ram.get("sram2b"), ram.get("refused"))
+              == ("0x20032800", "0x2003bc00", 0),
+              f"{said[-300:]} {s} {ram}\n{info[-500:]}")
+        stop(b)
+        code, out, err, took = fe(b, "run", "--radio-stack", "full-ext",
+                                  "--detach", *QUIET)
+        halt = until(lambda: state(b).get("halted"), 30) if code == 0 else None
+        ram = state(b).get("sram2") or {}
+        c2, o2, e2, _ = fe(b, "wait", "--timeout", 10)
+        check("`run --radio-stack full-ext`: CPU1 locks up as it starts: "
+              "the block that it shares with CPU2, and wipes, reaches into "
+              "the SRAM2a that Full extended keeps for CPU2 (from "
+              "0x20030800); `status` and `wait` say so",
+              halt and halt.get("kind") == "LOCKUP"
+              and ram.get("sram2a") == "0x20030800"
+              and ram.get("refused", 0) > 0 and c2 != 0
+              and "locked up" in o2 + e2,
+              f"{out + err} {halt} {ram} {o2 + e2}")
+        stop(b)
+
         log = "\n".join(logs)
         crash = CRASH.search(log)
         check("no crash in the firmware's logs", not crash,

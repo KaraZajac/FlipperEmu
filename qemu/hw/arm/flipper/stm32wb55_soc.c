@@ -345,6 +345,8 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
                              &s->sram2b, 0, WB55_SRAM2B_SIZE);
     memory_region_add_subregion(sysmem, 0x10000000, &s->sram2a_alias);
     memory_region_add_subregion(sysmem, 0x10008000, &s->sram2b_alias);
+    /* the parts of SRAM2 that the option bytes give CPU2 */
+    wb55_flash_attach_sram2(&s->flash, &s->sram2a, &s->sram2b);
 
     /* ---- boot aliases at 0x00000000, selected by SYSCFG_MEMRMP */
     memory_region_init_alias(&s->boot_flash, OBJECT(dev_soc), "boot-flash",

@@ -32,6 +32,10 @@
 #include "qemu/error-report.h"
 #include "migration/vmstate.h"
 #include "system/runstate.h"
+#include "qemu/bswap.h"
+#include "target/arm/cpu.h"
+#include "hw/intc/armv7m_nvic.h"
+#include "wb55_tl.h"
 #include "wb55.h"
 
 #define R_ACR      0x00
@@ -129,6 +133,203 @@ void wb55_flash_set_sfsa(WB55FlashState *s, uint8_t page)
 {
     s->ob[14] = (s->ob[14] & ~0xFFu) | page;
     flash_ob_store(s);
+}
+
+/* ------------------------------------------------- CPU2's part of SRAM2
+ *
+ * SRRVR: CPU2's boot vector (SBRV), and where SRAM2a and SRAM2b stop being
+ * CPU1's (SBRSA, SNBRSA, in KB; BRSD and NBRSD switch that off).  The FUS
+ * sets them when it installs a stack, from the image's footer; they take
+ * effect when the option bytes are next loaded, at a reset.  CPU1's
+ * accesses there fail with a BusFault: a read's is precise, a write's
+ * imprecise (the bus took the write: BFSR.IMPRECISERR, no address, the
+ * fault asynchronous, so one inside the HardFault handler waits and is no
+ * Lockup; QEMU patch 0014).  A DMA's get a transfer error. */
+#define SRRVR_SBRSA(v)   (((v) >> 18) & 0x1F)
+#define SRRVR_BRSD       (1u << 23)
+#define SRRVR_SNBRSA(v)  (((v) >> 25) & 0x1F)
+#define SRRVR_NBRSD      (1u << 30)
+#define SRRVR_C2OPT      (1u << 31)
+#define SRAM2_PART       (32 * 1024)
+
+static const hwaddr sram2_base[2] = { WB55_SRAM2A_BASE, WB55_SRAM2B_BASE };
+
+void wb55_flash_set_c2_sram(WB55FlashState *s, uint8_t sbrsa, uint8_t snbrsa,
+                            uint32_t sbrv)
+{
+    /* security on in both (BRSD, NBRSD clear); CPU2 boots from the flash */
+    s->ob[15] = SRRVR_C2OPT | ((uint32_t)(snbrsa & 0x1F) << 25) |
+                ((uint32_t)(sbrsa & 0x1F) << 18) | (sbrv & 0x3FFFF);
+    flash_ob_store(s);
+}
+
+static void flash_c2_part(WB55FlashState *s, int i, unsigned kb, bool off)
+{
+    uint32_t from = off ? SRAM2_PART : MIN(kb * 1024u, SRAM2_PART);
+
+    s->secure_from[i] = from;
+    if (from >= SRAM2_PART) {
+        memory_region_set_enabled(&s->secure[i], false);
+        return;
+    }
+    memory_region_set_address(&s->secure[i], from);
+    memory_region_set_size(&s->secure[i], SRAM2_PART - from);
+    memory_region_set_enabled(&s->secure[i], true);
+}
+
+/* the option bytes as loaded: which parts are CPU2's */
+static void flash_c2_apply(WB55FlashState *s)
+{
+    uint32_t v = s->ob[15];
+
+    if (!s->sram2[0]) {
+        return;
+    }
+    memory_region_transaction_begin();
+    flash_c2_part(s, 0, SRRVR_SBRSA(v), v & SRRVR_BRSD);
+    flash_c2_part(s, 1, SRRVR_SNBRSA(v), v & SRRVR_NBRSD);
+    memory_region_transaction_commit();
+}
+
+bool wb55_flash_is_c2_ram(WB55FlashState *s, hwaddr addr, unsigned len)
+{
+    for (int i = 0; i < 2; i++) {
+        hwaddr from = sram2_base[i] + s->secure_from[i];
+        hwaddr end = sram2_base[i] + SRAM2_PART;
+
+        if (s->secure_from[i] < SRAM2_PART && addr < end && addr + len > from) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static MemTxResult flash_c2_access(WB55FlashState *s, int i, hwaddr addr,
+                                   uint64_t *data, unsigned size,
+                                   MemTxAttrs attrs, bool write)
+{
+    hwaddr at = s->secure_from[i] + addr;
+
+    /* CPU2's own (its model), and a debugger's look (gdb, the monitor) */
+    if (attrs.debug || attrs.requester_id == WB55_C2_REQUESTER) {
+        uint8_t *ram = (uint8_t *)memory_region_get_ram_ptr(s->sram2[i]) + at;
+
+        if (write) {
+            stn_le_p(ram, size, *data);
+            memory_region_set_dirty(s->sram2[i], at, size);
+        } else {
+            *data = ldn_le_p(ram, size);
+        }
+        return MEMTX_OK;
+    }
+    s->refused++;
+    s->refused_addr = sram2_base[i] + at;
+    s->refused_write = write;
+    qemu_log_mask(LOG_GUEST_ERROR, "wb55: a %s of 0x%08" HWADDR_PRIx
+                  ": SRAM2%c is CPU2's from %u KB on (%s): a bus error\n",
+                  write ? "write" : "read", (hwaddr)s->refused_addr,
+                  i ? 'b' : 'a', s->secure_from[i] / 1024,
+                  i ? "SNBRSA" : "SBRSA");
+    if (write && !attrs.unspecified && current_cpu) {
+        /* CPU1's write: not taken, and an imprecise BusFault later */
+        ARMCPU *cpu = ARM_CPU(current_cpu);
+
+        cpu->env.v7m.cfsr[M_REG_NS] |= R_V7M_CFSR_IMPRECISERR_MASK;
+        armv7m_nvic_set_pending_async(cpu->env.nvic, ARMV7M_EXCP_BUS, false);
+        return MEMTX_OK;
+    }
+    if (!write) {
+        *data = 0;
+    }
+    return MEMTX_ERROR;                 /* a precise fault, a DMA's error */
+}
+
+static MemTxResult flash_c2a_read(void *opaque, hwaddr addr, uint64_t *data,
+                                  unsigned size, MemTxAttrs attrs)
+{
+    return flash_c2_access(opaque, 0, addr, data, size, attrs, false);
+}
+
+static MemTxResult flash_c2a_write(void *opaque, hwaddr addr, uint64_t data,
+                                   unsigned size, MemTxAttrs attrs)
+{
+    return flash_c2_access(opaque, 0, addr, &data, size, attrs, true);
+}
+
+static MemTxResult flash_c2b_read(void *opaque, hwaddr addr, uint64_t *data,
+                                  unsigned size, MemTxAttrs attrs)
+{
+    return flash_c2_access(opaque, 1, addr, data, size, attrs, false);
+}
+
+static MemTxResult flash_c2b_write(void *opaque, hwaddr addr, uint64_t data,
+                                   unsigned size, MemTxAttrs attrs)
+{
+    return flash_c2_access(opaque, 1, addr, &data, size, attrs, true);
+}
+
+static const MemoryRegionOps flash_c2_ops[2] = {
+    {
+        .read_with_attrs = flash_c2a_read,
+        .write_with_attrs = flash_c2a_write,
+        .endianness = DEVICE_LITTLE_ENDIAN,
+        .valid = { .min_access_size = 1, .max_access_size = 8,
+                   .unaligned = true },
+        .impl = { .min_access_size = 1, .max_access_size = 8,
+                  .unaligned = true },
+    }, {
+        .read_with_attrs = flash_c2b_read,
+        .write_with_attrs = flash_c2b_write,
+        .endianness = DEVICE_LITTLE_ENDIAN,
+        .valid = { .min_access_size = 1, .max_access_size = 8,
+                   .unaligned = true },
+        .impl = { .min_access_size = 1, .max_access_size = 8,
+                  .unaligned = true },
+    },
+};
+
+void wb55_flash_attach_sram2(WB55FlashState *s, MemoryRegion *sram2a,
+                             MemoryRegion *sram2b)
+{
+    MemoryRegion *ram[2] = { sram2a, sram2b };
+
+    for (int i = 0; i < 2; i++) {
+        s->sram2[i] = ram[i];
+        s->secure_from[i] = SRAM2_PART;
+        memory_region_init_io(&s->secure[i], OBJECT(s), &flash_c2_ops[i], s,
+                              i ? "wb55.sram2b-cpu2" : "wb55.sram2a-cpu2",
+                              SRAM2_PART);
+        memory_region_set_enabled(&s->secure[i], false);
+        /* (inside the RAM region: its aliases at 0x10000000 have it too) */
+        memory_region_add_subregion_overlap(ram[i], 0, &s->secure[i], 1);
+    }
+    flash_c2_apply(s);
+}
+
+/* for `status`: {"sram2a": first address that is CPU2's or null, "sram2b":
+ * ..., "refused": n, "last": address, "last_write": bool} */
+static char *flash_get_c2_ram(Object *obj, Error **errp)
+{
+    WB55FlashState *s = WB55_FLASH(obj);
+    GString *g = g_string_new("{");
+
+    for (int i = 0; i < 2; i++) {
+        if (s->secure_from[i] < SRAM2_PART) {
+            g_string_append_printf(g, "\"sram2%c\": \"0x%08" HWADDR_PRIx
+                                   "\", ", i ? 'b' : 'a',
+                                   sram2_base[i] + s->secure_from[i]);
+        } else {
+            g_string_append_printf(g, "\"sram2%c\": null, ", i ? 'b' : 'a');
+        }
+    }
+    g_string_append_printf(g, "\"refused\": %u", s->refused);
+    if (s->refused) {
+        g_string_append_printf(g, ", \"last\": \"0x%08x\", "
+                               "\"last_write\": %s", s->refused_addr,
+                               s->refused_write ? "true" : "false");
+    }
+    g_string_append(g, "}");
+    return g_string_free(g, false);
 }
 
 static void flash_erase_page(WB55FlashState *s, unsigned page)
@@ -385,6 +586,7 @@ static void wb55_flash_reset_hold(Object *obj, ResetType type)
     for (int i = 0; i < 16; i++) {
         s->ob[i] = le32_to_cpu(ob[2 * i]);
     }
+    flash_c2_apply(s);                  /* ... SRRVR among them */
     qemu_set_irq(s->irq, 0);
 }
 
@@ -454,6 +656,7 @@ static void wb55_flash_init(Object *obj)
                           0x400);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mmio);
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
+    object_property_add_str(obj, "c2-ram", flash_get_c2_ram, NULL);
 }
 
 /*
@@ -483,12 +686,13 @@ static int wb55_flash_post_load(void *opaque, int version_id)
     if (s->blk && blk_supports_write_perm(s->blk) && !s->loaded) {
         s->loaded = qemu_add_vm_change_state_handler(wb55_flash_loaded, s);
     }
+    flash_c2_apply(s);                  /* (the registers came with it) */
     return 0;
 }
 
 static const VMStateDescription vmstate_wb55_flash = {
     .name = "stm32wb55-flash",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = wb55_flash_post_load,
     .fields = (const VMStateField[]) {
@@ -505,6 +709,9 @@ static const VMStateDescription vmstate_wb55_flash = {
         VMSTATE_BOOL(pg_pending, WB55FlashState),
         VMSTATE_UINT64(pg_addr, WB55FlashState),
         VMSTATE_UINT32(pg_lo, WB55FlashState),
+        VMSTATE_UINT32_V(refused, WB55FlashState, 2),
+        VMSTATE_UINT32_V(refused_addr, WB55FlashState, 2),
+        VMSTATE_BOOL_V(refused_write, WB55FlashState, 2),
         VMSTATE_END_OF_LIST()
     }
 };

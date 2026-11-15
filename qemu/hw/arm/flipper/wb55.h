@@ -139,10 +139,30 @@ struct WB55FlashState {
     uint32_t pg_lo;
     WB55RccState *rcc;
     VMChangeStateEntry *loaded;  /* a saved state came: the image follows */
+    /* The parts of SRAM2a and SRAM2b that the wireless stack keeps for
+     * CPU2, from SRRVR.SBRSA and SNBRSA as the option bytes are loaded (at
+     * reset): CPU1 and its DMA get a bus error there, CPU2 and a debugger
+     * do not.  (Accesses with WB55_C2_REQUESTER are CPU2's.) */
+    MemoryRegion *sram2[2];      /* the SoC's SRAM2a, SRAM2b */
+    MemoryRegion secure[2];      /* their parts that are CPU2's */
+    uint32_t secure_from[2];     /* where those begin, bytes in (32K: none) */
+    uint32_t refused;            /* accesses that got that bus error */
+    uint32_t refused_addr;       /* ... the last one's address */
+    bool refused_write;          /* ... and whether it wrote */
 };
 uint8_t *wb55_flash_info_ptr(WB55FlashState *s);
 /* the secure area's first page (SFR.SFSA), as the FUS sets it */
 void wb55_flash_set_sfsa(WB55FlashState *s, uint8_t page);
+/* SRRVR as the FUS sets it when it installs a stack: CPU1 keeps the first
+ * sbrsa KB of SRAM2a and snbrsa KB of SRAM2b, CPU2 boots at sbrv (a word
+ * address into the flash).  Loaded at the next reset, as on the chip. */
+void wb55_flash_set_c2_sram(WB55FlashState *s, uint8_t sbrsa, uint8_t snbrsa,
+                            uint32_t sbrv);
+/* the SoC's SRAM2a and SRAM2b, for the parts of them that are CPU2's */
+void wb55_flash_attach_sram2(WB55FlashState *s, MemoryRegion *sram2a,
+                             MemoryRegion *sram2b);
+/* whether [addr, addr + len) touches a part of SRAM2 that is CPU2's */
+bool wb55_flash_is_c2_ram(WB55FlashState *s, hwaddr addr, unsigned len);
 
 /* ---------------------------------------------------------------- HSEM */
 #define TYPE_WB55_HSEM "stm32wb55-hsem"
@@ -313,9 +333,15 @@ struct WB55IpccState {
     bool c2_booted;
     bool c2_stack;               /* it runs the stack (else the FUS) */
     bool c2_reinit;              /* told to restart: waits for CPU1's enable */
-    char *radio_stack;           /* property: "1.20.0" (the version), "none" */
+    char *radio_stack;           /* property: "1.20.0", "full-ext",
+                                    "1.20.0:full-ext", "none" */
     uint32_t stack_version;      /* its InfoTable Version word, 0: none */
-    uint8_t stack_type;          /* INFO_STACK_TYPE_BLE_*: 3 = Light */
+    uint8_t stack_type;          /* INFO_STACK_TYPE_BLE_*: 3 = Light,
+                                    1 = Full, 6 = Full extended */
+    /* What CPU1 keeps of SRAM2a and SRAM2b, in KB: the FUS sets that in
+     * the option bytes (SBRSA, SNBRSA) when it installs a stack, from the
+     * image's footer; the rest is CPU2's (stm32wb55_flash.c) */
+    uint8_t c2_sram2a, c2_sram2b;
     /* What the FUS keeps of the wireless stack, as CPU2's flash keeps it
      * on a chip: in a file on the host (property "radio-state") */
     char *radio_file;

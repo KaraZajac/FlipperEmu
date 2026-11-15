@@ -13,42 +13,47 @@
 #include "system/address-spaces.h"
 #include "system/memory.h"
 
+/* CPU2's accesses: the parts of SRAM2 that are CPU2's take them
+ * (stm32wb55_flash.c), where CPU1's get a bus error */
+#define WB55_C2_REQUESTER 0xC2
+#define WB55_C2_ATTRS ((MemTxAttrs){ .requester_id = WB55_C2_REQUESTER })
+
 static inline uint32_t tl_rd32(hwaddr a)
 {
     uint32_t v = 0;
-    address_space_read(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED, &v, 4);
+    address_space_read(&address_space_memory, a, WB55_C2_ATTRS, &v, 4);
     return le32_to_cpu(v);
 }
 
 static inline void tl_wr32(hwaddr a, uint32_t v)
 {
     v = cpu_to_le32(v);
-    address_space_write(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED,
+    address_space_write(&address_space_memory, a, WB55_C2_ATTRS,
                         &v, 4);
 }
 
 static inline uint8_t tl_rd8(hwaddr a)
 {
     uint8_t v = 0;
-    address_space_read(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED, &v, 1);
+    address_space_read(&address_space_memory, a, WB55_C2_ATTRS, &v, 1);
     return v;
 }
 
 static inline void tl_wr8(hwaddr a, uint8_t v)
 {
-    address_space_write(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED,
+    address_space_write(&address_space_memory, a, WB55_C2_ATTRS,
                         &v, 1);
 }
 
 static inline void tl_read(hwaddr a, void *buf, int len)
 {
-    address_space_read(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED, buf,
+    address_space_read(&address_space_memory, a, WB55_C2_ATTRS, buf,
                        len);
 }
 
 static inline void tl_write(hwaddr a, const void *buf, int len)
 {
-    address_space_write(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED, buf,
+    address_space_write(&address_space_memory, a, WB55_C2_ATTRS, buf,
                         len);
 }
 
