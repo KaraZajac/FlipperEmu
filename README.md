@@ -127,6 +127,9 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
   it, as on a real one. A real Flipper that is plugged in is left alone.
   [docs/DEVELOPING.md](docs/DEVELOPING.md) is the page for whoever writes an app or a
   firmware.
+- Bugs of the firmware that the emulator's checks and its fuzzer met are kept in
+  [docs/FIRMWARE_BUGS.md](docs/FIRMWARE_BUGS.md): what happens, on which firmwares,
+  why, and how to see it here.
 - Tests of an app as a script: `run --detach` starts a Flipper that runs by itself,
   `./flipperemu wait` holds the script until the firmware has logged a line or its
   screen is as in a file, and says what was there instead when that does not come.

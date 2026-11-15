@@ -844,6 +844,9 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           storage list request without a path (`strcmp(NULL, "/")`,
           `rpc_storage.c:266`); Momentum, Unleashed and RogueMaster too. Not
           reported upstream (Kara's to decide)
+    - ☑ The firmware's bugs in one list (2026-11-15): `docs/FIRMWARE_BUGS.md`,
+          18 of them (FW-01 to FW-18) with firmwares, cause, how to see each and
+          whether it was reported; a new one gets the next number (BRINGUP_LOG 168)
     - ☐ A lockup seen once after three RPC runs on one device, in the crash
           handler's walk of the heap (`vPortGetHeapStats`): what crashed first is
           not known (the fuzzer looks once more after its target is closed now)

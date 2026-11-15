@@ -5180,6 +5180,22 @@ big lock, entry 92).
       build (Unleashed's `subghz rx` does not start the radio from the
       CLI: skipped).
 
+168. **The firmware's bugs, in a list of their own.**
+    - They were in this log, each where it was met: 18 by now, from
+      entry 27 to entry 166. `docs/FIRMWARE_BUGS.md` has them together,
+      each with a number that stays its own (FW-01 to FW-18), the
+      firmwares it was seen on, the place in the source where that was
+      read, how to see it in the emulator, and whether it was reported
+      (none was: Kara's to decide). None was tried on a real Flipper.
+    - One was looked at again for it. An ST25TB card whose UID's third
+      byte names no chip the firmware knows (`D0 02 40 ...`): `scanner`
+      says "St25tb", and `dump` ends the official 1.5.1 with
+      `[CRASH][NfcWorker] unsupported st25tb type`
+      (`st25tb_get_type_from_uid()`, a `furi_crash()` for a value that
+      comes from the card). Entry 156 had it in a clause; it is FW-03.
+    - Three things seen once and not explained are at the list's end, and
+      not in it.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
