@@ -237,10 +237,12 @@ def central(b, name, version, commit):
         conn = s.get("connection") or {}
         check("a central connects: the firmware asks it to pair (a Security "
               "Request: bonding, MITM), and stops advertising; `status` has "
-              "the connection",
+              "the connection, of which the stack told by LE Connection "
+              "Complete (no advertising extensions are in use)",
               asked and asked.get("bond") == "1" and asked.get("mitm") == "1"
               and c.adv is None and s.get("advertising") is False
-              and conn.get("central") == PHONE, f"{asked} {s}")
+              and conn.get("central") == PHONE and s.get("ext_adv") is False
+              and conn.get("event") == "legacy", f"{asked} {s}")
 
         mtu = c.mtu(517)
         check("the MTU: the most that the firmware's stack takes (414)",
@@ -645,6 +647,25 @@ def main():
                   and (ram.get("sram2a"), ram.get("sram2b"),
                        ram.get("refused")) == ("0x20030800", "0x2003a800", 0),
                   f"{said[-300:]} {s} {ram}")
+            if s.get("up"):
+                # With advertising extensions in use (the firmware asked for
+                # them, and this stack has them) the stack tells of a
+                # connection by LE Enhanced Connection Complete, and by no
+                # other event: a firmware hears it, or has no connection.
+                with fe_ble.Central(b.dir / "ble.sock", timeout=15) as c:
+                    c.advertising(15)
+                    c.connect()
+                    asked = until(lambda: c.pump(0.2) or c.security_request, 10)
+                    conn = bt(b).get("connection") or {}
+                want = "enhanced" if s.get("ext_adv") else "legacy"
+                check("a central connects there: the stack tells the firmware "
+                      + ("by LE Enhanced Connection Complete (advertising "
+                         "extensions are in use)" if s.get("ext_adv") else
+                         "by LE Connection Complete (the firmware asked for "
+                         "no advertising extensions)")
+                      + ", and the firmware hears it: it asks the central to "
+                      "pair", conn.get("event") == want and bool(asked),
+                      f"{conn} {asked}")
         stop(b)
         c2_fault(b, args)                # (its crash is its own: not in logs)
 

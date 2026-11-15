@@ -298,6 +298,10 @@ typedef struct WB55BleState {
     /* The connection: a central on the link (docs/RADIO_LINK.md), one at a
      * time.  What a stack restart or a reset ends. */
     uint16_t att_mtu;            /* the server's ATT MTU (BLE_Init's AttMtu) */
+    uint8_t options;             /* BLE_Init's Options (bit 3: advertising
+                                  * extensions, where the stack has them) */
+    bool conn_enhanced;          /* CPU1 heard of the connection by LE Enhanced
+                                  * Connection Complete */
     uint16_t conn;               /* its handle; 0: no connection */
     uint8_t peer[6], peer_type;  /* the central's address, LSB first */
     uint16_t interval, latency, timeout;   /* 1.25 ms, events, 10 ms */
@@ -406,6 +410,7 @@ void wb55_ipcc_update_irq(WB55IpccState *s);
 /* stm32wb55_ble.c */
 void wb55_ble_reset(WB55IpccState *s);
 uint8_t wb55_ble_init(WB55IpccState *s, const uint8_t *p, int plen);
+bool wb55_ble_ext_adv(WB55IpccState *s);
 uint8_t wb55_ble_config(WB55IpccState *s, const uint8_t *p, int plen);
 void wb55_ble_command(WB55IpccState *s);
 void wb55_ble_post(WB55IpccState *s, int buf, uint8_t code,

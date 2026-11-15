@@ -80,6 +80,7 @@
 #define EVT_LE_META           0x3E
 #define EVT_VENDOR            0xFF
 #define LE_CONNECTION_COMPLETE        0x01
+#define LE_ENHANCED_CONNECTION_COMPLETE 0x0A
 #define LE_CONNECTION_UPDATE_COMPLETE 0x03
 #define VS_GAP_PAIRING_COMPLETE       0x0401
 #define VS_GAP_PASS_KEY_REQ           0x0402
@@ -868,19 +869,38 @@ static void ble_connect(WB55IpccState *s, char **w)
     ble_conn_drop(b);
     b->conn = CONN_HANDLE;
     b->adv = 0;                         /* a connection ends the advertising */
-    d[0] = LE_CONNECTION_COMPLETE;
-    d[1] = 0x00;
-    put16(d + 2, b->conn);
-    d[4] = 0x01;                        /* the Flipper's role: peripheral */
-    d[5] = b->peer_type;
-    memcpy(d + 6, b->peer, 6);
-    put16(d + 12, b->interval);
-    put16(d + 14, b->latency);
-    put16(d + 16, b->timeout);
-    d[18] = 0x00;                       /* the central's clock: 500 ppm */
-    wb55_ble_post(s, WB55_BLE_BUF_POOL, EVT_LE_META, d, sizeof(d));
+    b->conn_enhanced = wb55_ble_ext_adv(s);
+    if (b->conn_enhanced) {
+        /* With advertising extensions in use the stack tells of a
+         * connection by this event and not by the other (ST's release
+         * notes, 1.17.0): the same, and two resolvable private addresses
+         * between, which are zeros without privacy. */
+        uint8_t e[31] = { LE_ENHANCED_CONNECTION_COMPLETE, 0x00 };
+
+        put16(e + 2, b->conn);
+        e[4] = 0x01;
+        e[5] = b->peer_type;
+        memcpy(e + 6, b->peer, 6);
+        put16(e + 24, b->interval);
+        put16(e + 26, b->latency);
+        put16(e + 28, b->timeout);
+        wb55_ble_post(s, WB55_BLE_BUF_POOL, EVT_LE_META, e, sizeof(e));
+    } else {
+        d[0] = LE_CONNECTION_COMPLETE;
+        d[1] = 0x00;
+        put16(d + 2, b->conn);
+        d[4] = 0x01;                    /* the Flipper's role: peripheral */
+        d[5] = b->peer_type;
+        memcpy(d + 6, b->peer, 6);
+        put16(d + 12, b->interval);
+        put16(d + 14, b->latency);
+        put16(d + 16, b->timeout);
+        d[18] = 0x00;                   /* the central's clock: 500 ppm */
+        wb55_ble_post(s, WB55_BLE_BUF_POOL, EVT_LE_META, d, sizeof(d));
+    }
     ble_say(s, "connected handle=0x%04x interval=%u latency=%u timeout=%u "
-            "mtu=%u", b->conn, b->interval, b->latency, b->timeout, b->mtu);
+            "mtu=%u event=%s", b->conn, b->interval, b->latency, b->timeout,
+            b->mtu, b->conn_enhanced ? "enhanced" : "legacy");
     ble_adv_announce(s);
 }
 
@@ -1785,9 +1805,20 @@ uint8_t wb55_ble_init(WB55IpccState *s, const uint8_t *p, int plen)
     if (plen >= 20) {
         b->att_mtu = le16(p + 18);      /* AttMtu: what a client may get */
     }
+    b->options = plen >= 32 ? p[31] : 0;
     b->up = true;
     ble_adv_announce(s);
     return 0x00;
+}
+
+/* Are advertising extensions in use?  The stack has them (BLE Full
+ * extended), CPU1 asked for them (SHCI_C2_BLE_INIT_OPTIONS_EXT_ADV), and the
+ * stack is of 1.17.0 or later, from when it tells of a connection by LE
+ * Enhanced Connection Complete then. */
+bool wb55_ble_ext_adv(WB55IpccState *s)
+{
+    return s->stack_type == 0x06 && (s->ble.options & 0x08) && s->ble.up &&
+           (s->stack_version >> 16) >= 0x0111;
 }
 
 /* SHCI_C2_Config: where the stack's bonds go in CPU1's RAM, and which
@@ -2232,8 +2263,8 @@ static const VMStateDescription vmstate_wb55_ble_event = {
  */
 const VMStateDescription vmstate_wb55_ble = {
     .name = "stm32wb55-ble",
-    .version_id = 3,
-    .minimum_version_id = 3,
+    .version_id = 4,                    /* (4: BLE_Init's options) */
+    .minimum_version_id = 4,
     .fields = (const VMStateField[]) {
         VMSTATE_BOOL(up, WB55BleState),
         VMSTATE_UINT16(max_attrs, WB55BleState),
@@ -2268,6 +2299,8 @@ const VMStateDescription vmstate_wb55_ble = {
         VMSTATE_UINT8_ARRAY(public_addr, WB55BleState, 6),
         VMSTATE_UINT8_ARRAY(random_addr, WB55BleState, 6),
         VMSTATE_UINT16(att_mtu, WB55BleState),
+        VMSTATE_UINT8(options, WB55BleState),
+        VMSTATE_BOOL(conn_enhanced, WB55BleState),
         VMSTATE_UINT16(conn, WB55BleState),
         VMSTATE_UINT8_ARRAY(peer, WB55BleState, 6),
         VMSTATE_UINT8(peer_type, WB55BleState),

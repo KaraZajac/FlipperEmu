@@ -101,8 +101,15 @@ qFlipper / lab.flipper.net / `ufbt launch` only run over USB CDC.
           SRAM2A_BASE; official 1.5.1 waits 33 s for its answer, crashes with that
           record in its report, and starts again; `scripts/ble_check.py` moves the NVM
           buffer there with gdb (BRINGUP_LOG 152)
-    - ☐ What the Full stacks have more: the central role, a GATT client, advertising
-          sets, L2CAP CoC, LE Enhanced Connection Complete (with EXT_ADV)
+    - ☑ LE Enhanced Connection Complete (2026-11-15): on BLE Full extended 1.17.0 or
+          later with EXT_ADV in the options of SHCI_C2_BLE_Init, in the place of LE
+          Connection Complete (ST's release notes). Awaits a firmware that brings
+          Bluetooth up there to be seen heard: Moon-Shell's handler is written and
+          not built yet; `scripts/ble_check.py` has the check for then (BRINGUP_LOG
+          160)
+    - ☐ What the Full stacks have more besides: the central role, a GATT client,
+          advertising sets, L2CAP CoC. No firmware here calls them (Moon-Shell's
+          commands are the stock firmware's): nothing to check a model against
     - ☐ XIP app loaders exercised (MoonOS's .rock apps run from flash)
 - ☐ Stretch: second CDC port of the dual-CDC mode; mass storage
 

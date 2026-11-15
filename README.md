@@ -247,9 +247,13 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
 - A radio stack of another kind than BLE Light, BLE Full and BLE Full extended (BLE
   Basic, an HCI layer, Thread): `./flipperemu update` and `run --update` leave such a
   package's radio stage out. The three kinds are one model of ST's BLE stack, which
-  reports the kind's type and keeps its flash and SRAM2 for CPU2; what the Full stacks
-  have more (the central role, a GATT client, extended advertising, L2CAP CoC) is not
-  modelled yet.
+  reports the kind's type and keeps its flash and SRAM2 for CPU2. Of what the Full
+  stacks have more, one thing is modelled: on BLE Full extended, when the firmware
+  asks for advertising extensions, a connection is told by LE Enhanced Connection
+  Complete, as ST's stack does from 1.17.0 (`status --json`: `bluetooth.ext_adv`, and
+  `event` in its `connection`). The rest (the central role, a GATT client,
+  advertising sets, L2CAP channels) no firmware here calls, Moon-Shell included; it is
+  not modelled.
 - A real phone or computer over Bluetooth: the central is a program on the link, not a
   Bluetooth adapter.
 - NFC: MIFARE Plus in security level 3 (AES, which Unleashed and RogueMaster try

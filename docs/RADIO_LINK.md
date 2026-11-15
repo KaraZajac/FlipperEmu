@@ -193,7 +193,7 @@ advertise, and while a central is connected.
 
 | line | when |
 |---|---|
-| `connected handle=0x0801 interval=24 latency=0 timeout=400 mtu=23` | the answer to `connect`; the interval in 1.25 ms, the supervision timeout in 10 ms |
+| `connected handle=0x0801 interval=24 latency=0 timeout=400 mtu=23 event=legacy` | the answer to `connect`; the interval in 1.25 ms, the supervision timeout in 10 ms; `event`: how the stack told the firmware (`legacy`: LE Connection Complete; `enhanced`: LE Enhanced Connection Complete, with advertising extensions in use) |
 | `security-request bond=1 mitm=1 sc=1` | the firmware asks the central to pair (it does at every connection) |
 | `mtu 414` | the answer to `mtu`: what both take (the Flipper's stack takes 414 at most) |
 | `params interval=6 latency=0 timeout=400` | the firmware asked for other connection parameters, and the central took them |

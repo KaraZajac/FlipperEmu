@@ -1121,6 +1121,7 @@ static char *wb55_ipcc_get_ble(Object *obj, Error **errp)
     }
     qdict_put_int(d, "attributes", n);
     qdict_put_bool(d, "beacon", b->beacon);
+    qdict_put_bool(d, "ext_adv", wb55_ble_ext_adv(s));
     qdict_put_int(d, "events_waiting", b->npending);
     /* a program on the link (ble.sock), and its connection */
     qdict_put_bool(d, "link", s->ble_link && s->ble_link->open);
@@ -1136,6 +1137,7 @@ static char *wb55_ipcc_get_ble(Object *obj, Error **errp)
         qdict_put_str(c, "central", a);
         qdict_put_int(c, "interval", b->interval);
         qdict_put_int(c, "mtu", b->mtu);
+        qdict_put_str(c, "event", b->conn_enhanced ? "enhanced" : "legacy");
         qdict_put_bool(c, "encrypted", b->sec & WB55_BLE_SEC_ENCRYPTED);
         qdict_put_bool(c, "authenticated",
                        b->sec & WB55_BLE_SEC_AUTHENTICATED);

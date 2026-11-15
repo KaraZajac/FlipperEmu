@@ -4975,6 +4975,35 @@ big lock, entry 92).
     - Checks: nfc_check 25 on the official 1.5.1, 26 on the dev build, 27
       on Momentum, Unleashed and RogueMaster.
 
+160. **LE Enhanced Connection Complete, and what else the Full stacks have.**
+    - Who would call what the Full stacks have more? The stock firmwares
+      are peripherals on BLE Light. Moon-Shell's source (the custom
+      firmware that is built for Full extended) calls the same commands
+      as they: no central role, no GATT client, no advertising sets, no
+      L2CAP channels. A model of those would have nothing to be checked
+      against, and is left.
+    - One thing Moon-Shell does differently: it asks for advertising
+      extensions (SHCI_C2_BLE_INIT_OPTIONS_EXT_ADV), and its gap.c has a
+      handler for LE Enhanced Connection Complete. ST's release notes for
+      1.17.0, in the firmware's own source tree: "HCI_LE_ENHANCED_
+      CONNECTION_COMPLETE_EVENT is now automatically used instead of
+      HCI_LE_CONNECTION_COMPLETE_EVENT when advertising extensions are
+      used." So: the stack is Full extended, 1.17.0 or later, and CPU1's
+      options had the bit, then the enhanced event and not the other. The
+      model had always sent the other, by which a firmware without the
+      handler would have worked here and not on the chip.
+    - Not seen heard yet: no firmware at hand brings Bluetooth up on Full
+      extended. The stock ones lock up there (entry 150); Moon-Shell's
+      build of 2026-11-14 runs and says "Unsupported radio stack", and its
+      handler is in its working tree. ble_check connects a central on
+      Full extended as soon as a firmware has Bluetooth up there, and
+      wants the event that fits and the firmware's Security Request after
+      it. On BLE Light the event stays the old one: checked.
+    - `status --json`: bluetooth.ext_adv, connection.event; the link's
+      `connected` line has `event=`. The stack's saved state: version 4.
+    - Checks: ble_check 31 on the official 1.5.1 and on Moon-Shell's
+      build.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

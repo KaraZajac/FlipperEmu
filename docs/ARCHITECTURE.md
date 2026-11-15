@@ -305,7 +305,7 @@ stack gives CPU1 when a real central does it:
 
 | the central | CPU1 hears |
 |---|---|
-| `connect` | `HCI_LE_CONNECTION_COMPLETE` (handle 0x0801, the Flipper peripheral, 30 ms); the advertising stops |
+| `connect` | `HCI_LE_CONNECTION_COMPLETE` (handle 0x0801, the Flipper peripheral, 30 ms); the advertising stops. With advertising extensions in use (BLE Full extended 1.17.0 or later, and `SHCI_C2_BLE_INIT_OPTIONS_EXT_ADV` in the options of `SHCI_C2_BLE_Init`): `HCI_LE_ENHANCED_CONNECTION_COMPLETE` in its place, the same with two resolvable private addresses (zeros) between, and no other event: a firmware without a handler for it has no connection, as on the chip |
 | `mtu N` | `ACI_ATT_EXCHANGE_MTU_RESP`: the smaller of N and BLE_Init's `AttMtu` (414 on 1.5.1) |
 | `pair` | by both sides' IO capabilities: `ACI_GAP_PASS_KEY_REQ` (the firmware picks a PIN, answers `aci_gap_pass_key_resp` and shows it), `ACI_GAP_NUMERIC_COMPARISON_VALUE`, or nothing (Just Works); then `HCI_ENCRYPTION_CHANGE` and `ACI_GAP_PAIRING_COMPLETE`, or that with SMP's reason for a failure |
 | `write` | `ACI_GATT_ATTRIBUTE_MODIFIED` if the attribute's event mask asks for it (a CCCD's always), in parts of 245 bytes with bit 15 of the offset set while more follow |
