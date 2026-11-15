@@ -231,6 +231,77 @@ def app(b, work):
     return True
 
 
+def trace(b, work):
+    """`run --trace`: the order in which code ran, now, before the firmware
+    last started, and before the CPU's last fault"""
+    code, text = b.fe("coverage", "trace", "--last", 6)
+    rows = [line for line in text.splitlines()[1:] if line.startswith("  ")]
+    # (functions' names where this firmware's ELF is here; else addresses)
+    with_elf = "no ELF of this firmware" not in text
+    check("`coverage trace`: the code that ran last, a line for each run of "
+          "blocks of one function, the newest last",
+          code == 0 and "the code that ran last" in text and len(rows) == 6
+          and (not with_elf or all(re.match(r"  [A-Za-z_]", r) for r in rows)),
+          text)
+    code, text = b.fe("coverage", "trace", "--before", "fault")
+    code2, text2 = b.fe("coverage", "trace", "--before", "start", "--blocks",
+                        "--last", 3)
+    check("before a fault: there was none, said so; before the firmware's "
+          "start: the emulator's own start, with nothing before it",
+          code == 0 and "the CPU has had no fault" in text and code2 == 0
+          and "start number 1" in text2
+          and not [r for r in text2.splitlines()[1:] if r.startswith("  ")],
+          text + text2)
+    # a storage list with no path, by RPC: a fault in the official 1.5.1 and
+    # what is made from it (strcmp of nothing), and the firmware starts again
+    crash = work / "list.bin"
+    crash.write_bytes(bytes.fromhex("0a08033a064a042f658874"))
+    code, text = b.fe("fuzz", "rpc", "--replay", crash, "--out", work / "replay")
+    b.fe("wait", "--timeout", 120)
+    if "NULL pointer dereference" not in text:
+        print("  (this firmware lives through a storage list with no path: "
+              "no fault to trace)")
+        b.fe("reset")
+        b.fe("wait", "--timeout", 120)
+    else:
+        code, text = b.fe("coverage", "trace", "--before", "fault", "--last", 4)
+        rows = [r.strip() for r in text.splitlines()[1:] if r.startswith("  ")]
+        check("a fault (a storage list with no path, by RPC): `coverage "
+              "trace --before fault` ends where it came"
+              + (": in strcmp, from rpc_system_storage_list_process"
+                 if with_elf else ""),
+              code == 0 and "before the CPU's last fault (number 1)" in text
+              and len(rows) == 4 and (not with_elf or (
+                  rows[-1].startswith("strcmp") and
+                  rows[-2].startswith("rpc_system_storage_list_process"))),
+              text)
+    code, text = b.fe("coverage", "trace", "--before", "start", "--last", 3)
+    crashed = "NULL pointer dereference" in b.uart_text(every=True)
+    if "start number 1" in text:
+        # (a debug build stands still at its crash: started by hand)
+        crashed = False
+        b.fe("reset")
+        b.fe("wait", "--timeout", 120)
+        code, text = b.fe("coverage", "trace", "--before", "start", "--last", 3)
+    rows = [r.strip() for r in text.splitlines()[1:] if r.startswith("  ")]
+    check("the firmware started again: `--before start` has the end of its "
+          "life before" + (": the crash's function, and the reset"
+                           if with_elf and crashed else ""),
+          code == 0 and "start number 2" in text and len(rows) == 3
+          and (not (with_elf and crashed) or (
+              "__furi_crash_implementation" in text
+              and rows[-1].startswith("furi_hal_power_reset"))), text)
+    code, text = b.fe("coverage", "trace", "--json", "--last", 0)
+    try:
+        steps = json.loads(text[text.index("{"):])["steps"]
+    except (ValueError, KeyError):
+        steps = []
+    check("`--json`: the blocks themselves, with how often each ran in a "
+          "row", code == 0 and len(steps) > 1000
+          and all(s["bytes"] > 0 and s["times"] >= 1 for s in steps),
+          text[:300])
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("firmware")
@@ -308,6 +379,21 @@ def main():
         crash = CRASH.search(log)
         check("no crash in the firmware's logs", not crash,
               crash and log[max(0, crash.start() - 300):crash.end() + 300])
+        # the trace, last: its run has a crash that is meant
+        if check("boot with --coverage and no --trace, for `coverage trace`",
+                 b.start(more=("--coverage",)), b.uart_text()[-2000:]):
+            b.fe("wait", "--timeout", args.timeout)
+            code, text = b.fe("coverage", "trace")
+            check("a run without --trace: `coverage trace` says that it "
+                  "keeps none, and how to get one",
+                  code == 1 and "keeps no trace" in text
+                  and "run --trace" in text, text)
+            b.stop()
+        if check("boot with --trace: 'Startup complete'",
+                 b.start(more=("--trace",)), b.uart_text()[-2000:]):
+            b.fe("wait", "--timeout", args.timeout)
+            trace(b, work)
+            b.stop()
     finally:
         b.stop()
         shutil.rmtree(work, ignore_errors=True)

@@ -5083,6 +5083,34 @@ big lock, entry 92).
       clocking; `spi watch` on the record that runs); `spi watch` with a
       record of its own tried on Momentum with examples/spi/flash.js.
 
+164. **A trace: what ran last.**
+    - Coverage says what ran, not in which order; after a crash one wants
+      the last of it. The plugin gets a callback for each block's run and
+      keeps the last 65,536 in a ring.
+    - A crash is over when one looks. The firmware has started again, and
+      the ring is full of its start; or (a debug build) it stands in a
+      loop of one block, which would fill the ring with itself: a block
+      that runs again at once is counted, not put down again. For the
+      first case the ring is copied when the firmware starts and when a
+      fault's handler runs. QEMU's plugin interface has a callback for
+      exceptions, and its M-profile code does not call it (the A-profile's
+      does), so the plugin knows both moments by address: the vector
+      table at the flash's start, read at each translation.
+    - Tried on the storage list with no path (entry 154's crash): before
+      the fault the trace ends rpc_session_worker,
+      rpc_system_storage_list_process, ..., strcmp; before the start it
+      ends __furi_crash_implementation, furi_hal_power_reset.
+    - Its price: a JavaScript loop of 400,000 rounds took 13.6 s with
+      coverage alone and 20 to 29 s with the trace. (The fuzzer's inputs a
+      second said nothing: it waits more than it computes.) So it is a
+      switch of its own, `run --trace`, and not `--coverage`'s.
+    - The check had put the trace's run, with its crash that is meant,
+      before the check that there is no crash in the logs; and a debug
+      build does not start again by itself after a crash. Both the
+      check's.
+    - Checks: coverage_check 31 on the official 1.5.1, 25 on the dev
+      build, 22 on Momentum.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

@@ -817,7 +817,10 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       functions' calls, lines' counts, files, an lcov file; `coverage reset` before a
       test; an app by its id or its `.fap`, found by its bytes after it has ended;
       a stopped device's last run. `scripts/coverage_check.py` 23 (BRINGUP_LOG 153)
-    - ☐ A trace: the order in which code ran (the last calls before a crash)
+    - ☑ A trace (2026-11-15): `run --trace`, `coverage trace [--before start|
+          fault]`: the last 65,536 blocks in their order, by function, kept at
+          each start of the firmware and at each fault; `scripts/coverage_check.py`
+          31 (BRINGUP_LOG 164)
     - ☑ Apps that run in place from the flash (2026-11-15): the plugin keeps the
           bytes of what runs above the firmware's end in the flash (`keep=`)
 - ☑ Fuzzing harness for parsers in the firmware (2026-11-15): `./flipperemu fuzz

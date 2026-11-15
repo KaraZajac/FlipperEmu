@@ -107,6 +107,7 @@ import fe_header                                # noqa: E402  (small: the rest
 QEMU = ROOT / "build" / "qemu" / "qemu-system-arm"
 # the coverage plugin (qemu/plugins/fe_cov.c): `run --coverage` loads it
 COV_PLUGIN = ROOT / "build" / "plugins" / "libfe_cov.so"
+COV_TRACE = 65536               # the blocks that its trace keeps (a power of 2)
 DEVICES = ROOT / "devices"
 FLASH_BASE = 0x08000000
 FLASH_SIZE = 1 << 20
@@ -1257,7 +1258,9 @@ def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
         end = firmware_end(dev)
         cmd += ["-plugin", f"{COV_PLUGIN},sock={dev.cov_sock},"
                            f"out={dev.cov_dump}"
-                           + (f",keep={end:#x}" if end else "")]
+                           + (f",keep={end:#x}" if end else "")
+                           + (f",trace={COV_TRACE}"
+                              if getattr(args, "trace", False) else "")]
     return cmd + list(args.qemu_args or [])
 
 
@@ -1339,6 +1342,8 @@ def run_detached(dev, ready=None):
 
 
 def coverage_wanted(args):
+    if getattr(args, "trace", False):
+        args.coverage = True            # (the trace is the plugin's too)
     if getattr(args, "coverage", False) and not COV_PLUGIN.exists():
         sys.exit(f"--coverage: the coverage plugin is not built ({COV_PLUGIN}): "
                  "scripts/setup_qemu.sh builds it")
@@ -2161,6 +2166,7 @@ def run_note(dev, pid, args, **more):
     note = {"pid": pid, "started": time.strftime("%Y-%m-%d %H:%M:%S"),
             "machine": {k: getattr(args, k, None) for k in MACHINE_ARGS},
             "coverage": bool(getattr(args, "coverage", False)),
+            "trace": bool(getattr(args, "trace", False)),
             **more}
     tmp = dev.run_file.with_suffix(".tmp")
     tmp.write_text(json.dumps(note, indent=2) + "\n")
@@ -4095,6 +4101,80 @@ def coverage_app(dev, path, blocks):
     return (elf, *found)
 
 
+def coverage_trace(dev, args):
+    """coverage trace: the code that ran last, in its order, by function: of
+    a device that runs with `run --trace`.  --before start: what ran before
+    the firmware last started (the end of the life before); --before fault:
+    before the CPU's last fault."""
+    import fe_cov
+    how = (f"`./flipperemu -d {dev.name} run --trace` keeps the order in "
+           "which code runs")
+    if not dev.running():
+        sys.exit(f"[{dev.name}] is not running: a trace is a running "
+                 f"emulator's ({how})")
+    if not (run_noted(dev) or {}).get("trace") or not dev.cov_sock.exists():
+        sys.exit(f"[{dev.name}] this run keeps no trace: {how}, from a start "
+                 "on")
+    which = args.before or "now"
+    now = dev.dir / "trace.now"
+    try:
+        fe_cov.ask(dev.cov_sock, f"trace {now} {which}")
+        text = now.read_text()
+    except (fe_cov.Error, OSError) as e:
+        sys.exit(f"[{dev.name}] {e}")
+    finally:
+        now.unlink(missing_ok=True)
+    head, *rows = text.splitlines()
+    words = head.split()
+    moments = int(words[5]) if len(words) > 5 else 0
+    steps = [(int(a, 16), int(n), int(times)) for a, n, times in
+             (row.split() for row in rows)]
+    if which != "now" and not moments:
+        print(f"[{dev.name}] " + (
+            "the firmware has not started since the emulator did"
+            if which == "start" else "the CPU has had no fault") +
+            ": no trace of before that")
+        return 0
+    # by function: a run of blocks of one function is a line
+    lines = []
+    for addr, size, times in steps:
+        place = code_place(dev, addr) if not args.blocks else ""
+        name = place.split("+")[0] if place else None
+        if args.blocks or not name:
+            lines.append([None, f"{addr:#010x}" + (f"  {place}" if place else
+                         ("  (RAM: an app's code, or an updater's)"
+                          if addr >= 0x20000000 and not args.blocks else "")),
+                          1, times])
+        elif lines and lines[-1][0] == name:
+            lines[-1][2] += 1
+            lines[-1][3] += times
+        else:
+            lines.append([name, name, 1, times])
+    shown = lines[-args.last:] if args.last else lines
+    said = {"now": "the code that ran last",
+            "start": "the code that ran before the firmware started the "
+                     f"last time (its start number {moments} since the "
+                     "emulator's)",
+            "fault": f"the code that ran before the CPU's last fault (number "
+                     f"{moments})"}[which]
+    if args.json:
+        print(json.dumps({"which": which, "moments": moments,
+                          "steps": [{"address": a, "bytes": n, "times": k}
+                                    for a, n, k in steps]}, indent=2))
+        return 0
+    print(f"[{dev.name}] {said}: {len(steps):,} blocks kept, the last "
+          f"{len(shown)} " + ("blocks" if args.blocks else
+                              "runs of them by function") +
+          ", the newest last" + ("" if PLACES.get(dev.name, [None])[0]
+                                 or args.blocks else
+                                 " (no ELF of this firmware here: addresses)"))
+    for name, text, blocks, times in shown:
+        more = (f"  ({blocks} blocks)" if blocks > 1 else "") + \
+            (f"  x{times}" if times > blocks else "")
+        print(f"  {text}{more}")
+    return 0
+
+
 def cmd_coverage(args):
     """What a Flipper executed: the code that ran, by the firmware's (or an
     app's) functions and source lines"""
@@ -4124,8 +4204,11 @@ def cmd_coverage(args):
               "each: address, bytes, how often it ran; one in RAM with the "
               "bytes themselves)")
         return 0
+    if args.action == "trace":
+        return coverage_trace(dev, args)
     if args.action != "report":
-        sys.exit(f"coverage: report, reset or dump FILE, not `{args.action}`")
+        sys.exit(f"coverage: report, reset, dump FILE or trace, not "
+                 f"`{args.action}`")
     blocks, since = coverage_counts(dev)
     ran = fe_cov.Ran(blocks)
     tool = fe_cov.readelf()
@@ -7078,6 +7161,12 @@ def main():
                    help="count the code that runs: `./flipperemu coverage` says "
                         "which of the firmware's (or an app's) functions and "
                         "lines ran")
+    p.add_argument("--trace", action="store_true",
+                   help="--coverage, and the order in which code ran, the last "
+                        f"{COV_TRACE:,} blocks of it: `./flipperemu coverage "
+                        "trace` says what ran last, before the firmware "
+                        "started again or before a fault of the CPU's (code "
+                        "runs at about half its speed with it)")
     p.add_argument("--print-cmd", action="store_true", help="show the QEMU command and exit")
     p.add_argument("qemu_args", nargs="*", help="extra QEMU arguments after --")
     p.set_defaults(func=cmd_run)
@@ -7653,11 +7742,25 @@ def main():
                              "FILE] [--files N] [--functions [PATTERN]] "
                              "[--missed] [--lcov FILE] [--source DIR] [--json]\n"
                              "       flipperemu coverage reset\n"
-                             "       flipperemu coverage dump FILE")
+                             "       flipperemu coverage dump FILE\n"
+                             "       flipperemu coverage trace [--before start|"
+                             "fault] [--last N] [--blocks] [--json]")
     p.add_argument("action", nargs="?", default="report",
                    help="report (default): what ran, against the firmware's ELF "
                         "or an app's; reset: count from now on; dump FILE: the "
-                        "pieces of memory that ran, as text")
+                        "pieces of memory that ran, as text; trace (of a `run "
+                        "--trace`): the code that ran last, in its order, a "
+                        "line for each run of blocks of one function")
+    p.add_argument("--before", choices=("start", "fault"),
+                   help="trace: what ran before the firmware last started "
+                        "(how its life before ended: a crash's way to its "
+                        "reset), or before the CPU's last fault; not given: "
+                        "what ran last, now")
+    p.add_argument("--last", type=int, default=40, metavar="N",
+                   help="trace: the last N lines (default 40; 0: all that is "
+                        "kept)")
+    p.add_argument("--blocks", action="store_true",
+                   help="trace: every block with its address, not by function")
     p.add_argument("file", nargs="?", help="dump: the file to write")
     p.add_argument("--elf", metavar="FILE",
                    help="the firmware's ELF (default: found as `gdb` finds it)")

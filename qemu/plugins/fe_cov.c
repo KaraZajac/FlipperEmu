@@ -43,6 +43,22 @@
  * thread adds to them, and a write beside it could be lost): it notes what
  * each counter has, and a dump says what came since.
  *
+ * With trace=N it keeps the order too: the last N blocks that ran (N a
+ * power of two), a block that ran again at once counted and not put down
+ * twice, so that a loop of one block (a firmware that has halted) leaves
+ * what came before it.  What ran is no use once the firmware has started
+ * again or a fault's handler has run on for a while, so the trace is copied
+ * at those moments: when the block at the reset vector's address runs
+ * ("start": what ran before the firmware started, the end of its last
+ * life), and when one at the HardFault, MemManage, BusFault or UsageFault
+ * vector's does ("fault").  The vectors are read from the flash's start
+ * (0x08000000), where a Flipper's firmware has them.  `trace PATH
+ * now|start|fault` writes one of the three, the oldest block first:
+ *
+ *   # flipperemu trace 1 start 2 0800a001  (which; how many such moments so
+ *                                           far; the vector's address)
+ *   0800a4f0 12 3          (a block's address, its bytes, how often in a row)
+ *
  * Copyright (c) 2026, Kara Zajac
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -82,6 +98,29 @@ static uint64_t *mark[CHUNKS_MAX];      /* the counters at the last forget */
 static uint8_t *seen[CHUNKS_MAX];       /* a block that `news` has counted */
 static bool full;
 static unsigned resets;
+
+/* the trace */
+enum { RING_NOW, RING_START, RING_FAULT, RINGS };
+enum { KIND_START = 1, KIND_FAULT };    /* what a block is the first of */
+#define VECTORS     0x08000000u         /* the firmware's vector table */
+#define ID_BITS     28                  /* (a block's id; its kind above) */
+
+typedef struct Step {
+    uint32_t id, times;
+} Step;
+
+typedef struct Ring {
+    Step *e;
+    uint64_t at;                        /* steps put down so far */
+    unsigned moments;                   /* how often it was copied */
+    uint32_t vector;                    /* the handler's address, as read */
+} Ring;
+
+static uint32_t trace_size;             /* 0: no trace */
+static Ring ring[RINGS];
+static Ring copied;                     /* RING_NOW, for who asked */
+static int copy_wanted;                 /* 1: asked for; 2: made */
+static uint32_t vec_start, vec_fault[4];
 static char *sock_path, *out_path;
 static uint64_t keep_from = 0x10000000; /* blocks from here up: with bytes */
 static int listener = -1;
@@ -97,6 +136,70 @@ static uint64_t *counter(uint32_t id)
 static uint64_t count_of(uint32_t id)
 {
     return *counter(id) - base[id / CHUNK][id % CHUNK];
+}
+
+static void ring_copy(Ring *to, const Ring *from)
+{
+    memcpy(to->e, from->e, trace_size * sizeof(Step));
+    to->at = from->at;
+}
+
+/* a block runs (the vCPU's thread; nothing else writes the trace) */
+static void tb_exec(unsigned int vcpu_index, void *udata)
+{
+    uintptr_t v = (uintptr_t)udata;
+    uint32_t id = v & ((1u << ID_BITS) - 1), kind = v >> ID_BITS;
+    Ring *r = &ring[RING_NOW];
+    Step *last = &r->e[(r->at - 1) & (trace_size - 1)];
+
+    if (kind) {
+        Ring *to = &ring[kind == KIND_START ? RING_START : RING_FAULT];
+
+        ring_copy(to, r);               /* what ran up to here */
+        to->moments++;
+        to->vector = kind == KIND_START ? vec_start : 0;
+    }
+    if (r->at && last->id == id && last->times != UINT32_MAX) {
+        last->times++;
+    } else {
+        r->e[r->at++ & (trace_size - 1)] = (Step){ id, 1 };
+    }
+    if (g_atomic_int_get(&copy_wanted) == 1) {
+        ring_copy(&copied, r);
+        g_atomic_int_set(&copy_wanted, 2);
+    }
+}
+
+/* What is this block the first of?  By the firmware's vector table, read
+ * again each time: a firmware may be another after an update. */
+static uint32_t block_kind(uint64_t pc)
+{
+    g_autoptr(GByteArray) v = g_byte_array_new();
+
+    if (!qemu_plugin_read_memory_vaddr(VECTORS + 4, v, 6 * 4) ||
+        v->len < 6 * 4) {
+        return 0;
+    }
+    for (int i = 0; i < 6; i++) {
+        uint32_t at = (v->data[4 * i] | v->data[4 * i + 1] << 8 |
+                       v->data[4 * i + 2] << 16 |
+                       (uint32_t)v->data[4 * i + 3] << 24) & ~1u;
+
+        if (i == 0) {
+            vec_start = at;
+        } else if (i >= 2) {            /* (1 is the NMI's) */
+            vec_fault[i - 2] = at;
+        }
+    }
+    if (pc == vec_start) {
+        return KIND_START;
+    }
+    for (int i = 0; i < 4; i++) {
+        if (pc == vec_fault[i]) {
+            return KIND_FAULT;
+        }
+    }
+    return 0;
 }
 
 static void tb_trans(struct qemu_plugin_tb *tb, void *unused)
@@ -168,7 +271,71 @@ static void tb_trans(struct qemu_plugin_tb *tb, void *unused)
 
         qemu_plugin_register_vcpu_tb_exec_inline_per_vcpu(
             tb, QEMU_PLUGIN_INLINE_ADD_U64, at, 1);
+        if (trace_size) {
+            uintptr_t v = b->id | (uintptr_t)block_kind(pc) << ID_BITS;
+
+            qemu_plugin_register_vcpu_tb_exec_cb(tb, tb_exec,
+                                                 QEMU_PLUGIN_CB_NO_REGS,
+                                                 (void *)v);
+        }
     }
+}
+
+/* trace PATH now|start|fault -> the steps written, -1: errno, -2: no such */
+static int trace_dump(const char *path, const char *which)
+{
+    static const char *const names[RINGS] = { "now", "start", "fault" };
+    Ring *r = NULL;
+    uint64_t from;
+    FILE *f;
+    int n = 0;
+
+    for (int i = 0; i < RINGS; i++) {
+        if (!strcmp(which, names[i])) {
+            r = &ring[i];
+        }
+    }
+    if (!r || !trace_size) {
+        return -2;
+    }
+    if (r == &ring[RING_NOW]) {
+        /* the vCPU's thread makes the copy when it next runs a block; a
+         * CPU that sleeps runs none, and its trace stands still */
+        g_atomic_int_set(&copy_wanted, 1);
+        for (int i = 0; i < 300 && g_atomic_int_get(&copy_wanted) != 2; i++) {
+            g_usleep(1000);
+        }
+        if (g_atomic_int_get(&copy_wanted) != 2) {
+            ring_copy(&copied, r);
+        }
+        g_atomic_int_set(&copy_wanted, 0);
+        copied.moments = 0;
+        copied.vector = 0;
+        r = &copied;
+    }
+    f = fopen(path, "w");
+    if (!f) {
+        return -1;
+    }
+    fprintf(f, "# flipperemu trace 1 %s %u %08x\n", which, r->moments,
+            r->vector);
+    from = r->at > trace_size ? r->at - trace_size : 0;
+    g_mutex_lock(&lock);
+    for (uint64_t i = from; i < r->at; i++, n++) {
+        Step *s = &r->e[i & (trace_size - 1)];
+        Block *b = s->id < blocks->len ? g_ptr_array_index(blocks, s->id)
+                                       : NULL;
+
+        if (b) {
+            fprintf(f, "%08x %u %u\n", (uint32_t)(b->key >> 32),
+                    (uint32_t)(b->key & 0xFFFF), s->times);
+        }
+    }
+    g_mutex_unlock(&lock);
+    if (fclose(f)) {
+        return -1;
+    }
+    return n;
 }
 
 /* (the lock held) */
@@ -222,10 +389,29 @@ static void answer(int c, const char *line)
 {
     g_autofree char *reply = NULL;
 
+    if (g_str_has_prefix(line, "trace ")) {
+        /* (not under the lock: the vCPU's thread may want it to translate) */
+        g_auto(GStrv) w = g_strsplit(line + 6, " ", 2);
+        int n = w[0] && w[1] ? trace_dump(w[0], w[1]) : -2;
+
+        reply = n == -2 ? g_strdup(trace_size ?
+                    "error trace PATH now|start|fault\n" :
+                    "error no trace is kept (trace=N)\n")
+              : n < 0 ? g_strdup_printf("error %s: %s\n", w[0],
+                                        g_strerror(errno))
+              : g_strdup_printf("ok steps=%d\n", n);
+        if (write(c, reply, strlen(reply)) < 0) {
+            /* (it hung up) */
+        }
+        return;
+    }
     g_mutex_lock(&lock);
     if (!strcmp(line, "stat")) {
-        reply = g_strdup_printf("ok blocks=%u executed=%u resets=%u\n",
-                                blocks->len, executed(), resets);
+        reply = g_strdup_printf("ok blocks=%u executed=%u resets=%u trace=%u "
+                                "starts=%u faults=%u\n",
+                                blocks->len, executed(), resets, trace_size,
+                                ring[RING_START].moments,
+                                ring[RING_FAULT].moments);
     } else if (!strcmp(line, "reset")) {
         for (unsigned i = 0; i < blocks->len; i++) {
             base[i / CHUNK][i % CHUNK] = *counter(i);
@@ -256,7 +442,8 @@ static void answer(int c, const char *line)
                                         g_strerror(errno))
                       : g_strdup_printf("ok blocks=%d\n", n);
     } else {
-        reply = g_strdup("error stat, reset, dump PATH, news or forget\n");
+        reply = g_strdup("error stat, reset, dump PATH, news, forget or "
+                         "trace PATH now|start|fault\n");
     }
     g_mutex_unlock(&lock);
     if (write(c, reply, strlen(reply)) < 0) {
@@ -343,11 +530,23 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
             out_path = g_strdup(kv[1]);
         } else if (kv[1] && !strcmp(kv[0], "keep")) {
             keep_from = g_ascii_strtoull(kv[1], NULL, 0);
+        } else if (kv[1] && !strcmp(kv[0], "trace")) {
+            trace_size = g_ascii_strtoull(kv[1], NULL, 0);
+            if (trace_size & (trace_size - 1)) {
+                fprintf(stderr, "fe_cov: trace=%s: a power of two\n", kv[1]);
+                return -1;
+            }
         } else {
-            fprintf(stderr, "fe_cov: %s: its options are sock=PATH, out=PATH "
-                    "and keep=ADDRESS\n", argv[i]);
+            fprintf(stderr, "fe_cov: %s: its options are sock=PATH, out=PATH, "
+                    "keep=ADDRESS and trace=N\n", argv[i]);
             return -1;
         }
+    }
+    if (trace_size) {
+        for (int i = 0; i < RINGS; i++) {
+            ring[i].e = g_new0(Step, trace_size);
+        }
+        copied.e = g_new0(Step, trace_size);
     }
     by_key = g_hash_table_new(g_int64_hash, g_int64_equal);
     blocks = g_ptr_array_new();

@@ -2216,8 +2216,23 @@ is: the launcher gives the plugin the address where the firmware in the flash en
 (`keep=`: the first blank page from the flash's start), and a block from there up
 has its bytes, so that two apps that had one page, one after the other, are two.
 
-Not there: the order in which code ran (a trace). No firmware here has a loader of
-apps that run in place, so `coverage --app` has not told such an app's code yet.
+**The order** (`trace=N`, a power of two; `run --trace` gives 65536): a callback on
+each block's execution puts the block's number into a ring, and a block that runs
+again at once is counted where it stands, so a halted firmware's one-block loop
+does not wear the ring out. What ran before a crash is gone soon after it, so the
+plugin copies the ring at two kinds of moment, which it knows by the block's
+address: the reset vector's (the firmware starts: the copy is the end of its life
+before) and the HardFault, MemManage, BusFault and UsageFault vectors' (a fault).
+It reads the vector table from the flash's start at each translation, so a firmware
+that an update put there has its own. QEMU 11 tells plugins of exceptions on the
+A-profile only, which is why it is done by address. `trace PATH now|start|fault`
+on the socket writes one of the three (the live one copied by the vCPU's thread at
+its next block, or as it stands if the CPU sleeps), and the launcher names the
+blocks by the ELF's functions. A callback for each block costs: a CPU-bound loop
+took 13.6 s without it and 20 to 29 s with.
+
+No firmware here has a loader of apps that run in place, so `coverage --app` has
+not told such an app's code yet.
 
 ## Fuzzing (`scripts/fe_fuzz.py`) and where a fault was
 

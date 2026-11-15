@@ -542,6 +542,8 @@ picture of the save to the pixel and the tag, and goes on with Pause.
 | `record out.gif [--seconds N] [--scale N]` | what its LCD shows, as an animated GIF: until Ctrl-C, or for N seconds (a device without a window; with one: Device > Record the screen) |
 | `gdb [--elf FILE] [--apps DIR] [--with GDB] [-- GDB'S ARGUMENTS]` | gdb on a running device, with the firmware's symbols and its apps' |
 | `run --coverage` | count the code that runs (a plugin in the emulator, about 2 % slower) |
+| `run --trace` | `--coverage`, and the order in which code ran: the last 65,536 blocks of it (code runs at about half its speed) |
+| `coverage trace [--before start\|fault] [--last N] [--blocks] [--json]` | of a `run --trace`: the code that ran last, a line for each run of blocks of one function; what ran before the firmware last started (how its life before ended), or before the CPU's last fault |
 | `fuzz subghz\|ir\|rpc\|cli [--seconds N] [--runs N] [--first] [--seed N] [--out DIR] [--seeds FILE...] [--command TEMPLATE]` \| `fuzz TARGET --replay FILE\|FOLDER...` | inputs to one of the firmware's parsers, made from those that reached new code, until one crashes it; a crash's inputs given again |
 | `coverage [--elf FILE \| --app APP] [--files N] [--functions [PATTERN]] [--missed] [--lcov FILE] [--json]` \| `coverage reset` \| `coverage dump FILE` | what ran since the start or the last reset: of the firmware's functions and lines, or an app's (by its id, its .fap or its ELF); count anew; the blocks that ran, as text |
 | `gdb --serve PORT` | its gdb stub on a TCP port of this computer, for an IDE |
@@ -3203,9 +3205,41 @@ A file that is another build than the app that ran is told ("blocks that ran in 
 same place are not this file's code"). A count is of a block's runs: a line whose
 code the compiler put into several places has the highest of them, and a function's
 calls are the runs of its first instruction. `scripts/coverage_check.py FIRMWARE`
-checks it (23 checks on the official 1.5.1 with ufbt's SDK; 14 to 17 on the others,
+checks it (31 checks on the official 1.5.1 with ufbt's SDK; 22 to 25 on the others,
 where no SDK of theirs is here for the app). How it works:
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#coverage-qemupluginsfe_covc-scriptsfe_covpy).
+
+**What ran last: a trace.** `run --trace` keeps the order too, of the last 65,536
+blocks of code, and `coverage trace` says it by function, the newest last. A crash
+is over by the time one looks: the firmware has started again, or stands still. So
+the emulator keeps the trace as it was at two moments, and `--before` asks for them:
+`start`, when the firmware last started (the end of the life before it), and `fault`,
+when the CPU last took a fault.
+
+```
+$ ./flipperemu run --trace --detach -f firmware/official-1.5.1/flipper-z-f7-update-1.5.1.tgz
+$ ./flipperemu coverage trace --before fault --last 6       # after a crash
+[flipper] the code that ran before the CPU's last fault (number 1): 65,536 blocks kept, the last 6 runs of them by function, the newest last
+  rpc_session_worker  (2 blocks)
+  rpc_system_storage_list_process
+  furi_log_print_format  (2 blocks)
+  rpc_system_storage_list_process
+  rpc_system_storage_reset_state  (2 blocks)
+  rpc_system_storage_list_process
+  strcmp
+$ ./flipperemu coverage trace --before start --last 3
+[flipper] the code that ran before the firmware started the last time (its start number 2 since the emulator's): ...
+  furi_log_tx  (4 blocks)
+  __furi_crash_implementation
+  furi_hal_power_reset  (2 blocks)
+```
+
+A line is a run of blocks of one function, so a call and the return from it are
+three lines; `x9` after one says that its blocks ran more often than once each (a
+loop). `--blocks` has every block with its address, `--json` those for a program.
+Without the firmware's ELF the lines are addresses. Code runs at about half its
+speed with `--trace` (each block calls into the plugin), which is why it is not
+`--coverage`'s own; a fuzzer wants the other.
 
 ### Fuzzing: inputs until one crashes it
 
