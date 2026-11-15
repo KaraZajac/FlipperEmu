@@ -160,16 +160,18 @@ def nfc_frames(b, work):
     inputs, kept, crashes = numbers(text)
     ok, said = b.answers()
     corpus = [f.read_text() for f in files(out / "corpus")]
+    # (how many are kept is as it comes: `fuzz nfc` before this has run
+    # much of the same code)
     check("`fuzz nfc-frames --runs 14`: what the emulator's ISO14443A cards "
           "answer to the NFC shell's `dump` is recorded for the seeds (a WUPA "
-          "and its ATQA in each), and exchanges made from them are answered "
-          f"by a card on the NFC link: {kept} of {inputs} kept for the new "
-          "code they reached; "
+          "and its ATQA in what is kept), and exchanges made from them are "
+          f"answered by a card on the NFC link: {kept} of {inputs} kept for "
+          "the new code they reached; "
           + ("no crash" if not crashes else
              f"{crashes} crashes, each kept with its inputs and gone on from")
           + "; and the firmware's CLI answers after it",
-          inputs >= 14 and kept >= 5 and ok
-          and sum("7 52 > 16 " in c for c in corpus) >= 5
+          inputs >= 14 and kept >= 1 and ok
+          and all("7 52 > 16 " in c for c in corpus)
           and ((code == 0 and crashes == 0) or
                (code == 1 and (out / "crashes").is_dir()
                 and any((out / "crashes").iterdir()))),
@@ -182,18 +184,25 @@ def nfc_frames(b, work):
         "72 93708804A1B29FAE4B > 24 04DA17", "16 9520 > 40 C3D4E5F604",
         "72 9570C3D4E5F6049E03 > 24 " + crc("20"),
         "32 E0803173 > 64 " + crc("FF7577810280")]) + "\n")
+    air = work / "ats-air.txt"
+    b.fe("nfc", "record", air)
     code, text = b.fe("fuzz", "nfc-frames", "--replay", lies, "--out",
                       work / "frames-ats", timeout=600)
+    b.fe("nfc", "record", "stop")
     ok, said = b.answers()
+    heard = air.read_text() if air.exists() else ""
     check("`fuzz nfc-frames --replay` of an exchange that is written by "
           "hand, an ISO14443-4 card whose ATS says that it is 255 bytes long "
-          "and is 6: "
+          "and is 6: a record of the air has the firmware's RATS and that "
+          "ATS for its answer, from the card on the link; "
           + ("no crash and no hang" if code == 0 else
              "found and kept (the firmware's own), and gone on from")
           + "; the firmware's CLI answers after it",
-          ok and ((code == 0 and "no crash and no hang" in text) or
-                  (code == 1 and (work / "frames-ats" / "crashes").is_dir())),
-          text[-800:] + said)
+          ok and " flipper a 7 52 > 16 4403" in heard
+          and " flipper a 32 E0803173 > 64 " + crc("FF7577810280") in heard
+          and ((code == 0 and "no crash and no hang" in text) or
+               (code == 1 and (work / "frames-ats" / "crashes").is_dir())),
+          text[-800:] + said + heard[-600:])
 
 
 def planted(b, work):

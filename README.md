@@ -2211,6 +2211,14 @@ seconds at 1200 baud and after a fiftieth of a second at 115200. When the last b
 has come and the line stays quiet, the firmware is told (the UART's idle interrupt),
 which is how an app that reads whole messages knows that one has ended.
 
+What the app sends takes the line's time too: a thousand bytes at 9600 baud are a
+second on their way, and the firmware's write is busy for as long, as on a Flipper.
+One thing shows with that which a port without a speed hid: the firmware's write is
+back when its last byte is handed to the UART, not when it is sent, and a port that
+is closed right after it (`serial.end()` in a script) loses its last two bytes. Wait
+a few byte times before closing. (FW-20 in
+[docs/FIRMWARE_BUGS.md](docs/FIRMWARE_BUGS.md); a real Flipper should do the same.)
+
 - `uart send` waits as long as that takes. Its `--for S` is how long nothing may
   move before it gives up, not a limit for the whole text.
 - An app can take its bytes one by one (the JavaScript `serial` module,
@@ -2346,7 +2354,6 @@ waits for the next call. Exit status 0: all of that went as the protocol says.
 
 What it does not do yet:
 
-- Sending is not paced: what the firmware sends is there at once, at any baud rate.
 - The speed is the app's alone. Your side of the wire has no rate to get wrong, so an
   app with the wrong baud rate is understood all the same, only slower or faster, and
   a framing error never comes.
@@ -2369,7 +2376,7 @@ for your program, and a socket (`devices/NAME/lpuart.sock`, `usart.sock`) for `u
 send` and `uart term`, which is why the two do not take the port from each other.
 
 `scripts/uart_check.py FIRMWARE` checks both ports with that script on the Flipper's
-side, the bridge, a module's call and `expansion`: 79 checks, on the official 1.5.1, the
+side, the bridge, a module's call and `expansion`: 80 checks, on the official 1.5.1, the
 official dev build, Momentum, Unleashed and RogueMaster.
 
 Two bugs were in the way, and both are fixed (docs/BRINGUP_LOG.md, 104). After every
@@ -2382,7 +2389,9 @@ when the program on the port was slow to read (`qemu/patches/0006`).
 The baud rate, the idle line and reception by DMA are an addition to QEMU's UART
 model (`qemu/patches/0007`, docs/BRINGUP_LOG.md, 106), and the call is one more
 (`qemu/patches/0008`, 108): the model tells the board of a byte that came while its
-receiver was off. **A QEMU tree that was set up before these three patches came
+receiver was off. Sending at the baud rate is `qemu/patches/0017` (175); a tree from
+before it wants the script once more too, and without it what is sent is there at
+once. **A QEMU tree that was set up before these three patches came
 (2026-11-11) wants `scripts/setup_qemu.sh` once more.** Without 0007 the machine
 still runs, with the port as it was: about 1000 bytes a second at any baud rate, and
 a bridge that sends and does not hear. Without 0008 it runs too, and no byte is a

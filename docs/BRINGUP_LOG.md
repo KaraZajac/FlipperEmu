@@ -5467,6 +5467,38 @@ big lock, entry 92).
     - Checks: gpio_check 112 on the official 1.5.1 (three times), 83 on
       the dev build, Momentum and Unleashed.
 
+175. **What a UART sends takes time.**
+    - QEMU's model gave a character to its backend in the write to TDR,
+      and set TXE and TC before the write was back. Patch 0007 had given
+      reception the line's speed; sending had none.
+    - QEMU patch 0017: a shift register. TDR's character goes into it
+      as soon as it is free, which sets TXE; a frame's time later it is
+      the backend's, as a receiver has a character when its stop bit is
+      over, and the next one from TDR follows, or TC is set. The saved
+      state has the three new things (version 3; a state from before
+      loads).
+    - The firmware's blocking write waits for TXE before each
+      character, so it sends at the line's speed with no more said: a
+      script's 964 bytes at 9600 baud, read from the port's socket with
+      a time for each piece, 1.02 s from first to last, for 1.004.
+    - The first run of that check had 962 of them. The script ended
+      with `serial.write("end\n"); serial.end();`, and the two last
+      characters never came, each time. `furi_hal_serial_tx()` is back
+      when the last character is in TDR, the one before still in the
+      shift register; `end()` leads to `furi_hal_serial_deinit()`, which
+      takes the UART's clock away and with that resets it, and the
+      model's reset drops what the two registers hold, as the chip
+      does. Nothing waits for TC in between, though the firmware has a
+      function for it. Two byte times: 2 ms at 9600 baud. With 100 ms
+      before `end()` all 964 come. FW-20 in the list; not tried on a
+      real Flipper.
+    - What it costs: the firmware's log is a UART at 230400 baud, 43 µs
+      a character, which the logging thread now waits for as on a
+      Flipper. A first start is at "Startup complete" after 2601 ms of
+      the firmware's own time, in the range it was (2450 to 2850).
+    - Checks: uart_check 80 and smoke 28 on the official 1.5.1;
+      setup_check 47 with the patch.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

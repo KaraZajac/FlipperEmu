@@ -1,0 +1,158 @@
+From: FlipperEmu
+Subject: [PATCH] stm32l4x5_usart: transmission at the baud rate
+
+A character that the guest wrote to TDR was the backend's at once, with
+TXE and TC set again before the write returned. A guest that sends in a
+loop, waiting for TXE between two characters, sent any amount of them in
+no time, and one that waits for TC before it does something else (turns a
+transceiver round, switches the UART off) never waited.
+
+The transmitter has its shift register now. TDR's character goes into it
+as soon as it is free, which sets TXE; it is on the line for a frame's
+time (the start bit, the data bits, the stop bits, at the baud rate that
+BRR and PRESC say), and is given to the backend at the end of that, when
+a receiver has it. TC is set when a frame ends with nothing more in TDR.
+A reset of the device, which a guest's clock control can cause, drops
+what is still in the two registers, as the hardware does. While the
+registers do not say a baud rate, a character still goes out at once.
+
+Seen with the Flipper Zero firmware: its blocking write returns when the
+last character is in TDR, and a script that closes the port right after
+it loses that character and the one before on a real UART; here both
+came. And what an app sends at 9600 baud took no time on the wire.
+
+Signed-off-by: FlipperEmu
+---
+--- a/hw/char/stm32l4x5_usart.c
++++ b/hw/char/stm32l4x5_usart.c
+@@ -385,8 +385,31 @@
+ }
+ 
+ /*
+- * Try to send tx data, and arrange to be called back later if
+- * we can't (ie the char backend is busy/blocking).
++ * Transmission, a character at a time and at the line's speed.  What the
++ * guest writes to TDR goes into the shift register as soon as that is
++ * free, which makes TDR empty again (TXE).  It is on the line for a
++ * frame's time, and is the backend's at the end of that: a receiver has a
++ * character when its stop bit is over.  With nothing in TDR then, the
++ * transmission is complete (TC).  So a guest that waits for TXE or TC
++ * between two characters sends them as fast as the line carries them, and
++ * no faster.
++ */
++static void usart_tx_start(Stm32l4x5UsartBaseState *s)
++{
++    int64_t frame = usart_frame_ns(s);
++
++    s->tx_shift = s->tdr;
++    s->tx_busy = true;
++    s->isr |= R_ISR_TXE_MASK;
++    s->isr &= ~R_ISR_TC_MASK;
++    /* (a speed that the registers do not say yet: at once, as before) */
++    timer_mod(&s->tx_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + frame);
++}
++
++/*
++ * The character on the line has been sent: try to give it to the backend,
++ * and arrange to be called back later if we can't (ie the char backend is
++ * busy/blocking).
+  */
+ static gboolean usart_transmit(void *do_not_use, GIOCondition cond,
+                                void *opaque)
+@@ -394,11 +417,11 @@
+     Stm32l4x5UsartBaseState *s = STM32L4X5_USART_BASE(opaque);
+     int ret;
+     /* TODO: Handle 9 bits transmission */
+-    uint8_t ch = s->tdr;
++    uint8_t ch = s->tx_shift;
+ 
+     s->watch_tag = 0;
+ 
+-    if (!(s->cr1 & R_CR1_TE_MASK) || (s->isr & R_ISR_TXE_MASK)) {
++    if (!s->tx_busy) {
+         return G_SOURCE_REMOVE;
+     }
+ 
+@@ -422,14 +445,26 @@
+ buffer_drained:
+     /* Character successfully sent */
+     trace_stm32l4x5_usart_tx(ch);
+-    s->isr |= R_ISR_TC_MASK | R_ISR_TXE_MASK;
++    s->tx_busy = false;
++    if (!(s->isr & R_ISR_TXE_MASK) && (s->cr1 & R_CR1_TE_MASK)) {
++        usart_tx_start(s);              /* the next one waits in TDR */
++    } else {
++        s->isr |= R_ISR_TC_MASK;
++    }
+     stm32l4x5_update_irq(s);
+     return G_SOURCE_REMOVE;
+ }
+ 
++static void usart_tx_timer(void *opaque)
++{
++    usart_transmit(NULL, G_IO_OUT, opaque);
++}
++
+ static void usart_cancel_transmit(Stm32l4x5UsartBaseState *s)
+ {
+     g_clear_handle_id(&s->watch_tag, g_source_remove);
++    timer_del(&s->tx_timer);
++    s->tx_busy = false;
+ }
+ 
+ static void stm32l4x5_update_params(Stm32l4x5UsartBaseState *s)
+@@ -657,8 +692,11 @@
+         return;
+     case A_TDR:
+         s->tdr = value;
+-        s->isr &= ~R_ISR_TXE_MASK;
+-        usart_transmit(NULL, G_IO_OUT, s);
++        s->isr &= ~(R_ISR_TXE_MASK | R_ISR_TC_MASK);
++        if (!s->tx_busy && (s->cr1 & R_CR1_TE_MASK)) {
++            usart_tx_start(s);          /* the shift register is free */
++        }
++        stm32l4x5_update_irq(s);
+         return;
+     case A_PRESC:
+         s->presc = value & R_PRESC_PRESCALER_MASK;
+@@ -702,6 +740,7 @@
+     qdev_init_gpio_out_named(DEVICE(obj), &s->dma_rx, "dma-rx", 1);
+     qdev_init_gpio_out_named(DEVICE(obj), &s->rx_unheard, "rx-unheard", 1);
+     timer_init_ns(&s->rx_timer, QEMU_CLOCK_VIRTUAL, usart_rx_timer, s);
++    timer_init_ns(&s->tx_timer, QEMU_CLOCK_VIRTUAL, usart_tx_timer, s);
+     timer_init_ns(&s->idle_timer, QEMU_CLOCK_VIRTUAL, usart_idle_timer, s);
+ 
+     memory_region_init_io(&s->mmio, obj, &stm32l4x5_usart_base_ops, s,
+@@ -721,7 +760,7 @@
+ 
+ static const VMStateDescription vmstate_stm32l4x5_usart_base = {
+     .name = TYPE_STM32L4X5_USART_BASE,
+-    .version_id = 2,
++    .version_id = 3,
+     .minimum_version_id = 1,
+     .post_load = stm32l4x5_usart_base_post_load,
+     .fields = (VMStateField[]) {
+@@ -739,6 +778,9 @@
+         VMSTATE_TIMER_V(idle_timer, Stm32l4x5UsartBaseState, 2),
+         VMSTATE_INT64_V(rx_next, Stm32l4x5UsartBaseState, 2),
+         VMSTATE_BOOL_V(idle_armed, Stm32l4x5UsartBaseState, 2),
++        VMSTATE_TIMER_V(tx_timer, Stm32l4x5UsartBaseState, 3),
++        VMSTATE_UINT32_V(tx_shift, Stm32l4x5UsartBaseState, 3),
++        VMSTATE_BOOL_V(tx_busy, Stm32l4x5UsartBaseState, 3),
+         VMSTATE_CLOCK(clk, Stm32l4x5UsartBaseState),
+         VMSTATE_END_OF_LIST()
+     }
+--- a/include/hw/char/stm32l4x5_usart.h
++++ b/include/hw/char/stm32l4x5_usart.h
+@@ -66,6 +66,11 @@
+     QEMUTimer idle_timer;
+     int64_t rx_next;        /* the line has no next character before this */
+     bool idle_armed;        /* a character came since the last idle line */
++
++    /* Transmission at the line's speed */
++    QEMUTimer tx_timer;     /* the character on the line has been sent */
++    uint32_t tx_shift;      /* that character: the shift register */
++    bool tx_busy;           /* ... which is not free */
+ };
+ 
+ struct Stm32l4x5UsartBaseClass {

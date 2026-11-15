@@ -1493,10 +1493,19 @@ ufbt is not run at all, and `update` sends the package without the stage (BRINGU
   model's request lines 14 (USART1) and 16 (LPUART1); the channel's read of RDR, a
   byte wide, clears RXNE and the request. The request is set before the interrupt
   line, because that read comes back into the model from inside. While the receiver
-  is off, bytes are taken at once and dropped. Not modelled: pacing of what is sent,
-  overrun (the next byte waits in the backend), framing and parity errors. The
-  machine connects `dma-rx` only where the device has it, so a QEMU tree without the
-  patch gives a machine that runs.
+  is off, bytes are taken at once and dropped. Not modelled: overrun (the next
+  byte waits in the backend), framing and parity errors. The machine connects
+  `dma-rx` only where the device has it, so a QEMU tree without the patch gives a
+  machine that runs.
+- **What it sends** has the line's time too (`qemu/patches/0017`). The transmitter
+  has its shift register: TDR's character goes into it as soon as it is free (TXE),
+  is on the line for a frame's time, and is the chardev's at the end of that; TC
+  comes when a frame ends with nothing in TDR. The firmware's blocking write waits
+  for TXE between two characters, so 964 bytes at 9600 baud take the second that
+  they take on a wire. A reset of the UART by the clock controller drops what is in
+  the two registers: the firmware's write is back when its last character is in TDR,
+  and a port that is closed right after it loses that character and the one before
+  (FW-20 in FIRMWARE_BUGS.md).
 - **A start bit on the RX pin**: `qemu/patches/0008` gives the UART model one more
   line, `rx-unheard`, pulsed for a byte that comes while the receiver is off (or the
   whole port is). The firmware's expansion service waits that way for a module: RE

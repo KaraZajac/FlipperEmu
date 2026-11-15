@@ -41,6 +41,7 @@ keeps its row, with the version that fixed it.
 | FW-17 | The Bluetooth serial service's RPC status sends three bytes of the stack | official 1.5.1 | leak over the air | no |
 | FW-18 | While a CLI command waits, the CPU never sleeps | official 1.5.1 | battery | no |
 | FW-19 | The NFC shell's `emulate -f` of a Type 4 tag's file restarts the Flipper | Momentum mntm-012 | crash | no |
+| FW-20 | A serial port closed right after a write loses the last two bytes | official 1.5.1 | wrong result | no |
 
 ## Crashes and freezes
 
@@ -304,6 +305,28 @@ keeps its row, with the version that fixed it.
 - **Seen on:** official 1.5.1, by its source and under gdb. What it costs a real
   battery was not measured.
 - **Log:** entry 129.
+
+### FW-20: a serial port closed right after a write
+
+- **What happens:** the last two bytes of what was written do not go out. A script
+  that does `serial.write(text); serial.end();` at 9600 baud sends all but the end
+  of its text.
+- **Why:** `furi_hal_serial_tx()` puts each byte into the UART's transmit register
+  as soon as that is free and returns after the last one, with that byte still in
+  the register and the one before still on the line
+  (`targets/f7/furi_hal/furi_hal_serial.c:745`). `furi_hal_serial_deinit()` switches
+  the UART off at once (`:694`); nothing between the two waits for the transmission
+  to be complete (`furi_hal_serial_tx_wait_complete()` is there for it, and the
+  JavaScript module's `end()` does not call it).
+- **How much it matters:** the window is two byte times, 2 ms at 9600 baud and
+  174 µs at 115200, where the time a script's interpreter takes between two calls
+  may cover it.
+- **To see it:** a script as above with a text of some length at 9600 baud, and
+  `./flipperemu uart wait` for its last word. `scripts/uart_check.py` says how many
+  bytes did not come.
+- **Seen on:** official 1.5.1, in the emulator (QEMU patch 0017 gives a UART's
+  transmission its time) and in its source. Not tried on a real Flipper.
+- **Log:** entry 175.
 
 ## Seen once, not explained
 

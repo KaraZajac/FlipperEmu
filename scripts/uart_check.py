@@ -69,6 +69,26 @@ print("once done");
 """
 
 
+# 964 bytes at 9600 baud: a second on the line.  (The wait before end():
+# the firmware's write is back when its last character is in the UART's
+# transmit register, with the one before still on the line, and end()
+# switches the UART off at once: without it the last two are cut off, here
+# as, by the firmware's source, on a Flipper.  FW-20 in docs/FIRMWARE_BUGS.md)
+PACE = """let serial = require("serial");
+serial.setup("lpuart", 9600);
+serial.write("go\\n");
+delay(500);
+let line = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde\\n";
+for (let i = 0; i < 15; i++) {
+    serial.write(line);
+}
+serial.write("end\\n");
+delay(WAIT);
+serial.end();
+print("pace done");
+"""
+
+
 def fe(b, *args, timeout=600):
     """A launcher command: (exit status, what it printed, what it said on
     stderr, the seconds it took)"""
@@ -537,6 +557,59 @@ def usart_checks(b):
           between[1] and b"[I][" in between[0], between[0][-400:])
 
 
+def pace_checks(b):
+    """What the firmware sends is on the line for as long as the baud rate
+    says: read from the port's socket here, each piece with its time"""
+    js = b.dir / "pace.js"
+
+    def run(wait):
+        """The script, with so many ms between its last write and end():
+        (what came from the port, each piece's time, the CLI's words)"""
+        js.write_text(PACE.replace("WAIT", str(wait)))
+        fe(b, "push", js, "/ext")
+        data, stamps = b"", []
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            s.connect(str(b.dir / "lpuart.sock"))
+            s.settimeout(4)
+            p = script(b, "/ext/pace.js")
+            while b"end\n" not in data:
+                piece = s.recv(4096)
+                if not piece:
+                    break
+                data += piece
+                stamps.append((time.monotonic(), len(data)))
+        except OSError:
+            pass                        # (no more comes: the end was cut off)
+        finally:
+            s.close()
+        said = ended(p)
+        fe(b, "rm", "/ext/pace.js")
+        return data, stamps, said
+
+    data, stamps, said = run(100)
+    start = data.find(b"go\n") + 3
+    lines = (b"0123456789abcdef" * 4)[:63] + b"\n"
+    first = next((t for t, n in stamps if n > start), 0)
+    took = stamps[-1][0] - first if stamps else 0
+    want = (len(data) - start - 1) * 10 / 9600
+    check("what the firmware sends is on the line at its baud rate: a script "
+          f"writes {len(data) - start} bytes at 9600 baud (15 lines of 64 and "
+          f"an end), and the last comes {took:.2f} s after the first, as the "
+          f"line carries them ({want:.2f} s); none is lost",
+          start == 3 and data[start:] == lines * 15 + b"end\n"
+          and abs(took - want) < 0.2 * want and "pace done" in said,
+          f"{len(data)} bytes, {took:.3f} s for {want:.3f} s\n{data[:80]!r}\n{said}")
+    # the firmware's own: end() right after the last write
+    cut, _, _ = run(0)
+    lost = len(lines * 15 + b"end\n") + 3 - len(cut)
+    print(f"  (with no wait between the script's last write and its end(), "
+          f"{lost} of the last characters did not come: the firmware "
+          "switches the UART off with them still in it)" if lost > 0 else
+          "  (with no wait between the script's last write and its end(), "
+          "all of it came)")
+
+
 def speed_checks(b):
     """The port's speed: what is sent comes in at the app's baud rate"""
     text = ECHO.read_text()
@@ -787,6 +860,7 @@ def main():
                     turn(b, "after reset", "the script after a reset: ready, "
                                            "answered, closed")
                 usart_checks(b)
+                pace_checks(b)
                 speed_checks(b)
                 bridge_checks(b)
                 other_checks(b)
