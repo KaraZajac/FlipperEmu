@@ -1042,6 +1042,25 @@ counts in records, the newest first, as a card does: the firmware asks for as ma
 records as a record has bytes, gets a boundary error from a card with fewer, and its
 dump has no contents for that file.
 
+**ISO 7816-4** on ISO14443-4 (`app iso7816`) is a card of five kinds of record:
+an application (its name, and the FCI that SELECT answers with), a file (its ID and
+its bytes), a record (its SFI, its number, its bytes), a data object (its tag, what
+GET DATA answers), and an answer as it is (how a command begins, and the whole
+answer with its status). The records after an application's are that
+application's, up to the next; those before the first are the card's own, and are
+looked in when the selected application has none that fits. `iso_command()` parses
+the APDU (with or without Lc and Le), looks for an answer as it is, and then does
+SELECT by name (also by a name's beginning) or by a file's ID, READ BINARY and
+UPDATE BINARY on the selected file, READ RECORD and GET DATA; anything else is
+6D00. A Type 4 tag is the NDEF application (D2760000850101) with the capability
+container (E103) and the NDEF file (E104: the message's length, then the message).
+An EMV card is the payment directory, the application, an answer as it is for GET
+PROCESSING OPTIONS (which says where the records are, whatever the terminal sent),
+the records and the data objects. `fe_nfc.py` makes both from a firmware's file:
+an EMV file has the card's fields and not its bytes, so the TLVs are made new (the
+FCI, the record with PAN, dates, codes and name), which is why the firmware's
+second reading is the first's file again.
+
 **ISO14443B** has no anticollision in bits: REQB or WUPB (0x05, an AFI, PARAM) is
 answered by the ATQB (0x50, the PUPI, four bytes of application data, three of
 protocol info), ATTRIB (0x1D, the PUPI, four parameters with the CID) selects the

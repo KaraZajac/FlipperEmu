@@ -4897,6 +4897,51 @@ big lock, entry 92).
       Security level 3 itself (AES, a session, a MAC on each block) is not
       in the card model.
 
+158. **Cards of ISO 7816-4: Type 4 tags and EMV.**
+    - Which firmware reads what, from the strings in each package: a
+      Type 4 tag all but the official 1.5.1 (the dev build too), EMV
+      Momentum, Unleashed and RogueMaster. Their readers' sources are
+      public (Momentum's `type_4_tag`, Unleashed's `emv`); what they send
+      is plain ISO 7816-4. So the card model got that, once, and the two
+      kinds of card are data: applications, files, records, data objects,
+      and "an answer as it is" for EMV's GET PROCESSING OPTIONS.
+    - A Type 4 tag's file has the NDEF message and nothing of the card
+      around it; the capability container is made new (MLe and MLc 255,
+      the NDEF file E104, its size the message's or 254). The firmware
+      reads 246 bytes at a time by that: the longest frames a card has
+      sent here. A message of 910 bytes came back the same at once, and
+      is the check's.
+    - An EMV file has fields, not bytes: PAN, AID, the names, the dates,
+      country and currency (as numbers, low byte first), the PIN's tries.
+      The TLVs are made new from them: the directory's FCI with the AID,
+      the application's FCI with label, name and a PDOL, the answer to GPO
+      (AIP, an AFL of one record), record 1 of SFI 1, GET DATA 9F17. The
+      firmware cuts the holder's name at its first space, so the made-up
+      name has none.
+    - Momentum's shell: `scanner` with either card, and the firmware is
+      gone: "NULL pointer dereference", a MemManage fault at 0x080010a2
+      (a read of address 0) called from 0x08001162, six times in six
+      tries, and the shell's banner where the answer should be. Unleashed's
+      and the dev build's shells say "Protocols detected: Type 4 Tag" to
+      the same card. Momentum's NFC app reads both cards. (mntm-012; no
+      symbols here to say more than where. The fourth firmware bug of this
+      list of cards.)
+    - So the check reads these two through the NFC app, as a person
+      would: Read, More, Save, and the name as it is offered (the name
+      screen comes with "save" selected). When the read is done is not
+      seen on the screen, which stands still while reading too; the
+      reader's field is: on, then off for a while (`status --json`,
+      nfc.radio). After a save the app is in its file browser and hears no
+      request to close: Back first. A firmware whose app does not know
+      the kind saves it as ISO14443-4A, which is said and not counted.
+    - The commands one by one by the shell's `apdu`, on all five, known
+      kind or not: select by name and by ID, read, write and read back,
+      the statuses for what is not there.
+    - The card's saved state: version 4 (which application and file are
+      selected).
+    - Checks: nfc_check 23 on the official 1.5.1, 24 on the dev build, 25
+      on Momentum, Unleashed and RogueMaster.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

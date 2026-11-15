@@ -1274,8 +1274,8 @@ static int st25_card_pre_load(void *opaque)
 
 static const VMStateDescription vmstate_st25_card = {
     .name = "st25r3916/card",
-    .version_id = 3,                    /* (the card's: ISO14443B, ST25TB) */
-    .minimum_version_id = 3,
+    .version_id = 4,                    /* (the card's: ISO 7816-4) */
+    .minimum_version_id = 4,
     .needed = st25_card_needed,
     .pre_load = st25_card_pre_load,
     .fields = (const VMStateField[]) {

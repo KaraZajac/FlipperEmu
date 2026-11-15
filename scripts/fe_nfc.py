@@ -18,6 +18,8 @@ holds in its field (see qemu/hw/arm/flipper/nfc_card.c):
     fe_nfc.py --ulc 04A1B2C3D4E5F6          -> a MIFARE Ultralight C, its pages
                                                from 16 on behind its key
     fe_nfc.py --mfplus 04C2D3E4F5A6B7       -> a MIFARE Plus EV1 2K (SL3)
+    fe_nfc.py --t4t 04D1E2F3A4B5C6          -> a Type 4 tag with an NDEF URL
+    fe_nfc.py --emv 04E1F2A3B4C5D6          -> an EMV card with a test number
     fe_nfc.py --iso14443b 1A2B3C4D          -> an ISO14443-4B card with that PUPI
     fe_nfc.py --st25tb D0021C0123456789     -> an ST25TB04K with that UID
     fe_nfc.py --felica 012E4CD21A8B3C5F     -> a FeliCa Lite-S with that IDm
@@ -109,6 +111,85 @@ def describe_mfc(fields, atqa):
 REC_VERSION, REC_FREE, REC_APP, REC_FILE = 0x01, 0x02, 0x10, 0x20
 
 
+def tlv(tag, value):
+    """A BER-TLV data object (ISO 7816-4, EMV): a tag of one or two bytes"""
+    value = bytes(value)
+    head = tag.to_bytes(2 if tag > 0xFF else 1, "big")
+    size = bytes([len(value)]) if len(value) < 0x80 else \
+        bytes([0x81, len(value)]) if len(value) < 0x100 else \
+        bytes([0x82]) + len(value).to_bytes(2, "big")
+    return head + size + value
+
+
+REC_7816_DF, REC_7816_EF, REC_7816_RECORD, REC_7816_DATA, REC_7816_ANSWER = \
+    0x40, 0x41, 0x42, 0x43, 0x44
+T4T_NAME = bytes.fromhex("D2760000850101")      # the NDEF tag application
+PPSE = b"2PAY.SYS.DDF01"
+
+
+def iso7816_records(fields):
+    """An ISO 7816-4 card's records for nfc_card.c from what a firmware's
+    file has of it: a Type 4 tag's NDEF message; an EMV card's application"""
+    out = []
+    rec = lambda kind, data: out.append(
+        f"rec {kind:02x} {bytes(data).hex(' ')}".rstrip())
+    if fields.get("Device type") == "Type 4 Tag":
+        # an application of two files: the capability container, and the
+        # NDEF file with the message's length before it
+        data = b"".join(bytes.fromhex(v) for k, v in re.findall(
+            r"^(NDEF Data): (.*)$", fields.text, re.M))
+        size = int(fields.get("NDEF Data Size", "0"))
+        if len(data) != size:
+            raise ValueError(f"NDEF Data Size is {size}, and {len(data)} "
+                             "bytes of NDEF Data are there")
+        room = max(254, size)                   # what the file takes
+        cc = bytes.fromhex("000F2000FF00FF0406E104") + \
+            (room + 2).to_bytes(2, "big") + bytes(2)
+        rec(REC_7816_DF, bytes([len(T4T_NAME)]) + T4T_NAME)
+        rec(REC_7816_EF, bytes.fromhex("E103") + cc)
+        rec(REC_7816_EF, bytes.fromhex("E104") + size.to_bytes(2, "big") +
+            data.ljust(room, bytes(1)))
+        return out
+    # EMV: the payment system's directory names the application; the
+    # application's records have what the firmware keeps of the card
+    aid = hexbytes(fields.get("AID", ""))
+    if not aid:
+        raise ValueError("an EMV file has its AID")
+    label = fields.get("Application label", "").encode()
+    name = fields.get("Application name", "").encode()
+    entry = tlv(0x4F, aid) + (tlv(0x50, label) if label else b"") + \
+        tlv(0x87, b"\x01")
+    rec(REC_7816_DF, bytes([len(PPSE)]) + PPSE + tlv(0x6F, tlv(0x84, PPSE) + tlv(
+        0xA5, tlv(0xBF0C, tlv(0x61, entry)))))
+    # (a PDOL: the terminal's qualifiers, the amount, a random number)
+    pdol = bytes.fromhex("9F66049F02069F3704")
+    rec(REC_7816_DF, bytes([len(aid)]) + aid + tlv(0x6F, tlv(0x84, aid) + tlv(
+        0xA5, (tlv(0x50, label) if label else b"") +
+        (tlv(0x9F12, name) if name else b"") + tlv(0x9F38, pdol))))
+    aip = hexbytes(fields.get("Application interchange profile", "00 00"))
+    rec(REC_7816_ANSWER, bytes([2, 0x80, 0xA8]) + tlv(0x77, tlv(0x82, aip) + tlv(
+        0x94, bytes.fromhex("08010100"))) + b"\x90\x00")
+    one = lambda key: hexbytes(fields.get(key, "00"))[:1]
+    record = tlv(0x5A, hexbytes(fields.get("PAN", ""))) + tlv(
+        0x5F24, one("Expiration year") + one("Expiration month") +
+        one("Expiration day"))
+    if any(one(f"Effective {part}")[0] for part in ("year", "month", "day")):
+        record += tlv(0x5F25, one("Effective year") + one("Effective month") +
+                      one("Effective day"))
+    # (the firmware keeps the two codes as numbers, low byte first)
+    for tag, key in ((0x5F28, "Country code"), (0x9F42, "Currency code")):
+        code = hexbytes(fields.get(key, "00 00"))
+        if any(code):
+            record += tlv(tag, code[::-1])
+    if fields.get("Cardholder name"):
+        record += tlv(0x5F20, fields["Cardholder name"].encode())
+    rec(REC_7816_RECORD, bytes([1, 1]) + tlv(0x70, record))
+    tries = int(fields.get("PIN try counter", "255"))
+    if tries != 255:
+        rec(REC_7816_DATA, bytes.fromhex("9F17") + tlv(0x9F17, bytes([tries])))
+    return out
+
+
 def describe_iso4(fields, atqa, desfire, plus=False):
     """An ISO14443-4A card; a MIFARE DESFire's tables as records for
     nfc_card.c: what its commands answer, taken from the dump.  A MIFARE
@@ -129,6 +210,9 @@ def describe_iso4(fields, atqa, desfire, plus=False):
         out.append(f"ats {bytes([len(ats) + 1]).hex()} {ats.hex(' ')}".rstrip())
     elif fields.get("ATS"):
         out.append(f"ats {hexbytes(fields['ATS']).hex(' ')}")
+    if fields.get("Device type") in ("Type 4 Tag", "EMV"):
+        out[0] = f"# {fields['Device type']}"
+        return "\n".join(out + ["app iso7816"] + iso7816_records(fields)) + "\n"
     if plus:
         out.append("app mfplus")
         version = hexbytes(fields.get("PICC Version", ""))
@@ -457,6 +541,42 @@ def describe_iso15693(fields, slix):
     return "\n".join(out) + "\n"
 
 
+def iso4_head(kind, uid):
+    """The lines of an ISO14443-4A card's file that are before its own"""
+    if len(uid) != 7:
+        raise ValueError("this card's UID is 7 bytes")
+    return ["Filetype: Flipper NFC device", "Version: 4", f"Device type: {kind}",
+            f"UID: {bytes(uid).hex(' ').upper()}", "ATQA: 03 44", "SAK: 20",
+            "T0: 75", "TA(1): 77", "TB(1): 81", "TC(1): 02", "T1...Tk: 80"]
+
+
+def sample_t4t(uid, url="https://flipperzero.one", text=None):
+    """A Type 4 tag as a Flipper .nfc file's text (the format of the
+    firmwares that read one), made up: an NDEF message with a URL, or with
+    a text of any length"""
+    message = ndef_uri(url)[2:-1]               # (without Type 2's TLV)
+    if text is not None:                        # (a record that is not short)
+        payload = b"\x02en" + text.encode()
+        message = bytes([0xC1, 0x01]) + len(payload).to_bytes(4, "big") + \
+            b"T" + payload
+    up = lambda b: bytes(b).hex(" ").upper()
+    return "\n".join(iso4_head("Type 4 Tag", uid) + [f"NDEF Data Size: {len(message)}"] + [
+        f"NDEF Data: {up(message[i:i + 16])}" for i in range(0, len(message), 16)]) + "\n"
+
+
+def sample_emv(uid):
+    """An EMV card as a Flipper .nfc file's text (the format of the
+    firmwares that read one), made up: a test number, nobody's card"""
+    return "\n".join(iso4_head("EMV", uid) + [
+        "Cardholder name: FLIPPEREMU/TEST", "Application name: Test Credit",
+        "Application label: VISA CREDIT", "PAN length: 8",
+        "PAN: 41 11 11 11 11 11 11 11", "AID length: 7",
+        "AID: A0 00 00 00 03 10 10", "Application interchange profile: 20 00",
+        "Country code: 40 08", "Currency code: 40 08", "Expiration year: 30",
+        "Expiration month: 12", "Expiration day: 31", "Effective year: 25",
+        "Effective month: 01", "Effective day: 01", "PIN try counter: 3"]) + "\n"
+
+
 def sample_mfplus(uid):
     """A MIFARE Plus EV1 2K in security level 3 as a Flipper .nfc file's
     text, made up (what the firmware reads of one: its version's first
@@ -635,7 +755,7 @@ def describe(fields):
     if dev in ("ISO15693-3", "SLIX"):
         return describe_iso15693(fields, dev == "SLIX")
     if dev in ("Mifare DESFire", "Mifare Plus", "ISO14443-4A",
-               "ISO14443-4A (Unknown)"):
+               "ISO14443-4A (Unknown)", "Type 4 Tag", "EMV"):
         atqa = hexbytes(fields["ATQA"])
         return describe_iso4(fields, atqa[::-1] if version >
                              LSB_ATQA_FORMAT_VERSION else atqa,
@@ -644,7 +764,7 @@ def describe(fields):
     if dev not in T2_TYPES and kind not in T2_TYPES:
         raise ValueError(f"device type {dev!r} is not supported yet "
                          "(NTAG/Ultralight, MIFARE Classic, MIFARE DESFire, "
-                         "MIFARE Plus, "
+                         "MIFARE Plus, Type 4 Tag, EMV, "
                          "ISO14443-4A, ISO14443-3B and -4B, ST25TB, FeliCa "
                          "Lite-S, ISO15693-3 and SLIX are)")
     uid = hexbytes(fields["UID"])
@@ -834,7 +954,9 @@ def nfc_file(desc):
 
 
 # cards that are made up for a UID: (what makes the .nfc text, in words)
-SAMPLES = {"mfplus": (sample_mfplus, "a MIFARE Plus EV1 2K, SL3 (made up)"),
+SAMPLES = {"t4t": (sample_t4t, "a Type 4 tag with a URL (made up)"),
+           "emv": (sample_emv, "an EMV card (made up: a test number)"),
+           "mfplus": (sample_mfplus, "a MIFARE Plus EV1 2K, SL3 (made up)"),
            "desfire": (sample_desfire, "a MIFARE DESFire EV1 (two "
                        "applications, made up)"),
            "ulc": (sample_ulc, "a MIFARE Ultralight C (made up; its key "

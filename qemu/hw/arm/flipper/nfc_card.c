@@ -60,7 +60,8 @@
  * or, for MIFARE Classic, "type mfc" and the blocks in mem (16 bytes each);
  * or "type iso4" with
  *   ats 06 75 77 81 02 80   app desfire   (or mfplus: MIFARE Plus, with
- *                                          its version in a record 01)
+ *                                          its version in a record 01; or
+ *                                          iso7816: REC_7816_* below)
  *   rec 01 <28 bytes>       (a record of the application's tables: a type
  *                            and its bytes, see REC_* below; may repeat)
  * or "type felica" with uid (the IDm), pmm, and in mem 18 bytes a block
@@ -95,7 +96,7 @@ enum { ST_OFF, ST_IDLE, ST_READY, ST_ACTIVE, ST_HALT };
 enum { KIND_T2 = 1, KIND_MFC, KIND_ISO4, KIND_FELICA, KIND_V, KIND_B,
        KIND_ST25TB };
 enum { MFC_NONE, MFC_AUTH, MFC_ON };    /* Crypto1 session */
-enum { APP_NONE, APP_DESFIRE, APP_MFPLUS };     /* what runs on ISO14443-4 */
+enum { APP_NONE, APP_DESFIRE, APP_MFPLUS, APP_7816 };   /* on ISO14443-4 */
 /* what a DESFire ADDITIONAL FRAME goes on with */
 enum { DF_NONE, DF_VERSION_2, DF_VERSION_3, DF_DATA };
 
@@ -158,6 +159,9 @@ struct NfcCard {
     uint8_t df_aid[3];                  /* the application that is selected */
     int df_more;                        /* DF_*: what ADDITIONAL FRAME continues */
     int df_at, df_left;                 /* ... and where in `app`, how much */
+    /* ISO 7816-4: the application and the file that are selected (where
+     * their records' payloads are in `app`; -1: none) */
+    int iso_df, iso_ef;
     /* FeliCa: uid is the IDm, mem the blocks (18 bytes each) */
     uint8_t pmm[8];
     /* ISO14443B: uid is the PUPI; the application data and protocol info
@@ -943,6 +947,24 @@ static int rec_next(NfcCard *c, int *at, int type, int *len)
     return -1;
 }
 
+/* the record at *at: where its payload is (-1: none); *at is then behind it */
+static int rec_any(NfcCard *c, int *at, int *type, int *len)
+{
+    int n, here = *at + 3;
+
+    if (here > c->app_len) {
+        return -1;
+    }
+    n = c->app[*at + 1] | c->app[*at + 2] << 8;
+    if (here + n > c->app_len) {
+        return -1;
+    }
+    *type = c->app[*at];
+    *len = n;
+    *at = here + n;
+    return here;
+}
+
 static int df_app(NfcCard *c, const uint8_t aid[3], int *len)
 {
     int at = 0, here;
@@ -1172,10 +1194,202 @@ static int df_command(NfcCard *c, const uint8_t *in, int n, uint8_t *out)
 /* ------------------------------------------------------------ ISO14443-4 */
 
 /* A whole command to the application that runs on the card -> its answer */
+/* ---------------------------------------------------------- ISO 7816-4 */
+
+/*
+ * A card of ISO 7816-4's commands ("app iso7816"): applications that are
+ * selected by name, files of bytes, records, data objects.  A Type 4 tag
+ * (NDEF) is one: an application with two files.  An EMV card is one:
+ * applications with records, and an answer to GET PROCESSING OPTIONS.  The
+ * records (in app[]), each of an application after its own, and those
+ * before the first application the card's own:
+ */
+#define REC_7816_DF     0x40    /* a name's length, the name, what SELECT
+                                 * answers with (the FCI) */
+#define REC_7816_EF     0x41    /* a file's ID (2 bytes), its bytes */
+#define REC_7816_RECORD 0x42    /* a record's SFI, its number, its bytes */
+#define REC_7816_DATA   0x43    /* a tag (2 bytes), what GET DATA answers */
+#define REC_7816_ANSWER 0x44    /* how a command begins (a length before),
+                                 * the whole answer to it with its status */
+#define ISO_LE_MAX      251     /* (a frame of 256 with PCB, status, CRC) */
+
+/* the records of the application at `df` (where its record's payload is;
+ * < 0: the card's own, before the first application) */
+static void iso_span(NfcCard *c, int df, int *from, int *to)
+{
+    int at = 0, type, len, here;
+    bool inside = df < 0;
+
+    *from = 0;
+    while ((here = rec_any(c, &at, &type, &len)) >= 0) {
+        if (type != REC_7816_DF) {
+            continue;
+        }
+        if (inside) {
+            *to = here - 3;
+            return;
+        }
+        if (here == df) {
+            inside = true;
+            *from = at;
+        }
+    }
+    *to = inside ? at : 0;
+}
+
+/* a record of a type whose first bytes are `key`, of the application that
+ * is selected or else of the card: where its payload is (-1: none) */
+static int iso_find(NfcCard *c, int type, const uint8_t *key, int klen,
+                    int *len)
+{
+    for (int pass = c->iso_df >= 0 ? 0 : 1; pass < 2; pass++) {
+        int from, to, here, kind;
+
+        iso_span(c, pass ? -1 : c->iso_df, &from, &to);
+        while (from < to && (here = rec_any(c, &from, &kind, len)) >= 0) {
+            if (kind == type && *len >= klen && !memcmp(&c->app[here], key,
+                                                         klen)) {
+                return here;
+            }
+        }
+    }
+    return -1;
+}
+
+static int iso_sw(uint8_t *out, int n, uint16_t sw)
+{
+    out[n] = sw >> 8;
+    out[n + 1] = sw & 0xFF;
+    return n + 2;
+}
+
+static int iso_command(NfcCard *c, const uint8_t *in, int n, uint8_t *out)
+{
+    int lc = 0, le = -1, len, here, at = 0, type;
+    const uint8_t *data = in + 5;
+
+    if (n < 4) {
+        return iso_sw(out, 0, 0x6700);
+    }
+    if (n == 5) {
+        le = in[4];
+    } else if (n > 5) {
+        lc = in[4];
+        if (n == 5 + lc + 1) {
+            le = in[n - 1];
+        } else if (n != 5 + lc) {
+            return iso_sw(out, 0, 0x6700);      /* a wrong length */
+        }
+    }
+    /* an answer that is the card's to give as it is (EMV's GET PROCESSING
+     * OPTIONS, whose answer does not depend on what the terminal says) */
+    for (int pass = c->iso_df >= 0 ? 0 : 1; pass < 2; pass++) {
+        int from, to;
+
+        iso_span(c, pass ? -1 : c->iso_df, &from, &to);
+        while (from < to && (here = rec_any(c, &from, &type, &len)) >= 0) {
+            int plen = len >= 1 ? c->app[here] : 0;
+
+            if (type == REC_7816_ANSWER && plen >= 1 && plen < len &&
+                plen <= n && !memcmp(&c->app[here + 1], in, plen) &&
+                len - 1 - plen <= ISO_LE_MAX + 2) {
+                memcpy(out, &c->app[here + 1 + plen], len - 1 - plen);
+                return len - 1 - plen;
+            }
+        }
+    }
+    switch (in[1]) {
+    case 0xA4:                          /* SELECT */
+        if (in[2] == 0x04) {            /* an application, by its name or
+                                         * by how the name begins */
+            while ((here = rec_any(c, &at, &type, &len)) >= 0) {
+                int nlen = len >= 1 ? c->app[here] : 0;
+
+                if (type == REC_7816_DF && lc >= 1 && nlen >= lc &&
+                    nlen < len && !memcmp(&c->app[here + 1], data, lc)) {
+                    c->iso_df = here;
+                    c->iso_ef = -1;
+                    len -= 1 + nlen;
+                    if ((in[3] & 0x0C) == 0x0C || len > ISO_LE_MAX) {
+                        len = 0;        /* no answer's data is asked for */
+                    }
+                    memcpy(out, &c->app[here + 1 + nlen], len);
+                    return iso_sw(out, len, 0x9000);
+                }
+            }
+            return iso_sw(out, 0, 0x6A82);      /* no such file */
+        }
+        if ((in[2] == 0x00 || in[2] == 0x02) && lc == 2) {  /* a file */
+            if (data[0] == 0x3F && data[1] == 0x00) {       /* the card */
+                c->iso_df = c->iso_ef = -1;
+                return iso_sw(out, 0, 0x9000);
+            }
+            here = iso_find(c, REC_7816_EF, data, 2, &len);
+            if (here < 0) {
+                return iso_sw(out, 0, 0x6A82);
+            }
+            c->iso_ef = here;
+            return iso_sw(out, 0, 0x9000);
+        }
+        return iso_sw(out, 0, 0x6A86);          /* P1, P2: not so */
+    case 0xB0:                          /* READ BINARY */
+    case 0xD6:                          /* UPDATE BINARY */
+        at = 0;
+        if (c->iso_ef < 0 || (in[2] & 0x80) ||
+            rec_any(c, &(int){ c->iso_ef - 3 }, &type, &len) != c->iso_ef ||
+            type != REC_7816_EF || len < 2) {
+            return iso_sw(out, 0, 0x6986);      /* no file is selected */
+        }
+        here = c->iso_ef + 2;
+        len -= 2;
+        at = in[2] << 8 | in[3];
+        if (in[1] == 0xD6) {
+            if (lc < 1 || at + lc > len) {
+                return iso_sw(out, 0, 0x6B00);  /* beyond the file */
+            }
+            memcpy(&c->app[here + at], data, lc);
+            return iso_sw(out, 0, 0x9000);
+        }
+        if (n != 5 || at >= len) {
+            return iso_sw(out, 0, n != 5 ? 0x6700 : 0x6B00);
+        }
+        le = MIN(MIN(le ? le : 256, ISO_LE_MAX), len - at);
+        memcpy(out, &c->app[here + at], le);
+        return iso_sw(out, le, 0x9000);
+    case 0xB2: {                        /* READ RECORD: P1 its number, the
+                                         * SFI in P2's high five bits */
+        uint8_t key[2] = { in[3] >> 3, in[2] };
+
+        if ((in[3] & 0x07) != 0x04) {
+            return iso_sw(out, 0, 0x6A86);
+        }
+        here = iso_find(c, REC_7816_RECORD, key, 2, &len);
+        if (here < 0 || len - 2 > ISO_LE_MAX) {
+            /* no such record; no such file, when it has none at all */
+            return iso_sw(out, 0, iso_find(c, REC_7816_RECORD, key, 1, &len)
+                          < 0 ? 0x6A82 : 0x6A83);
+        }
+        memcpy(out, &c->app[here + 2], len - 2);
+        return iso_sw(out, len - 2, 0x9000);
+    }
+    case 0xCA:                          /* GET DATA: a tag in P1 and P2 */
+        here = iso_find(c, REC_7816_DATA, &in[2], 2, &len);
+        if (here < 0 || len - 2 > ISO_LE_MAX) {
+            return iso_sw(out, 0, 0x6A88);      /* no such data */
+        }
+        memcpy(out, &c->app[here + 2], len - 2);
+        return iso_sw(out, len - 2, 0x9000);
+    }
+    return iso_sw(out, 0, 0x6D00);              /* no such instruction */
+}
+
 static int app_command(NfcCard *c, const uint8_t *in, int n, uint8_t *out)
 {
     if (c->app_kind == APP_DESFIRE && n >= 1) {
         return df_command(c, in, n, out);
+    }
+    if (c->app_kind == APP_7816) {
+        return iso_command(c, in, n, out);
     }
     if (c->app_kind == APP_MFPLUS && n >= 1) {
         /* MIFARE Plus: of its commands GetVersion (EV1 and EV2 have it:
@@ -1293,6 +1507,7 @@ static void card_reset(NfcCard *c, int state)
     c->dep_in_len = 0;
     c->df_more = DF_NONE;
     memset(c->df_aid, 0, 3);
+    c->iso_df = c->iso_ef = -1;
     c->v_quiet = c->v_selected = false; /* (a field that went and came) */
 }
 
@@ -1446,24 +1661,6 @@ static int felica_block(NfcCard *c, int number)
 #define REC_FS_AREA     0x31    /* its code, its end, its key's version */
 #define REC_FS_BLOCK    0x32    /* its service's code, its number, 16 bytes */
 #define REC_FS_SERVICE  0x33    /* its code, its key's version */
-
-/* the record at *at: where its payload is (-1: none); *at is then behind it */
-static int rec_any(NfcCard *c, int *at, int *type, int *len)
-{
-    int n, here = *at + 3;
-
-    if (here > c->app_len) {
-        return -1;
-    }
-    n = c->app[*at + 1] | c->app[*at + 2] << 8;
-    if (here + n > c->app_len) {
-        return -1;
-    }
-    *type = c->app[*at];
-    *len = n;
-    *at = here + n;
-    return here;
-}
 
 /* System `sys`: where its code is (-1: no such system), and its records,
  * from *from up to *to.  sys < 0: none is looked for; -> how many there are */
@@ -2319,6 +2516,8 @@ NfcCard *nfc_card_new(const char *desc, Error **errp)
                 c->app_kind = APP_DESFIRE;
             } else if (!strcmp(val, "mfplus")) {
                 c->app_kind = APP_MFPLUS;
+            } else if (!strcmp(val, "iso7816")) {
+                c->app_kind = APP_7816;
             } else if (!strcmp(val, "none")) {
                 c->app_kind = APP_NONE;
             } else {
@@ -2543,7 +2742,9 @@ static int card_post_load(void *opaque, int version_id)
         c->mfc < MFC_NONE || c->mfc > MFC_ON ||
         c->ats_len < 0 || c->ats_len > sizeof(c->ats) ||
         c->dep_in_len < 0 || c->dep_in_len > sizeof(c->dep_in) ||
-        c->app_kind < APP_NONE || c->app_kind > APP_MFPLUS ||
+        c->app_kind < APP_NONE || c->app_kind > APP_7816 ||
+        c->iso_df < -1 || c->iso_df > c->app_len ||
+        c->iso_ef < -1 || c->iso_ef > c->app_len ||
         c->app_len < 0 || c->app_len > APP_MAX ||
         c->df_more < DF_NONE || c->df_more > DF_DATA ||
         c->df_at < 0 || c->df_left < 0 || c->df_at > c->app_len ||
@@ -2558,8 +2759,8 @@ static int card_post_load(void *opaque, int version_id)
 
 const VMStateDescription vmstate_nfc_card = {
     .name = "nfc-card",
-    .version_id = 3,                    /* (3: ISO14443B, ST25TB) */
-    .minimum_version_id = 3,
+    .version_id = 4,                    /* (4: ISO 7816-4's selection) */
+    .minimum_version_id = 4,
     .post_load = card_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_INT32(kind, NfcCard),
@@ -2600,6 +2801,8 @@ const VMStateDescription vmstate_nfc_card = {
         VMSTATE_INT32(df_more, NfcCard),
         VMSTATE_INT32(df_at, NfcCard),
         VMSTATE_INT32(df_left, NfcCard),
+        VMSTATE_INT32(iso_df, NfcCard),
+        VMSTATE_INT32(iso_ef, NfcCard),
         VMSTATE_UINT8_ARRAY(pmm, NfcCard, 8),
         VMSTATE_UINT8(v_dsfid, NfcCard),
         VMSTATE_UINT8(v_afi, NfcCard),

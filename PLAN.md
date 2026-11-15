@@ -214,10 +214,13 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       from a dump of either file format; Search Service Code, Request Service, reading
       and writing without encryption (BRINGUP_LOG 157). MIFARE Plus ☑ (2026-11-15):
       GetVersion (EV1, EV2) or the ATS (S, X, SE), which is all the firmware reads of
-      one. `scripts/nfc_check.py` 21 on five.
-      Next: what else
-      runs on ISO14443-4 (EMV, Type 4 tags: Momentum reads them), reading with keys
-      (DESFire, FeliCa's MAC); decode transparent mode (Classic emulation); a
+      one. ISO 7816-4 ☑ (2026-11-15): applications, files, records, data objects;
+      Type 4 tags and EMV cards from the files of the firmwares that read them, read
+      and saved by their NFC apps. `scripts/nfc_check.py` 23 to 25 on five
+      (BRINGUP_LOG 158).
+      Next: reading with keys
+      (DESFire, FeliCa's MAC, MIFARE Plus SL3); decode transparent mode (Classic
+      emulation); a
       virtual reader for the cards beyond ISO14443A
 - ☑ 125 kHz RFID read: COMP1 → TIM2 TI4 capture, a virtual tag in the reader's field
       (ASK/FSK/PSK, field noise), encoders ported from the firmware (`fe_rfid.py`, checked

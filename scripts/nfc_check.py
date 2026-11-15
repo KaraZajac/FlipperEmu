@@ -2,8 +2,8 @@
 # Copyright (c) 2026, Kara Zajac
 # SPDX-License-Identifier: BSD-3-Clause
 """Check the cards beyond NTAG and MIFARE Classic: MIFARE Ultralight C,
-ISO14443-4A, MIFARE DESFire, MIFARE Plus, ISO14443B, ST25TB, FeliCa Lite-S and
-Standard, ISO15693 with NXP's SLIX.
+ISO14443-4A, MIFARE DESFire, MIFARE Plus, ISO 7816-4 (a Type 4 tag, an EMV
+card), ISO14443B, ST25TB, FeliCa Lite-S and Standard, ISO15693 with NXP's SLIX.
 
     scripts/nfc_check.py firmware/official-1.5.1/flipper-z-f7-update-1.5.1.tgz
 
@@ -24,6 +24,7 @@ Needs the firmware's NFC shell (1.4 and later); without it nothing is
 checked and the exit status is 77.  Exit status 0 = pass.
 """
 import argparse
+import json
 import os
 import pathlib
 import re
@@ -118,6 +119,72 @@ def read_card(b, work, name, words, card, protocol, but=(), may=()):
           code == 0 and f"Protocols detected: {protocol}".lower() in found.lower()
           and got and differ == sorted(but),
           f"{text}\n{found}\n{dumped}\n" + "\n".join(
+              f"{k}: {want.get(k)} | {got.get(k)}" for k in differ[:12]))
+
+
+def app_read(b, work, name, words, card, kind):
+    """A card file in the field, read and saved by the NFC app (Read, More,
+    Save, the name as it is offered), for the cards that a firmware's app
+    knows and its shell does not: the saved file is the card's.  A firmware
+    whose app does not know the kind saves it as something else: said, and
+    not counted."""
+    path = work / f"{name}.nfc"
+    path.write_text(card)
+    code, text = b.fe("nfc", path)
+    before = b.fe("ls", "/ext/nfc")[1]
+    b.fe("app", "NFC")
+    time.sleep(1.5)
+    b.fe("press", "ok")                         # Read
+    # until the reader is done: its field was on, and has been off a while
+    # (it goes off and on between the kinds of card that are tried)
+    start, seen, idle = time.time(), False, 0
+    while time.time() < start + 60 and idle < 5:
+        try:
+            text = b.fe("status", "--json")[1]
+            state = json.loads(text[text.index("{"):])["nfc"]["radio"]
+        except (ValueError, KeyError):
+            state = None
+        seen = seen or state not in ("idle", None)
+        idle = idle + 1 if state == "idle" and (seen or time.time() > start + 8) \
+            else 0
+        time.sleep(0.3)
+    time.sleep(1.0)
+    for key in ("right", "ok", "ok"):           # More, Save, save
+        b.fe("press", key)
+        time.sleep(1.5)
+    # (the app is in its file browser then, and hears no request to close
+    # there: out of it by its Back button first)
+    for _ in range(6):
+        b.fe("press", "back")
+        time.sleep(0.6)
+        b.fe("app", "--close")
+        if "no app runs" in b.fe("app")[1]:
+            break
+    new = [m for m in re.findall(r"^\s*\d+\s+(\S.*\.nfc)\s*$",
+                                 b.fe("ls", "/ext/nfc")[1], re.M)
+           if m not in before]
+    out = work / f"{name}-saved.nfc"
+    if new:
+        b.fe("pull", f"/ext/nfc/{new[0]}", out)
+        b.fe("rm", f"/ext/nfc/{new[0]}")
+    b.fe("nfc", "none")
+    want = fe_nfc.parse_nfc_text(card)
+    got = fe_nfc.parse_nfc_text(out.read_text()) if out.exists() else {}
+    if got and got.get("Device type") != kind:
+        print(f"  (this firmware's NFC app reads {words} as "
+              f"{got.get('Device type')!r}: it does not know the kind)")
+        return
+    differ = sorted(k for k in set(want) | set(got)
+                    if (want.get(k) or "").upper() != (got.get(k) or "").upper())
+    # (the lines of a key that is there more than once)
+    many = lambda s: re.findall(r"^NDEF Data: .*$", s, re.M)
+    saved = out.read_text().replace("\r", "") if out.exists() else ""
+    check(f"{words}: in the field, the NFC app reads it, and the file that "
+          f"it saves is the card's own: {len(want)} keys the same"
+          + (f", {len(many(card))} lines of NDEF data" if many(card) else ""),
+          code == 0 and got and not differ
+          and many(card) == many(saved),
+          f"{text}\n{new}\n" + "\n".join(
               f"{k}: {want.get(k)} | {got.get(k)}" for k in differ[:12]))
 
 
@@ -293,6 +360,56 @@ def desfire(b):
           and rx[6].strip() == data[59 * 3:] + " 91 00"
           and rx[7].strip() == "FA 00 00 00 91 00" and rx[8].strip() == "91 AE"
           and rx[9].strip() == "91 A0" and rx[10].strip() == "91 AE", text)
+
+
+def iso7816(b):
+    """ISO 7816-4's commands to the two cards that are made of them, whether
+    the firmware knows the kinds or not"""
+    answers = []
+    for card, uid, apdus in (
+            ("t4t", "04D1E2F3A4B5C6",
+             "00A4040C07D2760000850101 00A4000C02E103 00B000000F "
+             "00A4000C02E104 00B0000002 00D6000204AABBCCDD 00B0000206 "
+             "00A4000C02E105 00B0010010 0020000000"),
+            ("emv", "04E1F2A3B4C5D6",
+             "00A404000E325041592E5359532E444446303100 "
+             "00A4040007A000000003101000 80A8000002830000 00B2010C00 "
+             "00B2020C00 00B2011400 80CA9F1700 80CA9F3600")):
+        b.fe("nfc", card, uid)
+        sh = Shell(b)
+        try:
+            if "apdu" not in sh.commands:
+                print("  (this firmware's NFC shell has no `apdu`: ISO 7816's "
+                      "commands are not tried one by one)")
+                return
+            text = sh.ask(f"apdu -p 4a -d {apdus}")
+        finally:
+            sh.close()
+        answers.append(([r.strip() for r in re.findall(r"Rx: ([0-9A-F ]+)", text)],
+                        text))
+    b.fe("nfc", "none")
+    (tag, tag_text), (emv, emv_text) = answers
+    check("a Type 4 tag's commands (the shell's `apdu`): the NDEF "
+          "application selected by its name, the capability container and "
+          "the NDEF file selected and read, four bytes written and read "
+          "back; a file that is not there, a read beyond the file and an "
+          "instruction that is none, each with its status",
+          len(tag) == 10 and tag[0] == "90 00" and tag[1] == "90 00"
+          and tag[2] == "00 0F 20 00 FF 00 FF 04 06 E1 04 01 00 00 00 90 00"
+          and tag[3] == "90 00" and tag[4] == "00 14 90 00" and tag[5] == "90 00"
+          and tag[6] == "AA BB CC DD 04 66 90 00" and tag[7] == "6A 82"
+          and tag[8] == "6B 00" and tag[9] == "6D 00", tag_text)
+    check("an EMV card's commands: the payment directory and the "
+          "application selected by name, each with its FCI; GET PROCESSING "
+          "OPTIONS; a record read; a record and a file that are not there; "
+          "GET DATA of the PIN's tries, and of what the card has not",
+          len(emv) == 8 and emv[0].startswith("6F 30 84 0E 32 50 41 59")
+          and emv[0].endswith("90 00")
+          and emv[1].startswith("6F 32 84 07 A0 00 00 00 03 10 10")
+          and emv[2] == "77 0A 82 02 20 00 94 04 08 01 01 00 90 00"
+          and emv[3].startswith("70 32 5A 08 41 11 11 11 11 11 11 11 5F 24 03 30 12 31")
+          and emv[3].endswith("90 00") and emv[4] == "6A 83" and emv[5] == "6A 82"
+          and emv[6] == "9F 17 01 03 90 00" and emv[7] == "6A 88", emv_text)
 
 
 def iso15693(b):
@@ -530,7 +647,16 @@ def main():
                           fe_nfc.sample_slix(bytes.fromhex("E004010812345678")),
                           "Slix")
                 ulc(b, work)
+                # (900 bytes: read 246 at a time, the longest frames there are)
+                app_read(b, work, "t4t", "a Type 4 tag with an NDEF message of "
+                         "910 bytes",
+                         fe_nfc.sample_t4t(bytes.fromhex("04D1E2F3A4B5C6"), text=(
+                             "FlipperEmu's long NDEF text record. " * 25)[:900]),
+                         "Type 4 Tag")
+                app_read(b, work, "emv", "an EMV card",
+                         fe_nfc.sample_emv(bytes.fromhex("04E1F2A3B4C5D6")), "EMV")
                 desfire(b)
+                iso7816(b)
                 st25tb(b, work)
                 iso14443b(b, work)
                 felica(b)
