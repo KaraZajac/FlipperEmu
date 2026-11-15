@@ -210,17 +210,41 @@ FUS_GET_STATE reports an error.
   (`ble_glue_force_c2_mode()`). In the FUS it answers idle, an operation under way
   (0x10 install, 0x30 delete), or an error with its code. `FUS_FW_DELETE` and
   `FUS_FW_UPGRADE` (the address where CPU1 wrote the image) answer at once and take
-  their time (0.4 and 1.5 s of the machine's); each then restarts the whole MCU, for
-  which the updater waits. The install reads the image's footers: ST's signature
+  their time (0.4 and 1.5 s of the machine's). Then `FUS_GET_STATE` says idle, and
+  0.3 s later the FUS restarts the whole MCU: the updater waits for that on its "Core 2
+  busy" screen (`update_task_wait_for_restart()`, which crashes with "C2 timeout" if
+  it does not come), and old MoonOS's devices died with that on their screens. The
+  install reads the image's footers: ST's signature
   footer at its end (magic 0xD3A12C5E), the FUS footer before the signature (magic
   0x23372991) with the stack's version and its size in 4 KB sectors, as fbt's
   `coprobin.py` reads them; the flash is programmed in doublewords, so up to seven
   bytes after the image may not be erased. An image without them is "not found" or
   "corrupt" (`FUS_GET_STATE`'s error), and no restart: the updater stops. The model
-  runs a BLE Light stack of the image's version; the encrypted body is ST's business.
+  runs the image's kind of stack at its version; the encrypted body is ST's business.
   `FUS_START_WS` restarts the MCU into the stack. Each change moves the start of the
   secure area (`FLASH->SFR.SFSA`, in the option bytes too) to the stack's first page, or
   to the FUS's (0xF4) without one: the updater checks that its image fits below it.
+
+- **The stack's check of CPU1's buffers.** ST's stacks check that each buffer CPU1
+  gives them lies wholly in the SRAM that is not CPU2's (since 1.16.0, ST says). 1.20.0
+  hard-faults on one that does not, where 1.21.0 reports a "security attack" (its
+  release notes, BLE 190951: "Manage correctly the case where the buffers provided to
+  the CPU2 are not in the unsecure SRAM"). CPU2's hard fault writes AN5289's record at
+  SRAM2A_BASE (magic 0x1170FD0F, PC, LR, SP), over the start of CPU1's reference table,
+  and CPU2 then loops. The model (`wb55_c2_buffer_ok()`) checks the transport layer's
+  buffers at `SHCI_C2_BLE_Init` (the BLE and system command buffers, the command status
+  buffer, the event queues, an ACL buffer, the spare event buffers, the event pool and
+  the free queue: ST's customer saw the fault "as soon as we invoke SHCI_C2_BLE_Init")
+  and the NVM buffer at `SHCI_C2_Config` (2028 bytes); which ones the stack checks, and
+  when, ST does not say. On one in CPU2's part of SRAM2 it writes the record (PC: the
+  stack's first address, LR 0, SP the top of SRAM2b: the model's values), answers that
+  command not, and does nothing more until the MCU's reset (the IPCC model's
+  `c2_fault`; `ble` says `runs: hardfault` and why). The command's channel flag stays
+  set: official 1.5.1 spins in `HW_IPCC_SYS_SendCmd()` for 33 s and crashes
+  ("HW_IPCC_SYS_SendCmd timeout"), and its crash report reads CPU2's record ("core2:
+  hardfaulted", PC, LR, SP). The firmware's own look for the record, every 5 s and
+  before each command it sends ("ST(R) Copro(R) HardFault"), does not get to run while
+  that thread spins.
 
 The firmware's log with a stack: "C2 boot completed, mode: Stack", "Core2: Stack:
 1.20.0, branch 0, reltype 2, stacktype 3, flash 29 pages", "Radio stack started".
@@ -495,9 +519,9 @@ scatterload" with an unadapted linker script, which is the write case.
 QEMU patch 0015 stops the processor there (powered off, as PSCI does: no interrupt
 wakes it, a reset does) instead of ending the emulator, and the NVIC's `lockup`
 property says where and why; the launcher's `status` and `wait` report it as a halt
-of the firmware. The LCD is reset with the MCU here, where on a Flipper it keeps its
-last picture (its reset is a GPIO of CPU1's): a locked-up Flipper's screen is blank in
-the emulator.
+of the firmware. The board's chips are not reset with the MCU ([Resets and the OTA
+updater](#resets-and-the-ota-updater)), so a locked-up Flipper shows the screen and the
+lights that it had, as a Flipper does.
 
 ## USB (`stm32wb55_usb.c`)
 
@@ -630,15 +654,28 @@ reset hook, which does what silicon does around the core's reset:
    resets. The firmware starts its updater by copying it to SRAM1, remapping SRAM to 0
    and jumping, and the updater's final reset must boot the new flash. QEMU's M-profile
    CPU fetches SP/PC in the hold phase, before SYSCFG's own reset would undo the remap.
-2. Reset all devices, then re-apply the board's pin levels (buttons, card detect, MISO).
+2. Reset the devices, then re-apply the board's pin levels (buttons, card detect, MISO,
+   the LCD's RST). The board's chips are reset only by the power-on (the emulator's
+   start: one that is switched off exits) and by a saved state's load. A later reset is
+   the MCU's alone, as on a Flipper: the LP5562 keeps its lights and running programs,
+   the BQ25896 its settings, the CC1101 and the ST25R3916 what they were doing, until
+   the firmware's start resets each with its own command (the RESET register, REG_RST,
+   SRES, SET_DEFAULT; `flipper_board_keeps()`). The fuel gauge keeps its state always.
+   The LCD keeps its picture while its RST (PB0) floats: the official firmware gives
+   the pin a pull-up in `PWR_PUCRB` that survives the reset ("Explicit, surviving
+   reset, pulls") and drives it low itself early in its start
+   (`furi_hal_resources_init_early()`), until its display's init. So a restart blanks
+   the screen at once, and a firmware that dies before that, in its reset handler,
+   keeps its last picture. The PWR model keeps no pull over a reset; the board holds
+   PB0 high instead.
 3. **Re-send pin levels the devices missed**: QEMU's L4x5 GPIO reset clears IDR without
    telling anyone, which left the LCD's A0 line stuck high after warm resets.
 
 `./flipperemu run --update PKG` stages an update package on the SD card as qFlipper
 does, then sends `update install` over the USB CLI. The package's radio stage stays in:
 the updater finds the stack up to date, or has CPU2's FUS install it. The emulated
-stack is BLE Light, so a stage with another kind of stack is blanked (its updater would
-begin again for ever). A blanked stage keeps every manifest line, because the firmware
+stack is BLE Light, Full or Full extended, so a stage with another kind (BLE Basic, an
+HCI layer) is blanked (its updater would begin again for ever). A blanked stage keeps every manifest line, because the firmware
 reads the manifest's optional keys in order and stops at the first missing one.
 
 `./flipperemu update PKG` is for a device that runs, whose card image is the firmware's

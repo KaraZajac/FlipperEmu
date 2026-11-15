@@ -2689,7 +2689,7 @@ chip (a write's BusFault is imprecise, a read's precise; a DMA's transfer fails)
 `status` says where they begin and what CPU1 touched there:
 
 ```
-sram2    : CPU2's (the wireless stack's) from 0x20034800 and 0x2003ac00
+sram2    : CPU2's (the wireless stack's) from SRAM2a 0x20034800 and SRAM2b 0x2003ac00
 ```
 
 A firmware whose block shared with CPU2 does not fit CPU1's part fails as it would on a
@@ -2704,8 +2704,30 @@ firmware : it locked up at 0x080122c4: a fault it could not take (can't escalate
 ```
 
 That is how old MoonOS builds with the Full extended stack ended: the FUS installed it,
-and at the restart the device was dead. A firmware for Full extended moves its
-mailboxes to SRAM2b, as ST's `BLE_p2pServer_Ext` does.
+and at the restart the device was dead, the updater's "Core 2 busy" on its screen. The
+emulated one shows that too: a reset of the MCU (a restart, `reset`, the FUS's) is the
+STM32's alone, as on a Flipper, and the LCD, the LEDs, the charger and the radios keep
+what they had until the firmware's start resets each of them. A firmware for Full
+extended moves its mailboxes to SRAM2b, as ST's `BLE_p2pServer_Ext` does; it runs on
+`--radio-stack full-ext` with no bus error in CPU2's SRAM2 (whether it brings Bluetooth
+up on the type is its own: official 1.5.1 says "Unsupported radio stack").
+
+CPU2 has a rule of its own: each buffer the firmware gives it (the mailboxes' buffers
+at `SHCI_C2_BLE_Init`, the bonds' buffer at `SHCI_C2_Config`) has to lie wholly in the
+SRAM that is not CPU2's. ST's 1.20.0 stacks hard-fault on one that does not, and so
+does the emulated one: CPU2 answers nothing more, and leaves its record at the start of
+SRAM2a. The command that brought the buffer waits for an answer: official 1.5.1 spins
+in `HW_IPCC_SYS_SendCmd()` for 33 s, then crashes ("HW_IPCC_SYS_SendCmd timeout"), its
+report with CPU2's record (`core2: hardfaulted`, CPU2's PC), and starts again. With that
+buffer at every start, that is a restart every 35 s or so. (The firmware also looks
+for the record every 5 s, "ST(R) Copro(R) HardFault", which catches a fault while no
+command waits.) A layout that moves the mailboxes but leaves one buffer in CPU2's part
+gets this where the firmware never touches that buffer itself. `status` says it while
+it lasts:
+
+```
+bluetooth: the radio stack 1.20.0 hard-faulted: the BLE NVM buffer (SHCI_C2_Config) at 0x2003b000 to 0x2003b7eb reaches into the SRAM2 that it keeps for CPU2. CPU2 answers nothing more until a reset; its record at SRAM2A_BASE is in the firmware's crash report (core2: hardfaulted)
+```
 **An emulator built before this (2026-11-14) wants `scripts/setup_qemu.sh` once more**:
 QEMU patches 0014 (an imprecise BusFault) and 0015 (a Lockup that stops the processor
 instead of ending the emulator).

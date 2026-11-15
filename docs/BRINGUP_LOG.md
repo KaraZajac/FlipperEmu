@@ -4523,6 +4523,106 @@ big lock, entry 92).
       as before (setup_check 44, gui_check 79). Momentum's slideshow crash
       of entry 120 came once, in the first of its two update runs.
 
+151. **The board's chips over a reset of the MCU; the FUS's "Core 2 busy".**
+    A Flipper's reset (a restart, a crash's, the FUS's, NRST) is the
+    STM32's alone: the LCD, the LP5562, the BQ25896, the CC1101 and the
+    ST25R3916 keep what they have until the firmware's start resets each.
+    Here every reset was a power-on for them, so a Flipper that locked up
+    in its start showed a blank screen, where MoonOS's devices "died at
+    'Core 2 busy'".
+    - The machine's reset hook: its first reset is the power-on (an
+      emulator that is switched off exits, and on again is a new process);
+      a later cold one is the MCU's (`flipper_board_keeps()`), and those
+      four chips skip their reset, a transfer under way ending. A saved
+      state's load resets them all, and the state comes after it. The fuel
+      gauge kept its state already. Each has its own reset modelled, which
+      the firmware's start gives: the LP5562's RESET register, REG_RST,
+      SRES, SET_DEFAULT.
+    - The LCD's RST (PB0): QEMU's GPIO reset zeroes IDR, and the SoC's
+      resync after a reset (made for its A0 line) sent that 0 to the panel,
+      a reset. Official 1.5.1 gives PB0 a pull-up in PWR_PUCRB ("Explicit,
+      surviving reset, pulls") and drives it low itself early in its start
+      (`furi_hal_resources_init_early()`) until its display's init. So a
+      restart blanks the screen at once, and a firmware that dies in its
+      reset handler keeps its last picture. The PWR model keeps no pull
+      over a reset (not modelled); the board holds PB0 high instead.
+    - Tried: the official desktop paused, `reset`: the same picture, the
+      backlight at 255 and the red charging LED as before; `continue`, and
+      the firmware starts over that and is back on its desktop. An update
+      that installs Full extended: the lockup shows the updater's screen.
+    - That screen was "Installing radio FW", not "Core 2 busy": the FUS
+      restarted the MCU the moment an install (or a delete) was done, while
+      the updater still asked FUS_GET_STATE. The updater waits for "done"
+      (`ble_glue_fus_wait_operation()`) and then shows "Core 2 busy" until
+      the restart (`update_task_wait_for_restart()`, a "C2 timeout" crash
+      after 10 s). Now FUS_GET_STATE says idle for 300 ms of the machine's
+      time before the FUS's restart, and a locked-up Flipper's last stage
+      is RadioBusy at 70: "Core 2 busy", as on the devices.
+    - The checks for Full extended took the stock layout's lockup for the
+      only answer. Moon-Shell's step-2 build (MoonOS, its mailboxes in
+      SRAM2b) runs on Full extended with no bus error in CPU2's SRAM2, and
+      failed both (ble_check 29 of 30; update_check would wait 900 s).
+      Now a lockup with bus errors, or a run with none, each consistent;
+      ble_check says whether the firmware brings Bluetooth up on the type
+      (official 1.5.1's furi_hal_bt knows 3 and 1: "Unsupported radio
+      stack"); update_check wants the screen not blank after a lockup and
+      names the updater's last stage. Its crash checks show the crash's
+      text now, and a last one reads every run's log (a crash in its start
+      with another radio stack was read by none).
+    - Checks: ble_check 30, the smoke test and update_check 37 on the
+      five, every check on the official 1.5.1. Momentum's and RogueMaster's
+      update checks had one crash each on the first start after an update
+      in that regression (8 to 10 emulators at once), the slideshow crash
+      of entry 120 as far as can be told (the text was not kept); six
+      reruns of the two, every run's log read, had none.
+
+152. **CPU2's own hard fault: a buffer of CPU1's in CPU2's SRAM2.** ST's
+    stacks check that each buffer CPU1 gives them lies wholly in the SRAM
+    that is not CPU2's (since 1.16.0, ST says). 1.20.0 hard-faults on one
+    that does not; 1.21.0 reports a "security attack" instead (release
+    notes, BLE 190951: "Manage correctly the case where the buffers
+    provided to the CPU2 are not in the unsecure SRAM"; ST's community, on
+    the HCI stacks' ACL buffer, where the customer saw it "as soon as we
+    invoke SHCI_C2_BLE_Init"). Old Moon's research had found it.
+    - The model checks the transport layer's buffers at SHCI_C2_BLE_Init
+      (the BLE and system command buffers, the command status buffer, the
+      event queues, an ACL buffer, the spare event buffers, the event pool,
+      the free queue) and the NVM buffer at SHCI_C2_Config (2028 bytes);
+      which ones the stack checks, and when, ST does not say. On one that
+      reaches into CPU2's part it writes AN5289's record at SRAM2A_BASE
+      (magic 0x1170FD0F; PC the stack's first address, LR 0, SP the top of
+      SRAM2b: the model's values), over the start of CPU1's reference
+      table, answers that command not, and does nothing more until the
+      MCU's reset. `status`: "the radio stack 1.20.0 hard-faulted: the BLE
+      NVM buffer ... reaches into the SRAM2 that it keeps for CPU2".
+    - What official 1.5.1 does then is its own: the command's channel flag
+      stays set, and `HW_IPCC_SYS_SendCmd()` spins for 33 s, then crashes
+      ("HW_IPCC_SYS_SendCmd timeout"), its report with "core2: hardfaulted.
+      PC: 80d7000 LR: 0 SP: 2003ffe0" from the record; it starts again, and
+      TL_Init's reference table goes over the record. The firmware's 5 s
+      look for the record ("ST(R) Copro(R) HardFault") did not get to run
+      while that thread spun (it runs: a breakpoint there was hit after the
+      restart). With such a buffer at every start, that is a restart every
+      35 s or so: a "rapid C2 reset loop".
+    - No firmware here hands CPU2 such a buffer (the stock layout's
+      buffers are all in MB_MEM2, which the reset handler wipes, so CPU1
+      locks up first). ble_check makes one with gdb: at a restart, a
+      breakpoint in the firmware's send hook for SHCI_C2_Config, and the
+      NVM address in the command's copy in RAM moved to 0x2003b000.
+      (Moving it in SHCI_C2_Config's own argument wrote the firmware's
+      flash: it is a const there.)
+    - Two faults of the new part itself, found on the other firmwares: the
+      official dev build halts after the crash (a debug build waits for a
+      debugger), so the part resets it; and without a firmware's symbols
+      gdb's breakpoint stayed pending and its `continue` never came back
+      (three checks ran into their 600 s limit), so the part asks gdb for
+      the symbol first and is left out without it.
+    - Checks: ble_check 31 on the official 1.5.1 and on the dev build, 30
+      on Momentum, Unleashed and RogueMaster (no symbols of theirs here);
+      update_check 38 on the five (one more: no crash in the log of any of
+      its runs); the smoke test on the five; every check on the official
+      1.5.1.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

@@ -89,12 +89,18 @@ qFlipper / lab.flipper.net / `ufbt launch` only run over USB CDC.
           last package has the FUS install Full extended, and the firmware's start locks
           CPU1 up in CPU2's SRAM2a; `scripts/update_check.py` 37 does it (BRINGUP_LOG
           150)
-    - ☐ The LCD keeps its picture over a reset of the MCU (on a Flipper its reset is a
-          GPIO of CPU1's): a locked-up device's screen is blank here, frozen there
-    - ☐ CPU2 hard-faults when CPU1 gives it a buffer in CPU2's part of SRAM2 (ST's
-          1.20.0 does, and leaves its marker at SRAM2A_BASE, which the firmware looks
-          for every 5 s): a firmware that hands CPU2 such a buffer without touching it
-          itself runs on here
+    - ☑ The board's chips over a reset of the MCU (2026-11-14): the LCD keeps its
+          picture (its RST pulled up), the LEDs, the charger and the radios what they
+          had, until the firmware's start resets each; a power-on and a load reset them.
+          The FUS says an operation is done before its restart, so the updater's "Core 2
+          busy" is the last screen of a Flipper that locks up then, as on MoonOS's
+          devices (BRINGUP_LOG 151)
+    - ☑ CPU2 hard-faults when CPU1 gives it a buffer in CPU2's part of SRAM2
+          (2026-11-14; ST's 1.20.0 does): the transport layer's buffers at
+          SHCI_C2_BLE_Init and the NVM buffer at SHCI_C2_Config, its record at
+          SRAM2A_BASE; official 1.5.1 waits 33 s for its answer, crashes with that
+          record in its report, and starts again; `scripts/ble_check.py` moves the NVM
+          buffer there with gdb (BRINGUP_LOG 152)
     - ☐ What the Full stacks have more: the central role, a GATT client, advertising
           sets, L2CAP CoC, LE Enhanced Connection Complete (with EXT_ADV)
     - ☐ XIP app loaders exercised (MoonOS's .rock apps run from flash)
