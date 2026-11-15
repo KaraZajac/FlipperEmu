@@ -7,11 +7,11 @@
 
 Runs the script itself on stand-in source trees: folders that hold only the
 files the patches touch (taken from the QEMU tarball in third_party/), with a
-`ninja` that builds nothing.  No emulator is started and nothing is built; the
-tree in third_party/ is read and never written.
+`ninja` and a `cc` that build nothing.  No emulator is started and nothing is
+built; the tree in third_party/ is read and never written.
 
-A new tree gets every patch, in order.  The script once more, and a third
-time, applies nothing.  A tree from before each patch gets that one and those
+A new tree gets every patch, in order, and the coverage plugin compiled.
+The script once more, and a third time, applies nothing.  A tree from before each patch gets that one and those
 after it; a tree that lacks one patch alone gets that one.  A tree the script
 damaged as it was until 2026-11-11 (a second run applied 0007 again, in part,
 because 0008 builds on it in the same file) is refused with the way out, and
@@ -129,6 +129,12 @@ def main():
         ninja = work / "bin" / "ninja"
         ninja.write_text('#!/bin/sh\necho "ninja $*"\n')
         ninja.chmod(0o755)
+        # (and a compiler that compiles nothing, for the plugins: it says
+        # what it was asked and leaves an empty file where its output goes)
+        cc = work / "bin" / "cc"
+        cc.write_text('#!/bin/sh\necho "cc $*"\nwhile [ $# -gt 1 ]; do\n'
+                      '  [ "$1" = -o ] && : > "$2"\n  shift\ndone\n')
+        cc.chmod(0o755)
         subprocess.run(["tar", "-C", str(work / "pristine"), "-xf", str(TARBALL),
                         *(f"{QEMU}/{f}" for f in (*FILES, *HOOKED))], check=True)
         every = [number(p) for p in PATCHES]
@@ -146,11 +152,19 @@ def main():
               out)
         check("a new tree: its files are what the patches make of QEMU's, one "
               "after another", s.same(whole) and not s.litter(), s.litter())
+        plugin = s.root / "build" / "plugins" / "libfe_cov.so"
+        check("a new tree: the coverage plugin is compiled against that "
+              "tree's plugin header, into build/plugins",
+              re.search(r"^cc -shared .*-I \S+/include/plugins -o \S+/build/"
+                        r"plugins/libfe_cov\.so\.new \S+/qemu/plugins/"
+                        r"fe_cov\.c$", out, re.M) and plugin.exists(), out)
         before = s.digest()
         code, applied, built, out = s.run()
         check("the script once more on that tree: nothing applied, exit 0, "
-              "nothing changed, the build started",
-              code == 0 and not applied and built and s.digest() == before,
+              "nothing changed, the build started, the plugin not compiled "
+              "again",
+              code == 0 and not applied and built and s.digest() == before
+              and "cc -shared" not in out,
               out + "\n".join(s.litter()))
         code, applied, built, out = s.run()
         check("and a third time: the same",

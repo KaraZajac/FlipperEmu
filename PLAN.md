@@ -770,7 +770,15 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           its instructions (about one in three thousand calls); the scan's checks take a
           skipped address now (BRINGUP_LOG 147). Not tried: QEMU's `-icount` with a fixed
           shift, which would keep a busy host out of the emulated time altogether
-- ☐ TCG plugin for coverage/trace of firmware or a single FAP
+- ☑ Coverage of the firmware or of an app (2026-11-14): `run --coverage` loads a TCG
+      plugin of our own (`qemu/plugins/fe_cov.c`: a counter to each translated block,
+      added to inline, about 2 % slower; the bytes of blocks in RAM kept),
+      `./flipperemu coverage` maps the counts with an ELF's symbols and line table:
+      functions' calls, lines' counts, files, an lcov file; `coverage reset` before a
+      test; an app by its id or its `.fap`, found by its bytes after it has ended;
+      a stopped device's last run. `scripts/coverage_check.py` 23 (BRINGUP_LOG 153)
+    - ☐ A trace: the order in which code ran (the last calls before a crash)
+    - ☐ Apps that run in place from the flash (their blocks' bytes are not kept)
 - ☐ Fuzzing harness (AFL++/libafl QEMU mode) for parsers in the firmware
 - ☐ Upstream the fifteen QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:
       register reads without the big lock under TCG, 2026-11-10; 0006 to 0009: a

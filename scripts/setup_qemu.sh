@@ -8,6 +8,9 @@
 #
 #   scripts/setup_qemu.sh            # configure (first time) and build
 #   scripts/setup_qemu.sh --build    # just rebuild
+#
+# With it, the plugins in qemu/plugins (the coverage plugin) are built into
+# build/plugins.
 set -euo pipefail
 
 QEMU_VERSION="${QEMU_VERSION:-11.1.3}"
@@ -35,8 +38,29 @@ revive_venv() {
     fi
 }
 
+# The plugins (qemu/plugins/*.c: fe_cov, which `./flipperemu run --coverage`
+# loads) are libraries of their own, built against QEMU's plugin header into
+# build/plugins/.  A new one is put in the old one's place whole: an emulator
+# that runs keeps the one it has open.
+build_plugins() {
+    local src so out="$ROOT/build/plugins"
+    for src in "$ROOT"/qemu/plugins/*.c; do
+        [[ -e "$src" ]] || continue
+        so="$out/lib$(basename "${src%.c}").so"
+        if [[ ! -e "$so" || "$src" -nt "$so" ]]; then
+            echo ">> building $so"
+            mkdir -p "$out"
+            # shellcheck disable=SC2046
+            "${CC:-cc}" -shared -fPIC -O2 -Wall $(pkg-config --cflags glib-2.0) \
+                -I "$SRC/include/plugins" -o "$so.new" "$src"
+            mv "$so.new" "$so"
+        fi
+    done
+}
+
 if [[ "${1:-}" == "--build" ]]; then
     revive_venv
+    build_plugins
     exec ninja -C "$BUILD" qemu-system-arm
 fi
 
@@ -141,6 +165,7 @@ if [[ ! -f "$BUILD/build.ninja" ]]; then
 fi
 revive_venv
 
+build_plugins
 echo ">> building"
 ninja -C "$BUILD" qemu-system-arm qemu-img
 echo ">> $BUILD/qemu-system-arm"

@@ -2036,6 +2036,59 @@ machine), a snapshot of a machine on USB/IP with a PC attached, a file system wi
 shared data (the copy by holes was not run: the disk here is btrfs), and a snapshot
 carried to another computer.
 
+## Coverage (`qemu/plugins/fe_cov.c`, `scripts/fe_cov.py`)
+
+`run --coverage` adds `-plugin build/plugins/libfe_cov.so,sock=…,out=…`: a TCG plugin,
+compiled by `scripts/setup_qemu.sh` against QEMU's plugin header (no part of QEMU's
+own build, and no patch to it).
+
+**The plugin.** QEMU translates the firmware's code a block at a time (a run of
+instructions with one way in), and tells a plugin of each translation. The plugin
+gives a block a counter, by its first address and its length, and asks QEMU for an
+inline operation: the translated block adds 1 to the counter itself, with no call out
+of the generated code. That is the whole cost when the code runs, about 2 % (MD5 of a
+3 MB file in the firmware: 6.1 s against 6.0 s). The counters are QEMU's scoreboards,
+which the inline operations write to; a scoreboard has room for 16 vCPUs at least,
+so they come in chunks of 16384 counters as blocks appear, not all at once (a boot of
+the official firmware translates 10,600 blocks). Blocks may overlap: a jump into the
+middle of one makes another that ends where the first does.
+
+Code in RAM (from 0x10000000 up) is an app's, loaded where the heap had room, or an
+updater's, and that room is another's later. A block there is kept with the bytes it
+had when it was translated, and its key has a mark of them: the same address with
+other bytes is another block with its own counter.
+
+A socket in the device's folder (`coverage.sock`) takes a line: `stat`, `reset`,
+`dump PATH`, and `news` (how many blocks ran for the first time since it was last
+asked, with `forget` to begin anew: what a fuzzer asks after each input). The machine
+runs on meanwhile. A reset writes no counter (the vCPU's
+thread adds to them, and a write beside it could be lost): it notes what each counter
+has, and a dump says what came since. At QEMU's exit the plugin writes a dump
+(`coverage.dump`), which is what `coverage` reads of a device that has stopped. A
+dump is text: a block's address, its length, its count, and for one in RAM its bytes.
+
+**The mapping** (`fe_cov.py`). A byte's count is the sum of the blocks that hold it.
+An ELF's functions are its symbol table's (read directly: 16 bytes a symbol); a
+function's calls are the count of its first byte, and its bytes that ran are counted.
+The lines are the ELF's line table as binutils' `readelf --debug-dump=decodedline`
+prints it (the toolchain's, or the system's: it needs no ARM support): rows of a
+file, a line and an address, in sequences; a row has the bytes up to the next
+address, several rows may have the same bytes (inlined code), and a line's count is
+the highest of its rows'. A function the linker left out keeps its rows, at address 0,
+where no code is: those go.
+
+**An app** has its code in a section that begins at 0, with relocations. The loader
+copies the section and changes the places the relocations name: a word of data (an
+address in a literal pool: R_ARM_ABS32) is no code, and no block of the app's has it;
+an instruction's (a call) is not compared. A block in RAM whose bytes fit the app's
+code at some offset says where the app was (address less offset); blocks of 8 bytes
+and more vote, and at each such base every block that fits is the app's. Two runs in
+two places are both counted. Blocks in that place that do not fit are counted too and
+said: the file is another build than what ran, or another app had the place.
+
+Not there: the order in which code ran (a trace), and apps that run in place from the
+flash (their bytes are not kept; none of the firmwares here has such a loader).
+
 ## Persistence per device (`devices/NAME/`)
 
 | file | real-world equivalent |
@@ -2046,6 +2099,7 @@ carried to another computer.
 | `enclave.keys` | the FUS's key store on CPU2: the secure enclave's keys (text, one key per line) |
 | `held.json` | (while it runs) the names of what the launcher held to it, for `status` and the window |
 | `run.json` | (while it runs) which QEMU the run's is, and the arguments that made its machine: what `snapshot save` notes with a state |
+| `coverage.sock`, `coverage.dump` | a run with `--coverage`: the plugin's socket while it runs, and the blocks that ran, written as the emulator ended (gone at the next start) |
 | `snapshots/NAME/` | a snapshot: the machine's state and the device's files of that moment (the section above). The user's alone: a state has the keys |
 | `.before-load/` | (while `snapshot load` is at work) the device's own files, until the snapshot's state is in: a load that fails puts them back |
 | `uart.log`, `uart.log.1` | what a serial adapter on pins 13 and 14 would have recorded: the firmware's log of this run, and of the one before |

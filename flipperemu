@@ -104,6 +104,8 @@ import fe_header                                # noqa: E402  (small: the rest
                                                 # is imported where it is used)
 
 QEMU = ROOT / "build" / "qemu" / "qemu-system-arm"
+# the coverage plugin (qemu/plugins/fe_cov.c): `run --coverage` loads it
+COV_PLUGIN = ROOT / "build" / "plugins" / "libfe_cov.so"
 DEVICES = ROOT / "devices"
 FLASH_BASE = 0x08000000
 FLASH_SIZE = 1 << 20
@@ -226,6 +228,8 @@ class Device:
         self.gdb_ide = self.dir / "gdb-ide.init"        # ... and what an IDE's gdb is told
         self.run_file = self.dir / "run.json"           # this run's QEMU, its arguments
         self.snapshots = self.dir / "snapshots"         # a device as it stood (cmd_snapshot)
+        self.cov_sock = self.dir / "coverage.sock"      # the coverage plugin's (--coverage)
+        self.cov_dump = self.dir / "coverage.dump"      # ... and what a run left of it
 
     def running(self):
         """Is a QEMU serving this device's monitor socket?"""
@@ -1241,6 +1245,11 @@ def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
         cmd += ["-gdb", f"tcp:127.0.0.1:{args.gdb_port}"]
     if args.wait_gdb:
         cmd += ["-S"]
+    if getattr(args, "coverage", False):
+        # the blocks of code that run, counted (qemu/plugins/fe_cov.c): asked
+        # for on its socket, and written when the emulator ends
+        cmd += ["-plugin", f"{COV_PLUGIN},sock={dev.cov_sock},"
+                           f"out={dev.cov_dump}"]
     return cmd + list(args.qemu_args or [])
 
 
@@ -1305,9 +1314,16 @@ def run_detached(dev, ready=None):
                 pass
 
 
+def coverage_wanted(args):
+    if getattr(args, "coverage", False) and not COV_PLUGIN.exists():
+        sys.exit(f"--coverage: the coverage plugin is not built ({COV_PLUGIN}): "
+                 "scripts/setup_qemu.sh builds it")
+
+
 def cmd_run(args):
     if not QEMU.exists():
         sys.exit(f"QEMU not built yet: run scripts/setup_qemu.sh ({QEMU})")
+    coverage_wanted(args)
     dev = Device(args.device)
     detached = os.environ.pop(DETACHED, None)
     if "help" in (args.i2c or ()):
@@ -1409,7 +1425,8 @@ class Session:
             self.gauge = dict(gauge)
         for stale in (dev.monitor, dev.usb_tty, dev.lpuart_tty, dev.usart_tty,
                       dev.lpuart_sock, dev.usart_sock, dev.panel_sock,
-                      dev.held_file, dev.gdb_sock, dev.run_file):
+                      dev.held_file, dev.gdb_sock, dev.run_file,
+                      dev.cov_sock, dev.cov_dump):
             try:
                 stale.unlink()
             except FileNotFoundError:
@@ -1786,6 +1803,19 @@ def sram2_text(sram2):
     return text
 
 
+def coverage_state(dev):
+    """A run with `--coverage`: {"blocks": those of its code that were
+    translated, "executed": those that ran since the last reset, "resets":
+    n}; None: this run counts nothing"""
+    if not (run_noted(dev) or {}).get("coverage"):
+        return None
+    import fe_cov
+    try:
+        return fe_cov.numbers(fe_cov.ask(dev.cov_sock, "stat", timeout=3))
+    except fe_cov.Error:
+        return None
+
+
 def halted_at(m):
     """Where the firmware sleeps for good, or None: it has not halted.  A
     debug build that crashed waits for a debugger, and furi_halt() waits for
@@ -2019,6 +2049,7 @@ def run_note(dev, pid, args, **more):
     same way, and `snapshot save` reads here how this one was."""
     note = {"pid": pid, "started": time.strftime("%Y-%m-%d %H:%M:%S"),
             "machine": {k: getattr(args, k, None) for k in MACHINE_ARGS},
+            "coverage": bool(getattr(args, "coverage", False)),
             **more}
     tmp = dev.run_file.with_suffix(".tmp")
     tmp.write_text(json.dumps(note, indent=2) + "\n")
@@ -2415,6 +2446,7 @@ def snapshot_load(args, dev, session=None):
     one that can be loaded, and the session has the loaded one after"""
     if not QEMU.exists():
         sys.exit(f"QEMU not built yet: run scripts/setup_qemu.sh ({QEMU})")
+    coverage_wanted(args)
     detached = os.environ.pop(DETACHED, None) if session is None else None
     snap, note = snap_find(dev, args.name)
     name = snap.name
@@ -2454,7 +2486,10 @@ def snapshot_load(args, dev, session=None):
             extra.append(word)
     run.update(device=dev.name, headless=args.headless, gtk=args.gtk,
                detach=args.detach, scale=args.scale, audio=args.audio,
-               gdb=args.gdb, gdb_port=args.gdb_port, qemu_args=extra)
+               gdb=args.gdb, gdb_port=args.gdb_port, qemu_args=extra,
+               coverage=getattr(args, "coverage", False) or (
+                   session is not None
+                   and getattr(session.args, "coverage", False)))
     run = argparse.Namespace(**run)
     if run.serial in ("stdio", "null"):
         # the log on the terminal, or not: that is this start's, as a run's
@@ -2723,6 +2758,7 @@ def device_status(dev):
         st["adc"] = read_adc(m)
         st["bluetooth"] = read_bluetooth(m)
         st["sram2"] = c2_ram(m)
+        st["coverage"] = coverage_state(dev)
         st["lights"] = {"led": g("/machine/led", "led"),
                         "blinking": g("/machine/led", "blinking"),
                         "backlight": g("/machine/led", "backlight"),
@@ -2799,6 +2835,13 @@ def cmd_status(args):
                     + f"; last sent: {last(st['subghz']['last_transmission'])}"),
         ("bluetooth", bluetooth_text(st["bluetooth"])),
         *([("sram2", sram2_text(st["sram2"]))] if st["sram2"] else []),
+        *([("coverage", f"on: {st['coverage'].get('executed', 0):,} blocks of "
+                        "code ran since "
+                        + ("the last `coverage reset`"
+                           if st["coverage"].get("resets") else "its start")
+                        + f" (`./flipperemu -d {dev.name} coverage` says "
+                        "which functions and lines)")]
+          if st.get("coverage") else []),
         ("sound", "muted" if st["sound"]["muted"] else "on"),
         *([("gpio", fe_header.summary(st["gpio"]))] if st["gpio"] else []),
         *[("" if i else "serial",
@@ -3686,6 +3729,206 @@ def vscode_launch(dev, gdb, elf, port, kit=None):
           "extension: open this folder in VS Code, and Run and Debug has it "
           "(F5)")
     print(again)
+    return 0
+
+
+def coverage_counts(dev):
+    """What ran on a device: (the blocks, as fe_cov.read_dump() has them;
+    the words for since when).  Of a
+    device that runs with `run --coverage`: asked of the plugin now.  Of one
+    that does not run: what its last run left when it ended."""
+    import fe_cov
+    how = (f"`./flipperemu -d {dev.name} run --coverage` counts the code "
+           "that runs")
+    if dev.running():
+        if not (run_noted(dev) or {}).get("coverage") or not dev.cov_sock.exists():
+            sys.exit(f"[{dev.name}] this run has no coverage: {how}, from a "
+                     "start on")
+        now = dev.dir / "coverage.now"
+        try:
+            fe_cov.ask(dev.cov_sock, f"dump {now}")
+            said = fe_cov.numbers(fe_cov.ask(dev.cov_sock, "stat"))
+            blocks = fe_cov.read_dump(now)
+        except fe_cov.Error as e:
+            sys.exit(f"[{dev.name}] {e}")
+        finally:
+            now.unlink(missing_ok=True)
+        return blocks, ("since the last `coverage reset`" if said.get("resets")
+                        else "since its start")
+    if not dev.cov_dump.exists():
+        sys.exit(f"[{dev.name}] is not running, and its last run left no "
+                 f"coverage: {how}")
+    try:
+        return fe_cov.read_dump(dev.cov_dump), \
+            "in its last run (from its start, or its last `coverage reset`)"
+    except (OSError, fe_cov.Error) as e:
+        sys.exit(f"[{dev.name}] {e}")
+
+
+def coverage_app(dev, path, blocks):
+    """An app's part of what ran: (its ELF, what ran in the ELF's own
+    addresses, the code section's index, where its code was).  The app is
+    known by its bytes: the plugin keeps those of each block in RAM, so an
+    app that has ended is found too."""
+    import fe_cov
+    app = pathlib.Path(path)
+    if not app.is_file() and "/" not in path and not app.suffix:
+        # an app by its id: what was built of it last (`ufbt launch` builds
+        # into ufbt's own folder, a firmware tree into its .extapps)
+        tree = source_tree()
+        built = [sdk_home() / "build" / f"{path}_d.elf",
+                 *(sorted(tree.glob(f"build/*/.extapps/{path}_d.elf"))
+                   if tree else []),
+                 pathlib.Path("dist") / "debug" / f"{path}_d.elf"]
+        app = next((b for b in built if b.is_file()), None)
+        if not app:
+            sys.exit(f"flipperemu: no build of an app `{path}` ("
+                     + ", ".join(str(b) for b in built) + "): name its "
+                     ".fap or its debug ELF")
+    if not app.is_file():
+        sys.exit(f"flipperemu: no {path}")
+    # an app as it is installed (.fap) has no line table: its debug ELF does
+    if app.suffix == ".fap":
+        app = next((d for d in (app.with_name(app.stem + "_d.elf"),
+                                app.parent / "debug" / (app.stem + "_d.elf"))
+                    if d.is_file()), app)
+    try:
+        elf = fe_cov.Elf(app)
+        found = fe_cov.app_ran(elf, blocks)
+    except (fe_cov.Error, struct.error, ValueError, IndexError) as e:
+        sys.exit(f"flipperemu: {app}: {e}")
+    if not found:
+        sys.exit(f"[{dev.name}] nothing of what ran is the code of {app.name}: "
+                 "the app has not run since the coverage began (its start, or "
+                 "the last `coverage reset`), or this file is another build "
+                 "than the one on the Flipper")
+    return (elf, *found)
+
+
+def cmd_coverage(args):
+    """What a Flipper executed: the code that ran, by the firmware's (or an
+    app's) functions and source lines"""
+    import fe_cov
+    dev = Device(args.device)
+    if args.action == "reset":
+        if not dev.running() or not (run_noted(dev) or {}).get("coverage"):
+            sys.exit(f"[{dev.name}] no coverage to reset: `./flipperemu -d "
+                     f"{dev.name} run --coverage` counts the code that runs")
+        try:
+            fe_cov.ask(dev.cov_sock, "reset")
+        except fe_cov.Error as e:
+            sys.exit(f"[{dev.name}] {e}")
+        print(f"[{dev.name}] coverage: counted from now on")
+        return 0
+    if args.action == "dump":
+        if not args.file:
+            sys.exit("coverage dump FILE: the file to write")
+        blocks, since = coverage_counts(dev)
+        with open(args.file, "w") as f:
+            f.write(fe_cov.HEADER + "\n")
+            for addr, size, count, code in blocks:
+                f.write(f"{addr:08x} {size} {count}"
+                        + (f" {code.hex()}" if code else "") + "\n")
+        print(f"[{dev.name}] {args.file}: what ran {since}, {len(blocks):,} "
+              f"blocks of code, {fe_cov.Ran(blocks).bytes():,} bytes (a line "
+              "each: address, bytes, how often it ran; one in RAM with the "
+              "bytes themselves)")
+        return 0
+    if args.action != "report":
+        sys.exit(f"coverage: report, reset or dump FILE, not `{args.action}`")
+    blocks, since = coverage_counts(dev)
+    ran = fe_cov.Ran(blocks)
+    tool = fe_cov.readelf()
+    others = 0
+    if args.app:
+        elf, mine, section, at, others = coverage_app(dev, args.app, blocks)
+        what = (f"the app {pathlib.Path(args.app).name} (its code was at "
+                + " and ".join(f"{a:#010x}" for a in at)
+                + f"; symbols: {elf.path})")
+        root = args.source
+    else:
+        path, origin = gdb_firmware(dev, args.elf)
+        if not path:
+            flash, ram = ran.bytes(0x08000000, 0x08100000), \
+                ran.bytes(0x20000000, 0x20040000)
+            print(f"[{dev.name}] coverage {since}: {flash:,} bytes of the "
+                  f"flash ran, and {ram:,} of the RAM (an app's code, an "
+                  "updater's)")
+            print(f"[{dev.name}] no ELF of the firmware in its flash: no "
+                  "functions and no lines.  `--elf FILE` names one "
+                  "(scripts/fetch_firmware.py gets a release's); `--app "
+                  "FILE` maps an app's code")
+            return 0
+        try:
+            elf = fe_cov.Elf(path)
+        except (fe_cov.Error, struct.error, ValueError, IndexError) as e:
+            sys.exit(f"flipperemu: {path}: {e}")
+        mine, section, what = ran, None, f"the firmware ({path})"
+        tree = source_tree(origin) if origin else None
+        root = args.source or (str(tree) if tree else None)
+    rep = fe_cov.Report(elf, mine, section, tool)
+    tot = rep.totals()
+    if args.lcov:
+        pathlib.Path(args.lcov).write_text(rep.lcov(root))
+    if args.json:
+        print(json.dumps({
+            "since": since, "elf": str(elf.path), **tot,
+            "not_this_file": others,
+            "by_file": [dict(zip(("file", "lines", "lines_ran", "functions",
+                                  "functions_ran"), f)) for f in rep.files()],
+            "by_function": [dict(zip(("name", "at", "bytes", "bytes_ran",
+                                      "calls"), f))
+                            for f in rep.listed(args.functions or None,
+                                                args.missed)],
+        }, indent=2))
+        return 0
+    print(f"[{dev.name}] coverage {since}, of {what}:")
+    print(f"  {tot['bytes_ran']:,} of {tot['bytes']:,} bytes of its functions "
+          f"ran ({fe_cov.percent(tot['bytes_ran'], tot['bytes'])}), "
+          f"{tot['functions_ran']:,} of {tot['functions']:,} functions"
+          + (f", {tot['lines_ran']:,} of {tot['lines']:,} lines"
+             if rep.rows else ""))
+    if others:
+        print(f"  ({others} blocks that ran in the same place are not this "
+              "file's code: the app that ran is another build than this "
+              "file, or another app had the place too.  What is said here "
+              "is of the blocks that are this file's)")
+    if not rep.rows:
+        print("  (no lines: " + ("no `readelf` here (binutils has it, and "
+                                 "the firmware's toolchain)" if not tool else
+                                 "this ELF has no line table") + ")")
+    if not args.app:
+        ram = ran.bytes(0x20000000, 0x20040000)
+        if ram:
+            print(f"  beside it, {ram:,} bytes of code ran in RAM (an app's, "
+                  "an updater's): `--app FILE` maps an app's")
+    if args.functions is not None:
+        rows = rep.listed(args.functions or None, args.missed)
+        print(f"  functions{' of which nothing ran' if args.missed else ''}"
+              + (f" that fit {args.functions}" if args.functions else "")
+              + f": {len(rows)}")
+        if rows:
+            print(f"  {'calls':>9} {'ran':>6} {'of':>6}  function")
+        for name, place, size, got, calls in rows:
+            print(f"  {calls:>9} {got:>6} {size:>6}  {name}"
+                  + (f"  ({place})" if place else ""))
+    elif rep.rows:
+        files = rep.files()
+        show = files if args.files == 0 else files[:args.files]
+        print(f"  {'lines ran':>9} {'of':>6} {'':>7}  {'functions':>11}  file")
+        for name, lines, got, funcs, fgot in show:
+            print(f"  {got:>9} {lines:>6} {fe_cov.percent(got, lines):>7}  "
+                  f"{fgot:>4} of {funcs:<4}  {name}")
+        if len(show) < len(files):
+            print(f"  ({len(files) - len(show)} files more: `--files 0` has "
+                  "them all; `--functions [PATTERN]` the functions)")
+    if args.lcov:
+        print(f"[{dev.name}] {args.lcov}: the same as an lcov file (`genhtml "
+              f"{args.lcov} -o DIR` makes pages of it; an editor's coverage "
+              "gutters read it)"
+              + ("" if root or args.app else "; its file names are as the "
+                 "build had them: `--source DIR` puts the source tree's "
+                 "folder before them"))
     return 0
 
 
@@ -6337,6 +6580,10 @@ def main():
                         "Full extended; or VERSION:KIND), with the flash and SRAM2 "
                         "that the kind keeps for CPU2; `none`: CPU2 runs the FUS "
                         "alone, and the firmware has no Bluetooth")
+    p.add_argument("--coverage", action="store_true",
+                   help="count the code that runs: `./flipperemu coverage` says "
+                        "which of the firmware's (or an app's) functions and "
+                        "lines ran")
     p.add_argument("--print-cmd", action="store_true", help="show the QEMU command and exit")
     p.add_argument("qemu_args", nargs="*", help="extra QEMU arguments after --")
     p.set_defaults(func=cmd_run)
@@ -6408,6 +6655,9 @@ def main():
                         "when the state is in (or with what went wrong)")
     p.add_argument("--gtk", action="store_true",
                    help="load: QEMU's own window, the bare LCD")
+    p.add_argument("--coverage", action="store_true",
+                   help="load: count the code that runs from then on "
+                        "(`coverage`)")
     p.add_argument("--paused", action="store_true",
                    help="load: it stands still at the snapshot's moment, "
                         "until `continue`")
@@ -6890,6 +7140,41 @@ def main():
                        formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("action", nargs="*", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_enclave)
+
+    p = sub.add_parser("coverage", help="the code that ran on a device started "
+                       "with `run --coverage`: by function and source line",
+                       usage="flipperemu coverage [report] [--elf FILE | --app "
+                             "FILE] [--files N] [--functions [PATTERN]] "
+                             "[--missed] [--lcov FILE] [--source DIR] [--json]\n"
+                             "       flipperemu coverage reset\n"
+                             "       flipperemu coverage dump FILE")
+    p.add_argument("action", nargs="?", default="report",
+                   help="report (default): what ran, against the firmware's ELF "
+                        "or an app's; reset: count from now on; dump FILE: the "
+                        "pieces of memory that ran, as text")
+    p.add_argument("file", nargs="?", help="dump: the file to write")
+    p.add_argument("--elf", metavar="FILE",
+                   help="the firmware's ELF (default: found as `gdb` finds it)")
+    p.add_argument("--app", metavar="FILE",
+                   help="an app instead of the firmware: its id (`fe_hello`: "
+                        "what ufbt, or the firmware tree you are in, built of "
+                        "it last), its .fap (the debug ELF beside it is "
+                        "taken, NAME_d.elf) or its ELF; what ran in RAM is "
+                        "told the app's by its bytes")
+    p.add_argument("--files", type=int, default=12, metavar="N",
+                   help="the N files with the most lines that ran (default 12; "
+                        "0: all)")
+    p.add_argument("--functions", nargs="?", const="", metavar="PATTERN",
+                   help="list functions instead: all, or those whose name or "
+                        "file fits a pattern (`furi_hal_bt_*`, `*/nfc/*`)")
+    p.add_argument("--missed", action="store_true",
+                   help="with --functions: only those of which nothing ran")
+    p.add_argument("--lcov", metavar="FILE",
+                   help="write the report as an lcov file too")
+    p.add_argument("--source", metavar="DIR",
+                   help="the folder the ELF's file names are from, for --lcov")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_coverage)
 
     p = sub.add_parser("gdb", help="gdb on a running device, with the firmware's "
                        "and its apps' symbols",

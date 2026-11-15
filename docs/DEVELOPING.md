@@ -1154,6 +1154,49 @@ gdb check does that each time. What the extension's own views make of it was not
 seen: if something there is off, the configuration is a plain one to change, and
 `gdb --vscode` only ever writes the one of its name.
 
+## Which of your lines a test ran: coverage
+
+Start the Flipper with `--coverage`, and the emulator counts the code that runs.
+`coverage reset` before the part you want to know about, then `coverage --app`:
+
+```sh
+../../flipperemu run --coverage --detach -f FIRMWARE
+../../flipperemu wait
+../../flipperemu coverage reset
+../../flipperemu ufbt launch
+../../flipperemu press up down back
+../../flipperemu coverage --app fe_hello --functions
+../../flipperemu coverage --app fe_hello --lcov lcov.info
+```
+
+```
+[flipper] coverage since the last `coverage reset`, of the app fe_hello (its code was at 0x20009244; symbols: ~/.ufbt/build/fe_hello_d.elf):
+  402 of 640 bytes of its functions ran (62.8 %), 3 of 4 functions, 48 of 57 lines
+  functions: 4
+      calls    ran     of  function
+          9     14     20  hello_input
+          3    122    160  hello_draw  (hello.c:22)
+          0      0     44  hello_signal  (hello.c:45)
+          1    266    416  fe_hello_app  (hello.c:54)
+```
+
+`--app fe_hello` is the app by its id: the debug ELF that ufbt built of it last
+(`~/.ufbt/build/fe_hello_d.elf`; in a firmware's tree, its `.extapps`). A `.fap` or an
+ELF can be named instead. The app is found by its bytes among what ran in RAM, so it
+need not run any more when you ask, and the Flipper may have stopped: the emulator
+writes its counts as it ends. If you changed the source and built again without
+starting it, the file is no longer what ran, and `coverage` says so.
+
+`lcov.info` is for `genhtml lcov.info -o pages` and for an editor's coverage gutters
+(VS Code's Coverage Gutters reads a file of that name in the app's folder). The lines
+are the compiler's: one that it merged into another has no count of its own, and a
+line with a count of 0 has code that did not run. In `examples/hello/test.sh` the two
+`coverage` lines go before the last `fe stop` (a `trap` there: put them above it).
+
+Without `--app`, `coverage` is of the firmware: the same lists for its functions and
+files, where its ELF is beside the package (the official builds': `fetch_firmware.py`
+gets it). The cost of `--coverage` is about 2 % of the emulator's speed.
+
 ## A firmware: `fbt`
 
 A firmware's source tree has its own tool, `./fbt`. What it builds goes on the emulated
@@ -1293,6 +1336,14 @@ At its end it runs `examples/hello/test.sh` as it is, and wants it to pass and t
 leave no Flipper running. It passes on the official 1.5.1 with ufbt 0.2.6 and its SDK
 (31 checks). Without `ufbt`, or with an SDK for another API than the firmware's, it
 checks nothing and its exit status is 77.
+
+`scripts/coverage_check.py FIRMWARE` checks the coverage: a run without it and one
+with, the firmware's functions and lines since the start, a reset and a CLI command
+whose function is then called once and three times, the lists, the lcov file, the
+dump; and with `ufbt`, the example app built, started, its keys pressed and left,
+and after that its functions' calls and its lines, by its `.fap` and by its id, a
+changed build told apart, and a stopped device's last run. 23 checks on the official
+1.5.1.
 
 `scripts/gpio_check.py FIRMWARE` has the firmware's own `gpio` command in the CLI on
 the other side of the pins: the header after a start, a pin the firmware makes an

@@ -230,6 +230,9 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
 - gdb on a device that runs, with the firmware's symbols and those of the apps it
   loads: a breakpoint in an app's code, and a stop at a crash. `gdb --vscode` writes
   the debug configuration for VS Code into the app's folder.
+- Coverage: which of the firmware's functions and source lines ran, or an app's,
+  since the start or since a test began (`run --coverage`, `./flipperemu coverage`),
+  as a summary, a list, or an lcov file.
 - The screen as a picture (PNG) and as a recording (an animated GIF, a few kB for a
   few seconds of an app), from the launcher and from the window.
 - Snapshots: a running device kept as it stands, with its card and what is on its
@@ -523,6 +526,8 @@ picture of the save to the pixel and the tag, and goes on with Pause.
 | `wait [--log REGEX \| --screen FILE] [--timeout S] [-- COMMAND …]` | for a script: until its CLI answers, its log has a line, or its screen is as in a file; 1 with the reason when that does not come |
 | `record out.gif [--seconds N] [--scale N]` | what its LCD shows, as an animated GIF: until Ctrl-C, or for N seconds (a device without a window; with one: Device > Record the screen) |
 | `gdb [--elf FILE] [--apps DIR] [--with GDB] [-- GDB'S ARGUMENTS]` | gdb on a running device, with the firmware's symbols and its apps' |
+| `run --coverage` | count the code that runs (a plugin in the emulator, about 2 % slower) |
+| `coverage [--elf FILE \| --app APP] [--files N] [--functions [PATTERN]] [--missed] [--lcov FILE] [--json]` \| `coverage reset` \| `coverage dump FILE` | what ran since the start or the last reset: of the firmware's functions and lines, or an app's (by its id, its .fap or its ELF); count anew; the blocks that ran, as text |
 | `gdb --serve PORT` | its gdb stub on a TCP port of this computer, for an IDE |
 | `gdb --vscode [--serve PORT]` | ... and a debug configuration for VS Code (the Cortex-Debug extension) in `.vscode/launch.json` of the folder you are in |
 | `info` | which firmware is on the device |
@@ -2985,6 +2990,68 @@ region), `legacy-sleep=on|off` (default off: STOP2), `nvram=`, `usb-serial=` (ch
 plugs the cable in), `audiodev=` (the speaker's `-audiodev` id). `-global
 stm32wb55-usb.debug=on` traces the USB host.
 
+### Coverage: which code ran
+
+```sh
+./flipperemu run --coverage -f firmware/official-1.5.1/flipper-z-f7-update-1.5.1.tgz
+./flipperemu coverage                  # what ran since its start
+./flipperemu coverage reset            # count from now on: before a test
+./flipperemu cli date
+./flipperemu coverage --functions 'cli_command_*'
+```
+
+```
+[flipper] coverage since the last `coverage reset`, of the firmware (firmware/official-1.5.1/flipper-z-f7-firmware-1.5.1.elf):
+  34,750 of 603,834 bytes of its functions ran (5.8 %), 626 of 7,126 functions, 6,654 of 85,692 lines
+  functions that fit cli_command_*: 28
+      calls    ran     of  function
+          1     82    296  cli_command_date  (applications/services/cli/cli_main_commands.c:66)
+          0      0    192  cli_command_help  (lib/toolbox/cli/shell/cli_shell.c:101)
+```
+
+`run --coverage` loads a plugin into the emulator that counts each block of code as it
+runs, with QEMU's own inline counters: a Flipper under coverage is about 2 % slower.
+`coverage` asks for the counts and maps them with the firmware's ELF, found as `gdb`
+finds it (`--elf FILE` names one): a function's calls and how many of its bytes ran,
+and, by the ELF's line table, each source line's count. Without `--functions` it lists
+the files with the most lines that ran (`--files N`; `0`: all); `--missed` keeps the
+functions of which nothing ran; `--lcov FILE` writes it all as an lcov file, which
+`genhtml` turns into pages and an editor's coverage gutters read (`--source DIR`: the
+folder that the ELF's file names are from, when the tree is elsewhere); `--json` for
+a program. A firmware whose ELF is not here (Momentum's, Unleashed's) gets the bytes
+that ran.
+
+An app's code is where the heap had room, another place each time. `--app` takes the
+app's id (what `ufbt launch`, or the firmware tree you are in, built of it last), its
+`.fap` or its debug ELF, and finds the app by its bytes: the plugin keeps the bytes of
+every block that ran in RAM, so the app may have ended, and the Flipper stopped too
+(`coverage` of a stopped device is its last run's, written as the emulator ended).
+
+```sh
+./flipperemu coverage reset
+./flipperemu ufbt launch               # in the app's folder
+./flipperemu press up down back
+./flipperemu coverage --app fe_hello --functions
+```
+
+```
+[flipper] coverage since the last `coverage reset`, of the app fe_hello (its code was at 0x20009244; symbols: .../fe_hello_d.elf):
+  402 of 640 bytes of its functions ran (62.8 %), 3 of 4 functions, 48 of 57 lines
+      calls    ran     of  function
+          9     14     20  hello_input
+          3    122    160  hello_draw  (hello.c:22)
+          0      0     44  hello_signal  (hello.c:45)
+          1    266    416  fe_hello_app  (hello.c:54)
+```
+
+A file that is another build than the app that ran is told ("blocks that ran in the
+same place are not this file's code"). A count is of a block's runs: a line whose
+code the compiler put into several places has the highest of them, and a function's
+calls are the runs of its first instruction. `scripts/coverage_check.py FIRMWARE`
+checks it (23 checks on the official 1.5.1 with ufbt's SDK; 14 to 17 on the others,
+where no SDK of theirs is here for the app). How it works:
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#coverage-qemupluginsfe_covc-scriptsfe_covpy).
+
 ## Layout
 
 ```
@@ -3001,6 +3068,7 @@ examples/i2c/          a script and an app for a sensor and an EEPROM on the I2C
 examples/spi/          a script for a serial flash on the SPI bus
 flipperemu             launcher / device manager
 qemu/hw/arm/flipper/   the QEMU machine + STM32WB55 SoC + board devices (C)
+qemu/plugins/          the emulator's coverage plugin (C)
 qemu/patches/          fixes to upstream QEMU (SysTick, SD over SPI, open-drain GPIO,
                        register reads without the big lock, a chardev's log file,
                        the UART's reception, a byte that no receiver took, an
@@ -3013,7 +3081,8 @@ scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_moni
                        fe_subghz.py, fe_sdr.py (real radios),
                        fe_nfc_link.py (cards from programs), fe_pm3.py (Proxmark3),
                        fe_enclave.py (the enclave's keys and ciphers), fe_gdb.py
-                       (gdb's side of `flipperemu gdb`), fe_record.py (the
+                       (gdb's side of `flipperemu gdb`), fe_cov.py (coverage:
+                       the plugin's counts against an ELF), fe_record.py (the
                        screen as a GIF), fe_usbip.py, fe_u2f.py (a U2F host
                        over USB/IP), usbip_attach.py, fe_gui.py (the window: fe_gui_view.py,
                        fe_gui_link.py, fe_gui_widgets.py, fe_gui_ble.py), smoke_test.py,

@@ -4623,6 +4623,60 @@ big lock, entry 92).
       its runs); the smoke test on the five; every check on the official
       1.5.1.
 
+153. **Coverage: which code ran.** `run --coverage`, `./flipperemu coverage`.
+    - QEMU's own `drcov` plugin is for one program under user-mode QEMU (it
+      names one binary and its code's range). A firmware has its flash, apps
+      in RAM where the heap had room, an updater. So a plugin of our own
+      (`qemu/plugins/fe_cov.c`), built by `setup_qemu.sh` with `cc` against
+      QEMU's plugin header: no part of QEMU's build, no patch.
+    - A counter to each translated block (first address, length), added to
+      by QEMU's inline operation, which wants its counter in a scoreboard. A
+      scoreboard is as many elements as vCPUs might come, 16 at least: one
+      with a million counters would be 128 MB from the start. They come in
+      chunks of 16384 counters (2 MB) as blocks appear; a boot of the
+      official 1.5.1 translates 10,600.
+    - A reset that set the counters to 0 from the plugin's socket thread
+      could lose against the vCPU's thread, which reads, adds and writes:
+      the counter would have its old value plus one, and a block would have
+      "run" that did not. The reset notes each counter's value instead, and
+      a dump says the difference: nothing is written beside the vCPU.
+    - The monitor's `memsave ADDR SIZE /path` fails with "invalid char 'h'
+      in expression": it takes the path's first `/` for a division of the
+      size. In quotes it works. (Not needed in the end, see the next.)
+    - An app's code: the first way looked for the app's bytes in the
+      running Flipper's RAM, and an app that had ended was not there any
+      more (its 640 bytes were another's a second after it left). Now the
+      plugin keeps the bytes of each block in RAM as it was translated, a
+      mark of them in the block's key, and the app is known by them: a block
+      whose bytes fit the app's code at some offset says where the app was.
+      That works after the app has ended and after the emulator has stopped
+      (the dump at its exit has the bytes).
+    - Two things the first match got wrong, both seen with a stale
+      `dist/fe_hello.fap` (ufbt's `launch` builds into its own folder, and
+      `dist/` was four days old). Its literal pool, 160 bytes of addresses
+      that relocations fill in, "fitted" every block that lay over it, all
+      of its bytes being relocated ones: a relocation of a word of data
+      (R_ARM_ABS32) is no code, and a block that touches one is not the
+      app's. And the older build's first two functions were the newer one's
+      too, so a third of the app was reported as if that were all: blocks
+      that ran in the app's place and do not fit are counted and said
+      ("another build than this file").
+    - Lines: the ELF's line table by `readelf --debug-dump=decodedline`
+      (259,000 rows of the official firmware in 0.15 s; the report in 0.8
+      s). Rows name a file by its last part alone, with the full path on a
+      line of its own when the file changes; a new sequence goes back to
+      the unit's file with no such line, so the name in the row decides.
+      Functions the linker left out keep their rows at address 0.
+    - What it says of the official 1.5.1: a start to the desktop runs
+      77,900 of 603,800 bytes of its functions, 1,274 of 7,126 functions,
+      14,100 of 85,700 lines; `date` in the CLI, 626 functions.
+    - The cost: `storage md5` of a 3 MB file, 6.0 s without and 6.1 s with
+      (three runs each).
+    - Checks: coverage_check 23 on the official 1.5.1 (with ufbt's SDK: the
+      example app), 17 on the dev build, 14 on Momentum, Unleashed and
+      RogueMaster (no ELF of theirs here: bytes); setup_check 45 (the
+      plugin is compiled; a `cc` that compiles nothing stands in).
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
