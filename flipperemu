@@ -1789,6 +1789,87 @@ def c2_ram(m):
 EXCEPTIONS = {3: "HardFault", 4: "MemManage", 5: "BusFault", 6: "UsageFault"}
 
 
+def cpu_fault(m):
+    """The CPU's last fault, as the emulator noted it when it was raised
+    (QEMU patch 0016): {"count": how many since the emulator began,
+    "exception": 3 to 6, "pc", "lr", "imprecise", "cfsr", "mmfar", "bfar"};
+    None: none yet, or an emulator from before it could say.  A firmware's
+    own report has its message and not its place, and a release build has
+    started again by the time one looks."""
+    raw = qom_get(m, "/machine/soc/armv7m/nvic", "last-fault")
+    try:
+        fault = json.loads(raw) if raw else None
+    except ValueError:
+        return None
+    return fault if isinstance(fault, dict) and fault.get("count") else None
+
+
+PLACES = {}                     # a device's name -> its ELF's functions, lines
+
+
+def code_place(dev, addr, lines=False):
+    """An address of code in words, by the firmware's ELF: `name+0x2c`, with
+    lines: and `(file:123)`; "": no ELF of this firmware here, or the
+    address is none of its code (an app's, in RAM)"""
+    import fe_cov
+    if dev.name not in PLACES:
+        path, _ = gdb_firmware(dev, None)
+        try:
+            elf = fe_cov.Elf(path) if path else None
+            PLACES[dev.name] = [elf, elf.functions() if elf else [], None]
+        except (fe_cov.Error, OSError, struct.error, ValueError, IndexError):
+            PLACES[dev.name] = [None, [], None]
+    elf, functions, rows = PLACES[dev.name]
+    addr &= ~1
+    hit = next(((a, n, name) for a, n, name in functions if a <= addr < a + n),
+               None)
+    if not hit:
+        return ""
+    text = hit[2] + (f"+{addr - hit[0]:#x}" if addr != hit[0] else "")
+    if lines:
+        if rows is None:
+            rows = PLACES[dev.name][2] = fe_cov.lines_of(elf) or []
+        line = next(((name, n) for a, e, name, n in rows if a <= addr < e), None)
+        if line:
+            text += f", {line[0]}:{line[1]}"
+    return text
+
+
+def fault_named(dev, fault, lines=False):
+    """cpu_fault() with its places in words: "at" (the PC's) and "from" (the
+    LR's: the caller's)"""
+    if not fault:
+        return fault
+    out = dict(fault)
+    for key, reg in (("at", "pc"), ("from", "lr")):
+        try:
+            out[key] = code_place(dev, int(fault[reg], 16), lines)
+        except (KeyError, ValueError):
+            out[key] = ""
+    return out
+
+
+def fault_text(fault):
+    """fault_named() as a sentence's part"""
+    kind = EXCEPTIONS.get(fault.get("exception"),
+                          f"exception {fault.get('exception')}")
+    cfsr = int(fault.get("cfsr", "0"), 16)
+    lr = int(fault.get("lr", "0"), 16) & ~1
+    text = (f"a {kind}{'' if kind.endswith('Fault') else ' fault'} at "
+            f"{fault.get('pc')}"
+            + (f" ({fault['at']})" if fault.get("at") else "")
+            + f", called from {lr:#010x}"
+            + (f" ({fault['from']})" if fault.get("from") else ""))
+    if fault.get("imprecise"):
+        text += ("; imprecise: a write that the bus refused later, noticed "
+                 "there and not made there")
+    elif cfsr & 0x80:                           # MMARVALID
+        text += f"; it touched {fault.get('mmfar')}"
+    elif cfsr & 0x8000:                         # BFARVALID
+        text += f"; it touched {fault.get('bfar')}"
+    return text
+
+
 def sram2_text(sram2):
     """c2_ram() in words"""
     parts = [f"SRAM2{x} from {sram2[f'sram2{x}']}" for x in "ab"
@@ -2759,6 +2840,7 @@ def device_status(dev):
         st["bluetooth"] = read_bluetooth(m)
         st["sram2"] = c2_ram(m)
         st["coverage"] = coverage_state(dev)
+        st["cpu_fault"] = fault_named(dev, cpu_fault(m))
         st["lights"] = {"led": g("/machine/led", "led"),
                         "blinking": g("/machine/led", "blinking"),
                         "backlight": g("/machine/led", "backlight"),
@@ -2871,6 +2953,16 @@ def cmd_status(args):
         print(f"{'firmware':9}: it started again after a crash: its "
               f"screen says \"{st['fault']}\" until a button is pressed "
               "there")
+    if st.get("cpu_fault"):
+        m = open_monitor(dev)
+        try:
+            fault = fault_named(dev, cpu_fault(m), lines=True)
+        finally:
+            m.close()
+        if fault:
+            n = fault["count"]
+            print(f"{'fault':9}: the CPU's last fault ({n} since the emulator "
+                  f"started): {fault_text(fault)}")
     for name, text in rows:
         print(f"{name:9}{':' if name else ' '} {text}")
     return 0
@@ -3930,6 +4022,203 @@ def cmd_coverage(args):
                  "build had them: `--source DIR` puts the source tree's "
                  "folder before them"))
     return 0
+
+
+def fuzz_inputs(target, paths):
+    """The inputs that files name, for seeds or a replay: a file as it is
+    (what the fuzzer itself keeps), a .sub or an .ir as its signal, a
+    crash's folder as the inputs before the crash and then its own"""
+    import fe_fuzz
+    out = []
+    for path in map(pathlib.Path, paths):
+        if path.is_dir():
+            names = sorted(path.glob("before-*"), key=lambda f: -int(
+                re.sub(r"\D", "", f.stem) or 0)) + sorted(path.glob("input*"))
+            names = names or sorted(f for f in path.iterdir() if f.is_file())
+        else:
+            names = [path]
+        for f in names:
+            try:
+                if f.suffix == ".sub" and target == "subghz":
+                    import fe_subghz
+                    data = fe_fuzz.pulses_text(
+                        [abs(x) for x in fe_subghz.parse_sub(f)[1]], True).encode()
+                elif f.suffix == ".ir" and target == "ir":
+                    import fe_ir
+                    data = fe_fuzz.pulses_text(
+                        fe_ir.parse_ir_file(str(f))[1], False).encode()
+                else:
+                    data = f.read_bytes()
+            except (OSError, ValueError, KeyError) as e:
+                sys.exit(f"fuzz: {f}: {e}")
+            out.append(data)
+    if not out:
+        sys.exit("fuzz: no input in " + ", ".join(map(str, paths)))
+    return out
+
+
+def cmd_fuzz(args):
+    """Inputs to the firmware's parsers, made from those that got somewhere
+    new, until one crashes it (scripts/fe_fuzz.py)"""
+    import fe_cov
+    import fe_fuzz
+    from fe_monitor import Monitor
+    dev = Device(args.device)
+    kind = fe_fuzz.TARGETS.get(args.target)
+    if not kind:
+        sys.exit(f"fuzz: no target `{args.target}`: one of "
+                 + ", ".join(fe_fuzz.TARGETS))
+    if not dev.running():
+        sys.exit(f"[{dev.name}] is not running: `./flipperemu -d {dev.name} "
+                 "run --coverage` starts it, with the coverage that tells an "
+                 "input that got somewhere new")
+    covered = bool((run_noted(dev) or {}).get("coverage")
+                   and dev.cov_sock.exists())
+    at = [0]
+
+    def ask_monitor(command):
+        # (the monitor takes one at a time, and the CLI's opening asks it
+        # too: a visit for each command)
+        m = Monitor(str(dev.monitor))
+        try:
+            return m.cmd(command)
+        finally:
+            m.close()
+
+    def tell(text):
+        print(f"[{dev.name}] fuzz {args.target}: {text}", flush=True)
+
+    class Env:
+        open_cli = staticmethod(lambda: open_cli(dev))
+        mon = staticmethod(ask_monitor)
+        say = staticmethod(tell)
+
+        @staticmethod
+        def news(forget=False):
+            if not covered:
+                return None
+            try:
+                if forget:
+                    fe_cov.ask(dev.cov_sock, "forget")
+                return fe_cov.numbers(fe_cov.ask(dev.cov_sock, "news")).get("new", 0)
+            except fe_cov.Error:
+                return None
+
+        @staticmethod
+        def log_new():
+            try:
+                with open(dev.uart, "rb") as f:
+                    if f.seek(0, 2) < at[0]:    # (a log that began anew)
+                        at[0] = 0
+                    f.seek(at[0])
+                    new = f.read()
+            except OSError:
+                return b""
+            at[0] += len(new)
+            return new
+
+        @staticmethod
+        def halted():
+            halt = firmware_halt(dev)
+            if not halt:
+                return None
+            return halt_text(dev, halt)[0]
+
+        @staticmethod
+        def fault():
+            """(how many faults the CPU has had, the last one in words, its
+            place in a word or two), or None"""
+            m = Monitor(str(dev.monitor))
+            try:
+                fault = fault_named(dev, cpu_fault(m), lines=True)
+            except (OSError, ConnectionError):
+                return None
+            finally:
+                m.close()
+            if not fault:
+                return None
+            short = (fault.get("from") or fault.get("lr") or "").split(",")[0]
+            return fault["count"], fault_text(fault), short
+
+        @staticmethod
+        def where(addr):
+            return code_place(dev, addr)
+
+        @staticmethod
+        def close_app(cli):
+            import fe_apps
+            try:
+                fe_apps.close(cli, back=lambda long=False: press_back(dev, long))
+            except (fe_apps.AppError, fe_apps.Restarted, OSError, TimeoutError):
+                pass
+
+        @staticmethod
+        def recover():
+            """A firmware that crashed starts again by itself; one that
+            halted or locked up, or whose CLI stays away, is reset"""
+            end, reset_at = time.time() + 120, time.time() + 25
+            while time.time() < end:
+                if not dev.running():
+                    return False
+                if firmware_halt(dev) or time.time() > reset_at:
+                    ask_monitor("system_reset")
+                    reset_at = time.time() + 40
+                    time.sleep(1.0)
+                try:
+                    open_cli(dev, timeout=5.0).close()
+                    return True
+                except SystemExit:
+                    time.sleep(0.5)
+            return False
+
+    opts = {k: v for k, v in (("max", args.max), ("frequency", args.frequency),
+                              ("command", args.command), ("ext", args.ext),
+                              ("timeout", args.timeout)) if v is not None}
+    try:
+        target = kind(Env, opts)
+    except ValueError as e:
+        sys.exit(f"fuzz {args.target}: {e}")
+    if args.seeds:
+        seeds = fuzz_inputs(args.target, args.seeds)
+        target.seeds = lambda: seeds
+    replay = fuzz_inputs(args.target, args.replay) if args.replay else None
+    out = pathlib.Path(args.out or f"fuzz-{dev.name}-{args.target}-"
+                       + time.strftime("%Y%m%d-%H%M%S"))
+    fz = fe_fuzz.Fuzzer(target, Env, out, args.seed)
+    fz.stop_at_first = args.first
+    if replay is None:
+        tell(f"into {out}/ (corpus, crashes), seed {fz.seed}"
+            + ("" if covered else "; this run has no coverage (`run "
+               "--coverage`): inputs are made from the seeds alone, and none "
+               "is told that got somewhere new"))
+    seconds = args.seconds if args.seconds is not None else \
+        (None if args.runs else 60.0)
+    try:
+        fz.run(seconds, args.runs, replay)
+    except fe_fuzz.Lost as e:
+        try:
+            target.close()
+        except (OSError, fe_fuzz.Lost):
+            pass
+        tell(f"stopped: {e}")
+        return 2
+    except KeyboardInterrupt:
+        try:
+            target.close()
+        except (OSError, fe_fuzz.Lost):
+            pass
+        tell("stopped by hand")
+    if replay is not None:
+        tell(f"{len(replay)} inputs again: " + (
+            "; ".join(f"{k} ({n} times)" for k, n in fz.kinds.items())
+            if fz.kinds else "no crash and no hang"))
+    for first, n in fz.kinds.items():
+        tell(f"  {n} times: {first}")
+    if fz.kinds and replay is None:
+        tell(f"each kind's first three are in {out / 'crashes'}/, with the "
+            "inputs before them: `fuzz " + args.target + " --replay FOLDER` "
+            "gives one's to the firmware again")
+    return 1 if fz.kinds else 0
 
 
 def cmd_gdb(args):
@@ -7175,6 +7464,51 @@ def main():
                    help="the folder the ELF's file names are from, for --lcov")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_coverage)
+
+    p = sub.add_parser("fuzz", help="inputs to the firmware's parsers, made "
+                       "from those that reached new code, until one crashes it",
+                       usage="flipperemu fuzz subghz|ir|rpc|cli [--seconds N] "
+                             "[--runs N] [--first] [--seed N] [--out DIR] "
+                             "[--seeds FILE...] [--max N] [--frequency HZ] "
+                             "[--command TEMPLATE] [--ext .EXT] [--timeout S]\n"
+                             "       flipperemu fuzz TARGET --replay FILE|FOLDER...")
+    p.add_argument("target",
+                   help="subghz: +high/-low µs on the air while `subghz rx` "
+                        "listens; ir: marks and spaces at the IR receiver "
+                        "while `ir rx` listens; rpc: bytes into an RPC session "
+                        "on the USB serial port; cli: a CLI command with the "
+                        "input in it (--command)")
+    p.add_argument("--seconds", type=float, metavar="N",
+                   help="for so long (default 60, or until --runs)")
+    p.add_argument("--runs", type=int, metavar="N", help="so many inputs")
+    p.add_argument("--first", action="store_true",
+                   help="stop at the first crash or hang")
+    p.add_argument("--seed", type=int, metavar="N",
+                   help="the random numbers' seed (said at the start)")
+    p.add_argument("--out", metavar="DIR",
+                   help="where the kept inputs (corpus/) and the crashes go "
+                        "(default: fuzz-DEVICE-TARGET-TIME in this folder)")
+    p.add_argument("--seeds", nargs="+", metavar="FILE",
+                   help="inputs to begin with, in place of the target's own: "
+                        "files as the fuzzer keeps them, or folders of them; "
+                        "for subghz a .sub (RAW), for ir an .ir")
+    p.add_argument("--replay", nargs="+", metavar="FILE",
+                   help="give these inputs once each, in their order, and say "
+                        "what came of it: files, or a crash's folder")
+    p.add_argument("--max", type=int, metavar="N",
+                   help="an input's most bytes (signals: durations)")
+    p.add_argument("--frequency", type=int, metavar="HZ",
+                   help="subghz: where `subghz rx` listens (default 433920000)")
+    p.add_argument("--command", metavar="TEMPLATE",
+                   help="cli: the command, with the input's place in it: {hex}, "
+                        "{text}, or {file} (the input written to the card "
+                        "first: `subghz decode_raw {file}`)")
+    p.add_argument("--ext", metavar=".EXT",
+                   help="cli with {file}: the file's ending (default .bin)")
+    p.add_argument("--timeout", type=float, metavar="S",
+                   help="cli: seconds a command may take (default 5): longer "
+                        "is a hang")
+    p.set_defaults(func=cmd_fuzz)
 
     p = sub.add_parser("gdb", help="gdb on a running device, with the firmware's "
                        "and its apps' symbols",

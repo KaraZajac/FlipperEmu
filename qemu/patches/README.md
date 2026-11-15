@@ -26,8 +26,11 @@ under way lost).
 0014 and 0015 are needed by the machine since 2026-11-14 (CPU2's SRAM2: the flash model
 calls `armv7m_nvic_set_pending_async()`, and the launcher reads the NVIC's `lockup`);
 without them it does not build.
+0016 is an addition: without it the machine runs, and `status` and a fuzzer's crash
+report have no place of a fault.
 A source tree that was set up before a patch came (0006 to 0009: 2026-11-11; 0010 to
-0013: 2026-11-12; 0014 and 0015: 2026-11-14) gets it from one more run of that script.
+0013: 2026-11-12; 0014 and 0015: 2026-11-14; 0016: 2026-11-15) gets it from one more
+run of that script.
 
 How the script finds out what a tree has: it takes the patches out of a copy of the
 files they touch, the last one first, and what does not come out there is what the tree
@@ -69,6 +72,7 @@ without a change to the check.
 | 0013 | `hw/nvram/eeprom_at24c.c` | the EEPROM saved no state: in a loaded machine its address counter was 0, the bytes of a write that was under way at the save were lost (as was all that had been written to an EEPROM without a backing file), and the bus did not have it as the device of a transfer under way |
 | 0014 | `hw/intc/armv7m_nvic.c`, `include/hw/intc/armv7m_nvic.h` | every fault was synchronous: a board's memory that refuses a write the bus took (an imprecise BusFault, asynchronous on the chip) could only raise a precise one, escalated at once, and a Lockup where it came inside the HardFault handler. `armv7m_nvic_set_pending_async()` pends such a fault: not escalated for its priority, a disabled one a pending HardFault, never a Lockup |
 | 0015 | `hw/intc/armv7m_nvic.c`, `include/hw/intc/armv7m_nvic.h` | a Lockup (a fault that cannot be taken) ended QEMU with `cpu_abort()`; on the chip the processor stops until it is reset and the rest runs on. Now it stops so (powered off, as PSCI does, until a reset), and the NVIC's `lockup` property says where and why |
+| 0016 | `hw/intc/armv7m_nvic.c`, `include/hw/intc/armv7m_nvic.h` | nothing kept where a fault was: a guest's handler seldom says (the Flipper's prints a message and its own registers, and resets). The NVIC notes each fault as it is pended: the exception, the PC and LR it was raised at, the fault status and addresses, and whether it is imprecise; its `last-fault` property has that as JSON, with a count, over a reset too |
 
 **Licence:** these patches modify QEMU's own source files, which are GPL-2.0-or-later,
 so the patches are GPL-2.0-or-later too, unlike the rest of this repository (BSD-3-Clause).

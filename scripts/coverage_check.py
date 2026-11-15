@@ -284,11 +284,13 @@ def main():
                   and ("functions" in text if with_elf else
                        "bytes of the flash ran" in text), text)
             if tried:
-                code, rep, raw = report(b, "--app", "fe_hello", "--functions")
-                # (the id's build is the changed one now: by its file)
+                # (by its file, which is the changed build: what ufbt built
+                # last under the id may be another check's by now)
+                fap = work / "fe_hello" / "dist" / "fe_hello.fap"
+                code, rep, raw = report(b, "--app", fap, "--functions")
                 check("... and of the app, which is not in any memory now: "
-                      "told as another build by the id (the changed one was "
-                      "built last)",
+                      "its changed build is told as another than the one "
+                      "that ran",
                       code in (0, 1) and ("another build" in raw
                                           or (rep or {}).get("not_this_file")),
                       raw[:800])

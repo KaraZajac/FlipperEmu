@@ -233,6 +233,10 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
 - Coverage: which of the firmware's functions and source lines ran, or an app's,
   since the start or since a test began (`run --coverage`, `./flipperemu coverage`),
   as a summary, a list, or an lcov file.
+- Fuzzing: inputs to the firmware's parsers (Sub-GHz and infrared signals, RPC
+  messages, a CLI command's argument or file), made from those that reached new
+  code, until one crashes it; a crash is kept with its inputs and with the place of
+  the CPU's fault (`./flipperemu fuzz`).
 - The screen as a picture (PNG) and as a recording (an animated GIF, a few kB for a
   few seconds of an app), from the launcher and from the window.
 - Snapshots: a running device kept as it stands, with its card and what is on its
@@ -527,6 +531,7 @@ picture of the save to the pixel and the tag, and goes on with Pause.
 | `record out.gif [--seconds N] [--scale N]` | what its LCD shows, as an animated GIF: until Ctrl-C, or for N seconds (a device without a window; with one: Device > Record the screen) |
 | `gdb [--elf FILE] [--apps DIR] [--with GDB] [-- GDB'S ARGUMENTS]` | gdb on a running device, with the firmware's symbols and its apps' |
 | `run --coverage` | count the code that runs (a plugin in the emulator, about 2 % slower) |
+| `fuzz subghz\|ir\|rpc\|cli [--seconds N] [--runs N] [--first] [--seed N] [--out DIR] [--seeds FILE...] [--command TEMPLATE]` \| `fuzz TARGET --replay FILE\|FOLDER...` | inputs to one of the firmware's parsers, made from those that reached new code, until one crashes it; a crash's inputs given again |
 | `coverage [--elf FILE \| --app APP] [--files N] [--functions [PATTERN]] [--missed] [--lcov FILE] [--json]` \| `coverage reset` \| `coverage dump FILE` | what ran since the start or the last reset: of the firmware's functions and lines, or an app's (by its id, its .fap or its ELF); count anew; the blocks that ran, as text |
 | `gdb --serve PORT` | its gdb stub on a TCP port of this computer, for an IDE |
 | `gdb --vscode [--serve PORT]` | ... and a debug configuration for VS Code (the Cortex-Debug extension) in `.vscode/launch.json` of the folder you are in |
@@ -3052,6 +3057,91 @@ checks it (23 checks on the official 1.5.1 with ufbt's SDK; 14 to 17 on the othe
 where no SDK of theirs is here for the app). How it works:
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#coverage-qemupluginsfe_covc-scriptsfe_covpy).
 
+### Fuzzing: inputs until one crashes it
+
+```sh
+./flipperemu run --coverage --detach -f firmware/official-1.5.1/flipper-z-f7-update-1.5.1.tgz
+./flipperemu wait
+./flipperemu fuzz rpc --seconds 60
+./flipperemu fuzz rpc --replay fuzz-flipper-rpc-*/crashes/001-crash/input.bin
+```
+
+```
+[flipper] fuzz rpc: crash after input 1: [CRASH][ISR MemMgmt] NULL pointer dereference (from rpc_system_storage_list_process+0x2c)  (fuzz-flipper-rpc-20261115-002210/crashes/001-crash)
+[flipper] fuzz rpc: 1 inputs again: [CRASH][ISR MemMgmt] NULL pointer dereference (from rpc_system_storage_list_process+0x2c) (1 times)
+```
+
+That one is real, and was the fuzzer's first find: the RPC of the official 1.5.1
+takes a "list this folder" request that names no folder, and compares the name that
+is not there (`strcmp(NULL, "/")` in `rpc_storage.c`); the Flipper restarts.
+Momentum mntm-012, Unleashed 094 and RogueMaster do the same. The first run found it
+with its sixteenth input, a seed's request with two bytes changed (226 inputs in 15 s
+in all); three runs with other seeds went 45 s each without it. A fuzzer's luck is
+its seed's, and a longer run evens it out.
+
+An input goes to the firmware the way a real one would, and the Flipper runs on. After
+each one the fuzzer looks at three things: whether the firmware crashed (its log, a
+halt, a lockup), whether it still answers, and whether code ran that had not run
+before, which the coverage plugin says (`run --coverage`; without it the inputs are
+made blindly, and the fuzzer says so). An input that got somewhere new is kept
+(`corpus/`), and later inputs are made from the kept ones: a byte or a pulse changed,
+a piece cut out or put in twice, two of them joined. That is what gets through a
+parser's checks one at a time. The targets:
+
+| target | an input | how the firmware gets it |
+|---|---|---|
+| `subghz` | +high/-low µs | on the air while `subghz rx` listens (`--frequency HZ`): the protocols' decoders. Unleashed's and RogueMaster's CLI does not start the radio, and the fuzzer says so |
+| `ir` | marks and spaces, µs | at the IR receiver while `ir rx` listens |
+| `rpc` | bytes | into an RPC session on the USB serial port: the protobuf decoder and the handlers of its messages. A message's body is changed and its length kept right, mostly |
+| `cli` | bytes | in a CLI command (`--command`): as hex (`{hex}`), as text (`{text}`), or as a file on the card that the command reads (`{file}`, `--ext .sub`) |
+
+`--seconds N` or `--runs N` says how long (60 s without), `--first` stops at the
+first crash, `--seed N` makes the same choices again (the seed is said at the start),
+`--seeds FILE...` gives inputs of your own to begin with (a `.sub` RAW capture for
+`subghz`, an `.ir` for `ir`), `--out DIR` is where the corpus and the crashes go.
+Its exit status is 1 when it found a crash or a hang.
+
+A crash's folder (`crashes/001-crash/`) has the input, the inputs before it (the
+Flipper is not reset between inputs, so an input meets what the ones before left), and
+`report.txt`: the firmware's own report, and before it the place of the CPU's fault
+as the emulator noted it. `fuzz TARGET --replay FOLDER` gives them to the firmware
+again, in their order; a file alone, that input. Crashes are told apart by their
+message and their place, and each kind's first three are kept. The radio and RPC
+targets use a throwaway device's Flipper as it is: the RPC's inputs write, delete and
+start things, as its messages do.
+
+Where a fault was is in `status` too, whoever caused it:
+
+```
+firmware : it started again after a crash: its screen says "NULL pointer dereference" until a button is pressed there
+fault    : the CPU's last fault (1 since the emulator started): a MemManage fault at 0x0806d514 (strcmp), called from 0x08088558 (rpc_system_storage_list_process+0x2c, applications/services/rpc/rpc_storage.c:267); it touched 0x00000000
+```
+
+The firmware's report has the message and the registers of its own crash handler; the
+emulator notes the fault when the CPU raises it (QEMU patch 0016: the PC, its
+caller's return address, the fault's address), and the launcher names them by the
+firmware's ELF.
+
+For an app's parser, the `cli` target with a command that reaches it. The check's
+own app takes a signal's argument, and crashes on one input in sixteen million:
+
+```sh
+cd scripts/fuzz_check_app && ../../flipperemu ufbt launch
+../../flipperemu fuzz cli --command 'loader signal 100 {hex}' --max 4 --first
+```
+
+```
+[flipper] fuzz cli: crash after input 724: [CRASH][LoaderSrv] fe_fuzz_check: found (from 20009137)  (.../crashes/001-crash)
+[flipper] fuzz cli: 724 inputs in 6 s (119 a second), 9 kept (the last 4 s ago), 1 crashes of 1 kinds
+```
+
+Its three checks of the input's bytes fall one after another, each kept input a step
+(`80000000`, `807f0065`, then `807f1065`). `scripts/fuzz_check.py FIRMWARE` checks
+all of it (16 checks on the official 1.5.1 with ufbt's SDK, 10 on the others). It is
+no AFL: an input takes the time that it takes on a Flipper (a signal its length on the
+air: 8 to 10 a second; an RPC message 15 to 20; a CLI command a hundred and more),
+and nothing is reset between two.
+
 ## Layout
 
 ```
@@ -3073,7 +3163,8 @@ qemu/patches/          fixes to upstream QEMU (SysTick, SD over SPI, open-drain 
                        register reads without the big lock, a chardev's log file,
                        the UART's reception, a byte that no receiver took, an
                        EEPROM's file that ends within a sector, a Winbond flash's
-                       older IDs)
+                       older IDs, an imprecise BusFault, Lockup, where the last
+                       fault was)
 scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_monitor.py,
                        fe_cli.py, fe_files.py (files on the card), fe_apps.py
                        (apps and the loader), fe_expansion.py (an expansion
@@ -3082,7 +3173,8 @@ scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_moni
                        fe_nfc_link.py (cards from programs), fe_pm3.py (Proxmark3),
                        fe_enclave.py (the enclave's keys and ciphers), fe_gdb.py
                        (gdb's side of `flipperemu gdb`), fe_cov.py (coverage:
-                       the plugin's counts against an ELF), fe_record.py (the
+                       the plugin's counts against an ELF), fe_fuzz.py (the
+                       fuzzer and its targets), fe_record.py (the
                        screen as a GIF), fe_usbip.py, fe_u2f.py (a U2F host
                        over USB/IP), usbip_attach.py, fe_gui.py (the window: fe_gui_view.py,
                        fe_gui_link.py, fe_gui_widgets.py, fe_gui_ble.py), smoke_test.py,

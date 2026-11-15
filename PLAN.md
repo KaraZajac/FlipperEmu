@@ -779,15 +779,32 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       a stopped device's last run. `scripts/coverage_check.py` 23 (BRINGUP_LOG 153)
     - ☐ A trace: the order in which code ran (the last calls before a crash)
     - ☐ Apps that run in place from the flash (their blocks' bytes are not kept)
-- ☐ Fuzzing harness (AFL++/libafl QEMU mode) for parsers in the firmware
-- ☐ Upstream the fifteen QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:
+- ☑ Fuzzing harness for parsers in the firmware (2026-11-15): `./flipperemu fuzz
+      subghz|ir|rpc|cli`, our own (`scripts/fe_fuzz.py`), guided by the coverage
+      plugin's `news`; inputs as a Flipper gets them (a signal on the air, an RPC
+      session, a CLI command), no reset between them; crashes kept with the inputs
+      before them and the place of the CPU's fault (QEMU patch 0016: the NVIC's
+      `last-fault`, in `status` too); `--replay`. Not AFL++'s QEMU mode: that is
+      another QEMU, and its speed comes from resets that a Flipper with its
+      peripherals does not have here. `scripts/fuzz_check.py` 16 (BRINGUP_LOG 154)
+    - ☑ Found with it, in its first minute: the official 1.5.1's RPC crashes on a
+          storage list request without a path (`strcmp(NULL, "/")`,
+          `rpc_storage.c:266`); Momentum, Unleashed and RogueMaster too. Not
+          reported upstream (Kara's to decide)
+    - ☐ A lockup seen once after three RPC runs on one device, in the crash
+          handler's walk of the heap (`vPortGetHeapStats`): what crashed first is
+          not known (the fuzzer looks once more after its target is closed now)
+    - ☐ More targets: NFC (a card's answers on the link), iButton and RFID pulses,
+          the Sub-GHz decoders on Unleashed and RogueMaster (their CLI does not
+          start the radio: through the app's Read), BLE's GATT writes
+- ☐ Upstream the sixteen QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:
       register reads without the big lock under TCG, 2026-11-10; 0006 to 0009: a
       chardev's log file, the UART's reception, a byte no receiver took, an EEPROM's
       file, 2026-11-11; 0010 to 0013: Winbond's read-ID commands, the load of a saved
       state with an SD card on SPI, an EEPROM's address counter after an address that
       was cut short, an EEPROM's saved state, 2026-11-12; 0014 and 0015: an imprecise
-      BusFault, a Lockup that stops the processor, 2026-11-14); consider upstreaming
-      the machine
+      BusFault, a Lockup that stops the processor, 2026-11-14; 0016: where the last
+      fault was, 2026-11-15); consider upstreaming the machine
 
 ## Non-goals (for now)
 - Running ST's radio stack on an emulated CPU2 (closed, encrypted binary)

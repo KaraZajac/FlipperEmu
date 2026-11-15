@@ -16,10 +16,12 @@
  *   stat          ->  ok blocks=N executed=M resets=R
  *   reset         ->  ok            counted from now on
  *   dump PATH     ->  ok blocks=M   the blocks that ran since the reset
- *   news          ->  ok new=N      blocks that ran for the first time since
- *                                   the last `news` (a fuzzer's question:
- *                                   did this input get anywhere new?)
- *   forget        ->  ok            `news` begins anew: all is new again
+ *   news          ->  ok new=N      blocks that ran since `forget` and that
+ *                                   no `news` has counted yet (a fuzzer's
+ *                                   question: did this input get anywhere
+ *                                   new?)
+ *   forget        ->  ok            `news` begins anew: what runs from now
+ *                                   on is new again, once
  *
  * and written at QEMU's exit with out=PATH.  A dump is text:
  *
@@ -73,6 +75,7 @@ static GHashTable *by_key;              /* Block.key -> Block */
 static GPtrArray *blocks;               /* Block, by id */
 static struct qemu_plugin_scoreboard *chunk[CHUNKS_MAX];
 static uint64_t *base[CHUNKS_MAX];      /* the counters at the last reset */
+static uint64_t *mark[CHUNKS_MAX];      /* the counters at the last forget */
 static uint8_t *seen[CHUNKS_MAX];       /* a block that `news` has counted */
 static bool full;
 static unsigned resets;
@@ -144,6 +147,7 @@ static void tb_trans(struct qemu_plugin_tb *tb, void *unused)
                 chunk[next / CHUNK] =
                     qemu_plugin_scoreboard_new(CHUNK * sizeof(uint64_t));
                 base[next / CHUNK] = g_new0(uint64_t, CHUNK);
+                mark[next / CHUNK] = g_new0(uint64_t, CHUNK);
                 seen[next / CHUNK] = g_new0(uint8_t, CHUNK);
             }
             b = g_new0(Block, 1);
@@ -229,7 +233,8 @@ static void answer(int c, const char *line)
         unsigned n = 0;
 
         for (unsigned i = 0; i < blocks->len; i++) {
-            if (!seen[i / CHUNK][i % CHUNK] && *counter(i)) {
+            if (!seen[i / CHUNK][i % CHUNK] &&
+                *counter(i) != mark[i / CHUNK][i % CHUNK]) {
                 seen[i / CHUNK][i % CHUNK] = 1;
                 n++;
             }
@@ -237,6 +242,7 @@ static void answer(int c, const char *line)
         reply = g_strdup_printf("ok new=%u\n", n);
     } else if (!strcmp(line, "forget")) {
         for (unsigned i = 0; i < blocks->len; i++) {
+            mark[i / CHUNK][i % CHUNK] = *counter(i);
             seen[i / CHUNK][i % CHUNK] = 0;
         }
         reply = g_strdup("ok\n");

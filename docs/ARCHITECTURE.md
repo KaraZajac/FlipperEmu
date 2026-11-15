@@ -2059,9 +2059,9 @@ had when it was translated, and its key has a mark of them: the same address wit
 other bytes is another block with its own counter.
 
 A socket in the device's folder (`coverage.sock`) takes a line: `stat`, `reset`,
-`dump PATH`, and `news` (how many blocks ran for the first time since it was last
-asked, with `forget` to begin anew: what a fuzzer asks after each input). The machine
-runs on meanwhile. A reset writes no counter (the vCPU's
+`dump PATH`, and `news` (how many blocks ran since `forget` that no `news` has
+counted yet: what a fuzzer asks after each input, with `forget` at its start). The
+machine runs on meanwhile. A reset writes no counter (the vCPU's
 thread adds to them, and a write beside it could be lost): it notes what each counter
 has, and a dump says what came since. At QEMU's exit the plugin writes a dump
 (`coverage.dump`), which is what `coverage` reads of a device that has stopped. A
@@ -2088,6 +2088,46 @@ said: the file is another build than what ran, or another app had the place.
 
 Not there: the order in which code ran (a trace), and apps that run in place from the
 flash (their bytes are not kept; none of the firmwares here has such a loader).
+
+## Fuzzing (`scripts/fe_fuzz.py`) and where a fault was
+
+`flipperemu fuzz TARGET` gives the firmware inputs the way the tools here give it
+anything: a signal through the CC1101's or the IR receiver's `rx` property while the
+firmware's own CLI command listens, bytes into an RPC session or a CLI command on the
+USB serial port. The Flipper is not reset between inputs and runs at its own speed,
+so an input costs what it costs on a Flipper (a signal its time on the air), and an
+input meets the state that the ones before it left: a crash is kept with the eight
+inputs before it.
+
+**Guidance.** After each input the fuzzer asks the coverage plugin's `news`: the
+blocks that ran since `forget` and were not counted before. More than none, and the
+input is kept; new inputs are changes of kept ones (a byte, a 16- or 32-bit number, a
+piece out or in or twice, two joined; for a signal a duration, a pair turned round,
+its speed, a gap; for the RPC a message's body with its length kept right, a
+message's request number, messages doubled or dropped). Before the first input it
+waits until nothing new runs by itself (timers, the services' own work), so that an
+input is told from the firmware's idling; what still runs for the first time later by
+itself is taken for an input's, and keeps one that did not earn it.
+
+**A crash** is the firmware's `[CRASH]` (or `furi_check failed`, `HardFault`) in its
+log since the input, a halt or a lockup (asked of the emulator when an input was not
+taken, every 25 inputs, and once more after the target is closed), or a CLI command
+or a session that does not come back. It is told from others by its first line and
+its place, and the firmware is waited for (a release build starts again; a halted or
+locked-up one is reset) before the next input.
+
+An RPC session that takes a length of megabytes for a message's would eat the next
+inputs as that message. When an input brings no answer, a ping tells whether the
+session still reads messages; if not, the port is closed and opened, which ends it.
+
+**Where a fault was.** QEMU patch 0016 has the NVIC note each fault as it is pended:
+the exception, the PC and LR at that moment (of a synchronous fault: the instruction,
+and its caller's return address), CFSR, MMFAR and BFAR; its `last-fault` property is
+that as JSON with a count, and a reset leaves it. `status` names both addresses by the
+firmware's ELF (its symbol table, and its line table for the file and line), and the
+fuzzer puts it before the firmware's report. For a crash that the firmware called for
+itself (`furi_crash`, `furi_check`) there is no fault, and the place is the LR that
+its report has.
 
 ## Persistence per device (`devices/NAME/`)
 

@@ -1197,6 +1197,27 @@ Without `--app`, `coverage` is of the firmware: the same lists for its functions
 files, where its ELF is beside the package (the official builds': `fetch_firmware.py`
 gets it). The cost of `--coverage` is about 2 % of the emulator's speed.
 
+## A parser's inputs: fuzzing
+
+If your app reads something that it did not make itself (a file, a frame, a message),
+the emulator can try inputs on it by the thousand, and keep those that got further
+into your code than the ones before (`run --coverage` tells it). It needs a way to
+give your app an input from the CLI. Two that the firmware has:
+
+```sh
+# an input as a file on the card, and a command that makes the app read it
+../../flipperemu fuzz cli --command 'loader open "My App" {file}' --ext .myf --seeds samples/
+# an input as a signal's argument, to an app that runs (four bytes)
+../../flipperemu fuzz cli --command 'loader signal 100 {hex}' --max 4 --first
+```
+
+The first starts the app anew for every input, a second or so each. The second
+needs a few lines in the app (`furi_thread_set_signal_callback`, as
+`scripts/fuzz_check_app/target.c` has them) and gives a hundred and more inputs a
+second. A crash's folder has the input, the firmware's report, and where the CPU
+faulted; `fuzz cli --command '...' --replay FOLDER` crashes it again, under `gdb` if
+you like. `coverage --app` afterwards says how far into the parser the inputs got.
+
 ## A firmware: `fbt`
 
 A firmware's source tree has its own tool, `./fbt`. What it builds goes on the emulated
@@ -1343,6 +1364,13 @@ whose function is then called once and three times, the lists, the lcov file, th
 dump; and with `ufbt`, the example app built, started, its keys pressed and left,
 and after that its functions' calls and its lines, by its `.fap` and by its id, a
 changed build told apart, and a stopped device's last run. 23 checks on the official
+1.5.1.
+
+`scripts/fuzz_check.py FIRMWARE` checks the fuzzer: blind without coverage, the `ir`,
+`subghz` and `rpc` targets with their seeds, a replay; and with `ufbt`, its own app
+(`scripts/fuzz_check_app`), whose crash behind three checks of an input's bytes the
+fuzzer has to find, by the steps in its corpus, and to find again from the crash's
+folder; and the place of a CPU fault that the app makes. 16 checks on the official
 1.5.1.
 
 `scripts/gpio_check.py FIRMWARE` has the firmware's own `gpio` command in the CLI on

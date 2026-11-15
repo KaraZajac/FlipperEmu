@@ -4677,6 +4677,73 @@ big lock, entry 92).
       RogueMaster (no ELF of theirs here: bytes); setup_check 45 (the
       plugin is compiled; a `cc` that compiles nothing stands in).
 
+154. **Fuzzing, and where a fault was.** `./flipperemu fuzz subghz|ir|rpc|cli`
+    (`scripts/fe_fuzz.py`), guided by the coverage plugin.
+    - Not AFL++'s QEMU mode: that is a QEMU of its own, and what makes it
+      fast is a fork or a snapshot for every input, which a machine with
+      its USB, its card and its timers running does not give here (a
+      snapshot's load is two seconds). So the Flipper runs on, an input
+      goes in as a real one would, and the plugin is asked `news` after it:
+      blocks that ran for the first time. 8 to 10 inputs a second for a
+      signal (its own length on the air), 15 to 20 for an RPC message, 120
+      to 250 for a CLI command.
+    - Found in its first minute, with its sixteenth input: the official
+      1.5.1's RPC crashes on a storage list request that names no path.
+      `rpc_system_storage_list_process` does `strcmp(list_request->path,
+      "/")` (rpc_storage.c:266) with a NULL path: a MemManage fault at
+      address 0, "NULL pointer dereference", and a restart. One message of
+      11 bytes (`0a 08 03 3a 06 4a 04 2f 65 88 74`: the seed's list request
+      with its path's field number and one letter changed), alone, every
+      time; Momentum mntm-012, Unleashed 094 and RogueMaster too. Over USB
+      and, once paired, over Bluetooth. Not reported upstream: Kara's to
+      decide.
+    - The firmware's report of such a crash has a message and its handler's
+      own registers, not the place. QEMU patch 0016: the NVIC notes each
+      fault as it is pended (exception, PC, LR, CFSR, MMFAR, BFAR; an
+      asynchronous one as imprecise), property `last-fault`, kept over a
+      reset. `status` has a row of it, named by the ELF: "a MemManage fault
+      at 0x0806d514 (strcmp), called from 0x08088558
+      (rpc_system_storage_list_process+0x2c, .../rpc_storage.c:267); it
+      touched 0x00000000". The fuzzer tells crashes apart by it (the
+      caller's function: the fault itself is often in a library's).
+      The patch's line in `armv7m_nvic_set_pending_async()` stands directly
+      after that function's own assert: with a blank line between, `patch`
+      put the hunk into another function of a tree without 0014 (its fuzz
+      drops two lines of context at each end), and setup_check's tree
+      "without 0014 alone" was a tree with the call in the wrong place.
+    - What went wrong on the way. The monitor takes one client: the fuzzer
+      kept one open and the launcher's own `open_cli` (which asks the
+      monitor) then got no answer; it visits per command now. `news` kept
+      what it had counted from one fuzz run to the next in the same
+      emulator, so a second run found nothing new in its seeds: `forget`
+      notes the counters, and what runs after it is new again once. An RPC
+      input with a length of megabytes had the session take the next
+      inputs for its message (146 s of them): a ping after an input that
+      brought no answer, and the port closed and opened when the ping gets
+      none. The RPC's seeds start an app (Clock), and the next target's
+      `ir rx` was refused beside it: the radio and RPC targets close what
+      runs, with Back where an app takes no request (RogueMaster's Clock);
+      the `cli` target must not, for it closed the app that was being
+      fuzzed, and 102,000 inputs then found nothing, rightly.
+    - A lockup, once: after three RPC runs on one device the firmware was
+      locked up at `vPortGetHeapStats+0x54`, the crash handler's walk of
+      the heap for its report: a crash first, and then a fault inside its
+      handler on a heap that was not whole. The fuzzer had said "0
+      crashes": it came after the last input, as the session and the app
+      it started were closed. Four more runs did not bring it back, and
+      the device was gone (removed before a look: a mistake). The fuzzer
+      looks once more after it has closed its target now.
+    - The check's own app (`scripts/fuzz_check_app`) has a crash behind
+      three checks of a signal's argument, byte by byte (0x80, 0x7F, 0x10:
+      values that the fuzzer's "telling" bytes have, to keep the check
+      short): found after 724, 3,879 and 1,727 inputs in three runs (6 to
+      22 s), the corpus with the steps to it. Its other signal writes to
+      address 0, for the fault's place.
+    - Checks: fuzz_check 16 on the official 1.5.1 (with ufbt's SDK), 10 on
+      the dev build, Momentum, Unleashed and RogueMaster (on the last two
+      `fuzz subghz` says that their CLI does not start the radio);
+      setup_check 45 with patch 0016.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

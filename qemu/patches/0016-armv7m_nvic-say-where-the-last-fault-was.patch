@@ -1,0 +1,102 @@
+From: FlipperEmu
+Subject: [PATCH] armv7m_nvic: say where the last fault was
+
+A guest's fault handler seldom says where the fault was: the Flipper's
+prints a line ("NULL pointer dereference") and the registers of its own
+call, not the stacked ones, and then resets the machine. Whoever looks
+afterwards has a message and no place.
+
+Note it when a fault is pended (HardFault, MemManage, BusFault,
+UsageFault): the exception, the PC and LR it was raised at (of a
+synchronous fault: the instruction that faulted, and its caller's return
+address), the fault status and the fault addresses as they are then; of
+an asynchronous one (armv7m_nvic_set_pending_async()), that it is
+imprecise, for its PC is only where it was noticed. The NVIC's
+"last-fault" property has it as JSON, with a count that tells a new
+fault from the one before; a reset leaves it.
+
+Signed-off-by: FlipperEmu
+---
+--- a/include/hw/intc/armv7m_nvic.h
++++ b/include/hw/intc/armv7m_nvic.h
+@@ -84,6 +84,9 @@
+ 
+     /* Lockup: why the processor stopped ("" while it runs); property "lockup" */
+     char lockup[160];
++    /* The last fault: where it was, as JSON; property "last-fault" */
++    char last_fault[256];
++    uint32_t faults;
+ };
+ 
+ /* Interface between CPU and Interrupt controller.  */
+--- a/hw/intc/armv7m_nvic.c
++++ b/hw/intc/armv7m_nvic.c
+@@ -578,6 +578,29 @@
+     cpu_exit(cs);
+ }
+ 
++/*
++ * Where the last fault was, for whoever looks afterwards (a guest's fault
++ * handler seldom says, and has often reset the machine by then): the
++ * exception, the PC and LR it was raised at (of a synchronous fault, the
++ * instruction that faulted and its caller's return address), and the fault
++ * status and address registers as they are then.  The "last-fault"
++ * property; its count tells a new fault from the one before.  A reset
++ * leaves it.
++ */
++static void nvic_note_fault(NVICState *s, int irq, bool imprecise)
++{
++    CPUARMState *env = &s->cpu->env;
++
++    s->faults++;
++    snprintf(s->last_fault, sizeof(s->last_fault),
++             "{\"count\": %u, \"exception\": %d, \"pc\": \"0x%08x\", "
++             "\"lr\": \"0x%08x\", \"imprecise\": %s, \"cfsr\": \"0x%08x\", "
++             "\"mmfar\": \"0x%08x\", \"bfar\": \"0x%08x\"}",
++             s->faults, irq, env->regs[15], env->regs[14],
++             imprecise ? "true" : "false", env->v7m.cfsr[M_REG_NS],
++             env->v7m.mmfar[M_REG_NS], env->v7m.bfar);
++}
++
+ static void do_armv7m_nvic_set_pending(void *opaque, int irq, bool secure,
+                                        bool derived)
+ {
+@@ -605,6 +628,10 @@
+     assert(irq > ARMV7M_EXCP_RESET && irq < s->num_irq);
+     assert(!secure || banked);
+ 
++    if (irq >= ARMV7M_EXCP_HARD && irq <= ARMV7M_EXCP_USAGE) {
++        nvic_note_fault(s, irq, false);
++    }
++
+     vec = (banked && secure) ? &s->sec_vectors[irq] : &s->vectors[irq];
+ 
+     targets_secure = banked ? secure : exc_targets_secure(s, irq);
+@@ -743,6 +770,7 @@
+     bool targets_secure;
+ 
+     assert(irq >= ARMV7M_EXCP_HARD && irq < ARMV7M_EXCP_PENDSV);
++    nvic_note_fault(s, irq, true);
+     assert(!secure || banked);
+ 
+     vec = (banked && secure) ? &s->sec_vectors[irq] : &s->vectors[irq];
+@@ -2844,6 +2872,11 @@
+     return g_strdup(NVIC(obj)->lockup);
+ }
+ 
++static char *nvic_get_last_fault(Object *obj, Error **errp)
++{
++    return g_strdup(NVIC(obj)->last_fault);
++}
++
+ static void armv7m_nvic_instance_init(Object *obj)
+ {
+     DeviceState *dev = DEVICE(obj);
+@@ -2856,6 +2889,7 @@
+                             M_REG_NUM_BANKS);
+     qdev_init_gpio_in_named(dev, nvic_nmi_trigger, "NMI", 1);
+     object_property_add_str(obj, "lockup", nvic_get_lockup, NULL);
++    object_property_add_str(obj, "last-fault", nvic_get_last_fault, NULL);
+ }
+ 
+ static void armv7m_nvic_class_init(ObjectClass *klass, const void *data)

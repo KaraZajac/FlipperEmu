@@ -1,0 +1,12 @@
+# What scripts/fuzz_check.py has `flipperemu fuzz` find: a crash behind three
+# checks of an input's bytes, one after another.  Not an example
+App(
+    appid="fe_fuzz_check",
+    name="Fuzz check",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="fe_fuzz_check_app",
+    stack_size=2 * 1024,
+    fap_category="Debug",
+    fap_version="1.0",
+    fap_description="A crash behind three checks, for scripts/fuzz_check.py to find",
+)
