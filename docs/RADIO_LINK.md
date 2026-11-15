@@ -168,7 +168,7 @@ Start `scanner` in the `nfc` shell. The first poll is a WUPA, `poll 7 52 mode=a`
 The same link carries the other direction: the program is a reader, and the firmware
 emulates a card (NFC → Saved → Emulate, or `emulate -f` in the `nfc` shell). Every line
 of this direction starts with `reader`, both ways, and each of the program's lines gets
-exactly one line back. ISO14443A and FeliCa.
+exactly one line back. ISO14443A, FeliCa and ISO15693.
 
 | The program sends | The emulator answers | |
 |---|---|---|
@@ -176,6 +176,7 @@ exactly one line back. ISO14443A and FeliCa.
 | `reader off` | `reader field off` | the field goes, and the session with it. Closing the socket does the same |
 | `reader activate` | `reader target a <uid> <atqa> <sak>` | WUPA, anticollision and SELECT, which the chip answers by itself from what the firmware loaded. `reader target none`: the firmware is not emulating a card now |
 | | `reader target f <idm> <pmm> <system code>` | the firmware emulates a FeliCa card: a polling, which the chip answers by itself as well |
+| | `reader target v` | the firmware emulates an ISO15693 card. The chip knows nothing of that card: no UID here, an inventory is a frame like any other |
 | `reader send <bits> <hex> [<parity hex>]` | `reader answer <bits> <hex> <parity hex>` | a frame to the firmware and its answer, in the form of `poll` and `answer` above: the data with its CRC, the parity bits packed LSB first. `reader silence`: no answer within 250 ms of the Flipper's time |
 | `reader saved <path>` | `reader saved` | where the program kept what it read; `./flipperemu status` shows it as the last read |
 
@@ -206,6 +207,13 @@ A FeliCa frame is its bytes, in both directions: the length first, the CRC (high
 first) last, no parity. `reader send 128 1006012E4CD21A8B3C5F010B00018000xxxx` is a
 Read Without Encryption of block 0, with the CRC in place of `xxxx`.
 
+An ISO15693 frame is its bytes as well: flags, command, parameters, and the CRC (low
+byte first), no parity. `reader send 40 260100F60A` is an inventory of one slot with
+no mask, and `reader answer 96 000078563412080104E061A6 00` the card's flags, DSFID
+and UID, the UID's low byte first. The firmware takes such a frame from samples of a
+pin and answers it edge by edge (ARCHITECTURE.md): the reader's side is the high data
+rate with 1 out of 4, the card's the high rate on one subcarrier.
+
 A card answers in time, and an emulated CPU on a busy computer may not: after
 `reader silence` to a frame that should have had an answer, start again as a reader
 does with a card that has lost its place: `reader off`, `reader on`, `reader
@@ -214,8 +222,8 @@ activate`, and the step again. `fe_nfc_reader.py` does (`Classic.restart`, `agai
 `scripts/fe_nfc_reader.py` has readers written this way: `ReaderLink` is the link,
 `Classic` MIFARE Classic's authentication and reads, `IsoDep` ISO14443-4's blocks
 (RATS, APDUs chained either way, waiting time extensions), `Felica` FeliCa's
-commands. `./flipperemu nfc --reader classic CARD.nfc` (`felica`, `iso-dep`, `t4t`)
-runs them.
+commands, `Vicinity` ISO15693's. `./flipperemu nfc --reader classic CARD.nfc`
+(`felica`, `iso-dep`, `t4t`, `iso15693`) runs them.
 
 # Bluetooth (`ble.sock`)
 

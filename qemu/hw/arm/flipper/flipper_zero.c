@@ -2346,6 +2346,68 @@ static void flipper_tim2_oc(void *opaque, int ch, bool level, int64_t when)
     }
 }
 
+/*
+ * A firmware that emulates an ISO15693 card samples the NFC chip's receive
+ * signal by itself: what the chip model needs of the SoC for it.  A DMA
+ * request as the DMAMUX would have it (its generator 0 at a rise of the
+ * pin, TIM16's compare for a sample); whether the firmware samples at all;
+ * whether its interrupt handler has taken the samples so far, and how far
+ * the CPU is with them; whether the firmware is sending.
+ */
+static void flipper_nfc_v_request(void *opaque, int req)
+{
+    FlipperZeroState *s = opaque;
+
+    qemu_irq_pulse(qdev_get_gpio_in_named(DEVICE(&s->soc.dma), "request", req));
+}
+
+static bool flipper_nfc_v_armed(void *opaque)
+{
+    FlipperZeroState *s = opaque;
+
+    return wb55_dma_fresh(&s->soc.dma, WB55_DREQ_TIM16_CH1);
+}
+
+static bool flipper_nfc_v_handled(void *opaque)
+{
+    FlipperZeroState *s = opaque;
+
+    return wb55_soc_dma_handled(&s->soc, WB55_DREQ_TIM16_CH1);
+}
+
+static bool flipper_nfc_cpu_asleep(void *opaque)
+{
+    return qatomic_read(&first_cpu->halted);
+}
+
+/*
+ * How long the CPU has run: the host's time for its thread.  That is the
+ * firmware's progress whatever else the host does, where the machine's
+ * clock goes on while the thread waits for a core.
+ */
+static int64_t flipper_nfc_cpu_ns(void *opaque)
+{
+#ifdef CONFIG_LINUX
+    struct timespec ts;
+    clockid_t id;
+
+    if (first_cpu->thread &&
+        !pthread_getcpuclockid(first_cpu->thread->thread, &id) &&
+        !clock_gettime(id, &ts)) {
+        return ts.tv_sec * NANOSECONDS_PER_SECOND + ts.tv_nsec;
+    }
+#endif
+    return -1;
+}
+
+/* the firmware's digital_signal is at it: TIM2's update drives the DMA */
+static bool flipper_nfc_v_sending(void *opaque)
+{
+    FlipperZeroState *s = opaque;
+
+    return wb55_dma_on(&s->soc.dma, WB55_DREQ_TIM2_UP);
+}
+
 /* The virtual USB cable also carries VBUS to the charger. */
 static void flipper_usb_vbus(void *opaque, bool on)
 {
@@ -2576,6 +2638,13 @@ static void flipper_zero_init(MachineState *machine)
     s->soc.tim2.oc_opaque = s;
     dev = spi_named(machine, spi1, TYPE_ST25R3916, 1, "nfc");
     s->nfc = ST25R3916(dev);
+    s->nfc->v_request = flipper_nfc_v_request;
+    s->nfc->v_armed = flipper_nfc_v_armed;
+    s->nfc->v_handled = flipper_nfc_v_handled;
+    s->nfc->cpu_asleep = flipper_nfc_cpu_asleep;
+    s->nfc->cpu_ns = flipper_nfc_cpu_ns;
+    s->nfc->v_sending = flipper_nfc_v_sending;
+    s->nfc->v_opaque = s;
     soc_out(s, 'E', 4, qdev_get_gpio_in_named(dev, SSI_GPIO_CS, 0));
     qdev_connect_gpio_out_named(dev, "irq", 0, soc_in(s, 'A', 2));
     /* ... and what is wired to the header's pins (-device ...,bus=spi-header) */

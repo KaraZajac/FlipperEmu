@@ -6752,7 +6752,7 @@ def nfc_watch(dev, seconds):
 
 
 # readers that are programs on the link (scripts/fe_nfc_reader.py)
-NFC_READER_PROGRAMS = ("classic", "ulc", "iso-dep", "t4t", "felica")
+NFC_READER_PROGRAMS = ("classic", "ulc", "iso-dep", "t4t", "felica", "iso15693")
 
 
 def nfc_reader_program(dev, args):
@@ -6789,7 +6789,8 @@ def nfc_reader_program(dev, args):
     else:
         who = {"iso-dep": "an ISO14443-4 reader",
                "t4t": "a reader of NFC Forum Type 4 tags",
-               "felica": "a FeliCa reader"}[args.reader]
+               "felica": "a FeliCa reader",
+               "iso15693": "an ISO15693 reader"}[args.reader]
     say = (lambda t: print(f"[{dev.name}] {t}", flush=True)) if args.verbose \
         else (lambda t: None)
     print(f"[{dev.name}] {who} in front of the Flipper...", flush=True)
@@ -6811,6 +6812,9 @@ def nfc_reader_program(dev, args):
         elif args.reader == "felica":
             out, (read, total) = fe_nfc_reader.read_felica(link, say, text)
             done, words = read > 0, f"{read} of {total} blocks"
+        elif args.reader == "iso15693":
+            out, (read, total) = fe_nfc_reader.read_vicinity(link, say)
+            done, words = read == total and total > 0, f"{read} of {total} blocks"
         else:
             out, length = fe_nfc_reader.read_t4t(link, say)
             done, words = True, f"an NDEF message of {length} bytes"
@@ -8057,7 +8061,7 @@ def main():
                         "on the air and its answer, into a text file), watch "
                         "(the same, as it happens)")
     p.add_argument("--reader", choices=("scan", "ntag", "classic", "ulc",
-                                        "iso-dep", "t4t", "felica"),
+                                        "iso-dep", "t4t", "felica", "iso15693"),
                    help="instead: hold a virtual reader to an emulating Flipper and "
                         "print what it reads (scan: UID/ATQA/SAK; ntag: a Type 2 "
                         "tag; classic CARD.nfc: a MIFARE Classic, by a reader that "
@@ -8066,7 +8070,7 @@ def main():
                         "iso-dep: an ISO14443-4A card's ATS; t4t: a Type 4 "
                         "tag's NDEF message; felica [CARD.nfc]: a FeliCa "
                         "Lite-S's blocks, with CARD.nfc's card key or without "
-                        "one)")
+                        "one; iso15693: an ISO15693 card's blocks (NXP's SLIX)")
     p.add_argument("--for", dest="seconds", type=float, metavar="SECONDS",
                    help="with `nfc watch`: for so long, then end")
     p.add_argument("--quiet-read", action="store_true",

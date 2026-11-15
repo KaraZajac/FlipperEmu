@@ -86,6 +86,15 @@ int64_t wb55_tim_now(WB55TimState *s)
     return tim_now(s);
 }
 
+static void tim_run_updates(WB55TimState *s, int64_t now);
+
+void wb55_tim_sync(WB55TimState *s)
+{
+    if (!s->now_override) {
+        tim_run_updates(s, tim_now(s));
+    }
+}
+
 static int oc_mode(WB55TimState *s, int ch)
 {
     uint32_t ccmr = ch < 2 ? REG(s, R_CCMR1) : REG(s, R_CCMR2);
@@ -415,6 +424,9 @@ static void tim_run_updates(WB55TimState *s, int64_t now)
         return;
     }
     s->in_updates = true;
+    if (!s->dma_wait) {
+        s->wait_since = -1;             /* (no update has waited till now) */
+    }
     s->dma_wait = false;
     s->marker_wait = false;
     for (int guard = 0; guard < 65536 && tim_event_driven(s) &&
@@ -437,10 +449,18 @@ static void tim_run_updates(WB55TimState *s, int64_t now)
          * microseconds; here the vCPU can be later than the next update, or
          * than the ring's other half.  So the update waits for it, keeping
          * its exact time; if the DMA stays dry, it was left that way.
+         *
+         * How long one update has waited is counted from when it began to
+         * (wait_since), not from its own time: each wait leaves the timer's
+         * updates further behind the clock, and a long transmission on a
+         * busy host is later than any limit before it is over.
          */
-        if ((REG(s, R_DIER) & DIER_UDE) && s->dma_ready &&
-            !s->dma_ready(s->dma_ready_opaque) && now - when < TIM_DMA_WAIT_NS) {
+        if (s->wait_since >= 0 && now - s->wait_since >= TIM_DMA_WAIT_NS) {
+            /* waited long enough: this update goes whatever the DMA has */
+        } else if ((REG(s, R_DIER) & DIER_UDE) && s->dma_ready &&
+            !s->dma_ready(s->dma_ready_opaque)) {
             s->dma_wait = true;
+            s->wait_since = s->wait_since >= 0 ? s->wait_since : now;
             break;
         }
         /*
@@ -456,13 +476,34 @@ static void tim_run_updates(WB55TimState *s, int64_t now)
          * looks for the end.  (One period before the marker, not at it:
          * with the DMA at the marker itself the firmware's ring counts as
          * full, and it writes nothing more.)
+         *
+         * "Only then" needs the DMA's count to be what it is: the firmware
+         * reads ARR in its loop as well, for an underrun, when the count
+         * says that the ring is full.  A count read brings these updates
+         * up to its moment first (wb55_tim_sync), or a ring that was full
+         * at the read and is emptied here before the read of ARR would
+         * have that read taken for the end's.
+         *
+         * And the firmware writes a period over the marker before it
+         * writes the marker anew behind it.  Between the two the ring has
+         * no marker, and nothing here may go on then: the vCPU can be kept
+         * from its second write for milliseconds on a busy host.
          */
-        if ((REG(s, R_DIER) & DIER_UDE) && s->dma_marker && !s->marker_asked &&
-            now - when < TIM_DMA_WAIT_NS &&
-            s->dma_marker(s->dma_marker_opaque)) {
-            s->dma_wait = s->marker_wait = true;
-            break;
+        if (s->wait_since >= 0 && now - s->wait_since >= TIM_DMA_WAIT_NS) {
+            /* (as above) */
+        } else if ((REG(s, R_DIER) & DIER_UDE) && s->dma_marker) {
+            int mark = s->dma_marker(s->dma_marker_opaque);
+
+            s->marker_seen |= mark > 0;
+            if ((mark == 2 && !s->marker_asked) ||
+                (mark == 0 && s->marker_seen)) {
+                s->dma_wait = true;
+                s->marker_wait = mark == 2;
+                s->wait_since = s->wait_since >= 0 ? s->wait_since : now;
+                break;
+            }
         }
+        s->wait_since = -1;
         s->marker_asked = false;
         tim_update_event(s, when);
     }
@@ -653,6 +694,9 @@ static void tim_write(void *opaque, hwaddr addr, uint64_t val64, unsigned size)
     }
     tim_catch_up(s, now);
     cnt = s->running ? tim_cnt_at(s, now) : s->cnt_base;
+    if (addr == R_DIER && (val & ~REG(s, R_DIER) & DIER_UDE)) {
+        s->marker_seen = false;         /* another ring may be another kind */
+    }
 
     switch (addr) {
     case R_CR1:
@@ -737,7 +781,8 @@ static void tim_reset_hold(Object *obj, ResetType type)
     s->now_override = 0;
     s->dma_up_pending = false;
     s->in_updates = false;
-    s->marker_wait = s->marker_asked = false;
+    s->marker_wait = s->marker_asked = s->marker_seen = false;
+    s->wait_since = -1;
     s->rep = 0;
     s->cap_unread = 0;
     memset(s->cap_ns, 0, sizeof(s->cap_ns));

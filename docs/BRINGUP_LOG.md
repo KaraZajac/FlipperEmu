@@ -5582,6 +5582,100 @@ big lock, entry 92).
     - Checks: nfc_emulate_check 21 on the official 1.5.1, 22 on the dev
       build, Momentum, Unleashed and RogueMaster.
 
+179. **A reader for ISO15693: the card that the firmware emulates by itself.**
+    - The last of the firmware's listeners without a reader. It has no
+      chip between: TRANSPARENT_MODE at the start, the SPI pins off, and
+      until the end the firmware samples the chip's pin and modulates
+      PB5. What it had set up was read from the machine first
+      (DMA2 channel 2 on TIM16's compare reading GPIOA's IDR into 16
+      samples, channels 3 and 5 on the DMAMUX's generator 0 writing
+      TIM16's CR1 and counter, EXTI line 2), then the coding from what
+      the parser wants: 0x21, a byte for two bits, 0x04.
+    - No TIM16 was made for it. The chip model plays a frame as the
+      samples and has the board pulse the two DMA requests. Three things
+      were wrong, each seen in a trace:
+      - Nothing was sampled: the DMA reads IDR 16 bits wide and QEMU's
+        GPIO model answers 32-bit reads only. The SoC's tap serves the
+        narrow read now.
+      - The second frame of a session was lost, each time: the player
+        began when the channel was enabled, and the firmware enables the
+        channel's interrupts last. Armed is: enabled with both.
+      - One frame in some runs was still lost, the first time the
+        parser's code ran. Eight samples by eight with only the handler
+        awaited leaves the thread no time; with 75.5 µs between them and
+        the CPU asleep again it has what a Flipper gives it. That wait
+        made a read 13.8 s long from the NFC shell, whose `emulate`
+        never lets the CPU sleep: 400 µs at most now, 2.5 s a read (1.1 s
+        from the NFC app), no frame lost in six runs on the official
+        1.5.1.
+    - **On a busy host** (the regression's four lanes; then 32 busy
+      loops on 16 threads) the read failed, every time. Two things, the
+      second of them older than this entry:
+      - The 400 µs were of the machine's clock, which goes on while the
+        host keeps the emulated CPU waiting: the samples were given
+        faster than the firmware took them. They are 400 µs of the
+        CPU's own running now (the host's time for its thread), after
+        the interrupt handler has taken the samples before, which is
+        awaited without a limit of that kind.
+      - Then the frames arrived and the answers were wrong: cut short,
+        or with a byte in them four, five, fourteen times (a byte is
+        128 periods: the ring, once round). That is TIM2's wait at the
+        marker of entry 169, and a trace of each transmission (updates,
+        waits, where the marker was loaded) had three causes in it.
+        The wait's limit was counted from the update's own time, which
+        falls behind the clock with every wait, so late in a long answer
+        no update waited any more. The firmware's read of ARR for an
+        underrun, which it makes when the DMA's count says the ring is
+        full, came after the ring had been emptied to the marker behind
+        its back, and passed for the read at the end. And between the
+        firmware's two writes, the period over the marker and the marker
+        behind it, the ring has no marker at all. Each wait is counted
+        by itself now; a read of the DMA's count brings the timer up to
+        that moment first; a ring that has had a marker and has none
+        waits. MIFARE Classic's answers go the same way and gain the
+        same.
+      - Beside 32 busy loops, seven reads: all whole (before: none of
+        four). Six of them in 83 frames with none unanswered; in one a
+        request went unanswered twice and was answered the third time.
+        The reader sends a frame again now when no response comes or
+        its CRC is wrong, three times, as a reader does.
+      - Not mended: the whole check beside 32 loops is 22 or 23 of 24,
+        another check each time (an Ultralight C's read, a MIFARE
+        Classic's with wrong keys): a frame that the firmware does not
+        answer though it had its time. One was seen in a record, the
+        READ right after an answer. Two tries at it (the reader's
+        patience and the gap after an answer measured by the CPU's own
+        running) changed which check failed and made the run longer,
+        and are not in. At the load of the regression those checks pass.
+    - The answer has no chip select for its end. A timer of 2 ms after
+      the last edge decodes it: two units of 256/fc a bit from five units
+      after the first rise.
+    - `fe_nfc_reader.py` got `Vicinity` (inventory, system information,
+      read single block with the security status, NXP's read signature)
+      and `nfc --reader iso15693`; the link says `reader target v`. An
+      emulated SLIX2 comes back whole: UID, DSFID, AFI, IC reference, 80
+      blocks, the locked one's status, the signature.
+    - **A firmware bug, found by the order of the checks (FW-21).** With
+      the new check before it, the Type 4 tag of the NFC app failed on
+      four firmwares: an ATS and then nothing, and `Tx error: 1` in the
+      log. Alone it passed. EXTI's falling trigger for the chip's pin is
+      on after an ISO15693 emulation and stays on (read with the monitor,
+      official 1.5.1 and Momentum); with the bit cleared by gdb the tag
+      is read again. The source says why: `signal_reader_start()` sets
+      the pin to both edges, nothing takes the falling one back, the
+      read of the chip's interrupt registers then sets the thread's flag
+      again, and the listener's wait for the end of its transmission
+      returns on it before the frame is out. The model was not in it.
+      The check is the last of its file now and says why.
+    - Saved states: the chip model did not keep transparent mode, which
+      was a few hundred microseconds of a MIFARE Classic's answer before
+      and is the whole emulation here. A subsection keeps it. The NFC
+      shell's `emulate` ends at a load whatever the model does (its USB
+      session is a new one), so the check takes the NFC app's emulation
+      through a snapshot.
+    - Checks: nfc_emulate_check 24 on the official 1.5.1, 25 on the dev
+      build, Momentum, Unleashed and RogueMaster.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

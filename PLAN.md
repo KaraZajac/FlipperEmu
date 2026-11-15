@@ -275,13 +275,16 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       A record of the air ☑ (2026-11-15): `nfc record FILE`, `nfc watch`: every
       frame and its answer, both ways, all four technologies, with the parity
       bits where they are not odd; nfc_emulate_check 15 on five (BRINGUP_LOG 172).
-      Next: a reader for ISO15693 and SLIX emulation. The firmware receives those
-      itself, edge by edge: a DMAMUX request generator on an EXTI line starts TIM16,
-      whose compare requests have the DMA sample a GPIO pin. Needed first: the
-      request generator, TIM16 as a timer (it is the speaker's register file now),
-      DMA requests on compare events, and the chip's demodulated signal on its
-      pin in transparent mode. Then: MIFARE Plus SL3 (AES; Unleashed and
-      RogueMaster try keys)
+      A reader for ISO15693 ☑ (2026-11-15): `nfc --reader iso15693` reads the
+      SLIX that the firmware emulates. The firmware receives that card itself
+      (a DMAMUX request generator on the chip's pin, TIM16's compare requests,
+      the DMA sampling GPIOA) and answers it edge by edge without leaving the
+      chip's transparent mode: the chip model plays a reader's frame as the
+      samples, eight at a time as the firmware takes them, and decodes the
+      answer off the edges. No TIM16 for it (it stays the speaker's register
+      file). Transparent mode is in a saved state now. nfc_emulate_check 24 /
+      25 on five; firmware bug FW-21 found with it (BRINGUP_LOG 179).
+      Next: MIFARE Plus SL3 (AES; Unleashed and RogueMaster try keys)
 - ☑ 125 kHz RFID read: COMP1 → TIM2 TI4 capture, a virtual tag in the reader's field
       (ASK/FSK/PSK, field noise), encoders ported from the firmware (`fe_rfid.py`, checked
       cycle for cycle against its emulation by `rfid_check.py`); app Read and `rfid read`
@@ -880,6 +883,20 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           its instructions (about one in three thousand calls); the scan's checks take a
           skipped address now (BRINGUP_LOG 147). Not tried: QEMU's `-icount` with a fixed
           shift, which would keep a busy host out of the emulated time altogether
+    - ☑ A card's answers that the firmware modulates itself, under load (2026-11-15):
+          TIM2's wait at the marker of the firmware's ring gave way on a busy host in
+          three ways (its limit counted from the update's time, the firmware's read
+          of ARR for an underrun taken for the end's, a ring with no marker between
+          two writes), and an answer came cut short or with a ring's worth of it
+          repeated. Mended; the samples of an ISO15693 frame go by the CPU's own
+          running time. Beside 32 busy loops on 16 threads: seven ISO15693 reads, all
+          whole, six of them with no frame lost, where none of four was read
+          (BRINGUP_LOG 179)
+    - ☐ The NFC emulation check beside 32 busy loops: 22 or 23 of 24, another check
+          each time (an Ultralight C's read, a MIFARE Classic's with wrong keys): a
+          frame that the firmware does not answer. It passes at the regression's load.
+          Tried and not kept: the reader's patience and its gap after an answer by
+          the CPU's own time (BRINGUP_LOG 179)
 - ☑ Coverage of the firmware or of an app (2026-11-14): `run --coverage` loads a TCG
       plugin of our own (`qemu/plugins/fe_cov.c`: a counter to each translated block,
       added to inline, about 2 % slower; the bytes of blocks in RAM kept),

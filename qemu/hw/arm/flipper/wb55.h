@@ -70,7 +70,8 @@ enum {
     WB55_DREQ_I2C3_RX = 12, WB55_DREQ_I2C3_TX = 13,
     WB55_DREQ_USART1_RX = 14, WB55_DREQ_USART1_TX = 15,
     WB55_DREQ_LPUART1_RX = 16, WB55_DREQ_LPUART1_TX = 17,
-    WB55_DREQ_TIM1_UP = 25, WB55_DREQ_TIM2_UP = 32,
+    WB55_DREQ_GENERATOR0 = 1,
+    WB55_DREQ_TIM1_UP = 25, WB55_DREQ_TIM2_UP = 32, WB55_DREQ_TIM16_CH1 = 33,
     WB55_DREQ_NUM = 41,
 };
 
@@ -608,6 +609,11 @@ struct WB55DmaState {
     uint16_t served[64];         /* per request: channels of its last edge */
     bool in_service;
     bool dirty;
+    /* SoC hook: the firmware reads how much an enabled channel on this
+     * request has left.  (Whoever makes the request brings the channel up
+     * to this moment first: a timer whose updates are replayed late.) */
+    void (*count_read)(void *opaque, int req);
+    void *count_read_opaque;
 };
 
 /* have the channels that served request `req` last time been given more
@@ -618,9 +624,18 @@ bool wb55_dma_ready_for(WB55DmaState *s, int req);
  * halves (its half-transfer or transfer-complete interrupt is enabled),
  * whose next beat is the first of a half: its number (0..13), or -1 */
 int wb55_dma_at_half(WB55DmaState *s, int req);
-/* a circular channel on this request that feeds the register at `periph`
- * from memory: is `value` what its beat after the next will write? */
-bool wb55_dma_second_is(WB55DmaState *s, int req, hwaddr periph, uint32_t value);
+/* is a channel on this request enabled? */
+bool wb55_dma_on(WB55DmaState *s, int req);
+/* is a channel on this request enabled, its half-transfer and transfer-
+ * complete interrupts with it, and none of its transfers done? */
+bool wb55_dma_fresh(WB55DmaState *s, int req);
+/*
+ * A circular channel on this request that writes words from a ring of
+ * memory to the register at `periph`: where in its ring is `value`?
+ * 2: behind the next word to go (the one after it); 1: somewhere else;
+ * 0: nowhere; -1: there is no such channel.
+ */
+int wb55_dma_ring_mark(WB55DmaState *s, int req, hwaddr periph, uint32_t value);
 /* a request that signals events (a timer's update): one beat per channel
  * each time it rises, however long it stays up */
 void wb55_dma_set_pulse(WB55DmaState *s, int req);
@@ -710,13 +725,19 @@ struct WB55TimState {
     bool (*dma_ready)(void *opaque);
     void *dma_ready_opaque;
     bool dma_wait;               /* an update waits for the DMA */
-    /* SoC hook: is the end marker of a ring that a loop of the firmware
-     * fills behind the update DMA's next period? (see tim_run_updates) */
-    bool (*dma_marker)(void *opaque);
+    int64_t wait_since;          /* ... since then (-1: none does) */
+    /* SoC hook: the end marker of a ring that a loop of the firmware fills,
+     * as wb55_dma_ring_mark() has it (see tim_run_updates) */
+    int (*dma_marker)(void *opaque);
     void *dma_marker_opaque;
     bool marker_wait;            /* an update waits at such a marker */
     bool marker_asked;           /* ... and the firmware has read ARR */
+    bool marker_seen;            /* the ring is one with a marker */
 };
+
+/* replay the updates that are due by now (for one who reads what they
+ * changed elsewhere: the DMA's count) */
+void wb55_tim_sync(WB55TimState *s);
 /* virtual time, or the exact time of the update that is being processed */
 int64_t wb55_tim_now(WB55TimState *s);
 /* an edge on input TI1..TI4 (ti 0..3) at virtual time `when` */
@@ -987,6 +1008,10 @@ struct WB55SocState {
     } gpio_tap_mr[WB55_NUM_PORTS];
     uint8_t pin_level[WB55_PINS];
 };
+/* a circular DMA channel on this request, about to enter a half of its
+ * buffer: has the firmware's interrupt handler taken the half before? */
+bool wb55_soc_dma_handled(WB55SocState *s, int req);
+
 
 void wb55_soc_latch_boot(WB55SocState *s);
 void wb55_soc_sync_pins(WB55SocState *s);

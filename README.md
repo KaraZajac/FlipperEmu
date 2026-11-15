@@ -203,7 +203,8 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
   emulated MIFARE Classic with the card's keys: every block, through Crypto1.
   `--reader ulc` and `--reader felica` read a MIFARE Ultralight C and a FeliCa
   Lite-S, with their keys too; `--reader iso-dep` an ISO14443-4A card's ATS,
-  `--reader t4t` a Type 4 tag's NDEF message.
+  `--reader t4t` a Type 4 tag's NDEF message, `--reader iso15693` an ISO15693 card
+  (NXP's SLIX), which the firmware receives and answers with no help of the NFC chip.
 - NFC link: `./flipperemu nfc --link iso-dep` puts a card played by a program in the
   field (an ISO14443-4A card here; any card type you write). The machine stops while it
   answers, so it can take its time, or relay to real hardware.
@@ -542,6 +543,7 @@ picture of the save to the pixel and the tag, and goes on with Pause.
 | `nfc --reader classic CARD.nfc` | read an emulated MIFARE Classic with the keys of `CARD.nfc` (`--quiet-read`: only say where the file is) |
 | `nfc --reader ulc CARD.nfc` \| `nfc --reader felica [CARD.nfc]` | read an emulated MIFARE Ultralight C with its key (two-key triple DES), a FeliCa Lite-S with its card key or without one |
 | `nfc --reader iso-dep` \| `nfc --reader t4t` | an emulated ISO14443-4A card's ATS, a Type 4 tag's NDEF message |
+| `nfc --reader iso15693` | an emulated ISO15693 card (NXP's SLIX): its system information, every block with its security status, a SLIX2's signature |
 | `nfc record OUT.txt` \| `nfc record stop` \| `nfc watch` | every frame on the air at the NFC antenna and its answer, a line each with its time: the firmware's to a card, and a reader's to the card that the firmware emulates |
 | `nfc --link iso-dep` \| `--link script:FILE.py` \| `--link log` | a card played by a program, in the field until ^C |
 | `nfc --link pm3[:PORT]` \| `nfc DUMP.json` | real cards through a Proxmark3; a Proxmark3 dump as the card |
@@ -1593,6 +1595,7 @@ The same program has more readers:
 ./flipperemu nfc --reader felica card.nfc   # ... with the card key in card.nfc
 ./flipperemu nfc --reader iso-dep           # an ISO14443-4A card: RATS, and its ATS
 ./flipperemu nfc --reader t4t               # a Type 4 tag: its NDEF message
+./flipperemu nfc --reader iso15693          # an ISO15693 card (NXP's SLIX): its blocks
 ```
 
 - `ulc` shows the card the key of the file's pages 44 to 47 and has the card show
@@ -1613,6 +1616,15 @@ The same program has more readers:
   from their NFC app (NFC → Saved → the card → Emulate, or `./flipperemu app NFC
   /ext/nfc/tag.nfc`), 246 bytes a read; their shells do not (and Momentum's
   crashes when asked to). The official 1.5.1 does not know the card.
+- `iso15693` takes an inventory (the UID), the system information, every block with
+  its security status, and from one of NXP's the signature that a SLIX2 has: an
+  emulated SLIX2's 80 blocks in 83 frames. The chip has no part in this card. The
+  firmware samples the reader's signal on the chip's interrupt pin with a timer and
+  the DMA, takes the frame out of the samples, and modulates its answer on a pin
+  edge by edge; the emulator plays a reader's frame as those samples and reads the
+  answer off the edges. After such an emulation the firmware's ISO14443A cards are
+  out of order until a restart, on a real Flipper too by its source: FW-21 in
+  [docs/FIRMWARE_BUGS.md](docs/FIRMWARE_BUGS.md).
 
 A reader starts again when the Flipper stops answering in the middle: field off
 and on, select, and the last step once more. On a busy computer the emulated CPU
@@ -1622,12 +1634,13 @@ can be too late with an answer, and a real card never is.
 NTAG215, a MIFARE Classic Mini, 1K and 4K whose every block and key comes back, a
 MIFARE Ultralight C and a FeliCa Lite-S with their keys and with wrong ones, an
 ISO14443-4A card, a Type 4 tag with an NDEF message of 910 bytes where the firmware
-emulates one, and the record of the frames (21 checks on the official 1.5.1, 22 on
-its dev build, Momentum, Unleashed and RogueMaster).
+emulates one, the record of the frames, and an NXP SLIX2 (ISO15693), also from the
+NFC app through a snapshot (24 checks on the official 1.5.1, 25 on its dev build,
+Momentum, Unleashed and RogueMaster).
 
-Not there: a reader for ISO15693 and SLIX emulation. The firmware receives those
-by itself as well, sampling a pin with a timer and the DMA, which needs three more
-pieces of the chip modelled first (PLAN.md).
+A snapshot keeps an emulation that the NFC app runs. One that the NFC shell's
+`emulate` runs ends at the load: the command ends with its USB session, and the
+loaded machine's is a new one.
 
 #### A record of the frames on the air
 

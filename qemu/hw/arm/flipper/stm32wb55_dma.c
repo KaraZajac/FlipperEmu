@@ -230,7 +230,7 @@ int wb55_dma_at_half(WB55DmaState *s, int req)
 {
     for (int c = 0; c < 14; c++) {
         WB55DmaChannel *ch = &s->ch[c];
-        const uint32_t want = CCR_EN | CCR_DIR | CCR_CIRC;
+        const uint32_t want = CCR_EN | CCR_CIRC;        /* (either way) */
 
         if ((ch->ccr & want) == want && (ch->ccr & (CCR_HTIE | CCR_TCIE)) &&
             (s->muxccr[c] & 0x3F) == req && ch->reload >= 2 &&
@@ -241,27 +241,64 @@ int wb55_dma_at_half(WB55DmaState *s, int req)
     return -1;
 }
 
-bool wb55_dma_second_is(WB55DmaState *s, int req, hwaddr periph, uint32_t value)
+/* is a channel on this request enabled? */
+bool wb55_dma_on(WB55DmaState *s, int req)
+{
+    for (int c = 0; c < 14; c++) {
+        if ((s->ch[c].ccr & CCR_EN) && (s->muxccr[c] & 0x3F) == req) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* is a channel on this request enabled, its two interrupts with it, and
+ * none of its transfers done?  (The interrupts: the firmware's
+ * signal_reader enables them last of all that it sets up.) */
+bool wb55_dma_fresh(WB55DmaState *s, int req)
+{
+    const uint32_t want = CCR_EN | CCR_HTIE | CCR_TCIE;
+
+    for (int c = 0; c < 14; c++) {
+        WB55DmaChannel *ch = &s->ch[c];
+
+        if ((ch->ccr & want) == want && (s->muxccr[c] & 0x3F) == req &&
+            ch->cndtr && ch->cndtr == ch->reload) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int wb55_dma_ring_mark(WB55DmaState *s, int req, hwaddr periph, uint32_t value)
 {
     for (int c = 0; c < 14; c++) {
         WB55DmaChannel *ch = &s->ch[c];
         const uint32_t want = CCR_EN | CCR_DIR | CCR_CIRC;
         unsigned msize = dma_size(ch->ccr >> 10);
-        uint32_t data = 0;
+        uint32_t ring[256];
 
         if ((ch->ccr & (want | CCR_PINC | CCR_MINC)) != (want | CCR_MINC) ||
             ch->cpar != periph || (s->muxccr[c] & 0x3F) != req ||
-            ch->reload < 2) {
+            ch->reload < 2 || ch->reload > ARRAY_SIZE(ring) || msize != 4) {
             continue;
         }
-        if (address_space_read(&address_space_memory, ch->cmar +
-                               (ch->midx + 1) % ch->reload * msize,
-                               MEMTXATTRS_UNSPECIFIED, &data, msize) != MEMTX_OK) {
+        if (address_space_read(&address_space_memory, ch->cmar,
+                               MEMTXATTRS_UNSPECIFIED, ring,
+                               ch->reload * 4) != MEMTX_OK) {
             continue;
         }
-        return data == value;
+        if (le32_to_cpu(ring[(ch->midx + 1) % ch->reload]) == value) {
+            return 2;
+        }
+        for (unsigned i = 0; i < ch->reload; i++) {
+            if (le32_to_cpu(ring[i]) == value) {
+                return 1;
+            }
+        }
+        return 0;
     }
-    return false;
+    return -1;
 }
 
 /* ---- DMA1/DMA2 register blocks: ISR, IFCR, then 7 x {CCR,CNDTR,CPAR,CMAR} */
@@ -277,7 +314,11 @@ static uint64_t dma_read(WB55DmaState *s, int ctrl, hwaddr addr)
     int c = ctrl * 7 + (addr - 0x08) / 0x14;
     switch ((addr - 0x08) % 0x14) {
     case 0x0: return s->ch[c].ccr;
-    case 0x4: return s->ch[c].cndtr;
+    case 0x4:
+        if (s->count_read && (s->ch[c].ccr & CCR_EN) && !s->in_service) {
+            s->count_read(s->count_read_opaque, s->muxccr[c] & 0x3F);
+        }
+        return s->ch[c].cndtr;
     case 0x8: return s->ch[c].cpar;
     case 0xC: return s->ch[c].cmar;
     }

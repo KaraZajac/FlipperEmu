@@ -129,6 +129,11 @@ static void st25_update_irq(St25r3916State *s)
     for (int i = 0; i < 4; i++) {
         pending |= s->irq_status[i] & ~s->irq_mask[i];
     }
+    if (s->tm) {
+        /* transparent mode: the pin has the receiver's signal, not this */
+        qemu_set_irq(s->irq, s->v_level);
+        return;
+    }
     qemu_set_irq(s->irq, pending);
 }
 
@@ -908,6 +913,8 @@ static void st25_direct(St25r3916State *s, uint8_t cmd)
     case 0xDC:                          /* TRANSPARENT_MODE, till selected */
         s->tm = true;
         s->tm_n = 0;
+        s->v_level = false;
+        st25_update_irq(s);             /* the IRQ pin: the receiver's signal */
         break;
     case 0xCE:                          /* GOTO_SLEEP (after HLTA) */
         s->pt_sleep = true;
@@ -957,6 +964,8 @@ static void st25_ext_field(St25r3916State *s, bool session, bool standing)
                                          * has no second and third send of
                                          * its own before it hears "silence" */
 #define RD_GAP_NS    (1 * SCALE_MS)     /* an answer to the next command */
+#define RD_LATE_NS   (5 * SCALE_MS)     /* an answer that has begun: wait on, */
+#define RD_LATE_MAX  40                 /* ... so often at most */
 #define RD_TRIES     3                  /* sends of one command, at most */
 
 /* a reader's frame is out: kept until its answer, for the record's line */
@@ -975,10 +984,10 @@ static void st25_rd_asked(St25r3916State *s, const uint8_t *d, int bits,
 /* ... and the line: with the firmware's answer, or with none */
 static void st25_rd_recorded(St25r3916State *s, bool answered)
 {
-    bool f = st25_listen_f(s);
+    bool f = st25_listen_f(s) || s->tm;     /* (bytes: no parity) */
 
     if (s->rec && s->rd_cmd_bits) {
-        st25_rec_exchange(s, "reader", f ? 'f' : 'a', s->rd_cmd,
+        st25_rec_exchange(s, "reader", s->tm ? 'v' : f ? 'f' : 'a', s->rd_cmd,
                           s->rd_cmd_bits, f ? NULL : s->rd_cmd_par, s->rd_ans,
                           answered ? s->rd_ans_bits : 0, f ? NULL : s->rd_par);
     }
@@ -1009,7 +1018,7 @@ static void st25_rd_answer(St25r3916State *s)
     if (!s->rd_waiting) {
         return;
     }
-    if (st25_listen_f(s)) {             /* bytes, as they are */
+    if (st25_listen_f(s) || s->tm) {    /* bytes, as they are */
         memcpy(s->rd_ans, s->tx, (s->ntx + 7) / 8);
         memset(s->rd_par, 0, sizeof(s->rd_par));
         s->rd_ans_bits = s->ntx;
@@ -1130,6 +1139,8 @@ static void st25_rd_write(St25r3916State *s)
 
 /* ------------------------------------------ listen: transparent mode */
 
+#define TM_IDLE_NS (500 * SCALE_US)
+
 /*
  * The pin's edges while the mode is on, from its first rise.  What the
  * firmware puts there (lib/digital_signal's ISO14443A preset) is the card's
@@ -1147,6 +1158,9 @@ void st25r3916_mod(St25r3916State *s, bool level, int64_t when)
         return;
     }
     s->tm_edge[s->tm_n++] = when << 1 | level;
+    /* (a firmware that stays in the mode, as an ISO15693 card: its frame
+     * is over when no edge has come for a while) */
+    timer_mod(s->tm_idle, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + TM_IDLE_NS);
 }
 
 /* how long the pin was high in [a, b); *from: the first edge to look at */
@@ -1171,13 +1185,32 @@ static int64_t tm_high(St25r3916State *s, int64_t a, int64_t b, int *from)
     return sum;
 }
 
+/* The edges that are kept: an ISO15693 card's (its subcarrier is fc/32, a
+ * half wave of 16/fc), not an ISO14443A card's (fc/16, 8/fc)? */
+static bool st25_tm_wave_v(St25r3916State *s)
+{
+    return s->tm_n >= 2 &&
+           (s->tm_edge[1] >> 1) - (s->tm_edge[0] >> 1) >=
+           muldiv64(12, NANOSECONDS_PER_SECOND, 13560000);
+}
+
 static void st25_tm_end(St25r3916State *s)
 {
     int64_t t0 = s->tm_n ? s->tm_edge[0] >> 1 : 0;
     int n = 0, from = 0;
 
     s->tm = false;
-    if (s->tm_n < 2 || !(s->rega[REG_MODE] & MODE_TARG)) {
+    timer_del(s->tm_idle);
+    timer_del(s->v_timer);
+    if (s->v_n && s->rd_waiting) {
+        /* a reader's frame that the firmware did not stay to hear */
+        timer_mod(s->rd_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    }
+    s->v_n = s->v_at = 0;
+    s->v_level = false;
+    st25_update_irq(s);                 /* the pin is the interrupts' again */
+    if (s->tm_n < 2 || !(s->rega[REG_MODE] & MODE_TARG) || st25_tm_wave_v(s)) {
+        s->tm_n = 0;
         return;
     }
     memset(s->tx, 0, sizeof(s->tx));
@@ -1198,6 +1231,185 @@ static void st25_tm_end(St25r3916State *s)
     if (n) {
         st25_rd_answer(s);              /* this answers the reader */
     }
+}
+
+/*
+ * A firmware that emulates an ISO15693 card does all of it in this mode,
+ * and never leaves it: the chip only carries the field.
+ *
+ * What it sends (lib/digital_signal's ISO15693 preset, the high data rate
+ * with one subcarrier) is pulses of fc/32, eight of them in 256/fc.  A
+ * frame starts with 24 pulses, then a 1; a 0 is pulses and then as long a
+ * silence, a 1 the silence first; it ends with a 0 and 24 pulses.  So from
+ * the first rise: three units of pulses, a silence, a unit of pulses, and
+ * then two units a bit, until both halves of one have pulses.
+ *
+ * No chip select ends this frame.  It is over when no edge has come for
+ * TM_IDLE_NS and the firmware's DMA does not drive the pin any more.
+ */
+static void st25_tm_idle(void *opaque)
+{
+    St25r3916State *s = opaque;
+    const int64_t unit = muldiv64(256, NANOSECONDS_PER_SECOND, 13560000);
+    int64_t t0 = s->tm_n ? s->tm_edge[0] >> 1 : 0;
+    int n = 0, from = 0;
+    bool whole = false;
+
+    if (!s->tm || s->tm_n < 2) {
+        s->tm_n = 0;
+        return;
+    }
+    if (s->v_sending && s->v_sending(s->v_opaque)) {
+        /* no end: the firmware's sequence is still on, and the next of its
+         * edges waits for the firmware (stm32wb55_tim.c: the ring's marker) */
+        timer_mod(s->tm_idle, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                              TM_IDLE_NS);
+        return;
+    }
+    if (!st25_tm_wave_v(s)) {
+        /* an ISO14443A answer, and the firmware late to select the chip
+         * again (a busy host): that is its end, and its edges wait for it */
+        return;
+    }
+    memset(s->tx, 0, sizeof(s->tx));
+    for (int k = 0; n < (NFC_AIR_MAX - 1) * 8; k++) {
+        int64_t a = t0 + (5 + 2 * k) * unit;
+        bool first = tm_high(s, a, a + unit, &from) > unit / 4;
+        bool second = tm_high(s, a + unit, a + 2 * unit, &from) > unit / 4;
+
+        if (first == second) {
+            whole = first && n > 0;     /* the end's 24 pulses, after its 0 */
+            break;
+        }
+        bit_put(s->tx, n++, second);
+    }
+    s->tm_n = 0;
+    if (!whole || (n - 1) % 8) {
+        return;                         /* nothing that is a frame */
+    }
+    s->ntx = n - 1;                     /* (without the end's 0) */
+    st25_rd_answer(s);
+}
+
+/*
+ * What it receives.  The firmware has the chip's receive signal on the IRQ
+ * pin and samples it by itself (lib/signal_reader): the first rise starts
+ * a timer by a DMAMUX request generator, each compare of the timer has the
+ * DMA read the port's input register, and an interrupt takes every eight
+ * samples for a byte.  A reader's frame is slots of 128/fc with a pause in
+ * some: a start (0x21 as such a byte: slots 0 and 5), a byte for every two
+ * bits (0x02, 0x08, 0x20, 0x80: "1 out of 4"), an end (0x04).
+ *
+ * The samples are given eight at a time, with no timer of 9.4 us: the pin
+ * is set, a rise is the generator's request, and the timer's request
+ * follows for each slot.  The next eight wait
+ * - for the firmware's interrupt handler to have taken these (the DMA's
+ *   interrupt neither pending nor active);
+ * - for the 75.5 us that eight slots last;
+ * - for the firmware's thread, which takes the bytes apart between two of
+ *   those interrupts on a Flipper and loses bytes when the next one
+ *   overtakes it.  It is done when the CPU sleeps again.  A CPU that never
+ *   sleeps is no rare thing (while the NFC shell's `emulate` runs, the
+ *   shell looks every two ticks whether it has ended, and the idle task
+ *   never gets to its WFI): then V_BUSY_NS of the CPU's own running, which
+ *   is the host's time for its thread and not the machine's clock.  The
+ *   clock goes on while a busy host leaves the CPU waiting, and the thread
+ *   is slow the first time its code runs (it is translated then).
+ */
+#define V_REQ_EDGE   1                  /* DMAMUX: request generator 0 */
+#define V_REQ_SAMPLE 33                 /* ... TIM16's channel 1 */
+#define V_POLL_NS    (20 * SCALE_US)
+#define V_BYTE_NS    75516              /* eight slots: 1024 / 13.56 MHz */
+#define V_BUSY_NS    (400 * SCALE_US)   /* a CPU that does not sleep: its
+                                         * running, then on */
+#define V_STUCK_NS   (500 * SCALE_MS)   /* a firmware that takes nothing: on */
+#define V_ARM_NS     (50 * SCALE_MS)    /* the firmware may not listen yet */
+
+static void st25_v_level(St25r3916State *s, bool level)
+{
+    if (level != s->v_level) {
+        s->v_level = level;
+        qemu_set_irq(s->irq, level);
+        if (level && s->v_request) {
+            s->v_request(s->v_opaque, V_REQ_EDGE);
+        }
+    }
+}
+
+static void st25_v_play(void *opaque)
+{
+    St25r3916State *s = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    if (!s->tm || !s->v_n || !s->v_request) {
+        s->v_n = s->v_at = 0;
+        return;
+    }
+    if (s->v_at == 0 && !s->v_armed(s->v_opaque)) {
+        /* nobody samples yet: the firmware is still at its last answer */
+        if (now < s->v_until) {
+            timer_mod(s->v_timer, now + V_POLL_NS);
+            return;
+        }
+        s->v_n = 0;                     /* a frame that nobody heard */
+        timer_mod(s->rd_timer, now);
+        return;
+    }
+    while (s->v_at < s->v_n * 8) {
+        if (s->v_at && s->v_at % 8 == 0 && now < s->v_given + V_STUCK_NS) {
+            if (!s->v_handled(s->v_opaque)) {
+                timer_mod(s->v_timer, now + V_POLL_NS);
+                return;
+            }
+            if (now < s->v_next) {
+                timer_mod(s->v_timer, s->v_next);
+                return;
+            }
+            if (!s->cpu_asleep(s->v_opaque)) {
+                int64_t ran = s->cpu_ns(s->v_opaque);
+
+                if (ran < 0 || s->v_ran < 0 ? now < s->v_given + V_BUSY_NS :
+                                              ran < s->v_ran + V_BUSY_NS) {
+                    timer_mod(s->v_timer, now + V_POLL_NS);
+                    return;
+                }
+            }
+        }
+        st25_v_level(s, (s->v_code[s->v_at / 8] >> (s->v_at % 8)) & 1);
+        s->v_request(s->v_opaque, V_REQ_SAMPLE);
+        s->v_at++;
+        if (s->v_at % 8 == 0) {
+            s->v_next = MAX(now, s->v_next) + V_BYTE_NS;
+            s->v_given = now;
+            s->v_ran = s->cpu_ns(s->v_opaque);
+        }
+    }
+    st25_v_level(s, false);
+    s->v_n = s->v_at = 0;
+    /* the frame is out: the firmware's answer, or none in its time */
+    timer_mod(s->rd_timer, now + RD_LINK_ANSWER_NS);
+}
+
+/* a reader's frame (with its CRC) for a firmware that listens so */
+static void st25_v_frame(St25r3916State *s, const uint8_t *d, int n)
+{
+    static const uint8_t pair[4] = { 0x02, 0x08, 0x20, 0x80 };
+    int k = 0;
+
+    n = MIN(n, (int)(sizeof(s->v_code) - 2) / 4);
+    s->v_code[k++] = 0x21;
+    for (int i = 0; i < n; i++) {
+        for (int b = 0; b < 8; b += 2) {
+            s->v_code[k++] = pair[(d[i] >> b) & 3];
+        }
+    }
+    s->v_code[k++] = 0x04;
+    s->v_n = k;
+    s->v_at = 0;
+    s->v_next = 0;
+    s->tm_n = 0;                        /* (what it sent before is over) */
+    s->v_until = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + V_ARM_NS;
+    st25_v_play(s);
 }
 
 /* ----------------------------------------------- a reader on the link */
@@ -1296,6 +1508,12 @@ static void st25_link_reader(St25r3916State *s, char *line)
             flipper_link_send(&s->lk, "reader target none\n");
             return;
         }
+        if (s->tm) {
+            /* a firmware that listens by itself, as an ISO15693 card: the
+             * chip knows nothing of the card, and an inventory is a frame */
+            flipper_link_send(&s->lk, "reader target v\n");
+            return;
+        }
         if (st25_listen_f(s)) {
             /* a SENSF_REQ, which the chip answers from the memory that the
              * firmware loaded for it (at 15: the system code, the response
@@ -1355,6 +1573,12 @@ static void st25_link_reader(St25r3916State *s, char *line)
         odd &= bit_get(par, i) == !(ctpop8(data[i]) & 1);
     }
     st25_rd_asked(s, data, nbits, own_par ? par : NULL);
+    if (listening && s->tm) {           /* the firmware samples it itself */
+        s->rd_ans_bits = -1;
+        s->rd_waiting = true;
+        st25_v_frame(s, data, nbits / 8);
+        return;
+    }
     if (!listening) {                   /* nobody hears it */
         s->rd_waiting = true;
         timer_mod(s->rd_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
@@ -1388,6 +1612,14 @@ static void st25_rd_timer(void *opaque)
     if (!s->rd_prog) {
         return;
     }
+    if (s->rd_waiting && s->tm && s->tm_n && s->rd_late < RD_LATE_MAX) {
+        /* The answer is on its way, edge by edge: the reader's time was
+         * for its start, and the reader hears it out. */
+        s->rd_late++;
+        timer_mod(s->rd_timer, now + RD_LATE_NS);
+        return;
+    }
+    s->rd_late = 0;
     if (st25_rd_on_link(s)) {
         st25_link_rd_timer(s);
         return;
@@ -1753,6 +1985,8 @@ static void st25_realize(SSIPeripheral *d, Error **errp)
     qdev_init_gpio_out_named(DEVICE(d), &s->irq, "irq", 1);
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, st25_timer, s);
     s->rd_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, st25_rd_timer, s);
+    s->tm_idle = timer_new_ns(QEMU_CLOCK_VIRTUAL, st25_tm_idle, s);
+    s->v_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, st25_v_play, s);
     s->rec_flush = timer_new_ms(QEMU_CLOCK_REALTIME, st25_rec_flush, s);
     s->link_timeout = timer_new_ms(QEMU_CLOCK_REALTIME, st25_link_timeout, s);
     s->link_stop = qemu_bh_new(st25_link_stop, s);
@@ -1861,6 +2095,29 @@ static bool st25_size_ok(void *opaque, int version_id)
     return s->card_str_len <= ST25_STR_MAX;
 }
 
+/*
+ * Transparent mode, for a firmware that stays in it: one that emulates an
+ * ISO15693 card is in it from the emulation's start to its end.  (A frame
+ * that is on its way either way is not kept: a reader asks again.)
+ */
+static bool st25_tm_needed(void *opaque)
+{
+    St25r3916State *s = opaque;
+
+    return s->tm;
+}
+
+static const VMStateDescription vmstate_st25_tm = {
+    .name = "st25r3916/transparent",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = st25_tm_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(tm, St25r3916State),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 /* no card is held and no reader talks: the state says what is */
 static int st25_pre_load(void *opaque)
 {
@@ -1877,6 +2134,10 @@ static int st25_pre_load(void *opaque)
     s->rd_ans_bits = -1;
     s->tm = false;
     s->tm_n = 0;
+    s->v_n = s->v_at = 0;
+    s->v_level = false;
+    timer_del(s->tm_idle);
+    timer_del(s->v_timer);
     timer_del(s->link_timeout);
     return 0;
 }
@@ -1955,6 +2216,7 @@ static const VMStateDescription vmstate_st25r3916 = {
     },
     .subsections = (const VMStateDescription * const []) {
         &vmstate_st25_card,
+        &vmstate_st25_tm,
         NULL
     }
 };
@@ -1975,6 +2237,12 @@ static void st25_reset_hold(Object *obj, ResetType type)
     s->prefix_b = false;
     s->tm = false;
     s->tm_n = 0;
+    s->v_n = s->v_at = 0;
+    s->v_level = false;
+    if (s->tm_idle) {
+        timer_del(s->tm_idle);
+        timer_del(s->v_timer);
+    }
 }
 
 static void st25_reset_exit(Object *obj, ResetType type)

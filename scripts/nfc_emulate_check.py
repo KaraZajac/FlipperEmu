@@ -20,7 +20,9 @@ An ISO14443-4A card by a reader that asks for its ATS (`nfc --reader iso-dep`).
 A FeliCa Lite-S by a FeliCa reader without the card key (`nfc --reader
 felica`).  With keys: a MIFARE Ultralight C (`nfc --reader ulc CARD.nfc`) and
 the FeliCa Lite-S (`nfc --reader felica CARD.nfc`), each also by a reader
-that has another key.  A Type 4 tag whose NDEF message of 910 bytes is read through
+that has another key.  An NXP SLIX2 by an ISO15693 reader (`nfc --reader
+iso15693`): the firmware samples that reader's signal itself and modulates
+its own answers.  A Type 4 tag whose NDEF message of 910 bytes is read through
 ISO14443-4's blocks (`nfc --reader t4t`), emulated by the NFC app of the
 firmwares that know one (the dev build and the forks); and one that is
 played in Python, for the official 1.5.1 and for shorter reads.  `nfc record` writes every frame on the air and its answer
@@ -185,17 +187,7 @@ def t4t(b, work):
     path.write_text(card)
     b.fe("rm", "/ext/nfc/fe-emu-t4t.nfc")
     b.fe("push", path, "/ext/nfc")
-    code, said = b.fe("app", "NFC", "/ext/nfc/fe-emu-t4t.nfc")
-    on = False
-    for _ in range(40):                 # (the app's start, and its file)
-        try:
-            text = b.fe("status", "--json")[1]
-            on = json.loads(text[text.index("{"):])["nfc"]["radio"] == "listen"
-        except (ValueError, KeyError):
-            pass
-        if on:
-            break
-        time.sleep(0.25)
+    on = app_emulates(b, "/ext/nfc/fe-emu-t4t.nfc")
     try:
         if not on:
             print("  (this firmware's NFC app does not emulate a Type 4 tag's "
@@ -213,18 +205,12 @@ def t4t(b, work):
               "are the card's",
               code == 0 and "an NDEF message of 910 bytes" in text and read
               and not differ,
-              f"{said}\n{text}\n" + "\n".join(
+              f"{text}\n" + "\n".join(
                   f"{k}: {fe_nfc.parse_nfc_text(card).get(k)} | "
                   f"{fe_nfc.parse_nfc_text(read).get(k) if read else None}"
                   for k in differ[:8]))
     finally:
-        # (out by its Back button: the app that is asked to close while it
-        # emulates ends the firmware, FW-06)
-        for _ in range(8):
-            b.fe("press", "back")
-            time.sleep(0.6)
-            if "no app runs" in b.fe("app")[1]:
-                break
+        app_back(b)
         b.fe("rm", "/ext/nfc/fe-emu-t4t.nfc")
 
 
@@ -494,6 +480,106 @@ def keyed(b, work):
               and "26 of 28 blocks" in text, text)
 
 
+def app_emulates(b, path):
+    """The NFC app, opened with a card's file as from the archive: does it
+    emulate it?  (The chip listens.)"""
+    b.fe("app", "NFC", path)
+    for _ in range(40):                 # (the app's start, and its file)
+        try:
+            text = b.fe("status", "--json")[1]
+            if json.loads(text[text.index("{"):])["nfc"]["radio"] == "listen":
+                return True
+        except (ValueError, KeyError):
+            pass
+        time.sleep(0.25)
+    return False
+
+
+def app_back(b):
+    """Out of the NFC app by its Back button (asked to close while it
+    emulates, the app ends the firmware: FW-06)"""
+    for _ in range(8):
+        b.fe("press", "back")
+        time.sleep(0.6)
+        if "no app runs" in b.fe("app")[1]:
+            break
+
+
+def vicinity(b, work):
+    """ISO15693, which the firmware emulates with no help of the chip: it
+    samples the reader's signal itself (a timer, the DMA and the chip's
+    pin) and modulates its answers itself.
+
+    The last of the checks here, for what the firmware leaves behind: after
+    an ISO15693 emulation its ISO14443-3A listener takes every answer of its
+    own for failed, and an ISO14443-4 card of its is not activated any more,
+    until a restart (FW-21 in docs/FIRMWARE_BUGS.md)."""
+    card = fe_nfc.sample_slix(bytes.fromhex("E004010812345678"))
+    keys = ("Device type", "UID", "DSFID", "AFI", "IC Reference",
+            "Block Count", "Block Size", "Data Content", "Security Status",
+            "Signature")
+
+    def differs(path):
+        read = pathlib.Path(path).read_text() if path else ""
+        want, got = fe_nfc.parse_nfc_text(card), fe_nfc.parse_nfc_text(read)
+        return [f"{k}: {(want.get(k) or '')[:80]} | {(got.get(k) or '')[:80]}"
+                for k in keys if want.get(k) != got.get(k)]
+
+    with Emulated(b, work, "slix", card) as emu:
+        if not check("the firmware emulates an NXP SLIX2's file (ISO15693)",
+                     emu.on, emu.said[-300:]):
+            return
+        air = work / "v-air.txt"
+        b.fe("nfc", "record", air)
+        code, text = b.fe("nfc", "--reader", "iso15693", "--quiet-read",
+                          "--verbose")
+        b.fe("nfc", "record", "stop")
+        differ = differs(last_read(b))
+        said = [line.split(" ", 1)[1] for line in
+                (air.read_text() if air.exists() else "").splitlines()
+                if " reader v " in line]
+        check("an NXP SLIX2 that the firmware emulates, read by an ISO15693 "
+              "reader: the inventory's UID, the system information, its 80 "
+              "blocks each with its security status (one of them locked), "
+              "and NXP's signature are the card's.  The firmware takes every "
+              "frame from samples of the chip's pin and sends every answer "
+              f"edge by edge; a record has them ({len(said)} frames)",
+              code == 0 and "80 of 80 blocks" in text and not differ
+              and "reader v 40 260100F60A > 96 000078563412080104E061A6" in said
+              and len(said) >= 83,
+              text + "\n" + "\n".join(differ) + "\n" + "\n".join(said[:4]))
+
+    # The NFC app's emulation of it, through a saved state.  (The shell's
+    # would not do: its command ends with the USB session, which is a new
+    # one after a load.)
+    path = work / "fe-emu-slix-app.nfc"
+    path.write_text(card)
+    b.fe("push", path, "/ext/nfc")
+    try:
+        if not app_emulates(b, "/ext/nfc/fe-emu-slix-app.nfc"):
+            print("  (this firmware's NFC app does not emulate an ISO15693 "
+                  "card's file)")
+            return
+        first = b.fe("nfc", "--reader", "iso15693", "--quiet-read")
+        saved = b.fe("snapshot", "save", "fe-v")
+        b.fe("stop")
+        loaded = b.fe("snapshot", "load", "fe-v", "--detach", "--headless",
+                      "--audio", "none", timeout=180)
+        again = b.fe("nfc", "--reader", "iso15693", "--quiet-read")
+        differ = differs(last_read(b))
+        check("the NFC app's emulation of it, saved in a snapshot while it "
+              "listens: the machine that is loaded from it is read by the "
+              "ISO15693 reader as the one before was (the chip is left in "
+              "its transparent mode, as the firmware has it)",
+              first[0] == 0 and saved[0] == 0 and loaded[0] == 0
+              and again[0] == 0 and "80 of 80 blocks" in again[1] and not differ,
+              "\n".join((first[1], saved[1], loaded[1], again[1], *differ)))
+    finally:
+        app_back(b)
+        b.fe("snapshot", "rm", "fe-v")
+        b.fe("rm", "/ext/nfc/fe-emu-slix-app.nfc")
+
+
 def ntag(b, work):
     uid = bytes.fromhex("04A1B2C3D4E5F6")
     card = fe_nfc.nfc_file(fe_nfc.blank("ntag215", uid, "https://flipperzero.one"))
@@ -554,6 +640,7 @@ def main():
                 record(b, work)
                 t4t(b, work)
                 t4t_reader()
+                vicinity(b, work)       # (the last: FW-21)
             b.stop()
             b.fe("stop")
             log = b.uart_text(every=True)

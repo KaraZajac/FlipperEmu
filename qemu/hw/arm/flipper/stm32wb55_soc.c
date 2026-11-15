@@ -62,9 +62,20 @@ static MemTxResult soc_gpio_tap_read(void *opaque, hwaddr addr, uint64_t *data,
     struct WB55GpioTap *tap = opaque;
     WB55SocState *s = tap->soc;
     MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->gpio[tap->port]), 0);
-    MemTxResult r = memory_region_dispatch_read(mr, addr, data, size_memop(size),
-                                                attrs);
+    MemTxResult r;
 
+    if (size < 4) {
+        /* A register read a byte or two wide, which the chip allows and
+         * QEMU's GPIO model does not: the DMA reads IDR so, 16 bits, for
+         * a firmware that samples a pin (lib/signal_reader) */
+        uint64_t word = 0;
+
+        r = memory_region_dispatch_read(mr, addr & ~3, &word, MO_32, attrs);
+        *data = extract64(word, (addr & 3) * 8, size * 8);
+        addr &= ~3;
+    } else {
+        r = memory_region_dispatch_read(mr, addr, data, size_memop(size), attrs);
+    }
     if (addr == 0x10 && s->idr_read) {
         s->idr_read(s->gpio_hook_opaque, tap->port);
     }
@@ -144,12 +155,23 @@ void wb55_soc_sync_pins(WB55SocState *s)
 
 /* TIM2's update DMA: is the period after its next the end marker of a ring
  * that the firmware's digital_sequence fills (an ARR of 0xFFFFFFFF)? */
-static bool soc_tim2_dma_marker(void *opaque)
+static int soc_tim2_dma_marker(void *opaque)
 {
     WB55SocState *s = opaque;
 
-    return wb55_dma_second_is(&s->dma, WB55_DREQ_TIM2_UP,
-                            0x4000002C, 0xFFFFFFFF);
+    return wb55_dma_ring_mark(&s->dma, WB55_DREQ_TIM2_UP,
+                              0x4000002C, 0xFFFFFFFF);
+}
+
+/* the firmware reads a DMA channel's count: TIM2's updates, which move
+ * its channels, are replayed up to now first */
+static void soc_dma_count_read(void *opaque, int req)
+{
+    WB55SocState *s = opaque;
+
+    if (req == WB55_DREQ_TIM2_UP) {
+        wb55_tim_sync(&s->tim2);
+    }
 }
 
 /*
@@ -161,10 +183,9 @@ static bool soc_tim2_dma_marker(void *opaque)
  * the half after, and a timer that had to wait catches up faster than the
  * handler writes.)
  */
-static bool soc_tim2_dma_ready(void *opaque)
+bool wb55_soc_dma_handled(WB55SocState *s, int req)
 {
-    WB55SocState *s = opaque;
-    int c = wb55_dma_at_half(&s->dma, WB55_DREQ_TIM2_UP);
+    int c = wb55_dma_at_half(&s->dma, req);
     const VecInfo *v;
 
     if (c < 0) {
@@ -174,6 +195,11 @@ static bool soc_tim2_dma_ready(void *opaque)
                                 (c < 7 ? WB55_IRQ_DMA1_CH1 + c
                                        : WB55_IRQ_DMA2_CH1 + c - 7)];
     return !(v->active || (v->pending && v->enabled));
+}
+
+static bool soc_tim2_dma_ready(void *opaque)
+{
+    return wb55_soc_dma_handled(opaque, WB55_DREQ_TIM2_UP);
 }
 
 /* TIM1's update DMA: is it re-armed for the next update? */
@@ -622,8 +648,14 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, NVIC(WB55_IRQ_TIM2));
     qdev_connect_gpio_out_named(dev, "dma-up", 0, DREQ(WB55_DREQ_TIM2_UP));
     wb55_dma_set_pulse(&s->dma, WB55_DREQ_TIM2_UP);
+    /* (a request generator's and TIM16's compare: the board makes them
+     * for a firmware that samples the NFC chip's signal, see st25r3916.c) */
+    wb55_dma_set_pulse(&s->dma, WB55_DREQ_GENERATOR0);
+    wb55_dma_set_pulse(&s->dma, WB55_DREQ_TIM16_CH1);
     s->tim2.dma_marker = soc_tim2_dma_marker;
     s->tim2.dma_marker_opaque = s;
+    s->dma.count_read = soc_dma_count_read;
+    s->dma.count_read_opaque = s;
     s->tim2.dma_ready = soc_tim2_dma_ready;
     s->tim2.dma_ready_opaque = s;
     wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_APB1RSTR1, 0, dev);

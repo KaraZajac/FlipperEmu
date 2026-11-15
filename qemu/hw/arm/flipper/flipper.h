@@ -245,7 +245,40 @@ struct St25r3916State {
     /* transparent mode: the answer modulated by a pin of the MCU */
     bool tm;
     int tm_n;
-    int64_t tm_edge[2048];       /* time << 1 | level, from the first rise */
+    /* (16 edges a bit of an ISO15693 answer: one of 512 bytes fits) */
+    int64_t tm_edge[512 * 8 * 16 + 256]; /* time << 1 | level, from the first
+                                          * rise */
+    QEMUTimer *tm_idle;          /* no edge for a while: a frame's end */
+    /*
+     * ... and, for a firmware that listens as an ISO15693 card, the reader's
+     * frame on the IRQ pin, which the firmware samples by itself: a timer's
+     * compare requests have the DMA read the pin, eight samples a byte.
+     * The samples of a frame, given at the firmware's pace.
+     */
+    uint8_t v_code[4 * 512 + 2]; /* a byte for eight samples: the slots */
+    int v_n, v_at;               /* ... how many, and the next sample */
+    bool v_level;                /* the pin */
+    int64_t v_until;             /* the firmware may begin to sample by then */
+    int64_t v_next;              /* the next eight samples: not before */
+    QEMUTimer *v_timer;
+    /*
+     * Board hooks, all or none.  A DMA request (the DMAMUX's number).  Is
+     * the sampling armed (a fresh channel on the timer's request)?  Has the
+     * firmware's interrupt handler taken the samples so far?  Does the CPU
+     * sleep, and how long has it run (the host's time for its thread, or
+     * -1 where the host cannot say)?  Does the firmware send (its DMA
+     * drives the modulation's pin)?
+     */
+    void (*v_request)(void *opaque, int req);
+    bool (*v_armed)(void *opaque);
+    bool (*v_handled)(void *opaque);
+    bool (*cpu_asleep)(void *opaque);
+    int64_t (*cpu_ns)(void *opaque);
+    bool (*v_sending)(void *opaque);
+    void *v_opaque;
+    int64_t v_given;             /* when the last eight samples were given */
+    int64_t v_ran;               /* ... and how long the CPU had run then */
+    int rd_late;                 /* a reader's wait for an answer on its way */
     uint8_t rd_uid[10], rd_atqa[2], rd_sak;
     int rd_uid_len;
     bool rd_has_version, rd_has_sig, rd_has_cnt;

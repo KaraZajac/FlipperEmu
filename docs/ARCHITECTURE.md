@@ -1190,12 +1190,82 @@ one writing ARR from a ring of 128 periods.
   cycles a period on a real Flipper, with an ARR of 0xFFFFFFFF behind the last
   period written as the end's marker. An emulated CPU is slower than that loop, the
   DMA overtakes it, loads the marker, and the answer ends in its middle. So TIM2
-  asks the DMA before each update whether the marker is behind the next period
-  (`wb55_dma_second_is`), and if so the update waits, keeping its exact time, until
-  the firmware has written one more period or reads ARR, which it does in that state
-  only when it has no more to write and looks for the end. One period before the
-  marker and not at it: with the DMA at the marker the firmware's own count takes the
-  ring for full and writes nothing more.
+  asks the DMA before each update where the marker is in the ring
+  (`wb55_dma_ring_mark`), and if it is behind the next period the update waits,
+  keeping its exact time, until the firmware has written one more period or reads
+  ARR, which it does in that state only when it has no more to write and looks for
+  the end. One period before the marker and not at it: with the DMA at the marker
+  the firmware's own count takes the ring for full and writes nothing more.
+- On a busy host that was not enough, in three ways, each of which left an answer
+  cut short or with a ring's worth of it sent again and again:
+  - The wait had its limit (250 ms, for a DMA that is left dry for good) counted
+    from the update's own time. Every wait leaves the timer's updates further behind
+    the clock, so late in a long answer every update was past the limit before it
+    began to wait. The limit counts each wait by itself now (`wait_since`).
+  - The firmware reads ARR in its loop too, to see an underrun, when the DMA's count
+    says that the ring is full. With the updates behind the clock, a ring that was
+    full at the count's read could be emptied to the marker before the read of ARR,
+    which then passed for the end's. A read of the count brings the timer's updates
+    up to that moment first (`count_read`, `wb55_tim_sync`), so the count is what
+    the firmware decides by.
+  - The firmware writes the new period over the marker and then the marker behind
+    it. Between the two writes the ring has no marker, and a vCPU thread that the
+    host takes off its core just then leaves it so for milliseconds. A ring that
+    has had a marker and has none waits as well.
+
+**ISO15693, with no chip between.** The firmware emulates an ISO15693 card (a SLIX)
+without the chip in both directions. It enters transparent mode at the emulation's
+start, takes the SPI bus off its pins and stays there until the emulation's end.
+- *What it hears.* In that mode the chip's interrupt pin (PA2) carries the receiver's
+  signal: a pulse for each pause of the reader's field. `lib/signal_reader` samples
+  it: the DMAMUX's request generator 0, on EXTI line 2's rise, has one DMA channel
+  write TIM16's CR1 once (the timer starts) and another write its counter at every
+  rise (9: the timer is in step with the signal again); TIM16's compare request has a
+  third channel read GPIOA's input register, 16 bits wide, into a ring of 16 samples
+  with an interrupt at each half. Eight samples of 128/fc are a byte for the
+  firmware's parser, and a frame in the reader's "1 out of 4" coding is a start
+  (0x21 as such a byte), a byte for every two bits (0x02, 0x08, 0x20, 0x80) and an
+  end (0x04).
+- *The model has no such timer.* TIM16 stays the speaker's register file, and the
+  DMA's two writes land in it. The chip model plays a reader's frame as the samples
+  (`st25_v_frame`, `st25_v_play`): it sets the pin, and asks the board for the two
+  DMA requests as the DMAMUX would make them (`v_request`: the generator's at a rise,
+  TIM16's for each sample). Eight samples at a time; the next eight after the 75.5 µs
+  that eight last, when the firmware's interrupt handler has taken the half
+  (`wb55_soc_dma_handled`: the channel's interrupt is neither pending nor active in
+  the NVIC) and the CPU sleeps again. The firmware's thread takes the bytes apart
+  between two of those interrupts and loses bytes when the next overtakes it, which a
+  Flipper's CPU does not let happen and an emulated one, translating that code for
+  the first time, does. A CPU that never sleeps gets 400 µs of its own running and
+  no more: the NFC shell's `emulate` keeps it awake (it looks every two ticks whether
+  it is to end). Its own running is the host's time for the CPU's thread
+  (`pthread_getcpuclockid`), not the machine's clock, which goes on while a busy host
+  keeps the thread off its core. A frame's first sample waits, up to 50 ms, until the
+  firmware samples at all
+  (`wb55_dma_fresh`: the channel on TIM16's request enabled with both its interrupts
+  and its whole count still to go): after an answer it sets all of this up anew.
+- *A register read 16 bits wide.* QEMU's GPIO model takes 32-bit accesses only and
+  the DMA's read of IDR is not one: the SoC's tap in front of the ports serves a
+  narrower read from the word.
+- *What it says.* The answer goes out on PB5 as a MIFARE Classic's does, from
+  `lib/digital_signal`, in the card's coding of the high data rate on one
+  subcarrier: pulses of fc/32, a unit of 256/fc; a start of three units of pulses
+  and a 1, a 0 as pulses and then none, a 1 as none and then pulses, an end of a 0
+  and three units of pulses. No chip select ends this answer, so the edges are
+  decoded when none has come for 500 µs and the firmware's DMA does not drive the pin
+  any more (`st25_tm_idle`; while it does, the next edge may be waiting for the
+  firmware at the ring's marker): from the first rise, five units on, two units a
+  bit, until both halves of one are alike. The two cards' waves tell them apart, a
+  half wave of 16/fc here and of 8/fc for ISO14443A, so a late chip select does not
+  have a MIFARE Classic's answer read as this. A reader whose time for an answer
+  runs out while edges are coming hears the answer out.
+- A reader on the link gets `reader target v` for its `activate` (the chip has no
+  UID of this card: an inventory is a frame) and sends its frames as bytes; the
+  record's letter is `v`. An emulated SLIX2 of 80 blocks is read in 83 frames and
+  about a second of the Flipper's time.
+- The mode is in a saved state (the subsection `st25r3916/transparent`, only while
+  it is on), so a machine loaded from a snapshot goes on emulating. Not a frame that
+  was on its way: the reader asks again.
 
 **A reader on the link.** The reader can be a program on the chip's link instead of
 the two built-in ones: `reader on` (its field), `reader activate` (WUPA,
@@ -2053,7 +2123,8 @@ the header adds its own.
   attack finds its keys). A standing reader's field (`nfc --field on`) is saved as
   well. A virtual reader's session (`nfc --reader`) is not: that reader is gone, its
   field goes off at the first run, and the firmware's emulation waits for the next
-  reader. A question that was out to a card on the link (`nfc --link`) gets silence
+  reader. Transparent mode is saved while it is on: the firmware that emulates an
+  ISO15693 card is in it all the time. A question that was out to a card on the link (`nfc --link`) gets silence
   for an answer.
 - **The header's pins.** The board saves the outside's hand on each pin: whether the
   pin is held low, held high or let go, and the voltage of a hold (`gpio PA7 1.25V`).

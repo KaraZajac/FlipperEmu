@@ -11,6 +11,8 @@ NFC link (docs/RADIO_LINK.md, "A reader on the link").
     ./flipperemu nfc --reader felica CARD.nfc    # ... with CARD's card key
     ./flipperemu nfc --reader ulc CARD.nfc       # a MIFARE Ultralight C, with
                                                  # the key in CARD's pages
+    ./flipperemu nfc --reader iso15693           # an ISO15693 card (NXP's SLIX):
+                                                 # its blocks
     scripts/fe_nfc_reader.py devices/NAME/nfc.sock classic CARD.nfc -o OUT.nfc
 
 The emulator's chip model is the air: `reader on` is this reader's field
@@ -133,6 +135,12 @@ class ReaderLink:
         if len(words) < 5 or words[1] != "a":
             return None
         return bytes.fromhex(words[2]), bytes.fromhex(words[3]), int(words[4], 16)
+
+    def listens_v(self):
+        """Does the firmware listen by itself, as it does for an ISO15693
+        card?  (The chip has no part in that card: no UID from it.)"""
+        words = self.ask("activate")
+        return len(words) >= 2 and words[1] == "v"
 
     def poll_f(self):
         """FeliCa's polling: (IDm, PMm, system code), or None when the
@@ -960,10 +968,136 @@ def read_felica(link, say=lambda text: None, card_text=None):
     return "\n".join(out) + "\n", (read, len(blocks))
 
 
+# ---------------------------------------------------------------- ISO15693
+
+def crc_v(data):
+    """ISO15693's CRC (ISO/IEC 13239), the low byte first"""
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = crc >> 1 ^ 0x8408 if crc & 1 else crc >> 1
+    return (crc ^ 0xFFFF).to_bytes(2, "little")
+
+
+class Vicinity:
+    """An ISO15693 reader's session with the card on the link (the high
+    data rate, one subcarrier, 1 out of 4)"""
+
+    TRIES = 3                           # of one request, as a reader has
+
+    def __init__(self, link):
+        self.link = link
+        self.uid = None                 # as it is on the air: the low byte first
+        self.again = 0                  # requests that were sent once more
+
+    def frame(self, data):
+        """A request there, the response back (no CRC either way here):
+        None for a response with its error flag.  A request with no
+        response, or with one that its CRC does not fit, is sent again: this
+        card keeps no place that a lost frame could lose."""
+        for left in range(self.TRIES, 0, -1):
+            try:
+                bits, got, _ = self.link.send(bytes(data) + crc_v(data))
+            except Silence:
+                if left == 1:
+                    raise
+            else:
+                if not bits % 8 and len(got) >= 3 and \
+                        crc_v(got[:-2]) == got[-2:]:
+                    return None if got[0] & 1 else got[:-2]
+                if left == 1:           # (damaged each time: no card's doing)
+                    raise RuntimeError(
+                        f"a response that is none: {got.hex()}")
+            self.again += 1
+
+    def inventory(self):
+        """One slot, no mask: (DSFID, UID), or None"""
+        r = self.frame(b"\x26\x01\x00")
+        if not r or len(r) < 10:
+            return None
+        self.uid = r[2:10]
+        return r[1], r[2:10][::-1]
+
+    def system(self):
+        """Get System Information: a dict of what the card says it has"""
+        r = self.frame(b"\x22\x2B" + self.uid)
+        if not r or len(r) < 10:
+            return {}
+        out, at = {}, 10
+        for bit, name, size in ((1, "dsfid", 1), (2, "afi", 1), (4, "memory", 2),
+                                (8, "ic", 1)):
+            if r[1] & bit and at + size <= len(r):
+                out[name] = r[at:at + size]
+                at += size
+        return out
+
+    def read(self, block):
+        """Read Single Block with its security status: (status, data), or
+        None"""
+        r = self.frame(b"\x62\x20" + self.uid + bytes((block,)))
+        return (r[1], r[2:]) if r and len(r) > 2 else None
+
+    def nxp(self, command, more=b""):
+        """One of NXP's own commands (the manufacturer's code after it)"""
+        return self.frame(bytes((0x22, command, 0x04)) + self.uid + more)
+
+
+def read_vicinity(link, say=lambda text: None):
+    """Read the emulated card as an ISO15693 card: the .nfc text of what a
+    reader gets of one (its ID and system information, every block with its
+    security status, an NXP SLIX2's signature), and (blocks read, blocks)"""
+    for _ in range(50):                 # (the firmware may start late)
+        if link.listens_v():
+            break
+        time.sleep(0.1)
+    else:
+        raise RuntimeError("the Flipper is not emulating an ISO15693 card")
+
+    def once():
+        rd = Vicinity(link)
+        found = rd.inventory()
+        if not found:
+            raise Silence()
+        dsfid, uid = found
+        info = rd.system()
+        count, size = 0, 4
+        if "memory" in info:
+            count, size = info["memory"][0] + 1, (info["memory"][1] & 0x1F) + 1
+        data, status = b"", b""
+        for block in range(count):
+            got = rd.read(block)
+            if not got:
+                break
+            status += bytes((got[0],))
+            data += got[1][:size].ljust(size, b"\0")
+        nxp = uid[1] == 0x04
+        signature = rd.nxp(0xBD) if nxp else None
+        return uid, dsfid, info, count, size, data, status, signature, rd.again
+
+    uid, dsfid, info, count, size, data, status, signature, sent_again = \
+        again(link, once)
+    up = lambda b: bytes(b).hex(" ").upper()
+    say(f"a card: UID {up(uid)}, {count} blocks of {size} bytes"
+        + (f" ({sent_again} requests sent once more)" if sent_again else ""))
+    slix = uid[1] == 0x04 and signature is not None
+    out = ["Filetype: Flipper NFC device", "Version: 4",
+           f"Device type: {'SLIX' if slix else 'ISO15693-3'}", f"UID: {up(uid)}",
+           f"DSFID: {info.get('dsfid', bytes((dsfid,)))[0]:02X}",
+           f"AFI: {info.get('afi', b'\x00')[0]:02X}",
+           f"IC Reference: {info.get('ic', b'\x00')[0]:02X}",
+           f"Block Count: {count}", f"Block Size: {size:02X}",
+           f"Data Content: {up(data)}", f"Security Status: {up(status)}"]
+    if signature and len(signature) >= 33:
+        out.append(f"Signature: {up(signature[1:33])}")
+    return "\n".join(out) + "\n", (len(status), count)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("sock", help="the device's NFC link (devices/NAME/nfc.sock)")
-    ap.add_argument("program", choices=["classic", "ulc", "iso-dep", "t4t", "felica"])
+    ap.add_argument("program", choices=["classic", "ulc", "iso-dep", "t4t", "felica",
+                                        "iso15693"])
     ap.add_argument("card", nargs="?",
                     help="classic, ulc: the card's .nfc file, whose keys are "
                          "the reader's; felica: one with the card key, to "
@@ -996,6 +1130,10 @@ def main():
                 link, say, pathlib.Path(args.card).read_text()
                 if args.card else None)
             done, words = read > 0, f"read {read} of {total} blocks"
+        elif args.program == "iso15693":
+            text, (read, total) = read_vicinity(link, say)
+            done, words = read == total and total > 0, \
+                f"read {read} of {total} blocks"
         else:
             text, length = read_t4t(link, say)
             done, words = True, f"read an NDEF message of {length} bytes"
