@@ -4889,7 +4889,13 @@ big lock, entry 92).
       GetVersion from DESFire's version record and "command invalid"
       (0x0B) to the rest, so that a DESFire's reader, which asks for a key
       version first, takes it for none. An EV1 and an X dump to their own
-      files; nfc_check 21 on the five.
+      files; nfc_check 21 on the five. Unleashed and RogueMaster read more
+      of a Plus in security level 3 (each sector's keys and blocks, the
+      card's keys, its configuration blocks: 200 lines more for a 2K, 344
+      for a 4K), with keys of a dictionary; none fits a card that takes no
+      key, and the lines are "??". The check counts them and lets them be.
+      Security level 3 itself (AES, a session, a MAC on each block) is not
+      in the card model.
 
 ## Things that were right the first time (and why)
 

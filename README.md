@@ -1444,7 +1444,8 @@ and the firmware's `dump` of it is the file again, key for key:
 - **MIFARE Plus**, as far as the firmware reads one: an EV1 or EV2 answers
   GetVersion (the firmware takes its first part, and knows the kind and size by it),
   a Plus S, X or SE has none and is known by its ATS. No sector is read: the
-  firmware has no keys for security level 3.
+  official firmware reads none, and Unleashed's and RogueMaster's try keys in
+  security level 3, which the card here does not have ("??" for each block).
 - **ISO14443B** (ISO14443-3B and -4B): REQB and WUPB with the ATQB (the card's PUPI,
   application data and protocol info, as the file has them), ATTRIB, HLTB, and
   ISO14443-4's blocks after it when the protocol info says so. `raw -p 14b -c -d
