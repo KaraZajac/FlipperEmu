@@ -2113,6 +2113,24 @@ $ ./flipperemu press back left                      # "Exit USB-UART?": Exit
 While the bridge is on, the CLI is not there: `cli`, `push` and what else goes
 through it wait until Back and Exit have given the port back.
 
+**On a second port.** The bridge's Config has "USB Channel": on 1, the firmware is
+two serial ports on the USB (its dual-CDC mode), the CLI stays on the first, and the
+bridge has the second. The second is a pty of its own, `devices/NAME/usb2.tty`, which
+`status` names while the firmware has two ports:
+
+```
+$ ./flipperemu press left right back                # Config, USB Channel: 1, back
+$ ./flipperemu status | grep usb
+usb      : plugged into a computer, which sees 0483:5740 Flipper NAME: CDC ACM x2; its second serial port: devices/NAME/usb2.tty
+$ picocom devices/NAME/usb2.tty                     # the bridge; `cli` works beside it
+```
+
+That is so on the official firmware up to 1.1.2. From 1.3 on, and on the firmwares
+made from it (1.3.4, 1.5.1, Momentum mntm-012, Unleashed unlshd-094 were tried), the
+bridge asks for two ports and the firmware's CLI service sets one again at once: the
+screen says "COM PORT:1", and there is no second port, here as on a Flipper.
+`scripts/usb_dual_check.py FIRMWARE` checks either (7 checks on 1.1.2, 3 on 1.5.1).
+
 **A module's call.** An expansion module says that it is there by pulling pin 14 low
 for a moment, and the firmware's expansion service waits for that with an interrupt
 on the pin's fall, the port's receiver off. A byte's start bit is such a pulse. So

@@ -529,7 +529,11 @@ lights that it had, as a Flipper does.
 ## USB (`stm32wb55_usb.c`)
 
 QEMU has no USB wire that leaves the machine, so the device model contains the other end
-too: a small **virtual host**. Device side, modelled to what the firmware's driver
+too: a small **virtual host**. It bridges the configuration's first CDC ACM function to
+the chardev `usb` (the CLI's and RPC's port) and, where the configuration has two (the
+firmware's dual-CDC mode), the second to the chardev `usb2`: each port has its own
+queues, its own DTR that follows its chardev's reader, and its turn at the bus every
+other time, so that one port with much to say does not hold the other up. Device side, modelled to what the firmware's driver
 (`lib/libusb_stm32/src/usbd_stm32wb55_devfs.c`) relies on:
 - **EPnR**: STAT_RX/STAT_TX/DTOG_RX/DTOG_TX toggle when written with 1, CTR_RX/CTR_TX are
   rc_w0, SETUP is read-only, EA/EP_TYPE/EP_KIND are plain fields. A bus reset clears

@@ -114,7 +114,12 @@ qFlipper / lab.flipper.net / `ufbt launch` only run over USB CDC.
           into the free flash while the firmware runs, run there, replaced and run
           again; `scripts/xip_check.py` 8 (BRINGUP_LOG 161). A loader itself
           (Moon-Shell's .rock apps) when one is built
-- ☐ Stretch: second CDC port of the dual-CDC mode; mass storage
+- ☑ The second CDC port of the dual-CDC mode (2026-11-15): the built-in host
+      bridges a second CDC ACM function to `devices/NAME/usb2.tty`; the USB-UART
+      bridge on channel 1 carries bytes both ways with the CLI on the first port
+      (official 1.1.2). The firmwares from 1.3 on undo the dual mode themselves.
+      `scripts/usb_dual_check.py` 7 / 3 (BRINGUP_LOG 162)
+- ☐ Stretch: mass storage
 
 The double-buffer question from the notes was settled by what libusb_stm32 requires:
 `ep_write()` only accepts a double-buffered IN endpoint whose STAT_TX reads NAK (so STAT_TX

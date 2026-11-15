@@ -770,9 +770,11 @@ static void host_detach(WB55UsbState *s)
     }
     s->hstate = H_DETACHED;
     s->ctl.active = false;
-    s->cdc = false;
-    s->hup = false;                         /* the port went with the device */
-    fifo8_reset(&s->to_dev);
+    for (int i = 0; i < 2; i++) {
+        s->port[i].cdc = false;
+        s->port[i].hup = false;             /* the port went with the device */
+        fifo8_reset(&s->port[i].to_dev);
+    }
     s->addr = 0;
     s->failures = 0;
     if (s->timer) {
@@ -839,10 +841,13 @@ static bool ep0_settled(WB55UsbState *s)
 static void parse_config(WB55UsbState *s)
 {
     const uint8_t *d = s->cfg_desc;
-    int cls = -1, comm_if = -1, ncdc = 0, nhid = 0, nmsc = 0, nother = 0;
+    int cls = -1, comm_if[2] = { -1, -1 }, ncdc = 0, ndata = 0, nhid = 0;
+    int nmsc = 0, nother = 0;
     GString *f = g_string_new(NULL);
 
-    s->cdc_in = s->cdc_out = 0;
+    for (int i = 0; i < 2; i++) {
+        s->port[i].cdc_in = s->port[i].cdc_out = 0;
+    }
     s->hid_in = 0;
     s->nif = 0;
     for (int dir = 0; dir < 2; dir++) {
@@ -869,15 +874,17 @@ static void parse_config(WB55UsbState *s)
             }
             cls = d[off + 5];
             if (cls == 0x02 && d[off + 6] == 0x02) {
-                ncdc++;
-                if (comm_if < 0) {
-                    comm_if = d[off + 2];
+                if (ncdc < 2) {
+                    comm_if[ncdc] = d[off + 2];
                 }
+                ncdc++;
+            } else if (cls == 0x0A) {
+                ndata++;                            /* a function's data */
             } else if (cls == 0x03) {
                 nhid++;
             } else if (cls == 0x08) {
                 nmsc++;
-            } else if (cls != 0x0A) {
+            } else {
                 nother++;
             }
         } else if (type == 5 && len >= 7 && cls == 0x03 &&
@@ -888,18 +895,25 @@ static void parse_config(WB55UsbState *s)
         } else if (type == 5 && len >= 7 && cls == 0x0A &&
                    (d[off + 3] & 3) == 2) {         /* CDC data, bulk */
             uint8_t ea = d[off + 2];
+            WB55UsbPort *p = &s->port[MIN(MAX(ndata, 1), 2) - 1];
 
-            if ((ea & 0x80) && !s->cdc_in) {
-                s->cdc_in = ea & 0xF;
-            } else if (!(ea & 0x80) && !s->cdc_out) {
-                s->cdc_out = ea & 0xF;
-                s->cdc_out_mps = MIN(lduw_le_p(&d[off + 4]), 64);
+            if (ndata > 2) {
+                continue;                           /* (a third: not bridged) */
+            }
+            if ((ea & 0x80) && !p->cdc_in) {
+                p->cdc_in = ea & 0xF;
+            } else if (!(ea & 0x80) && !p->cdc_out) {
+                p->cdc_out = ea & 0xF;
+                p->cdc_out_mps = MIN(lduw_le_p(&d[off + 4]), 64);
             }
         }
     }
-    s->cdc = comm_if >= 0 && s->cdc_in && s->cdc_out;
-    s->cdc_if = MAX(comm_if, 0);
-    s->hid = !s->cdc && nhid && s->hid_in;
+    for (int i = 0; i < 2; i++) {
+        s->port[i].cdc = comm_if[i] >= 0 && s->port[i].cdc_in &&
+                         s->port[i].cdc_out;
+        s->port[i].cdc_if = MAX(comm_if[i], 0);
+    }
+    s->hid = !s->port[0].cdc && nhid && s->hid_in;
     if (ncdc) {
         g_string_append_printf(f, "%sCDC ACM%s", f->len ? ", " : "",
                                ncdc > 1 ? " x2" : "");
@@ -936,7 +950,7 @@ static void enum_next(WB55UsbState *s, int64_t now);
 static void enum_report(WB55UsbState *s)
 {
     GString *m = g_string_new(NULL);
-    bool chr = qemu_chr_fe_backend_connected(&s->chr);
+    bool chr = qemu_chr_fe_backend_connected(&s->port[0].chr);
 
     g_string_printf(m, "flipper-zero: USB device %04x:%04x",
                     lduw_le_p(&s->dev_desc[8]), lduw_le_p(&s->dev_desc[10]));
@@ -946,8 +960,11 @@ static void enum_report(WB55UsbState *s)
         }
     }
     g_string_append_printf(m, ": %s", s->functions[0] ? s->functions : "?");
-    if (chr && s->cdc) {
+    if (chr && s->port[0].cdc) {
         g_string_append(m, " (CLI/RPC on the USB chardev)");
+        if (s->port[1].cdc && qemu_chr_fe_backend_connected(&s->port[1].chr)) {
+            g_string_append(m, " (its second port on the second chardev)");
+        }
     } else if (chr && s->hid) {
         g_string_append(m, " (what it types appears on the USB chardev)");
     }
@@ -1072,24 +1089,28 @@ static void enum_next(WB55UsbState *s, int64_t now)
             ctl_start(s, now, 0x00, 9, s->cfg_desc[5], 0, 0, NULL);
             return;
         case E_LINECODING:
-            if (!s->cdc) {
+            if (!s->port[0].cdc) {
                 s->enum_step++;
                 continue;
             }
-            ctl_start(s, now, 0x21, 0x20, 0, s->cdc_if, 7, line_coding);
+            ctl_start(s, now, 0x21, 0x20, 0, s->port[0].cdc_if, 7,
+                      line_coding);
             return;
         default:
             s->hstate = H_RUNNING;
             s->failures = 0;
-            s->dtr_sent = false;
-            s->hup = s->stale = false;
+            for (int i = 0; i < 2; i++) {
+                s->port[i].dtr_sent = false;
+                s->port[i].hup = s->port[i].stale = false;
+            }
             s->kb_mods = s->kb_lone_mods = s->mouse_btn = 0;
             s->alt_code = s->alt_digits = 0;
             memset(s->kb_keys, 0, sizeof(s->kb_keys));
             memset(s->consumer, 0, sizeof(s->consumer));
             s->hid_next_poll = now;
             enum_report(s);
-            qemu_chr_fe_accept_input(&s->chr);
+            qemu_chr_fe_accept_input(&s->port[0].chr);
+            qemu_chr_fe_accept_input(&s->port[1].chr);
             return;
         }
     }
@@ -1101,7 +1122,7 @@ static void running_ctl_done(WB55UsbState *s, bool ok)
     if (!ok) {
         usb_dbg(s, "SET_CONTROL_LINE_STATE failed");
     }
-    s->dtr_sent = s->dtr_pending;
+    s->port[s->ctl_port & 1].dtr_sent = s->port[s->ctl_port & 1].dtr_pending;
 }
 
 static void usbip_ctl_done(WB55UsbState *s, bool ok);
@@ -1198,49 +1219,49 @@ static int ctl_step(WB55UsbState *s, int64_t now)
 
 /* ---- CDC ACM bridge */
 
-static void usb_chr_flush(WB55UsbState *s);
+static void usb_chr_flush(WB55UsbPort *p);
 
 static gboolean usb_chr_writable(void *do_not_use, GIOCondition cond,
                                  void *opaque)
 {
-    WB55UsbState *s = opaque;
+    WB55UsbPort *p = opaque;
 
-    s->watch = 0;
-    usb_chr_flush(s);
-    host_kick(s);
+    p->watch = 0;
+    usb_chr_flush(p);
+    host_kick(p->usb);
     return G_SOURCE_REMOVE;
 }
 
-static void usb_chr_flush(WB55UsbState *s)
+static void usb_chr_flush(WB55UsbPort *p)
 {
-    while (!fifo8_is_empty(&s->to_chr)) {
+    while (!fifo8_is_empty(&p->to_chr)) {
         uint32_t n;
-        const uint8_t *p = fifo8_peek_bufptr(&s->to_chr,
-                                             fifo8_num_used(&s->to_chr), &n);
-        int w = qemu_chr_fe_write(&s->chr, p, n);
+        const uint8_t *d = fifo8_peek_bufptr(&p->to_chr,
+                                             fifo8_num_used(&p->to_chr), &n);
+        int w = qemu_chr_fe_write(&p->chr, d, n);
 
         if (w <= 0) {
-            if (!qemu_chr_fe_backend_connected(&s->chr)) {
-                fifo8_reset(&s->to_chr);
-            } else if (!s->watch) {
-                s->watch = qemu_chr_fe_add_watch(&s->chr, G_IO_OUT | G_IO_HUP,
-                                                 usb_chr_writable, s);
+            if (!qemu_chr_fe_backend_connected(&p->chr)) {
+                fifo8_reset(&p->to_chr);
+            } else if (!p->watch) {
+                p->watch = qemu_chr_fe_add_watch(&p->chr, G_IO_OUT | G_IO_HUP,
+                                                 usb_chr_writable, p);
             }
             return;
         }
-        fifo8_drop(&s->to_chr, w);
+        fifo8_drop(&p->to_chr, w);
     }
 }
 
-static int cdc_step(WB55UsbState *s, int64_t now)
+static int cdc_port_step(WB55UsbState *s, WB55UsbPort *p, int64_t now)
 {
     uint8_t pkt[64];
     int n, progress = 0;
 
-    if (!s->cdc) {
+    if (!p->cdc) {
         return -1;
     }
-    if (s->hup) {
+    if (p->hup) {
         /*
          * The port was closed.  As a computer does it then: what the program
          * wrote still goes out, for as long as the device takes it; then DTR
@@ -1248,27 +1269,29 @@ static int cdc_step(WB55UsbState *s, int64_t now)
          * device whose port is closed: the firmware's CLI does not read a
          * packet that comes when it has no session, and no later one either.
          */
-        if (!fifo8_is_empty(&s->to_dev) && now < s->hup_by && !s->dtr_sent) {
+        if (!fifo8_is_empty(&p->to_dev) && now < p->hup_by && !p->dtr_sent) {
             /* written and closed before the port's DTR was up: that first */
-            s->dtr_pending = true;
-            ctl_start(s, now, 0x21, 0x22, 0x0003, s->cdc_if, 0, NULL);
+            p->dtr_pending = true;
+            s->ctl_port = p - s->port;
+            ctl_start(s, now, 0x21, 0x22, 0x0003, p->cdc_if, 0, NULL);
             return 1;
         }
-        if (fifo8_is_empty(&s->to_dev) || now >= s->hup_by) {
-            fifo8_reset(&s->to_dev);
-            s->hup = false;
-            qemu_chr_fe_accept_input(&s->chr);
-            if (s->dtr_sent) {
-                s->dtr_pending = false;
-                s->stale = true;
-                s->reopen_at = now + REOPEN_NS;
-                ctl_start(s, now, 0x21, 0x22, 0, s->cdc_if, 0, NULL);
+        if (fifo8_is_empty(&p->to_dev) || now >= p->hup_by) {
+            fifo8_reset(&p->to_dev);
+            p->hup = false;
+            qemu_chr_fe_accept_input(&p->chr);
+            if (p->dtr_sent) {
+                p->dtr_pending = false;
+                p->stale = true;
+                p->reopen_at = now + REOPEN_NS;
+                s->ctl_port = p - s->port;
+                ctl_start(s, now, 0x21, 0x22, 0, p->cdc_if, 0, NULL);
             }
             return 1;
         }
-    } else if (s->chr_open != s->dtr_sent) {
+    } else if (p->chr_open != p->dtr_sent) {
         /* DTR and RTS follow the chardev connection, as with a terminal */
-        if (s->chr_open && s->stale) {
+        if (p->chr_open && p->stale) {
             /*
              * The device may still hold a packet for the program that left
              * (one at most: nobody took it, and the firmware waits for
@@ -1278,33 +1301,34 @@ static int cdc_step(WB55UsbState *s, int64_t now)
              * away what it finds in a port it opens, and this does it for
              * all of them.
              */
-            if (now < s->reopen_at) {
-                host_wake(s, s->reopen_at);
+            if (now < p->reopen_at) {
+                host_wake(s, p->reopen_at);
                 return 0;
             }
-            if (!usb_in_armed(s, s->cdc_in)) {
-                s->stale = false;
-            } else if (usb_in(s, s->cdc_in, pkt, &n) == TX_ACK) {
-                s->stale = false;
+            if (!usb_in_armed(s, p->cdc_in)) {
+                p->stale = false;
+            } else if (usb_in(s, p->cdc_in, pkt, &n) == TX_ACK) {
+                p->stale = false;
                 return 1;
             } else {
                 host_wake(s, now + IDLE_POLL_NS);
                 return 0;
             }
         }
-        s->dtr_pending = s->chr_open;
-        ctl_start(s, now, 0x21, 0x22, s->chr_open ? 0x0003 : 0, s->cdc_if, 0,
+        p->dtr_pending = p->chr_open;
+        s->ctl_port = p - s->port;
+        ctl_start(s, now, 0x21, 0x22, p->chr_open ? 0x0003 : 0, p->cdc_if, 0,
                   NULL);
         return 1;
     }
-    if (!fifo8_is_empty(&s->to_dev)) {
+    if (!fifo8_is_empty(&p->to_dev)) {
         uint32_t len;
-        const uint8_t *p = fifo8_peek_bufptr(&s->to_dev,
-                MIN(s->cdc_out_mps, fifo8_num_used(&s->to_dev)), &len);
+        const uint8_t *d = fifo8_peek_bufptr(&p->to_dev,
+                MIN(p->cdc_out_mps, fifo8_num_used(&p->to_dev)), &len);
 
-        if (usb_out(s, s->cdc_out, p, len) == TX_ACK) {
-            fifo8_drop(&s->to_dev, len);
-            qemu_chr_fe_accept_input(&s->chr);
+        if (usb_out(s, p->cdc_out, d, len) == TX_ACK) {
+            fifo8_drop(&p->to_dev, len);
+            qemu_chr_fe_accept_input(&p->chr);
             progress = 1;
         }
     }
@@ -1313,31 +1337,47 @@ static int cdc_step(WB55UsbState *s, int64_t now)
      * while a closed one sends its last bytes, with nobody left to read
      * what comes back.
      */
-    if ((s->chr_open || s->hup) && fifo8_num_free(&s->to_chr) >= sizeof(pkt) &&
-        usb_in(s, s->cdc_in, pkt, &n) == TX_ACK) {
-        if (n && !s->hup) {
-            fifo8_push_all(&s->to_chr, pkt, n);
-            usb_chr_flush(s);
+    if ((p->chr_open || p->hup) && fifo8_num_free(&p->to_chr) >= sizeof(pkt) &&
+        usb_in(s, p->cdc_in, pkt, &n) == TX_ACK) {
+        if (n && !p->hup) {
+            fifo8_push_all(&p->to_chr, pkt, n);
+            usb_chr_flush(p);
         }
         progress = 1;
     }
-    if (!progress && (s->chr_open || !fifo8_is_empty(&s->to_dev))) {
+    if (!progress && (p->chr_open || !fifo8_is_empty(&p->to_dev))) {
         host_wake(s, now + IDLE_POLL_NS);   /* safety net; writes kick us */
     }
     return progress;
+}
+
+/* The ports in turn, each first every other time: one that has much to say
+ * does not keep the other waiting.  (A control transfer that one starts is
+ * the host's next work: the other waits for it.) */
+static int cdc_step(WB55UsbState *s, int64_t now)
+{
+    int first = s->port[1].cdc ? s->port_turn : 0, r, other;
+
+    s->port_turn = !first;
+    r = cdc_port_step(s, &s->port[first], now);
+    if (r > 0 || s->ctl.active || !s->port[!first].cdc) {
+        return r;
+    }
+    other = cdc_port_step(s, &s->port[!first], now);
+    return MAX(r, other);
 }
 
 /* ---- HID: the host as a PC with a US keyboard layout */
 
 static void hid_emit(WB55UsbState *s, const char *txt)
 {
-    uint32_t n = MIN(strlen(txt), fifo8_num_free(&s->to_chr));
+    uint32_t n = MIN(strlen(txt), fifo8_num_free(&s->port[0].to_chr));
 
-    if (!s->chr_open || !n) {
+    if (!s->port[0].chr_open || !n) {
         return;
     }
-    fifo8_push_all(&s->to_chr, (const uint8_t *)txt, n);
-    usb_chr_flush(s);
+    fifo8_push_all(&s->port[0].to_chr, (const uint8_t *)txt, n);
+    usb_chr_flush(&s->port[0]);
 }
 
 static const char kb_plain[0x39] =
@@ -2001,7 +2041,7 @@ static int host_step(WB55UsbState *s, int64_t now)
         s->enum_step = E_DEV8;
         s->ep0_mps = 8;
         s->ctl.not_before = 0;
-        s->cdc = false;
+        s->port[0].cdc = s->port[1].cdc = false;
         enum_next(s, now);
         return 1;
     case H_ENUM:
@@ -2015,7 +2055,8 @@ static int host_step(WB55UsbState *s, int64_t now)
         if (s->usbip_imported) {
             return usbip_step(s, now);
         }
-        return s->cdc ? cdc_step(s, now) : s->hid ? hid_step(s, now) : -1;
+        return s->port[0].cdc ? cdc_step(s, now) :
+               s->hid ? hid_step(s, now) : -1;
     default:
         return -1;
     }
@@ -2038,47 +2079,49 @@ static void host_timer(void *opaque)
 
 static int usb_chr_can_receive(void *opaque)
 {
-    WB55UsbState *s = opaque;
+    WB55UsbPort *p = opaque;
+    WB55UsbState *s = p->usb;
 
     if (s->hstate != H_RUNNING || s->usbip_imported) {
         return 0;                           /* keep it in the chardev */
     }
-    if (s->cdc && s->hup) {
+    if (p->cdc && p->hup) {
         return 0;                           /* after the hang-up */
     }
-    return s->cdc ? fifo8_num_free(&s->to_dev) : 256;
+    return p->cdc ? fifo8_num_free(&p->to_dev) : 256;
 }
 
 static void usb_chr_receive(void *opaque, const uint8_t *buf, int size)
 {
-    WB55UsbState *s = opaque;
+    WB55UsbPort *p = opaque;
 
-    if (!s->cdc) {
+    if (!p->cdc) {
         return;                             /* no CDC function: dropped */
     }
-    fifo8_push_all(&s->to_dev, buf, MIN(size, fifo8_num_free(&s->to_dev)));
-    host_kick(s);
+    fifo8_push_all(&p->to_dev, buf, MIN(size, fifo8_num_free(&p->to_dev)));
+    host_kick(p->usb);
 }
 
 static void usb_chr_event(void *opaque, QEMUChrEvent event)
 {
-    WB55UsbState *s = opaque;
+    WB55UsbPort *p = opaque;
 
     switch (event) {
     case CHR_EVENT_OPENED:
-        s->chr_open = true;
+        p->chr_open = true;
         break;
     case CHR_EVENT_CLOSED:
-        s->chr_open = false;
-        fifo8_reset(&s->to_chr);
-        s->hup = true;
-        s->hup_by = now_ns() + CLOSE_WAIT_NS;
+        p->chr_open = false;
+        fifo8_reset(&p->to_chr);
+        p->hup = true;
+        p->hup_by = now_ns() + CLOSE_WAIT_NS;
         break;
     default:
         return;
     }
-    usb_dbg(s, "chardev %s", s->chr_open ? "opened" : "closed");
-    host_kick(s);
+    usb_dbg(p->usb, "chardev %d %s", (int)(p - p->usb->port) + 1,
+            p->chr_open ? "opened" : "closed");
+    host_kick(p->usb);
 }
 
 /* ---- QOM: the virtual cable */
@@ -2156,8 +2199,10 @@ static void usb_reset_hold(Object *obj, ResetType type)
     s->istr = s->istr_seen = 0;
     s->daddr = s->btable = s->lpmcsr = s->bcdr = 0;
     host_detach(s);
-    fifo8_reset(&s->to_dev);
-    fifo8_reset(&s->to_chr);
+    for (int i = 0; i < 2; i++) {
+        fifo8_reset(&s->port[i].to_dev);
+        fifo8_reset(&s->port[i].to_chr);
+    }
 }
 
 static void usb_reset_exit(Object *obj, ResetType type)
@@ -2177,8 +2222,11 @@ static void usb_init(Object *obj)
     sysbus_init_mmio(sbd, &s->pma_mmio);
     sysbus_init_irq(sbd, &s->irq_lp);
     sysbus_init_irq(sbd, &s->irq_hp);
-    fifo8_create(&s->to_dev, 1024);
-    fifo8_create(&s->to_chr, 4096);
+    for (int i = 0; i < 2; i++) {
+        s->port[i].usb = s;
+        fifo8_create(&s->port[i].to_dev, 1024);
+        fifo8_create(&s->port[i].to_chr, 4096);
+    }
     QTAILQ_INIT(&s->urbs);
     s->usbip_rx = g_byte_array_new();
     s->usbip_tx = g_byte_array_new();
@@ -2197,14 +2245,18 @@ static void usb_realize(DeviceState *dev, Error **errp)
     WB55UsbState *s = WB55_USB(dev);
 
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, host_timer, s);
-    qemu_chr_fe_set_handlers(&s->chr, usb_chr_can_receive, usb_chr_receive,
-                             usb_chr_event, NULL, s, NULL, true);
+    for (int i = 0; i < 2; i++) {
+        qemu_chr_fe_set_handlers(&s->port[i].chr, usb_chr_can_receive,
+                                 usb_chr_receive, usb_chr_event, NULL,
+                                 &s->port[i], NULL, true);
+    }
     qemu_chr_fe_set_handlers(&s->usbip_chr, usbip_can_receive, usbip_receive,
                              usbip_event, NULL, s, NULL, true);
 }
 
 static const Property usb_props[] = {
-    DEFINE_PROP_CHR("chardev", WB55UsbState, chr),
+    DEFINE_PROP_CHR("chardev", WB55UsbState, port[0].chr),
+    DEFINE_PROP_CHR("chardev2", WB55UsbState, port[1].chr),
     DEFINE_PROP_CHR("usbip", WB55UsbState, usbip_chr),
     DEFINE_PROP_BOOL("debug", WB55UsbState, debug, false),
 };
@@ -2225,8 +2277,10 @@ static int usb_post_load(void *opaque, int version_id)
     WB55UsbState *s = opaque;
     int64_t now = now_ns();
 
-    fifo8_reset(&s->to_dev);
-    fifo8_reset(&s->to_chr);
+    for (int i = 0; i < 2; i++) {
+        fifo8_reset(&s->port[i].to_dev);
+        fifo8_reset(&s->port[i].to_chr);
+    }
     if (s->usbip_imported) {
         s->usbip_imported = false;          /* (nothing here to disconnect) */
         if (s->hstate != H_DETACHED) {
@@ -2235,15 +2289,37 @@ static int usb_post_load(void *opaque, int version_id)
         }
         return 0;
     }
-    if (s->cdc && s->dtr_sent && !s->hup) {
-        s->hup = true;
-        s->hup_by = now;
+    for (int i = 0; i < 2; i++) {
+        if (s->port[i].cdc && s->port[i].dtr_sent && !s->port[i].hup) {
+            s->port[i].hup = true;
+            s->port[i].hup_by = now;
+        }
     }
     if (s->hstate != H_DETACHED && s->hstate != H_FAILED) {
         host_wake(s, now + KICK_NS);
     }
     return 0;
 }
+
+static const VMStateDescription vmstate_wb55_usb_port = {
+    .name = "stm32wb55-usb/port",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(cdc, WB55UsbPort),
+        VMSTATE_UINT8(cdc_if, WB55UsbPort),
+        VMSTATE_UINT8(cdc_in, WB55UsbPort),
+        VMSTATE_UINT8(cdc_out, WB55UsbPort),
+        VMSTATE_UINT16(cdc_out_mps, WB55UsbPort),
+        VMSTATE_BOOL(dtr_sent, WB55UsbPort),
+        VMSTATE_BOOL(dtr_pending, WB55UsbPort),
+        VMSTATE_BOOL(hup, WB55UsbPort),
+        VMSTATE_BOOL(stale, WB55UsbPort),
+        VMSTATE_INT64(hup_by, WB55UsbPort),
+        VMSTATE_INT64(reopen_at, WB55UsbPort),
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 static const VMStateDescription vmstate_wb55_usb_ctl = {
     .name = "stm32wb55-usb/ctl",
@@ -2264,8 +2340,8 @@ static const VMStateDescription vmstate_wb55_usb_ctl = {
 
 static const VMStateDescription vmstate_wb55_usb = {
     .name = "stm32wb55-usb",
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,                    /* (2: two CDC ACM ports) */
+    .minimum_version_id = 2,
     .post_load = usb_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT16_ARRAY(epr, WB55UsbState, 8),
@@ -2301,17 +2377,9 @@ static const VMStateDescription vmstate_wb55_usb = {
         VMSTATE_UINT16(langid, WB55UsbState),
         VMSTATE_BUFFER_UNSAFE(strings, WB55UsbState, 0, 3 * 64),
         VMSTATE_BUFFER_UNSAFE(functions, WB55UsbState, 0, 64),
-        VMSTATE_BOOL(cdc, WB55UsbState),
-        VMSTATE_UINT8(cdc_if, WB55UsbState),
-        VMSTATE_UINT8(cdc_in, WB55UsbState),
-        VMSTATE_UINT8(cdc_out, WB55UsbState),
-        VMSTATE_UINT16(cdc_out_mps, WB55UsbState),
-        VMSTATE_BOOL(dtr_sent, WB55UsbState),
-        VMSTATE_BOOL(dtr_pending, WB55UsbState),
-        VMSTATE_BOOL(hup, WB55UsbState),
-        VMSTATE_BOOL(stale, WB55UsbState),
-        VMSTATE_INT64(hup_by, WB55UsbState),
-        VMSTATE_INT64(reopen_at, WB55UsbState),
+        VMSTATE_STRUCT_ARRAY(port, WB55UsbState, 2, 0, vmstate_wb55_usb_port,
+                             WB55UsbPort),
+        VMSTATE_INT32(ctl_port, WB55UsbState),
         VMSTATE_BOOL(hid, WB55UsbState),
         VMSTATE_UINT8(hid_in, WB55UsbState),
         VMSTATE_UINT8(hid_interval, WB55UsbState),

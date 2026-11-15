@@ -206,6 +206,7 @@ struct FlipperZeroState {
     Bq25896State *charger;
     char *name;
     char *usb_serial;            /* chardev id bridged to USB CDC */
+    char *usb_serial2;           /* ... and to a second CDC port, if there is */
     char *usbip;                 /* chardev id serving USB/IP (TCP 3240) */
     uint32_t scale;
     uint32_t region;
@@ -2183,6 +2184,15 @@ static void flipper_zero_init(MachineState *machine)
             exit(1);
         }
         qdev_prop_set_chr(DEVICE(&s->soc.usb), "chardev", chr);
+        if (s->usb_serial2) {
+            chr = qemu_chr_find(s->usb_serial2);
+            if (!chr) {
+                error_report("flipper-zero: usb-serial2: no chardev '%s'",
+                             s->usb_serial2);
+                exit(1);
+            }
+            qdev_prop_set_chr(DEVICE(&s->soc.usb), "chardev2", chr);
+        }
         object_property_set_bool(OBJECT(&s->soc.usb), "attached",
                                  s->usb_cable, &error_fatal);
     }
@@ -2447,6 +2457,20 @@ static void flipper_set_usb_serial(Object *obj, const char *value,
     s->usb_serial = *value ? g_strdup(value) : NULL;
 }
 
+static char *flipper_get_usb_serial2(Object *obj, Error **errp)
+{
+    return g_strdup(FLIPPER_ZERO(obj)->usb_serial2);
+}
+
+static void flipper_set_usb_serial2(Object *obj, const char *value,
+                                    Error **errp)
+{
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+
+    g_free(s->usb_serial2);
+    s->usb_serial2 = *value ? g_strdup(value) : NULL;
+}
+
 static char *flipper_get_usbip(Object *obj, Error **errp)
 {
     return g_strdup(FLIPPER_ZERO(obj)->usbip);
@@ -2684,6 +2708,11 @@ static void flipper_zero_class_init(ObjectClass *oc, const void *data)
                                   flipper_set_usb_serial);
     object_class_property_set_description(oc, "usb-serial",
         "Chardev id for the USB CDC port (CLI/RPC); plugs in the USB cable");
+    object_class_property_add_str(oc, "usb-serial2", flipper_get_usb_serial2,
+                                  flipper_set_usb_serial2);
+    object_class_property_set_description(oc, "usb-serial2",
+        "Chardev id for the second USB CDC port, when the firmware has two "
+        "(its dual-CDC mode: the USB-UART bridge on channel 1)");
     object_class_property_set_description(oc, "nvram",
         "File keeping battery-backed state (gauge, RTC) between runs");
     object_class_property_add_str(oc, "enclave", flipper_get_enclave,

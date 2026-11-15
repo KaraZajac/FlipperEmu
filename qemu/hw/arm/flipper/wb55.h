@@ -817,6 +817,24 @@ typedef struct WB55UsbCtl {
     int64_t not_before;
 } WB55UsbCtl;
 
+/* A CDC ACM function of the configuration, and the chardev that the
+ * built-in host bridges it to: the first is the CLI's and RPC's port; a
+ * configuration with two (the firmware's "dual CDC", for its USB-UART
+ * bridge on channel 1) has the second on the second chardev */
+typedef struct WB55UsbPort {
+    struct WB55UsbState *usb;
+    CharFrontend chr;            /* CDC ACM data <-> this chardev */
+    bool cdc;                    /* the configuration has this function */
+    uint8_t cdc_if, cdc_in, cdc_out;
+    uint16_t cdc_out_mps;
+    bool chr_open, dtr_sent, dtr_pending;
+    bool hup;                    /* the port was closed: DTR is to drop */
+    bool stale;                  /* the device may hold a packet for who left */
+    int64_t hup_by, reopen_at;
+    Fifo8 to_dev, to_chr;
+    guint watch;
+} WB55UsbPort;
+
 struct WB55UsbState {
     SysBusDevice parent_obj;
     MemoryRegion mmio;           /* registers  @0x40006800 */
@@ -838,7 +856,6 @@ struct WB55UsbState {
     int64_t turn_ns;             /* the firmware's turnaround, averaged */
 
     /* built-in host */
-    CharFrontend chr;            /* CDC ACM data <-> this chardev */
     bool attached;               /* virtual cable plugged in */
     bool debug;
     QEMUTimer *timer;
@@ -856,16 +873,10 @@ struct WB55UsbState {
     char strings[3][64];         /* manufacturer, product, serial */
     char functions[64];          /* "CDC ACM", "HID", ... */
 
-    /* CDC ACM function (first one in the configuration) */
-    bool cdc;
-    uint8_t cdc_if, cdc_in, cdc_out;
-    uint16_t cdc_out_mps;
-    bool chr_open, dtr_sent, dtr_pending;
-    bool hup;                   /* the port was closed: DTR is to drop */
-    bool stale;                 /* the device may hold a packet for who left */
-    int64_t hup_by, reopen_at;
-    Fifo8 to_dev, to_chr;
-    guint watch;
+    /* the CDC ACM functions (the first two in the configuration) */
+    WB55UsbPort port[2];
+    int32_t ctl_port;            /* whose SET_CONTROL_LINE_STATE is under way */
+    int port_turn;               /* which port the host serves first next */
 
     /* HID function: keystrokes become text on the same chardev */
     bool hid;

@@ -209,6 +209,7 @@ class Device:
         self.enclave = self.dir / "enclave.keys"    # the secure enclave's keys
         self.usb_sock = self.dir / "usb.sock"   # --usb unix
         self.usb_tty = self.dir / "usb.tty"     # --usb pty: symlink to the pty
+        self.usb2_tty = self.dir / "usb2.tty"   # the second CDC port's pty
         # the serial port on pins 15 and 16 (LPUART1): --lpuart pty, symlink
         # to the pty; and what the firmware sent there, this run
         self.lpuart_tty = self.dir / "lpuart.tty"
@@ -1193,7 +1194,9 @@ def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
     elif args.usb != "none":
         sys.exit(f"--usb: expected pty, unix, tcp:PORT or none, not {args.usb!r}")
     if usb:
-        machine += ",usb-serial=usb"
+        # (a second port, for a firmware that has two: its dual-CDC mode)
+        usb += ["-chardev", "pty,id=usb2"]
+        machine += ",usb-serial=usb,usb-serial2=usb2"
     if args.usbip:
         usb += ["-chardev", f"socket,id=usbip,host={args.usbip_host},"
                             f"port={args.usbip},server=on,wait=off"]
@@ -1443,7 +1446,8 @@ class Session:
             args.unplugged = unplugged
         if gauge is not None:
             self.gauge = dict(gauge)
-        for stale in (dev.monitor, dev.usb_tty, dev.lpuart_tty, dev.usart_tty,
+        for stale in (dev.monitor, dev.usb_tty, dev.usb2_tty, dev.lpuart_tty,
+                      dev.usart_tty,
                       dev.lpuart_sock, dev.usart_sock, dev.panel_sock,
                       dev.held_file, dev.gdb_sock, dev.run_file,
                       dev.cov_sock, dev.cov_dump):
@@ -1512,7 +1516,7 @@ class Session:
 
     def tidy(self):
         """Behind a QEMU that is gone: what only meant something while it ran"""
-        for stale in (self.dev.usb_tty, self.dev.lpuart_tty,
+        for stale in (self.dev.usb_tty, self.dev.usb2_tty, self.dev.lpuart_tty,
                       self.dev.usart_tty, self.dev.lpuart_sock,
                       self.dev.usart_sock, self.dev.held_file,
                       self.dev.run_file):
@@ -1585,7 +1589,7 @@ def usb_helpers(dev: Device, proc, usb_mode, manifest, label=None):
     start a staged update through the firmware's CLI (as qFlipper does)."""
     from fe_cli import FlipperCli, usb_endpoint
     from fe_monitor import Monitor
-    ep, pins = None, {}
+    ep, ep2, pins = None, None, {}
     for _ in range(100):
         if proc.poll() is not None:
             return
@@ -1594,12 +1598,13 @@ def usb_helpers(dev: Device, proc, usb_mode, manifest, label=None):
                 m = Monitor(str(dev.monitor))
                 try:
                     ep = usb_endpoint(m)
+                    ep2 = usb_endpoint(m, "usb2")
                     pins = {port: usb_endpoint(m, UART_PORTS[port][0])
                             for port in UART_PORTS}
                 finally:
                     m.close()
             except OSError:
-                ep, pins = None, {}
+                ep, ep2, pins = None, None, {}
             if ep or any(pins.values()):
                 break
         time.sleep(0.1)
@@ -1615,6 +1620,10 @@ def usb_helpers(dev: Device, proc, usb_mode, manifest, label=None):
         dev.usb_tty.symlink_to(ep[1])
         print(f"[{dev.name}] USB serial (CLI/RPC): {ep[1]} -> {dev.usb_tty}"
               f"   (./flipperemu -d {dev.name} cli)", flush=True)
+    if ep2 and ep2[0] == "pty":
+        # (said in `status` when the firmware has a second port)
+        dev.usb2_tty.unlink(missing_ok=True)
+        dev.usb2_tty.symlink_to(ep2[1])
     if not manifest:
         return
     try:
@@ -2806,7 +2815,9 @@ def usb_text(u):
                 "enumerating": "plugged into a computer, which is finding out what it is",
                 "failed": "plugged into a computer, which could not make sense of it",
                 "usbip": "plugged in: a PC has it over USB/IP",
-                }.get(u["device"], f"plugged into a computer, which sees {u['device']}")
+                }.get(u["device"], f"plugged into a computer, which sees {u['device']}") \
+            + (f"; its second serial port: {u['second_port']}"
+               if u.get("second_port") else "")
     return "on a charger (power, no data)" if u["cable"] == "charger" else "unplugged"
 
 
@@ -2828,6 +2839,10 @@ def device_status(dev):
         st["halted"] = firmware_halt(dev, m)
         st["fault"] = None if st["halted"] else firmware_fault(dev, m)
         st["usb"] = read_usb(m)
+        # a firmware with two serial ports (its dual-CDC mode): the second
+        st["usb"]["second_port"] = (
+            str(dev.usb2_tty) if "CDC ACM x2" in (st["usb"].get("device") or "")
+            and dev.usb2_tty.is_symlink() else None)
         st["battery"] = read_battery(m)
         st["sd"] = {"card": dev.sd.exists(), "inserted": g("/machine", "sd-card")}
         card = g("/machine/nfc", "card")

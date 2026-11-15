@@ -5029,6 +5029,41 @@ big lock, entry 92).
       is not the firmware's); coverage_check 23 and fuzz_check 16 as
       before.
 
+162. **The second USB serial port.**
+    - The firmware's USB-UART bridge can leave the CLI its port and take
+      a second one ("USB Channel: 1"): the USB configuration is then two
+      CDC ACM functions. The built-in host bridged the first function it
+      found. Its port's state (the chardev, two queues, DTR, the hang-up
+      and what follows it) became a structure, there are two of them, and
+      the second is on a chardev `usb2`, a pty that the launcher links as
+      usb2.tty.
+    - The first try, on the official 1.5.1: the screen said "COM PORT:1",
+      and the host saw one port, three enumerations and no fourth. gdb:
+      the firmware's own `usb.interface` was `usb_cdc_single`. Its
+      source: the bridge sets `usb_cdc_dual` and then enables the CLI's
+      USB service, whose "enable" sets `usb_cdc_single`, whatever the
+      configuration was. With the host's debug output on the official
+      1.3.4: detached, attaching, detached, attaching: to two ports and
+      back within the same moment. So from the CLI's rewrite on (1.3), a
+      bridge on channel 1 has no port at all, on a Flipper as here;
+      Momentum mntm-012 and Unleashed unlshd-094 do the same. (The fifth
+      firmware bug of these days; the older code only set the single
+      configuration "if it is not set yet".)
+    - The official 1.1.2 keeps the two ports: "CDC ACM x2", bytes from
+      usb2.tty out of pin 13, bytes on pin 14 out of usb2.tty, the CLI
+      answering on the first port meanwhile; one port again when the
+      bridge is left. All at the first run there.
+    - The host gives each port its turn first every other time. The
+      second port gets no SET_LINE_CODING of its own (the first does, at
+      enumeration): the bridge's "Host" baud rate stays the firmware's
+      default, 115200.
+    - Checks: usb_dual_check 7 on the official 1.1.2, 3 on the 1.5.1 (the
+      two ports and back; the one answers). Every check on the official
+      1.5.1 after the change to the port's code, and the smoke test on the
+      other four firmwares: as before. (ufbt_check lost a step in that
+      run to another check that was building in ufbt's one build folder
+      at that moment, and has its 31 alone.)
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
