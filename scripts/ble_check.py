@@ -44,6 +44,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 
@@ -100,6 +101,102 @@ def stop(b):
         logs.append(b.uart.read_text(errors="replace"))
     except OSError:
         pass
+    fe(b, "stop")
+
+
+# in the SRAM2b that BLE Light keeps for CPU2 (from 0x2003ac00)
+NVM_IN_C2 = 0x2003B000
+
+
+def c2_fault(b, args):
+    """CPU2's own hard fault: the stack (1.20.0) checks that the buffers
+    CPU1 gives it lie in the SRAM that is not CPU2's, and faults on one that
+    does not, leaving its record at SRAM2A_BASE.  The command that brought
+    the buffer gets no answer: official 1.5.1 waits for CPU2 in
+    HW_IPCC_SYS_SendCmd() for 33 s, then crashes, its report with CPU2's
+    record ("core2: hardfaulted", PC), and starts again.  No firmware here
+    hands CPU2 such a buffer, so gdb does: at a restart, the NVM buffer in
+    SHCI_C2_Config's command (its copy in the system command buffer) is
+    moved into CPU2's part of SRAM2b.  Needs gdb with the firmware's symbols
+    (the official 1.5.1's); without them it is not tried."""
+    # (BLE Light again: the part before left Full extended in radio.state)
+    ok, said = up(b, args.timeout, "run", "--radio-stack", "light")
+    if not ok:
+        check("CPU2's hard fault: the device starts", False, said[-600:])
+        fe(b, "stop")
+        return
+    # (gdb with this firmware's own symbols, or nothing is tried: without
+    # them its breakpoint would wait for ever)
+    code, out, err, _ = fe(b, "gdb", "--", "-batch", "-ex",
+                           "info address ble_glue_TL_SYS_SendCmd", "-ex",
+                           "detach", timeout=120)
+    if "is a function at address" not in out + err:
+        print("  (no gdb with this firmware's symbols here: CPU2's hard fault "
+              "is not tried)")
+        fe(b, "stop")
+        return
+    cmd = "ble_glue_cmd_buff.cmdserial.cmd"
+    try:
+        code, out, err, took = fe(
+            b, "gdb", "--", "-batch",
+            "-ex", f"break ble_glue_TL_SYS_SendCmd if {cmd}.cmdcode == 0xfc75",
+            "-ex", "monitor system_reset", "-ex", "continue",
+            "-ex", f"set var *(uint32_t *)&{cmd}.payload[4] = {NVM_IN_C2:#x}",
+            "-ex", "delete", "-ex", "detach", timeout=180)
+    except subprocess.TimeoutExpired as e:
+        code, out, err = 1, str(e.stdout or ""), "gdb took over 180 s"
+    said = out + err
+    if not re.search(r"Breakpoint 1(\.1)?, (0x[0-9a-f]+ in )?"
+                     r"ble_glue_TL_SYS_SendCmd", said):
+        check("CPU2's hard fault: gdb stops the firmware where it sends "
+              "SHCI_C2_Config, at a restart", False, said[-800:])
+        fe(b, "stop")
+        return
+    hard = until(lambda: "hardfault" if bt(b).get("runs") == "hardfault"
+                 else None, 10, 0.2)
+    run_log = b.dir / "run.log"
+
+    def text(path):
+        try:
+            return path.read_text(errors="replace")
+        except OSError:
+            return ""
+    crashed = until(lambda: "core2: hardfaulted" in text(b.uart), 60, 1)
+    back, said2, halted = False, "", False
+    if crashed:
+        code, out, err, _ = fe(b, "wait", "--timeout", args.timeout)
+        said2 = out + err
+        if code != 0 and "has halted" in said2:
+            # a debug build (the official dev one) waits for a debugger
+            # after a crash: `reset` starts it
+            halted = True
+            fe(b, "reset")
+            code, out, err, _ = fe(b, "wait", "--timeout", args.timeout)
+            said2 += out + err
+        back = code == 0
+    s = bt(b) if back else {}
+    if back:
+        until(lambda: bt(b).get("up") is True, 20)
+        s = bt(b)
+    uart, emu = text(b.uart), text(run_log)
+    want = (f"the BLE NVM buffer (SHCI_C2_Config) at {NVM_IN_C2:#010x} to "
+            f"{NVM_IN_C2 + 2027:#010x} reaches into the SRAM2 that it keeps "
+            "for CPU2")
+    why = re.search(r"\[CRASH\]\[[^]]*\] *([^\r\n]*)", uart)
+    check("CPU2's hard fault: SHCI_C2_Config's NVM buffer moved by gdb into "
+          "the SRAM2b that BLE Light keeps for CPU2 (from 0x2003ac00), at a "
+          "restart: the stack faults on it and answers nothing more"
+          + (", `status` says so" if hard else "") + "; the firmware's "
+          "command waits for it, and the firmware crashes ("
+          + (why.group(1).strip() if why else "?") + "), its report with "
+          "CPU2's record from SRAM2A_BASE (core2: hardfaulted, its PC at the "
+          "stack's start, 0x080d7000), "
+          + ("halts, as a debug build does, and after a `reset`"
+             if halted else "starts again, and then") + " BLE runs as before",
+          want in emu and crashed
+          and re.search(r"PC: 0?80d7000", uart, re.I) is not None
+          and back and s.get("runs") == "stack" and s.get("up") is True,
+          f"{said[-400:]}\n{emu[-600:]}\n{uart[-1200:]}\n{said2[-300:]} {s}")
     fe(b, "stop")
 
 
@@ -549,6 +646,7 @@ def main():
                        ram.get("refused")) == ("0x20030800", "0x2003a800", 0),
                   f"{said[-300:]} {s} {ram}")
         stop(b)
+        c2_fault(b, args)                # (its crash is its own: not in logs)
 
         log = "\n".join(logs)
         crash = CRASH.search(log)

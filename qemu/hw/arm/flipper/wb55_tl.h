@@ -94,6 +94,16 @@ static inline hwaddr tl_lst_remove_head(hwaddr head)
 #define TL_SYS_CMD_BUFFER    0
 #define TL_SYS_QUEUE         4
 /* MB_MemManagerTable_t */
+/* the sizes of the transport layer's buffers (ST's tl.h): a command packet
+ * (header 8, type 1, opcode 2, length 1, 255 bytes), the command status
+ * buffer (header, event header 3, TL_CsEvt_t 4), a spare event buffer
+ * (header, event header, 255), a list node, an ACL data packet */
+#define TL_CMD_PACKET_SIZE   267
+#define TL_CS_BUFFER_SIZE    15
+#define TL_SPARE_EVT_SIZE    266
+#define TL_LIST_NODE_SIZE    8
+#define TL_ACL_BUFFER_SIZE   264
+
 #define TL_MM_SPARE_BLE      0
 #define TL_MM_SPARE_SYS      4
 #define TL_MM_BLE_POOL       8

@@ -220,9 +220,10 @@ def run_update(b, pkg, ours, after, timeout=900):
     now = version(b)
     check(f"... and it runs the firmware of the package ({now}), and its CLI "
           "answers", ok and now and now == after, f"{now}\n{text2}")
-    crash = CRASH.search(b.uart_text())
+    log = b.uart_text()
+    crash = CRASH.search(log)
     check("... with no crash in the firmware's log", not crash,
-          crash and crash.group(0))
+          crash and log[max(0, crash.start() - 300):crash.end() + 700])
 
 
 def with_stack(pkg, folder, image, address, version):
@@ -496,6 +497,23 @@ def update_checks(b, pkg, work, other):
     return ours, after
 
 
+def every_run(b):
+    """No crash in any of the check's runs: each start's log (uart-runN.log)
+    and the last one's.  The parts look at the log of the run they are in;
+    a crash in a run that no part looks at again (the start with another
+    radio stack, say) is caught here."""
+    found = []
+    for f in sorted(b.dir.glob("uart*.log")):
+        text = f.read_text(errors="replace")
+        crash = CRASH.search(text)
+        if crash:
+            found.append(f"{f.name}:\n" + text[max(0, crash.start() - 300):
+                                              crash.end() + 700])
+    runs = len(list(b.dir.glob("uart*.log")))
+    check(f"no crash in the logs of any of its runs ({runs})", not found,
+          "\n".join(found))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("firmware")
@@ -533,6 +551,7 @@ def main():
             # extended)
             full_extended(b, pkg, work, FULL_EXT_IMAGE)
             b.stop()
+            every_run(b)
     finally:
         b.stop()
         shutil.rmtree(work, ignore_errors=True)

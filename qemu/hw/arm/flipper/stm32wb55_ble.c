@@ -319,6 +319,9 @@ void wb55_ble_post(WB55IpccState *s, int buf, uint8_t code,
     WB55BleState *b = &s->ble;
     WB55BleEvent *e;
 
+    if (s->c2_fault) {
+        return;                         /* a CPU2 that faulted says nothing */
+    }
     if (b->npending == WB55_BLE_PENDING) {
         qemu_log_mask(LOG_GUEST_ERROR, "flipper-cpu2: CPU1 takes no events: "
                       "event 0x%02x dropped\n", code);
@@ -930,6 +933,7 @@ static void ble_conn_update(WB55IpccState *s, uint16_t min, uint16_t latency,
 #define BOND_SC         0x02            /* by LE Secure Connections */
 #define C2_CONFIG1_NVM_TO_SRAM    0x01
 #define C2_EVTMASK1_NVM_UPDATE    0x02
+#define BLE_NVM_SIZE              2028  /* (the buffer, as the stack takes it) */
 
 typedef struct Bond {
     uint8_t type, addr[6], flags;
@@ -1732,9 +1736,46 @@ void wb55_ble_reset(WB55IpccState *s)
 uint8_t wb55_ble_init(WB55IpccState *s, const uint8_t *p, int plen)
 {
     WB55BleState *b = &s->ble;
+    hwaddr ref = wb55_ipcc_ref_table(s);
+    hwaddr ble = tl_rd32(ref + TL_REF_BLE), sys = tl_rd32(ref + TL_REF_SYS);
+    hwaddr mm = tl_rd32(ref + TL_REF_MEM_MANAGER);
 
     if (!s->c2_stack) {
         return 0x01;
+    }
+    /* the transport layer's buffers, which the stack checks (ST: "as soon
+     * as we invoke SHCI_C2_BLE_Init"): a hard fault on one in CPU2's SRAM2 */
+    if ((ble && (!wb55_c2_buffer_ok(s, "the BLE command buffer",
+                                    tl_rd32(ble + TL_BLE_CMD_BUFFER),
+                                    TL_CMD_PACKET_SIZE) ||
+                 !wb55_c2_buffer_ok(s, "the BLE command status buffer",
+                                    tl_rd32(ble + TL_BLE_CS_BUFFER),
+                                    TL_CS_BUFFER_SIZE) ||
+                 !wb55_c2_buffer_ok(s, "the BLE event queue",
+                                    tl_rd32(ble + TL_BLE_EVT_QUEUE),
+                                    TL_LIST_NODE_SIZE) ||
+                 !wb55_c2_buffer_ok(s, "the HCI ACL data buffer",
+                                    tl_rd32(ble + TL_BLE_ACL_BUFFER),
+                                    TL_ACL_BUFFER_SIZE))) ||
+        (sys && (!wb55_c2_buffer_ok(s, "the system command buffer",
+                                    tl_rd32(sys + TL_SYS_CMD_BUFFER),
+                                    TL_CMD_PACKET_SIZE) ||
+                 !wb55_c2_buffer_ok(s, "the system event queue",
+                                    tl_rd32(sys + TL_SYS_QUEUE),
+                                    TL_LIST_NODE_SIZE))) ||
+        (mm && (!wb55_c2_buffer_ok(s, "the spare BLE event buffer",
+                                   tl_rd32(mm + TL_MM_SPARE_BLE),
+                                   TL_SPARE_EVT_SIZE) ||
+                !wb55_c2_buffer_ok(s, "the spare system event buffer",
+                                   tl_rd32(mm + TL_MM_SPARE_SYS),
+                                   TL_SPARE_EVT_SIZE) ||
+                !wb55_c2_buffer_ok(s, "the BLE event pool",
+                                   tl_rd32(mm + TL_MM_BLE_POOL),
+                                   tl_rd32(mm + TL_MM_BLE_POOL_SIZE)) ||
+                !wb55_c2_buffer_ok(s, "the free buffer queue",
+                                   tl_rd32(mm + TL_MM_FREE_QUEUE),
+                                   TL_LIST_NODE_SIZE)))) {
+        return 0xFF;                    /* (no answer: CPU2 faulted) */
     }
     if (plen >= 14) {
         b->max_attrs = le16(p + 8);
@@ -1757,6 +1798,11 @@ uint8_t wb55_ble_config(WB55IpccState *s, const uint8_t *p, int plen)
         s->ble.config1 = p[1];          /* bit 0: the bonds in that RAM */
         s->ble.evt_mask1 = p[2];
         s->ble.nvm_ram = ldl_le_p(p + 4);
+        if ((s->ble.config1 & 1) &&
+            !wb55_c2_buffer_ok(s, "the BLE NVM buffer (SHCI_C2_Config)",
+                               s->ble.nvm_ram, BLE_NVM_SIZE)) {
+            return 0xFF;                /* (no answer: CPU2 faulted) */
+        }
     }
     return 0x00;
 }

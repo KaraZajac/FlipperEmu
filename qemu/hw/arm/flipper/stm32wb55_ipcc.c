@@ -181,6 +181,11 @@ static const WB55StackKind *stack_kind_of_image(uint8_t sectors,
 #define FUS_SWITCH_MS                  20
 #define FUS_DELETE_MS                  400
 #define FUS_UPGRADE_MS                 1500
+/* ... and from the end of a delete or an install to the FUS's restart of
+ * the MCU, in which FUS_GET_STATE says it is done: the updater shows "Core
+ * 2 busy" there and waits for the restart (update_task_wait_for_restart);
+ * old MoonOS's devices died with that on the screen */
+#define FUS_RESTART_MS                 300
 
 hwaddr wb55_ipcc_ref_table(WB55IpccState *s)
 {
@@ -201,6 +206,50 @@ void wb55_ipcc_update_irq(WB55IpccState *s)
 }
 
 /* ------------------------------------------------------------- CPU2 (FUS) */
+
+/*
+ * The stack checks that each buffer CPU1 gives it lies wholly in the SRAM
+ * that is not CPU2's.  1.20.0 hard-faults on one that does not; 1.21.0
+ * reports a "security attack" instead (ST's release notes, BLE 190951:
+ * "Manage correctly the case where the buffers provided to the CPU2 are not
+ * in the unsecure SRAM"; ST's community, on the HCI stacks' ACL buffer: the
+ * check is there since 1.16.0).  CPU2's hard fault leaves AN5289's record at
+ * SRAM2A_BASE (a magic word, its PC, LR and SP), over the start of CPU1's
+ * reference table, and CPU2 then loops: it answers nothing more.  The
+ * firmware looks for that record every 5 s and before each command it sends
+ * (ble_glue.c: "ST(R) Copro(R) HardFault").  Which buffers the stack checks,
+ * and when, ST does not say: the model checks the transport layer's at
+ * SHCI_C2_BLE_Init (where ST's customer saw it) and the NVM buffer at
+ * SHCI_C2_Config.  The PC, LR and SP are the model's (the stack's base, 0,
+ * the top of SRAM2b).
+ */
+#define C2_HARDFAULT_MAGIC             0x1170FD0Fu
+
+static void cpu2_hardfault(WB55IpccState *s)
+{
+    s->c2_fault = true;
+    tl_wr32(WB55_SRAM2A_BASE + 0, C2_HARDFAULT_MAGIC);
+    tl_wr32(WB55_SRAM2A_BASE + 4, FUS_BASE - s->stack_sectors * 4096);
+    tl_wr32(WB55_SRAM2A_BASE + 8, 0);
+    tl_wr32(WB55_SRAM2A_BASE + 12, WB55_SRAM2B_BASE + 0x8000 - 0x20);
+    warn_report("flipper-cpu2: the stack hard-faults: %s (stack 1.20.0 "
+                "checks the buffers that CPU1 gives it); CPU2 does nothing "
+                "more until a reset", (char *)s->c2_fault_why);
+}
+
+bool wb55_c2_buffer_ok(WB55IpccState *s, const char *what, hwaddr addr,
+                       unsigned len)
+{
+    if (s->c2_fault || !addr || !len || !s->flash ||
+        !wb55_flash_is_c2_ram(s->flash, addr, len)) {
+        return !s->c2_fault;
+    }
+    snprintf((char *)s->c2_fault_why, sizeof(s->c2_fault_why), "%s at 0x%08"
+             HWADDR_PRIx " to 0x%08" HWADDR_PRIx " reaches into the SRAM2 "
+             "that it keeps for CPU2", what, addr, addr + len - 1);
+    cpu2_hardfault(s);
+    return false;
+}
 
 /* MemorySize, as the stack's InfoTable has it (shci.h INFO_SIZE_*) */
 static uint32_t stack_memory_size(WB55IpccState *s)
@@ -557,7 +606,11 @@ static void fus_operation_done(void *opaque)
         fus_sfsa(s);
         radio_save(s);
     }
-    /* done: the FUS restarts the whole MCU, and boots itself or the stack */
+    if (op == WB55_FUS_OP_DELETE || op == WB55_FUS_OP_UPGRADE) {
+        fus_after(s, WB55_FUS_OP_SWITCH, FUS_RESTART_MS);   /* done, then */
+        return;
+    }
+    /* the FUS restarts the whole MCU, and boots itself or the stack */
     qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
 }
 
@@ -696,6 +749,9 @@ static void cpu2_system_command(WB55IpccState *s)
         }
         break;
     }
+    if (s->c2_fault) {
+        return;                         /* (it faulted on it: no answer) */
+    }
     /* TL_EvtSerial_t at offset 0: type | evtcode | plen | TL_CcEvt_t */
     tl_wr8(buf + 0, TL_SYSRSP_PKT_TYPE);
     tl_wr8(buf + 1, TL_BLEEVT_CC_OPCODE);
@@ -724,11 +780,14 @@ static void cpu2_release_buffers(WB55IpccState *s)
 /* CPU1 raised a C1->C2 flag: CPU2 reacts immediately. */
 static void cpu2_channel_set(WB55IpccState *s, uint32_t chans)
 {
-    if (!s->c2_booted) {
+    if (!s->c2_booted || s->c2_fault) {
         return;
     }
     if (chans & CH(2)) {                /* system command/response */
         cpu2_system_command(s);
+        if (s->c2_fault) {
+            return;                     /* the flag stays: no answer */
+        }
         s->c1toc2sr &= ~CH(2);
     }
     if ((chans & CH(1)) && s->c2_stack) {   /* a BLE command */
@@ -825,6 +884,7 @@ static void wb55_ipcc_reset_hold(Object *obj, ResetType type)
     s->c2_booted = false;
     s->c2_stack = false;
     s->c2_reinit = false;
+    s->c2_fault = false;
     timer_del(s->boot_timer);
     /* an operation of the FUS's that was under way is cut short; what is
      * installed, and whether CPU2 stays in its FUS, stay as they were */
@@ -962,7 +1022,7 @@ static const VMStateDescription vmstate_wb55_fus_key = {
 
 static const VMStateDescription vmstate_wb55_ipcc = {
     .name = "stm32wb55-ipcc",
-    .version_id = 6,
+    .version_id = 7,
     .minimum_version_id = 5,
     .post_load = wb55_ipcc_post_load,
     .fields = (const VMStateField[]) {
@@ -985,6 +1045,8 @@ static const VMStateDescription vmstate_wb55_ipcc = {
         VMSTATE_UINT8(stack_sectors, WB55IpccState),
         VMSTATE_UINT8_V(c2_sram2a, WB55IpccState, 6),
         VMSTATE_UINT8_V(c2_sram2b, WB55IpccState, 6),
+        VMSTATE_BOOL_V(c2_fault, WB55IpccState, 7),
+        VMSTATE_BUFFER_V(c2_fault_why, WB55IpccState, 7),
         VMSTATE_BOOL(c2_fus_boot, WB55IpccState),
         VMSTATE_UINT8(fus_asked, WB55IpccState),
         VMSTATE_UINT8(fus_op, WB55IpccState),
@@ -1019,8 +1081,11 @@ static char *wb55_ipcc_get_ble(Object *obj, Error **errp)
     } else {
         qdict_put_null(d, "stack");
     }
-    qdict_put_str(d, "runs", !s->c2_booted ? "nothing" :
-                  s->c2_stack ? "stack" : "fus");
+    qdict_put_str(d, "runs", s->c2_fault ? "hardfault" :
+                  !s->c2_booted ? "nothing" : s->c2_stack ? "stack" : "fus");
+    if (s->c2_fault) {
+        qdict_put_str(d, "fault", (char *)s->c2_fault_why);
+    }
     qdict_put_bool(d, "up", b->up);
     /* the FUS: whether CPU2 stays in it, what it is doing */
     qdict_put_bool(d, "stays_in_fus", s->c2_fus_boot);

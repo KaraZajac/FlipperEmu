@@ -342,6 +342,11 @@ struct WB55IpccState {
      * the option bytes (SBRSA, SNBRSA) when it installs a stack, from the
      * image's footer; the rest is CPU2's (stm32wb55_flash.c) */
     uint8_t c2_sram2a, c2_sram2b;
+    /* The stack hard-faulted on a buffer of CPU1's that reaches into the
+     * SRAM2 it keeps for CPU2 (1.20.0 does so; wb55_c2_buffer_ok): CPU2
+     * does nothing more until the MCU's reset.  Why, in words. */
+    bool c2_fault;
+    uint8_t c2_fault_why[160];   /* (text: a buffer for its saved state) */
     /* What the FUS keeps of the wireless stack, as CPU2's flash keeps it
      * on a chip: in a file on the host (property "radio-state") */
     char *radio_file;
@@ -392,6 +397,11 @@ void wb55_fus_loaded(WB55IpccState *s);
 
 /* stm32wb55_ipcc.c, for the stack's model */
 hwaddr wb55_ipcc_ref_table(WB55IpccState *s);
+/* Whether a buffer that CPU1 gives the stack lies wholly in the SRAM that
+ * is not CPU2's; if not, the stack hard-faults (`what`: the buffer, in
+ * words) and false is returned */
+bool wb55_c2_buffer_ok(WB55IpccState *s, const char *what, hwaddr addr,
+                       unsigned len);
 void wb55_ipcc_update_irq(WB55IpccState *s);
 /* stm32wb55_ble.c */
 void wb55_ble_reset(WB55IpccState *s);

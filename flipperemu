@@ -1650,6 +1650,11 @@ def bluetooth_text(bt):
         return "no radio stack installed: CPU2 runs the FUS alone (run --radio-stack none)"
     if bt.get("kind") and bt["kind"] != "BLE Light":
         bt = dict(bt, stack=f"{bt['stack']} ({bt['kind']})")
+    if bt.get("runs") == "hardfault":
+        return (f"the radio stack {bt['stack']} hard-faulted: "
+                f"{bt.get('fault') or '?'}. CPU2 answers nothing more until "
+                "a reset; its record at SRAM2A_BASE is in the firmware's "
+                "crash report (core2: hardfaulted)")
     if bt.get("runs") != "stack":
         return (f"the radio stack {bt['stack']} is installed; CPU2 has not "
                 "started it" + (" (it runs the FUS)" if bt.get("runs") == "fus"
