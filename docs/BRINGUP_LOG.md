@@ -5161,6 +5161,25 @@ big lock, entry 92).
     - Checks: fuzz_check with `fuzz nfc --runs 16` and that replay: 18 on
       the official 1.5.1, 12 on Momentum and Unleashed.
 
+167. **Sub-GHz keys of five more protocols.**
+    - The launcher made Princeton keys and played captures. CAME, Nice
+      FLO, GateTX, Holtek HT12X and Linear now, each from the firmware's
+      own encoder for it (a pause, a start pulse, a low and a high for
+      each bit; Linear a high and a low), and a .sub key file of one is
+      sent the same way.
+    - The firmware's `subghz rx` read CAME, Nice FLO and GateTX back at
+      once. A Holtek key came back as "CAME 12bit": at the firmware's own
+      TE for Holtek, 320 µs, the two are one signal, and CAME's decoder
+      has it first; at 205 µs it is Holtek's. A Linear key came back with
+      every bit turned over. The firmware's source: "Protocol is actually
+      implemented wrong way around, bits are inverted. Instead of fixing
+      it and breaking old saved remotes, only the display here is
+      inverted". So a key on the command line is the one the Flipper
+      shows, and a file's is as the file has it.
+    - Checks: subghz_check 12 on the official 1.5.1, Momentum and the dev
+      build (Unleashed's `subghz rx` does not start the radio from the
+      CLI: skipped).
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

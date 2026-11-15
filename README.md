@@ -521,7 +521,7 @@ picture of the save to the pixel and the tag, and goes on with Pause.
 | `log [-f] [-n N] [-l LEVEL] [-g REGEX] [--previous]` | what the firmware logged (its UART), in its colours: follow it, the last N lines, this level and worse, the lines that match |
 | `log --set-level LEVEL` | how much the firmware logs, from its next start: none, error, warn, info, debug, trace or default |
 | `ir PROTO ADDR CMD` \| `ir raw …` \| `ir FILE.ir [NAME]` | send an infrared signal to the device's receiver |
-| `subghz FILE.sub` \| `subghz princeton KEY` \| `subghz raw +H -L …` | put a Sub-GHz signal on the air (`--freq`) |
+| `subghz FILE.sub` \| `subghz princeton\|came\|nice-flo\|gatetx\|holtek\|linear KEY` \| `subghz raw +H -L …` | put a Sub-GHz signal on the air (`--freq`): a capture or a key file, a key of one of six fixed-code protocols (`--bits`, `--te`), or its levels |
 | `subghz --sdr rtl_tcp[:HOST[:PORT]]` \| `--sdr hackrf` \| `--sdr FILE.cu8` | a real radio (or a recording) as the CC1101's antenna, until ^C |
 | `rfid PROTO DATA` \| `rfid FILE.rfid` \| `rfid CAPTURE.txt` \| `rfid none` | hold a 125 kHz tag to the device (`--list`; no argument: show state) |
 | `rfid t5577 [BLOCK0 …]` | hold a writable T5577 (blank, or with these blocks); `rfid` shows its blocks |
@@ -1192,6 +1192,8 @@ The durations are whole carrier periods (26.3 µs at 38 kHz), as the LED sends t
 ```sh
 ./flipperemu subghz garage.sub                  # a RAW capture, at the file's frequency
 ./flipperemu subghz princeton 0x95D5D4          # a PT2262 fixed code (default 433.92 MHz)
+./flipperemu subghz came 0xABC                  # a CAME key, 12 bits (--bits 24: the long ones)
+./flipperemu subghz nice-flo 0x5A3              # Nice FLO; also gatetx, holtek, linear
 ./flipperemu subghz raw 390 -1170 1170 -390 … --freq 315
 ```
 

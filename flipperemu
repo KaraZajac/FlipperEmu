@@ -6413,19 +6413,21 @@ def cmd_subghz(args):
             sys.exit(f"subghz --sdr: {e}")
     sig = args.signal
     if not sig:
-        sys.exit("usage: subghz FILE.sub | subghz princeton KEY | subghz raw +H -L ... "
-                 "| subghz --sdr SOURCE")
+        sys.exit("usage: subghz FILE.sub | subghz princeton|came|nice-flo|gatetx|"
+                 "holtek|linear KEY | subghz raw +H -L ... | subghz --sdr SOURCE")
     try:
         if sig[0].endswith(".sub"):
             label = pathlib.Path(sig[0]).name
             freq, durs = fe_subghz.parse_sub(sig[0])
-        elif sig[0].lower() == "princeton" and len(sig) == 2:
-            label = f"Princeton {int(sig[1], 0):#x}"
-            freq, durs = 0, fe_subghz.princeton(int(sig[1], 0), args.bits, args.te)
+        elif sig[0].lower().replace("_", "-") in fe_subghz.WORDS and len(sig) == 2:
+            name, bits, durs = fe_subghz.encode(sig[0], int(sig[1], 0),
+                                                args.bits, args.te)
+            label, freq = f"{name} {int(sig[1], 0):#x} ({bits} bits)", 0
         elif sig[0].lower() == "raw":
             label, freq, durs = "raw", 0, [int(x) for x in sig[1:]]
         else:
-            sys.exit("usage: subghz FILE.sub | subghz princeton KEY | subghz raw +H -L ...")
+            sys.exit("usage: subghz FILE.sub | subghz princeton|came|nice-flo|"
+                     "gatetx|holtek|linear KEY | subghz raw +H -L ...")
     except (ValueError, KeyError, OSError) as e:
         sys.exit(f"subghz: {e}")
     if args.freq:
@@ -7698,8 +7700,12 @@ def main():
                         "hackrf[:SERIAL], an IQ recording (FILE.cu8|cs8|cs16|cf32), "
                         "or - (IQ on stdin)")
     p.add_argument("--freq", help="MHz or Hz (default: the file's, else 433.92 MHz)")
-    p.add_argument("--bits", type=int, default=24, help="princeton: key bits")
-    p.add_argument("--te", type=int, default=390, help="princeton: TE in µs")
+    p.add_argument("--bits", type=int,
+                   help="a key's bits (not given: the protocol's usual: "
+                        "princeton 24, came 12, nice-flo 12, gatetx 24, holtek "
+                        "12, linear 10)")
+    p.add_argument("--te", type=int,
+                   help="princeton, holtek: TE in µs (390, 320)")
     import fe_sdr
     fe_sdr.add_options(p)
     p.set_defaults(func=cmd_subghz)

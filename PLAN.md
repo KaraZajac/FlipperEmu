@@ -198,7 +198,11 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       CC1101 in RX within 500 kHz (GDO0 → TIM2 capture); decoded by Read / `subghz rx`
 - ☑ Sub-GHz transmit capture: every transmission → `devices/NAME/subghz-tx/*.sub` (exact
       timings, frequency, custom preset from the live registers); TX → RX loopback decodes
-- ☐ TX-side pacing against DMA refill lag; more key encoders (CAME, Nice FLO, …)
+- ☑ More key encoders (2026-11-15): CAME, Nice FLO, GateTX, Holtek HT12X and
+      Linear keys beside Princeton's, each as the firmware's own encoder sends it
+      (`subghz came KEY`, a .sub key file); the firmware's `subghz rx` reads each
+      back; `scripts/subghz_check.py` 12 (BRINGUP_LOG 167)
+- ☐ TX-side pacing against DMA refill lag
   - ☐ A Send that is held for more than about 8 s does not end when OK is let go, if
         the charging LED is on (official 1.5.1, in the emulator): the radio stays in
         `tx`. It is the firmware's own. The Send scene asks for a blink every 100 ms, a
