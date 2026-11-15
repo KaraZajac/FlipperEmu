@@ -110,7 +110,10 @@ qFlipper / lab.flipper.net / `ufbt launch` only run over USB CDC.
     - ☐ What the Full stacks have more besides: the central role, a GATT client,
           advertising sets, L2CAP CoC. No firmware here calls them (Moon-Shell's
           commands are the stock firmware's): nothing to check a model against
-    - ☐ XIP app loaders exercised (MoonOS's .rock apps run from flash)
+    - ◐ XIP app loaders: what one does is checked (2026-11-15): code programmed
+          into the free flash while the firmware runs, run there, replaced and run
+          again; `scripts/xip_check.py` 8 (BRINGUP_LOG 161). A loader itself
+          (Moon-Shell's .rock apps) when one is built
 - ☐ Stretch: second CDC port of the dual-CDC mode; mass storage
 
 The double-buffer question from the notes was settled by what libusb_stm32 requires:
@@ -127,8 +130,9 @@ NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
       The radio stage was blanked, because a FUS-only CPU2 could not install a stack;
       since 2026-11-13 a stage whose stack is the device's stays in (up to date), and
       since 2026-11-14 CPU2's FUS installs a BLE Light stack of any version from it.
-- ☐ XIP app loaders (custom firmwares that program FAP code into internal flash and
-      execute it there)
+- ◐ XIP app loaders (custom firmwares that program FAP code into internal flash and
+      execute it there): the write and the run in place ☑ (2026-11-15,
+      `scripts/xip_check.py`); a loader's own format when a firmware has one
 - ◐ Firmware matrix: official 1.5.1, the official dev build 3060cee9 (a debug build;
       BRINGUP_LOG 87), Momentum mntm-012, Unleashed unlshd-094 and RogueMaster
       RM1024-1347 (2026-11-10, BRINGUP_LOG 86) pass `scripts/smoke_test.py` (now
@@ -807,7 +811,8 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       test; an app by its id or its `.fap`, found by its bytes after it has ended;
       a stopped device's last run. `scripts/coverage_check.py` 23 (BRINGUP_LOG 153)
     - ☐ A trace: the order in which code ran (the last calls before a crash)
-    - ☐ Apps that run in place from the flash (their blocks' bytes are not kept)
+    - ☑ Apps that run in place from the flash (2026-11-15): the plugin keeps the
+          bytes of what runs above the firmware's end in the flash (`keep=`)
 - ☑ Fuzzing harness for parsers in the firmware (2026-11-15): `./flipperemu fuzz
       subghz|ir|rpc|cli`, our own (`scripts/fe_fuzz.py`), guided by the coverage
       plugin's `news`; inputs as a Flipper gets them (a signal on the air, an RPC

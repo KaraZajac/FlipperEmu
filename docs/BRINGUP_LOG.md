@@ -5004,6 +5004,31 @@ big lock, entry 92).
     - Checks: ble_check 31 on the official 1.5.1 and on Moon-Shell's
       build.
 
+161. **Code that runs in place from the flash.**
+    - "XIP app loaders: not yet exercised" had stood in the README since
+      the flash model was written. No firmware at hand has such a loader
+      built (Moon-Shell's is to come), so the check brings what a loader
+      does, at its smallest: an app of its own (scripts/xip_check_app)
+      takes the last page below the radio stack's when it is blank,
+      programs a function of two instructions there by the flash's
+      registers, and calls it: 42. A second with a loop: 55. The page
+      erased, another function at the first one's address: 43, and not 42
+      from the code that QEMU had translated before (the flash model
+      flushes a programmed page's translations; this is the first check
+      that would see it not do so). The page erased again, the firmware
+      started again. All of it at the first run.
+    - The app writes the flash with no word to the radio stack (no
+      SHCI_C2_FLASH_EraseActivity, no semaphore), which a loader on a
+      Flipper must not do; the model does not hold it to that.
+    - Coverage: a block is kept with its bytes from an address up, which
+      was RAM's start; code in the free flash is as much another's later
+      as code in RAM. The launcher gives the plugin the firmware's end
+      (the first blank page from the flash's start), and the two
+      functions that had one address are two in a dump, with their bytes.
+    - Checks: xip_check 8 on the official 1.5.1 (skipped where ufbt's SDK
+      is not the firmware's); coverage_check 23 and fuzz_check 16 as
+      before.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

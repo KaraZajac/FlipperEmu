@@ -262,7 +262,11 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
   emulates one. When the Flipper emulates a MIFARE Classic, the virtual reader gets as
   far as its UID, ATQA and SAK: the Crypto1 answers go out through a bit-banged pin
   that the model does not decode.
-- Not yet exercised: XIP app loaders that run code from internal flash.
+- Apps that run in place from the flash: what such a loader does is checked (code
+  programmed into a free page while the firmware runs, run there, replaced, run
+  again: `scripts/xip_check.py`, 8 checks with ufbt's SDK), and `run --coverage`
+  keeps the bytes of what ran above the firmware in the flash. A loader itself has
+  not run here: no firmware at hand has one built.
 - The window has been checked off-screen (Qt's offscreen platform, `scripts/gui_check.py`),
   not yet by hand on a desktop session.
 - DFU mode (Left held through a reboot) shows the firmware's DFU splash, but there is

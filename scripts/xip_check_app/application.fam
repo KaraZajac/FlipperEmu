@@ -1,0 +1,12 @@
+# What scripts/xip_check.py runs: code programmed into a free page of the
+# flash while the firmware runs, and run where it is.  Not an example
+App(
+    appid="fe_xip_check",
+    name="XIP check",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="fe_xip_check_app",
+    stack_size=2 * 1024,
+    fap_category="Debug",
+    fap_version="1.0",
+    fap_description="Code written to flash and run in place, for scripts/xip_check.py",
+)

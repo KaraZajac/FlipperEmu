@@ -1247,10 +1247,30 @@ def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
         cmd += ["-S"]
     if getattr(args, "coverage", False):
         # the blocks of code that run, counted (qemu/plugins/fe_cov.c): asked
-        # for on its socket, and written when the emulator ends
+        # for on its socket, and written when the emulator ends.  Code above
+        # the firmware's own is kept with its bytes: an app's in RAM, and one
+        # that a loader wrote into the free flash to run where it is
+        end = firmware_end(dev)
         cmd += ["-plugin", f"{COV_PLUGIN},sock={dev.cov_sock},"
-                           f"out={dev.cov_dump}"]
+                           f"out={dev.cov_dump}"
+                           + (f",keep={end:#x}" if end else "")]
     return cmd + list(args.qemu_args or [])
+
+
+def firmware_end(dev):
+    """Where the firmware in a device's flash ends: the address of the first
+    blank page from the flash's start on (None: no firmware there)"""
+    page = 0
+    try:
+        with open(dev.flash, "rb") as flash:
+            while page < 256:
+                data = flash.read(4096)
+                if len(data) < 4096 or data == b"\xff" * 4096:
+                    break
+                page += 1
+    except OSError:
+        return None
+    return 0x08000000 + page * 4096 if page else None
 
 
 DETACHED = "FLIPPEREMU_DETACHED"     # set for the run that `run --detach` starts

@@ -34,7 +34,10 @@
  * kept with the bytes it had when it was translated (from keep=ADDRESS up;
  * default 0x10000000, which is above a Flipper's flash): the same address
  * with other bytes is another block, and what ran can be told an app's by
- * its bytes, after the app has ended too.
+ * its bytes, after the app has ended too.  The launcher gives the address
+ * where the firmware in the flash ends: the flash above it is free, and
+ * what runs there was written by a loader of apps that run in place, to be
+ * another's later as well.
  *
  * The machine runs on meanwhile.  A reset writes no counter (the vCPU's
  * thread adds to them, and a write beside it could be lost): it notes what

@@ -496,7 +496,10 @@ PROGERR on non-erased targets), 4 KiB page erase and mass erase, option-byte pro
 (OPTSTRT) and reload (OBL_LAUNCH → system reset with OBLRSTF). EOP latches only when EOPIE
 is set, because the firmware does `furi_check(FLASH->SR == 0)`. Programmed pages are
 flushed from the TCG translation cache (`memory_region_flush_rom_device`), so freshly
-written code runs; that's what XIP app loaders and the OTA updater need. With a
+written code runs; that's what XIP app loaders and the OTA updater need
+(`scripts/xip_check.py`: an app programs a function into a blank page below the radio
+stack's, calls it there, erases the page, programs another at the same address and
+gets that one's answer). With a
 `-drive if=pflash` image every program/erase is written through to the file. Pages from
 SFSA (0xD7 with BLE Light) up belong to CPU2 and refuse writes.
 
@@ -2194,8 +2197,13 @@ and more vote, and at each such base every block that fits is the app's. Two run
 two places are both counted. Blocks in that place that do not fit are counted too and
 said: the file is another build than what ran, or another app had the place.
 
-Not there: the order in which code ran (a trace), and apps that run in place from the
-flash (their bytes are not kept; none of the firmwares here has such a loader).
+Code that runs in place from the free flash is kept with its bytes as code in RAM
+is: the launcher gives the plugin the address where the firmware in the flash ends
+(`keep=`: the first blank page from the flash's start), and a block from there up
+has its bytes, so that two apps that had one page, one after the other, are two.
+
+Not there: the order in which code ran (a trace). No firmware here has a loader of
+apps that run in place, so `coverage --app` has not told such an app's code yet.
 
 ## Fuzzing (`scripts/fe_fuzz.py`) and where a fault was
 
