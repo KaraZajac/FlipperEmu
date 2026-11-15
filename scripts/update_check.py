@@ -253,9 +253,12 @@ def full_extended(b, pkg, work, image):
     """The package with ST's BLE Full extended stack in its radio stage, as
     old MoonOS builds had it: the FUS deletes BLE Light and installs it,
     and from the restart on CPU2 keeps 30 KB of SRAM2a and 22 of SRAM2b
-    (its footer says what CPU1 keeps: 2 and 10).  A firmware whose block
-    shared with CPU2 is where the stock linker puts it (to 0x20031377)
-    wipes that at its start, and CPU1 locks up there."""
+    (its footer says what CPU1 keeps: 2 and 10).  What the firmware does
+    then is its own.  One whose block shared with CPU2 is where the stock
+    linker puts it (to 0x20031377) wipes that at its start, and CPU1 locks
+    up there, the screen as the updater left it (a Flipper's LCD keeps its
+    picture over a reset of the MCU).  One built for Full extended (its
+    shared block out of CPU2's part) starts the stack and runs."""
     if not image or not image.is_file():
         print(f"  (no BLE Full extended image ({image}): its install by the "
               "FUS is not tried; --full-ext IMAGE names one)")
@@ -263,19 +266,22 @@ def full_extended(b, pkg, work, image):
     folder = with_stack(pkg, work / "full-ext", image, 0x080C5000,
                         (1, 20, 0, 0, 2, 6))
     b.fe("log", "--set-level", "info")
+    mark = len(b.uart_text())
     code, text = b.fe("update", "--no-wait", folder, timeout=1800)
     check("a package with BLE Full extended 1.20.0 in its radio stage "
           "(ST's image, at 0x080C5000): kept for CPU2's FUS to install",
           code == 0 and "updater started" in text
           and "installs its stack 1.20.0 (BLE Full extended" in text, text)
-    st, end = {}, time.time() + 900
+    st, bt, end = {}, {}, time.time() + 900
     while time.time() < end:
         code, out = b.fe("status", "--json")
         try:
             st = json.loads(out)
         except ValueError:
             st = {}
-        if (st.get("halted") or {}).get("kind") == "LOCKUP":
+        bt = st.get("bluetooth") or {}
+        if (st.get("halted") or {}).get("kind") == "LOCKUP" or (
+                bt.get("type") == 6 and bt.get("runs") == "stack"):
             break
         time.sleep(5)
     try:
@@ -284,19 +290,30 @@ def full_extended(b, pkg, work, image):
         state = ""
     ram = st.get("sram2") or {}
     halt = st.get("halted") or {}
-    log = b.uart_text()
-    check("... the updater has the FUS delete BLE Light and install BLE "
-          "Full extended from the image (47 sectors; SRAM2a CPU2's from "
-          "0x20030800 and SRAM2b from 0x2003a800, as its footer says, and "
-          "kept in radio.state); at the restart the firmware's start wipes "
-          "its block in CPU2's SRAM2a, and CPU1 locks up there, as old "
-          "MoonOS builds did",
-          halt.get("kind") == "LOCKUP" and "Installing stack" in log
-          and "type 6 sectors 47" in state and "sram2 2 10" in state
-          and (ram.get("sram2a"), ram.get("sram2b")) == ("0x20030800",
-                                                          "0x2003a800")
-          and ram.get("refused", 0) > 0,
-          f"{halt} {ram}\n{state}\n{log[-1500:]}")
+    log = b.uart_text()[mark:]
+    installed = ("Installing stack" in log and "type 6 sectors 47" in state
+                 and "sram2 2 10" in state
+                 and (ram.get("sram2a"), ram.get("sram2b")) == ("0x20030800",
+                                                                 "0x2003a800"))
+    what = ("the updater has the FUS delete BLE Light and install BLE Full "
+            "extended from the image (47 sectors; SRAM2a CPU2's from "
+            "0x20030800 and SRAM2b from 0x2003a800, as its footer says, and "
+            "kept in radio.state)")
+    detail = f"{halt} {bt} {ram}\n{state}\n{log[-1500:]}"
+    if halt.get("kind") == "LOCKUP":
+        stages = re.findall(r"\[UpdWorker\].*?(Stage \d+, progress \d+)", log)
+        code, screen = b.fe("shot", "--text")
+        check(f"... {what}; at the restart the firmware's start wipes its "
+              "block in CPU2's SRAM2a, and CPU1 locks up there, as old MoonOS "
+              "builds did: its screen as the updater left it (its last stage "
+              f"{stages[-1] if stages else None})",
+              installed and ram.get("refused", 0) > 0 and code == 0
+              and screen.strip(" \n") != "", detail + "\n" + screen)
+    else:
+        check(f"... {what}; the firmware is built for it: it runs with BLE "
+              "Full extended (type 6), and CPU1 never touched CPU2's SRAM2",
+              installed and bt.get("type") == 6 and bt.get("runs") == "stack"
+              and ram.get("refused", 0) == 0, detail)
 
 
 def update_checks(b, pkg, work, other):
