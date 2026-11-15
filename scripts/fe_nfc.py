@@ -12,12 +12,25 @@ holds in its field (see qemu/hw/arm/flipper/nfc_card.c):
     fe_nfc.py --nfc-file --ntag215 04112233445566 [URL]  -> as a Flipper .nfc file
 
     fe_nfc.py --mfc1k 11223344              -> a factory MIFARE Classic 1K
+    fe_nfc.py --desfire 04A1B2C3D4E5F6      -> a MIFARE DESFire EV1 with two
+                                               applications and their files
+    fe_nfc.py --nfc-file --desfire 04A1B2C3D4E5F6   -> ... as a Flipper .nfc file
+    fe_nfc.py --ulc 04A1B2C3D4E5F6          -> a MIFARE Ultralight C, its pages
+                                               from 16 on behind its key
+    fe_nfc.py --felica 012E4CD21A8B3C5F     -> a FeliCa Lite-S with that IDm
+    fe_nfc.py --slix E004010812345678       -> an NXP SLIX2 (ISO15693) with that UID
+                                               (both with --nfc-file too)
 
     fe_nfc.py hf-mf-11223344-dump.json      -> a Proxmark3 dump's description
     fe_nfc.py --nfc-file hf-mfu-dump.json   -> the dump as a Flipper .nfc file
 
-Supported: MIFARE Ultralight / Ultralight EV1 / NTAG21x (Type 2), MIFARE
-Classic Mini / 1K / 4K (unread blocks: zeros; unread keys: FF..FF).  A
+Supported: MIFARE Ultralight / Ultralight EV1 / Ultralight C / NTAG21x (Type
+2; an Ultralight C's key is its pages 44 to 47), MIFARE
+Classic Mini / 1K / 4K (unread blocks: zeros; unread keys: FF..FF), MIFARE
+DESFire (what the dump has of it: its files that were read, and an
+authentication error for those that were not), an ISO14443-4A card with no
+application that is known (its ATS), FeliCa Lite-S (its 28 blocks),
+ISO15693-3 and NXP's SLIX.  A
 Proxmark3 dump is its client's JSON: `hf mf autopwn`, `hf mf dump`
 (FileType "mfcard", "mfc v2", "mfc v3") or `hf mfu dump` ("mfu").
 """
@@ -30,6 +43,7 @@ LSB_ATQA_FORMAT_VERSION = 2
 
 T2_TYPES = ("NTAG/Ultralight", "NTAG203", "NTAG213", "NTAG215", "NTAG216",
             "Mifare Ultralight", "Mifare Ultralight 11", "Mifare Ultralight 21",
+            "Mifare Ultralight C",
             "Mifare Ultralight EV1", "NTAG I2C 1K", "NTAG I2C 2K", "NTAG I2C Plus 1K",
             "NTAG I2C Plus 2K")
 
@@ -85,6 +99,291 @@ def describe_mfc(fields, atqa):
     return "\n".join(out) + "\n"
 
 
+REC_VERSION, REC_FREE, REC_APP, REC_FILE = 0x01, 0x02, 0x10, 0x20
+
+
+def describe_iso4(fields, atqa, desfire):
+    """An ISO14443-4A card; a MIFARE DESFire's tables as records for
+    nfc_card.c: what its commands answer, taken from the dump"""
+    uid = hexbytes(fields["UID"])
+    out = ["# MIFARE DESFire" if desfire else "# ISO14443-4A", "type iso4",
+           f"uid {uid.hex(' ')}", f"atqa {atqa.hex(' ')}",
+           f"sak {fields.get('SAK', '20')}"]
+    # the ATS as the file has it: its format byte, the interface bytes that
+    # the format byte says are there, the historical bytes (a length before)
+    if fields.get("T0"):
+        t0 = int(fields["T0"], 16)
+        ats = bytes([t0]) + b"".join(
+            hexbytes(fields.get(key, "00"))[:1]
+            for bit, key in ((0x10, "TA(1)"), (0x20, "TB(1)"), (0x40, "TC(1)"))
+            if t0 & bit) + hexbytes(fields.get("T1...Tk", ""))
+        out.append(f"ats {bytes([len(ats) + 1]).hex()} {ats.hex(' ')}".rstrip())
+    elif fields.get("ATS"):
+        out.append(f"ats {hexbytes(fields['ATS']).hex(' ')}")
+    if not desfire:
+        return "\n".join(out + ["app none"]) + "\n"
+    out.append("app desfire")
+
+    def rec(kind, data):
+        out.append(f"rec {kind:02x} {bytes(data).hex(' ')}".rstrip())
+
+    def flag(key):
+        return fields.get(key, "false").strip().lower() == "true"
+
+    def keys(prefix):
+        """GetKeySettings' two bytes and each key's version (b"": the dump
+        has none of it, the card asked for a key)"""
+        if f"{prefix} Change Key ID" not in fields:
+            return b""
+        first = (flag(f"{prefix} Key Changeable")
+                 | flag(f"{prefix} Free Directory List") << 1
+                 | flag(f"{prefix} Free Create Delete") << 2
+                 | flag(f"{prefix} Config Changeable") << 3
+                 | (int(fields[f"{prefix} Change Key ID"], 16) & 0xF) << 4)
+        second = (int(fields.get(f"{prefix} Max Keys", "01"), 16) & 0xF
+                  | (int(fields.get(f"{prefix} Flags", "00"), 16) & 0xF) << 4)
+        versions, i = [], 0
+        while f"{prefix} Key {i} Version" in fields:
+            versions.append(int(fields[f"{prefix} Key {i} Version"], 16))
+            i += 1
+        return bytes([first, second, *versions])
+
+    version = hexbytes(fields.get("PICC Version", ""))
+    if len(version) != 28:
+        raise ValueError("a MIFARE DESFire dump has its PICC Version (28 bytes)")
+    rec(REC_VERSION, version)
+    if "PICC Free Memory" in fields:
+        rec(REC_FREE, int(fields["PICC Free Memory"]).to_bytes(3, "little"))
+    rec(REC_APP, bytes(3) + keys("PICC"))
+    ids = hexbytes(fields.get("Application IDs", ""))
+    for aid in (ids[i:i + 3] for i in range(0, len(ids) - 2, 3)):
+        prefix = f"Application {aid.hex()}"
+        rec(REC_APP, aid + keys(prefix))
+        for fid in hexbytes(fields.get(f"{prefix} File IDs", "")):
+            fp = f"{prefix} File {fid}"
+            kind = int(fields.get(f"{fp} Type", "00"), 16)
+            number = lambda key, size: int(fields.get(f"{fp} {key}", "0")
+                                           ).to_bytes(size, "little")
+            settings = bytes([kind, int(fields.get(f"{fp} Communication "
+                                                   "Settings", "00"), 16)]) \
+                + hexbytes(fields.get(f"{fp} Access Rights", "EE EE"))[:2]
+            if kind in (0, 1):                  # standard, backup
+                settings += number("Size", 3)
+            elif kind == 2:                     # value
+                settings += (number("Lo Limit", 4) + number("Hi Limit", 4)
+                             + number("Limited Credit Value", 4)
+                             + bytes([flag(f"{fp} Limited Credit Enabled")]))
+            elif kind in (3, 4):                # linear, cyclic records
+                settings += number("Size", 3) + number("Max", 3) + number("Cur", 3)
+            else:                               # a transaction MAC's
+                settings += (hexbytes(fields.get(f"{fp} Key Option", "00"))[:1]
+                             + hexbytes(fields.get(f"{fp} Key Version", "00"))[:1])
+            data = hexbytes(fields[fp]) if fields.get(fp) else None
+            rec(REC_FILE, aid + bytes([fid, len(settings)]) + settings
+                + bytes([data is not None]) + (data or b""))
+    return "\n".join(out) + "\n"
+
+
+def sample_desfire(uid):
+    """A MIFARE DESFire EV1 4K as a Flipper .nfc file's text, made up: the
+    card's own keys, and two applications with files of each kind that a
+    reader gets without a key (one longer than a frame), and one that it
+    does not get"""
+    if len(uid) != 7:
+        raise ValueError("a MIFARE DESFire's UID is 7 bytes")
+    up = lambda b: bytes(b).hex(" ").upper()
+    version = (bytes.fromhex("04010101001805") + bytes.fromhex("04010101041805")
+               + uid + bytes.fromhex("BA3456789025" "20"))
+
+    def keys(prefix, most, versions):
+        return [f"{prefix} Change Key ID: 00", f"{prefix} Config Changeable: true",
+                f"{prefix} Free Create Delete: true",
+                f"{prefix} Free Directory List: true",
+                f"{prefix} Key Changeable: true", f"{prefix} Flags: 00",
+                f"{prefix} Max Keys: {most:02X}"] + \
+            [f"{prefix} Key {i} Version: {v:02X}" for i, v in enumerate(versions)]
+    out = ["Filetype: Flipper NFC device", "Version: 4",
+           "Device type: Mifare DESFire", f"UID: {up(uid)}", "ATQA: 03 44",
+           "SAK: 20", "T0: 75", "TA(1): 77", "TB(1): 81", "TC(1): 02",
+           "T1...Tk: 80", f"PICC Version: {up(version)}",
+           "PICC Free Memory: 2848", *keys("PICC", 1, [0]),
+           "Application Count: 2", "Application IDs: 56 34 12 F4 00 01"]
+    text = bytes(range(0x20, 0x70))             # 80 bytes: two frames
+    a = "Application 563412"
+    out += [*keys(a, 2, [0, 1]), f"{a} File IDs: 01 02 03 04",
+            f"{a} File 1 Type: 00", f"{a} File 1 Communication Settings: 00",
+            f"{a} File 1 Access Rights: EE EE", f"{a} File 1 Size: {len(text)}",
+            f"{a} File 1: {up(text)}",
+            f"{a} File 2 Type: 02", f"{a} File 2 Communication Settings: 00",
+            f"{a} File 2 Access Rights: EE EE", f"{a} File 2 Hi Limit: 1000",
+            f"{a} File 2 Lo Limit: 0", f"{a} File 2 Limited Credit Value: 0",
+            f"{a} File 2 Limited Credit Enabled: false",
+            f"{a} File 2: {up((250).to_bytes(4, 'little'))}",
+            f"{a} File 3 Type: 04", f"{a} File 3 Communication Settings: 00",
+            f"{a} File 3 Access Rights: EE EE", f"{a} File 3 Size: 16",
+            f"{a} File 3 Max: 4", f"{a} File 3 Cur: 2",
+            f"{a} File 3: {up(bytes(range(0xA0, 0xC0)))}",
+            f"{a} File 4 Type: 00", f"{a} File 4 Communication Settings: 03",
+            f"{a} File 4 Access Rights: 00 00", f"{a} File 4 Size: 32"]
+    b = "Application f40001"
+    out += [*keys(b, 1, [0]), f"{b} File IDs: 00",
+            f"{b} File 0 Type: 01", f"{b} File 0 Communication Settings: 00",
+            f"{b} File 0 Access Rights: EE EE", f"{b} File 0 Size: 8",
+            f"{b} File 0: {up(b'FlipEmu!')}"]
+    return "\n".join(out) + "\n"
+
+
+def describe_felica(fields):
+    """A FeliCa Lite-S: its IDm and PMm, and its 28 blocks as a dump has
+    them, each with the two status bytes the card gave for it (a block that
+    the dump lacks: an illegal block number's)"""
+    idm = hexbytes(fields.get("Manufacture id", fields["UID"]))
+    pmm = hexbytes(fields.get("Manufacture parameter", "00 F1 00 00 00 01 43 00"))
+    if "Block 0" not in fields:
+        raise ValueError("a FeliCa dump with its blocks (a Lite-S's): a "
+                         "FeliCa Standard card's systems are not supported yet")
+    out = ["# FeliCa Lite-S", "type felica", f"uid {idm.hex(' ')}",
+           f"pmm {pmm.hex(' ')}"]
+    for i in range(28):
+        block = hexbytes(fields.get(f"Block {i}", "01 A8 " + "00 " * 16))
+        out.append(f"mem {block[:18].ljust(18, bytes(1)).hex(' ')}")
+    return "\n".join(out) + "\n"
+
+
+def describe_iso15693(fields, slix):
+    """An ISO15693-3 card, and NXP's SLIX on it"""
+    uid = hexbytes(fields["UID"])
+    size = int(fields.get("Block Size", "04"), 16)
+    count = int(fields.get("Block Count", "0"))
+    data = hexbytes(fields.get("Data Content", ""))
+    security = hexbytes(fields.get("Security Status", ""))
+    if len(security) == count + 1:              # (an older file: a byte before)
+        security = security[1:]
+    if not count or len(data) < count * size:
+        raise ValueError("an ISO15693 dump has its blocks (Block Count, "
+                         "Block Size, Data Content)")
+    flag = lambda key: fields.get(key, "false").strip().lower() == "true"
+    lock = (flag("Lock DSFID") | flag("Lock AFI") << 1 | flag("Lock EAS") << 2
+            | flag("Lock PPL") << 3)
+    out = ["# SLIX" if slix else "# ISO15693-3", "type iso15693",
+           f"uid {uid.hex(' ')}", f"dsfid {fields.get('DSFID', '00')}",
+           f"afi {fields.get('AFI', '00')}",
+           f"icref {fields.get('IC Reference', '00')}", f"blocksize {size:02x}",
+           f"lock {lock:02x}"]
+    out += [f"mem {data[i:i + 64].hex(' ')}" for i in range(0, count * size, 64)]
+    out.append(f"security {security[:count].ljust(count, bytes(1)).hex(' ')}")
+    if slix:
+        out.append("slix 1")
+        if fields.get("Signature"):
+            out.append(f"signature {hexbytes(fields['Signature']).hex(' ')}")
+        for name in ("Read", "Write", "Privacy", "Destroy", "EAS"):
+            if fields.get(f"Password {name}"):
+                out.append(f"pwd-{name.lower()} "
+                           f"{hexbytes(fields[f'Password {name}']).hex(' ')}")
+        out.append(f"privacy {int(flag('Privacy Mode'))}")
+        out.append(f"protection {fields.get('Protection Pointer', '00')} "
+                   f"{fields.get('Protection Condition', '00')}")
+        out.append("accept-all "
+                   f"{int(fields.get('Capabilities') == 'AcceptAllPasswords')}")
+    return "\n".join(out) + "\n"
+
+
+ULC_KEY = bytes.fromhex("49454D4B41455242214E4143554F5946")    # (made up)
+
+
+def sample_ulc(uid):
+    """A MIFARE Ultralight C as a Flipper .nfc file's text, made up: its
+    pages from 16 on want its key (ULC_KEY), for reading too"""
+    if len(uid) != 7:
+        raise ValueError("a MIFARE Ultralight C's UID is 7 bytes")
+    up = lambda b: bytes(b).hex(" ").upper()
+    mem = bytearray(48 * 4)
+    mem[0:3] = uid[0:3]
+    mem[3] = 0x88 ^ uid[0] ^ uid[1] ^ uid[2]
+    mem[4:8] = uid[3:7]
+    mem[8] = uid[3] ^ uid[4] ^ uid[5] ^ uid[6]
+    mem[9] = 0x48
+    mem[16:32] = b"open to everyone"
+    mem[64:80] = b"only with a key!"
+    mem[42 * 4] = 16                            # AUTH0
+    mem[44 * 4:48 * 4] = ULC_KEY
+    out = ["Filetype: Flipper NFC device", "Version: 4",
+           "Device type: NTAG/Ultralight", f"UID: {up(uid)}", "ATQA: 00 44",
+           "SAK: 00", "Data format version: 2",
+           "NTAG/Ultralight type: Mifare Ultralight C",
+           f"Signature: {up(bytes(32))}", f"Mifare version: {up(bytes(8))}"]
+    for i in range(3):
+        out += [f"Counter {i}: 0", f"Tearing {i}: 00"]
+    out += ["Pages total: 48", "Pages read: 48"]
+    out += [f"Page {i}: {up(mem[i * 4:i * 4 + 4])}" for i in range(48)]
+    out.append("Failed authentication attempts: 0")
+    return "\n".join(out) + "\n"
+
+
+def sample_felica(idm):
+    """A FeliCa Lite-S as a Flipper .nfc file's text, made up: its user
+    blocks with something in them, its ID blocks, its card key not given"""
+    if len(idm) != 8:
+        raise ValueError("a FeliCa card's IDm is 8 bytes")
+    up = lambda b: bytes(b).hex(" ").upper()
+    pmm = bytes.fromhex("00F1000000014300")
+    blocks = [bytes(16)] * 28
+    blocks[0] = b"FlipperEmu FeliCa"[:16]
+    blocks[1] = bytes(range(0x10, 0x20))
+    blocks[13] = bytes(range(0xD0, 0xE0))
+    blocks[14] = bytes([0xFF] * 4 + [0] * 12)           # REG
+    blocks[17] = idm + bytes(8)                         # ID
+    blocks[18] = idm + pmm                              # D_ID
+    blocks[20] = bytes.fromhex("88B4") + bytes(14)      # SYS_C
+    blocks[23] = bytes.fromhex("FFFFFF00FF00100000000000000000 00")  # MC
+    status = [bytes(2)] * 28
+    status[22] = bytes.fromhex("01A8")                  # CK: not to be read
+    out = ["Filetype: Flipper NFC device", "Version: 4", "Device type: FeliCa",
+           f"UID: {up(idm)}", "Data format version: 2",
+           f"Manufacture id: {up(idm)}", f"Manufacture parameter: {up(pmm)}",
+           "IC Type: FeliCa Lite-S RC-S966", "Blocks total: 28",
+           # (the firmware counts one fewer than it read, without a key)
+           f"Blocks read: {sum(1 for s in status if not s[0]) - 1}"]
+    out += [f"Block {i}: {up(status[i] + (blocks[i] if not status[i][0] else bytes(16)))}"
+            for i in range(28)]
+    return "\n".join(out) + "\n"
+
+
+def sample_slix(uid):
+    """An NXP SLIX2 (ICODE SLIX2, 80 blocks of 4 bytes: what a UID that
+    begins E0 04 01 08 is) as a Flipper .nfc file's text, made up: an
+    NDEF-like beginning, one block locked, a signature that is no NXP's"""
+    if len(uid) != 8 or uid[0] != 0xE0:
+        raise ValueError("an ISO15693 card's UID is 8 bytes, the first E0")
+    up = lambda b: bytes(b).hex(" ").upper()
+    data = bytearray(80 * 4)
+    data[0:16] = bytes.fromhex("E1400D01" "030BD101" "07540265" "6E466C69")
+    data[16:20] = b"pEmu"
+    data[100:104] = bytes.fromhex("CAFEF00D")
+    security = bytearray(80)
+    security[25] = 1
+    out = ["Filetype: Flipper NFC device", "Version: 4", "Device type: SLIX",
+           f"UID: {up(uid)}", "DSFID: 00", "AFI: 00", "IC Reference: 01",
+           "Lock DSFID: false", "Lock AFI: false", "Block Count: 80",
+           "Block Size: 04", f"Data Content: {up(data)}",
+           f"Security Status: {up(security)}", "Capabilities: Default",
+           "Password Read: 00 00 00 00", "Password Write: 00 00 00 00",
+           "Password Privacy: 0F 0F 0F 0F", "Password Destroy: 0F 0F 0F 0F",
+           "Password EAS: 00 00 00 00", f"Signature: {up(range(0x40, 0x60))}",
+           "Privacy Mode: false", "Protection Pointer: 00",
+           "Protection Condition: 00", "Lock EAS: false", "Lock PPL: false"]
+    return "\n".join(out) + "\n"
+
+
+def parse_nfc_text(text):
+    fields = {}
+    for line in text.splitlines():
+        if not line.startswith("#") and ":" in line:
+            key, _, value = line.partition(":")
+            fields[key.strip()] = value.strip()
+    return fields
+
+
 def describe(fields):
     """The card description for nfc_card.c."""
     version = int(fields.get("Version", "4"))
@@ -93,10 +392,21 @@ def describe(fields):
         atqa = hexbytes(fields["ATQA"])
         return describe_mfc(fields, atqa[::-1] if version > LSB_ATQA_FORMAT_VERSION
                             else atqa)
+    if dev == "FeliCa":
+        return describe_felica(fields)
+    if dev in ("ISO15693-3", "SLIX"):
+        return describe_iso15693(fields, dev == "SLIX")
+    if dev in ("Mifare DESFire", "ISO14443-4A", "ISO14443-4A (Unknown)"):
+        atqa = hexbytes(fields["ATQA"])
+        return describe_iso4(fields, atqa[::-1] if version >
+                             LSB_ATQA_FORMAT_VERSION else atqa,
+                             dev == "Mifare DESFire")
     kind = fields.get("NTAG/Ultralight type", dev)
     if dev not in T2_TYPES and kind not in T2_TYPES:
         raise ValueError(f"device type {dev!r} is not supported yet "
-                         "(NTAG/Ultralight are)")
+                         "(NTAG/Ultralight, MIFARE Classic, MIFARE DESFire, "
+                         "ISO14443-4A, FeliCa Lite-S, ISO15693-3 and SLIX "
+                         "are)")
     uid = hexbytes(fields["UID"])
     atqa = hexbytes(fields["ATQA"])
     if version > LSB_ATQA_FORMAT_VERSION:
@@ -117,6 +427,10 @@ def describe(fields):
     pages = int(fields.get("Pages total", "0"))
     if not pages:
         raise ValueError("no pages in the file")
+    if kind == "Mifare Ultralight C":
+        # (its key is pages 44 to 47, as the firmware has it when it knew
+        # the key; zeros in a dump that was read without one)
+        out.append("ulc 1")
     for p in range(pages):
         out.append(f"mem {fields.get(f'Page {p}', '00 00 00 00')}")
     return "\n".join(out) + "\n"
@@ -279,10 +593,23 @@ def nfc_file(desc):
     return "\n".join(out) + "\n"
 
 
+# cards that are made up for a UID: (what makes the .nfc text, in words)
+SAMPLES = {"desfire": (sample_desfire, "a MIFARE DESFire EV1 (two "
+                       "applications, made up)"),
+           "ulc": (sample_ulc, "a MIFARE Ultralight C (made up; its key "
+                   f"{ULC_KEY.hex().upper()})"),
+           "felica": (sample_felica, "a FeliCa Lite-S (made up)"),
+           "slix": (sample_slix, "an NXP SLIX2, ISO15693 (made up)")}
+
+
 def main():
     args = sys.argv[1:]
     as_file = "--nfc-file" in args
     args = [a for a in args if a != "--nfc-file"]
+    if len(args) == 2 and args[0].lstrip("-") in SAMPLES:
+        text = SAMPLES[args[0].lstrip("-")][0](bytes.fromhex(args[1]))
+        print(text if as_file else describe(parse_nfc_text(text)), end="")
+        return 0
     if as_file:
         if len(args) == 1 and args[0].lower().endswith(".json"):
             print(nfc_file(describe_pm3(args[0])), end="")

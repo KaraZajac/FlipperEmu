@@ -1017,6 +1017,48 @@ After that every frame is encrypted, parity bits included (each one with the nex
 keystream bit). READ, WRITE and HALT obey the sector trailer's access bits, by the
 MF1S50 tables, and Key A always reads back as zeros.
 
+**MIFARE Ultralight C** is the Type 2 tag with AUTHENTICATE (0x1A): the card sends
+a random number enciphered, the reader answers with its own and the card's turned by
+a byte, enciphered on from the card's ciphertext (CBC), and the card answers with the
+reader's turned, enciphered on from the reader's. Two-key triple DES; `nfc_card.c`
+has DES itself (FIPS 46-3's tables, checked against its example and OpenSSL's
+`des-ede-cbc`), so that it needs no library of QEMU's build. The key is pages 44 to
+47 as the firmware uses it (not as a card's memory has it, each half turned round),
+never read; a READ rolls over at page 43; AUTH0 and AUTH1 (pages 42, 43) say from
+which page a reader needs it, and whether for reading too. EV1's commands get a NAK.
+
+**ISO14443-4** is in `nfc_card.c` too, on the same air bits: a card whose SAK says
+so answers RATS with its ATS and then speaks blocks. An I-block's command goes to the
+application and the answer comes back in one I-block with the command's block number
+(the firmware's poller wants exactly the PCB it sent, and takes no chained answer); a
+command in parts is taken with an R(ACK) to each; R(NAK) is answered as a presence
+check; DESELECT is said back and the card is halted. MIFARE DESFire runs on it,
+native or wrapped in ISO 7816 (`90 INS 00 00 Lc … 00`, answered with `91` and the
+status): its tables are records in the card (the version's 28 bytes, the free
+memory, each application's AID with its key settings and key versions, each file with
+`GetFileSettings`' answer and its contents), which `fe_nfc.py` makes from a dump.
+What is longer than 59 bytes goes in frames with ADDITIONAL FRAME. `ReadRecords`
+counts in records, the newest first, as a card does: the firmware asks for as many
+records as a record has bytes, gets a boundary error from a card with fewer, and its
+dump has no contents for that file.
+
+**The other technologies** are bytes on the air, and the firmware does their coding
+itself: it adds each one's CRC and sends with TRANSMIT_WITHOUT_CRC. `MODE.om` says
+which it is. For ISO14443B and FeliCa the FIFO's bytes are the frame's (the chip makes
+SOF and EOF, preamble and sync). ISO15693 is the chip's sub-carrier stream mode: the
+firmware sends a byte for each two bits of data, "1 out of 4" (SOF 0x21; 0x02, 0x08,
+0x20, 0x80; EOF 0x04), and reads the stream itself: a SOF of five bits, two stream
+bits for each bit of data (01 for a 0, 10 for a 1), an EOF. `st25_card_bytes()`
+takes the request out of that coding, gives the card its bytes
+(`nfc_card_bytes()`), and codes the answer as the chip's stream has it. The cards:
+FeliCa Lite-S (polling by system code, Read and Write Without Encryption over its 28
+blocks, each with the two status bytes of the dump), and ISO15693-3 with NXP's SLIX
+(the request flags: inventory with AFI and mask, addressed, selected, option; the
+quiet and selected states; blocks, security status, AFI, DSFID and their locks; SLIX:
+the manufacturer code after the command, the random number that a password is XORed
+with, privacy mode in which only those two are answered). A card on the link, and
+the virtual reader of listen mode, are ISO14443A alone.
+
 **Listen mode** (the Flipper emulating a card). The firmware sets the chip's target
 mode and loads its passive-target memory: the UID (`AUX.nfc_id` selects 4 or 7 bytes),
 the ATQA at bytes 10 and 11, and a SAK per cascade level from byte 12. A real ST25R3916

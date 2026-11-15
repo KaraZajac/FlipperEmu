@@ -96,6 +96,12 @@
 #define I_EOF  1, 0x08
 #define I_WU_A 3, 0x01
 #define MODE_TARG 0x80
+/* MODE.om as an initiator: what is on the air */
+#define MODE_OM(v)       (((v) >> 3) & 0xF)
+#define OM_ISO14443A     0x1
+#define OM_ISO14443B     0x2
+#define OM_FELICA        0x3
+#define OM_SUBCARRIER    0xE            /* stream mode: ISO15693 by software */
 #define I_CRC  2, 0x80
 #define I_PAR  2, 0x40
 
@@ -272,10 +278,69 @@ static void st25_stop(St25r3916State *s)
     s->stage = STAGE_IDLE;
 }
 
+/*
+ * The technologies that are bytes on the air (the firmware adds each one's
+ * CRC itself, and sends with TRANSMIT_WITHOUT_CRC).  ISO14443B and FeliCa:
+ * the FIFO's bytes are the frame's, the chip makes the SOF and EOF, the
+ * preamble and the sync.  ISO15693 is the chip's sub-carrier stream mode,
+ * coded by the firmware (furi_hal_nfc_iso15693.c): what it sends is a byte
+ * for each two bits of data, "1 out of 4" (SOF 0x21; 0x02, 0x08, 0x20, 0x80
+ * for 00, 01, 10, 11, low bits first; EOF 0x04), and what it receives is the
+ * stream itself, low bit first: a SOF of five bits (0x17), two bits for
+ * each bit of data (01 for a 0, 10 for a 1), an EOF (0x1D).
+ * -> the answer's bits in s->rx, 0: none
+ */
+static int st25_card_bytes(St25r3916State *s, int om)
+{
+    uint8_t in[NFC_AIR_MAX / 4], out[128];
+    int n = s->ntx / 8, got, bits = 0;
+
+    if (om == OM_ISO14443B || om == OM_FELICA) {
+        got = nfc_card_bytes(s->card, om == OM_FELICA ? NFC_TECH_F : NFC_TECH_B,
+                             s->tx, n, s->rx, sizeof(s->rx));
+        return MAX(got, 0) * 8;
+    }
+    if (om != OM_SUBCARRIER || n < 2 || s->tx[0] != 0x21) {
+        return 0;
+    }
+    memset(in, 0, sizeof(in));
+    for (int i = 1; i < n && s->tx[i] != 0x04; i++) {
+        int pair = s->tx[i] == 0x02 ? 0 : s->tx[i] == 0x08 ? 1 :
+                   s->tx[i] == 0x20 ? 2 : s->tx[i] == 0x80 ? 3 : -1;
+
+        if (pair < 0 || bits / 8 >= sizeof(in)) {
+            return 0;                   /* (no such symbol: no card hears it) */
+        }
+        in[bits / 8] |= pair << (bits % 8);
+        bits += 2;
+    }
+    got = nfc_card_bytes(s->card, NFC_TECH_V, in, bits / 8, out, sizeof(out));
+    if (got <= 0) {
+        return 0;
+    }
+    memset(s->rx, 0, sizeof(s->rx));
+    bits = 0;
+    for (int i = 0; i < 5; i++, bits++) {
+        bit_put(s->rx, bits, (0x17 >> i) & 1);
+    }
+    for (int i = 0; i < got * 8; i++, bits += 2) {
+        bool one = (out[i / 8] >> (i % 8)) & 1;
+
+        bit_put(s->rx, bits, !one);
+        bit_put(s->rx, bits + 1, one);
+    }
+    for (int i = 0; i < 8; i++, bits++) {
+        bit_put(s->rx, bits, (0x1D >> i) & 1);
+    }
+    return bits;
+}
+
 /* the answer is in: decode it into the FIFO the way the chip is set up */
 static void st25_rx_end(St25r3916State *s)
 {
-    bool raw = s->rega[REG_ISO14443A] & A_NO_RX_PAR;
+    bool bytes = MODE_OM(s->rega[REG_MODE]) != OM_ISO14443A &&
+                 !(s->rega[REG_MODE] & MODE_TARG);
+    bool raw = bytes || (s->rega[REG_ISO14443A] & A_NO_RX_PAR);
     bool parity_ok = true;
     uint8_t data[NFC_AIR_MAX + 1];
     int bits;
@@ -316,7 +381,13 @@ static void st25_tx_end(St25r3916State *s, int64_t now)
         return;
     }
     if (s->card && s->field_on && (s->rega[REG_OP_CONTROL] & OP_RX_EN)) {
-        s->nrx = nfc_card_rx(s->card, s->tx, s->ntx, s->rx);
+        int om = MODE_OM(s->rega[REG_MODE]);
+
+        s->nrx = om == OM_ISO14443A ?
+                 nfc_card_rx(s->card, s->tx, s->ntx, s->rx) :
+                 st25_card_bytes(s, om);
+    } else if (MODE_OM(s->rega[REG_MODE]) != OM_ISO14443A) {
+        /* (a card on the link is an ISO14443A card) */
     } else if (!s->card && s->lk.open && s->field_on &&
                (s->rega[REG_OP_CONTROL] & OP_RX_EN)) {
         st25_link_poll(s);              /* the card on the link answers */
@@ -541,8 +612,10 @@ static void st25_transmit(St25r3916State *s, uint8_t cmd)
             data[nbits / 8 + 1] = crc >> 8;
             nbits += 16;
         }
-        if (s->rega[REG_ISO14443A] & A_NO_TX_PAR) {
-            memcpy(s->tx, data, (nbits + 7) / 8);
+        if ((s->rega[REG_ISO14443A] & A_NO_TX_PAR) ||
+            (MODE_OM(s->rega[REG_MODE]) != OM_ISO14443A &&
+             !(s->rega[REG_MODE] & MODE_TARG))) {
+            memcpy(s->tx, data, (nbits + 7) / 8);   /* as it is */
             s->ntx = nbits;
         } else {
             s->ntx = nfc_air_encode(data, nbits, s->tx);
@@ -1201,8 +1274,8 @@ static int st25_card_pre_load(void *opaque)
 
 static const VMStateDescription vmstate_st25_card = {
     .name = "st25r3916/card",
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,                    /* (the card's: ISO14443-4) */
+    .minimum_version_id = 2,
     .needed = st25_card_needed,
     .pre_load = st25_card_pre_load,
     .fields = (const VMStateField[]) {

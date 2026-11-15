@@ -258,6 +258,11 @@ void nfc_card_free(NfcCard *c);
 void nfc_card_field(NfcCard *c, bool on);
 /* a frame from the reader, as air bits; returns the answer's bits (0: none) */
 int nfc_card_rx(NfcCard *c, const uint8_t *air, int nbits, uint8_t *out);
+/* ... of a technology whose frames are bytes (each with its CRC, as the
+ * firmware sends it): the answer's bytes (0: none) */
+enum { NFC_TECH_B = 1, NFC_TECH_F, NFC_TECH_V };
+int nfc_card_bytes(NfcCard *c, int tech, const uint8_t *in, int n,
+                   uint8_t *out, int max);
 /* the card in a saved state, and an empty one for a load to fill */
 extern const VMStateDescription vmstate_nfc_card;
 NfcCard *nfc_card_blank(void);

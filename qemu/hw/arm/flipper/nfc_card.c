@@ -12,10 +12,36 @@
  * and Ultralight EV1): READ, FAST_READ, WRITE, COMPATIBILITY_WRITE,
  * GET_VERSION, READ_SIG, READ_CNT, INCR_CNT, CHECK_TEARING, PWD_AUTH with
  * AUTH0/PROT from the configuration pages; anything else is NAKed, which
- * sends the card back to IDLE, as on silicon.  And MIFARE Classic Mini, 1K
+ * sends the card back to IDLE, as on silicon.  MIFARE Ultralight C ("ulc
+ * 1"): its 48 pages, AUTHENTICATE with two-key triple DES (the key is pages
+ * 44 to 47, never read), AUTH0 and AUTH1 for what needs it, and none of
+ * EV1's commands.  And MIFARE Classic Mini, 1K
  * and 4K: Crypto1 (from its published description), the nonce PRNG, plain
  * and nested AUTH, encrypted READ/WRITE/HALT, the sector trailers' access
  * bits.
+ *
+ * ISO14443-4 (a card whose SAK says so, "type iso4"): RATS and the ATS, PPS,
+ * and then blocks: I-blocks with the reader's chaining taken (R(ACK) to each
+ * part), R(NAK) answered as a presence check, DESELECT.  The card's answer
+ * to a command is one I-block with the command's block number.  What runs
+ * on it: MIFARE DESFire's native commands, plain or wrapped in ISO 7816
+ * (GetVersion, GetFreeMemory, GetKeySettings, GetKeyVersion,
+ * GetApplicationIDs, SelectApplication, GetFileIDs, GetFileSettings,
+ * ReadData, GetValue, ReadRecords, with ADDITIONAL FRAME for what is longer
+ * than 59 bytes; an Authenticate is refused, and a file that the dump could
+ * not read asks for one).  With no application ("app none") a command gets
+ * ISO 7816's "instruction not supported".
+ *
+ * The technologies whose frames are bytes (the chip model takes them from
+ * and to the firmware's own coding, st25r3916.c): FeliCa Lite-S ("type
+ * felica": polling, Read and Write Without Encryption on its 28 blocks, each
+ * with the two status bytes that the dump has of it; its MAC is the dump's,
+ * so an authentication with a key fails, as with a card whose key is
+ * another), and ISO15693-3 with NXP's SLIX on it ("type iso15693":
+ * inventory, the addressed, selected and quiet states, system information,
+ * blocks read and written singly and in runs with their security status,
+ * AFI and DSFID and their locks; SLIX's system information, signature,
+ * random number, passwords, privacy mode, EAS).
  *
  * The description (scripts/fe_nfc.py writes it from a Flipper .nfc file) is
  * one "key value" per line:
@@ -24,7 +50,18 @@
  *   signature <32 bytes>    counter0 0 ... tearing0 BD ...
  *   pwd FF FF FF FF         pack 00 00
  *   mem <bytes>             (pages in order; may repeat)
- * or, for MIFARE Classic, "type mfc" and the blocks in mem (16 bytes each).
+ * or, for MIFARE Classic, "type mfc" and the blocks in mem (16 bytes each);
+ * or "type iso4" with
+ *   ats 06 75 77 81 02 80   app desfire
+ *   rec 01 <28 bytes>       (a record of the application's tables: a type
+ *                            and its bytes, see REC_* below; may repeat)
+ * or "type felica" with uid (the IDm), pmm, and in mem 18 bytes a block
+ * (two status bytes and its 16) for the 28 of a Lite-S in a dump's order;
+ * or "type iso15693" with uid (as it is printed, E0 first), dsfid, afi,
+ * icref, blocksize, lock (bit 0 DSFID, 1 AFI, 2 EAS, 3 PPL), mem (the
+ * blocks), security (a byte a block), and for a SLIX: slix 1, signature,
+ * pwd-read/-write/-privacy/-destroy/-eas (4 bytes each), privacy 0|1,
+ * protection <pointer> <condition>, accept-all 0|1.
  *
  * Copyright (c) 2026, Kara Zajac
  * SPDX-License-Identifier: BSD-3-Clause
@@ -34,15 +71,38 @@
 #include "qemu/timer.h"
 #include "qemu/bitops.h"
 #include "qemu/host-utils.h"
+#include "qemu/guest-random.h"
 #include "qapi/error.h"
 #include "migration/vmstate.h"
 #include "flipper.h"
 
 #define MEM_MAX 4096                    /* NTAG216: 231 pages; 4K Classic */
+#define APP_MAX 16384                   /* an ISO14443-4 application's tables */
 
 enum { ST_OFF, ST_IDLE, ST_READY, ST_ACTIVE, ST_HALT };
-enum { KIND_T2 = 1, KIND_MFC };
+enum { KIND_T2 = 1, KIND_MFC, KIND_ISO4, KIND_FELICA, KIND_V };
 enum { MFC_NONE, MFC_AUTH, MFC_ON };    /* Crypto1 session */
+enum { APP_NONE, APP_DESFIRE };         /* what runs on ISO14443-4 */
+/* what a DESFire ADDITIONAL FRAME goes on with */
+enum { DF_NONE, DF_VERSION_2, DF_VERSION_3, DF_DATA };
+
+/*
+ * A DESFire card's tables, as records in `app`: a type, the payload's
+ * length (2 bytes, low first), the payload.
+ *   REC_VERSION  the 28 bytes of GetVersion's three frames
+ *   REC_FREE     GetFreeMemory's 3 bytes (no record: the card has no such
+ *                command, as a DESFire before EV1)
+ *   REC_APP      an application (000000: the card itself): its AID (3),
+ *                GetKeySettings' 2 bytes, a key's version for each key
+ *   REC_FILE     a file: its application's AID (3), its number, the length
+ *                of GetFileSettings' answer and that answer, whether its
+ *                contents were read (1: yes), its contents
+ */
+#define REC_VERSION 0x01
+#define REC_FREE    0x02
+#define REC_APP     0x10
+#define REC_FILE    0x20
+#define DF_FRAME    59                  /* bytes of data to a frame */
 
 struct NfcCard {
     int kind;
@@ -61,6 +121,9 @@ struct NfcCard {
     uint8_t pwd[4], pack[2];
     bool authed;
     int comp_write;                     /* page awaiting COMPATIBILITY_WRITE */
+    bool ulc;                           /* MIFARE Ultralight C */
+    bool ulc_auth;                      /* AUTHENTICATE's second part awaited */
+    uint8_t ulc_rndb[8], ulc_iv[8];     /* its number, the last ciphertext */
     /* MIFARE Classic: mem holds the blocks */
     int mfc;                            /* MFC_*: where the session is */
     uint64_t lfsr;                      /* Crypto1 state, bit i = x_i */
@@ -69,7 +132,36 @@ struct NfcCard {
     bool key_b;
     int write_block;                    /* block awaiting WRITE data, -1 */
     int64_t power_ns;                   /* field on: the nonce PRNG runs */
+    /* ISO14443-4 */
+    uint8_t ats[20];
+    int ats_len;
+    bool dep;                           /* RATS answered: blocks from now on */
+    uint8_t dep_in[600];                /* a command that comes in parts */
+    int dep_in_len;
+    int app_kind;                       /* APP_* */
+    uint8_t app[APP_MAX];               /* its tables */
+    int app_len;
+    /* MIFARE DESFire */
+    uint8_t df_aid[3];                  /* the application that is selected */
+    int df_more;                        /* DF_*: what ADDITIONAL FRAME continues */
+    int df_at, df_left;                 /* ... and where in `app`, how much */
+    /* FeliCa: uid is the IDm, mem the blocks (18 bytes each) */
+    uint8_t pmm[8];
+    /* ISO15693: uid as it is printed (E0 first), mem the blocks */
+    uint8_t v_dsfid, v_afi, v_icref, v_bsize;
+    uint8_t v_lock;                     /* V_LOCK_* */
+    uint8_t v_sec[256];                 /* a block's security status */
+    bool v_quiet, v_selected;
+    bool slix;                          /* NXP's commands too */
+    uint8_t slix_pwd[5][4];             /* read, write, privacy, destroy, EAS */
+    uint8_t slix_pp[2];                 /* protection pointer and condition */
+    uint8_t slix_rnd[2];                /* the random number last given */
+    bool slix_privacy, slix_accept_all, slix_eas;
 };
+#define V_LOCK_DSFID 1
+#define V_LOCK_AFI   2
+#define V_LOCK_EAS   4
+#define V_LOCK_PPL   8
 
 /* ------------------------------------------------------------ answers */
 
@@ -96,6 +188,157 @@ static int ans4(uint8_t *out, uint8_t v)
 
 /* ------------------------------------------------------------ Type 2 */
 
+/* ------------------------------------------------------------------- DES
+ *
+ * FIPS 46-3, for the cards that use it (MIFARE Ultralight C's two-key
+ * triple DES).  Bits are numbered as the standard has them, 1 the highest
+ * of the first byte. */
+static const uint8_t des_ip[64] = {
+    58, 50, 42, 34, 26, 18, 10, 2, 60, 52, 44, 36, 28, 20, 12, 4,
+    62, 54, 46, 38, 30, 22, 14, 6, 64, 56, 48, 40, 32, 24, 16, 8,
+    57, 49, 41, 33, 25, 17, 9, 1, 59, 51, 43, 35, 27, 19, 11, 3,
+    61, 53, 45, 37, 29, 21, 13, 5, 63, 55, 47, 39, 31, 23, 15, 7 };
+static const uint8_t des_fp[64] = {
+    40, 8, 48, 16, 56, 24, 64, 32, 39, 7, 47, 15, 55, 23, 63, 31,
+    38, 6, 46, 14, 54, 22, 62, 30, 37, 5, 45, 13, 53, 21, 61, 29,
+    36, 4, 44, 12, 52, 20, 60, 28, 35, 3, 43, 11, 51, 19, 59, 27,
+    34, 2, 42, 10, 50, 18, 58, 26, 33, 1, 41, 9, 49, 17, 57, 25 };
+static const uint8_t des_e[48] = {
+    32, 1, 2, 3, 4, 5, 4, 5, 6, 7, 8, 9, 8, 9, 10, 11, 12, 13,
+    12, 13, 14, 15, 16, 17, 16, 17, 18, 19, 20, 21, 20, 21, 22, 23, 24, 25,
+    24, 25, 26, 27, 28, 29, 28, 29, 30, 31, 32, 1 };
+static const uint8_t des_p[32] = {
+    16, 7, 20, 21, 29, 12, 28, 17, 1, 15, 23, 26, 5, 18, 31, 10,
+    2, 8, 24, 14, 32, 27, 3, 9, 19, 13, 30, 6, 22, 11, 4, 25 };
+static const uint8_t des_pc1[56] = {
+    57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18,
+    10, 2, 59, 51, 43, 35, 27, 19, 11, 3, 60, 52, 44, 36,
+    63, 55, 47, 39, 31, 23, 15, 7, 62, 54, 46, 38, 30, 22,
+    14, 6, 61, 53, 45, 37, 29, 21, 13, 5, 28, 20, 12, 4 };
+static const uint8_t des_pc2[48] = {
+    14, 17, 11, 24, 1, 5, 3, 28, 15, 6, 21, 10, 23, 19, 12, 4,
+    26, 8, 16, 7, 27, 20, 13, 2, 41, 52, 31, 37, 47, 55, 30, 40,
+    51, 45, 33, 48, 44, 49, 39, 56, 34, 53, 46, 42, 50, 36, 29, 32 };
+static const uint8_t des_shift[16] = {
+    1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1 };
+static const uint8_t des_s[8][64] = {
+    { 14, 4, 13, 1, 2, 15, 11, 8, 3, 10, 6, 12, 5, 9, 0, 7,
+      0, 15, 7, 4, 14, 2, 13, 1, 10, 6, 12, 11, 9, 5, 3, 8,
+      4, 1, 14, 8, 13, 6, 2, 11, 15, 12, 9, 7, 3, 10, 5, 0,
+      15, 12, 8, 2, 4, 9, 1, 7, 5, 11, 3, 14, 10, 0, 6, 13 },
+    { 15, 1, 8, 14, 6, 11, 3, 4, 9, 7, 2, 13, 12, 0, 5, 10,
+      3, 13, 4, 7, 15, 2, 8, 14, 12, 0, 1, 10, 6, 9, 11, 5,
+      0, 14, 7, 11, 10, 4, 13, 1, 5, 8, 12, 6, 9, 3, 2, 15,
+      13, 8, 10, 1, 3, 15, 4, 2, 11, 6, 7, 12, 0, 5, 14, 9 },
+    { 10, 0, 9, 14, 6, 3, 15, 5, 1, 13, 12, 7, 11, 4, 2, 8,
+      13, 7, 0, 9, 3, 4, 6, 10, 2, 8, 5, 14, 12, 11, 15, 1,
+      13, 6, 4, 9, 8, 15, 3, 0, 11, 1, 2, 12, 5, 10, 14, 7,
+      1, 10, 13, 0, 6, 9, 8, 7, 4, 15, 14, 3, 11, 5, 2, 12 },
+    { 7, 13, 14, 3, 0, 6, 9, 10, 1, 2, 8, 5, 11, 12, 4, 15,
+      13, 8, 11, 5, 6, 15, 0, 3, 4, 7, 2, 12, 1, 10, 14, 9,
+      10, 6, 9, 0, 12, 11, 7, 13, 15, 1, 3, 14, 5, 2, 8, 4,
+      3, 15, 0, 6, 10, 1, 13, 8, 9, 4, 5, 11, 12, 7, 2, 14 },
+    { 2, 12, 4, 1, 7, 10, 11, 6, 8, 5, 3, 15, 13, 0, 14, 9,
+      14, 11, 2, 12, 4, 7, 13, 1, 5, 0, 15, 10, 3, 9, 8, 6,
+      4, 2, 1, 11, 10, 13, 7, 8, 15, 9, 12, 5, 6, 3, 0, 14,
+      11, 8, 12, 7, 1, 14, 2, 13, 6, 15, 0, 9, 10, 4, 5, 3 },
+    { 12, 1, 10, 15, 9, 2, 6, 8, 0, 13, 3, 4, 14, 7, 5, 11,
+      10, 15, 4, 2, 7, 12, 9, 5, 6, 1, 13, 14, 0, 11, 3, 8,
+      9, 14, 15, 5, 2, 8, 12, 3, 7, 0, 4, 10, 1, 13, 11, 6,
+      4, 3, 2, 12, 9, 5, 15, 10, 11, 14, 1, 7, 6, 0, 8, 13 },
+    { 4, 11, 2, 14, 15, 0, 8, 13, 3, 12, 9, 7, 5, 10, 6, 1,
+      13, 0, 11, 7, 4, 9, 1, 10, 14, 3, 5, 12, 2, 15, 8, 6,
+      1, 4, 11, 13, 12, 3, 7, 14, 10, 15, 6, 8, 0, 5, 9, 2,
+      6, 11, 13, 8, 1, 4, 10, 7, 9, 5, 0, 15, 14, 2, 3, 12 },
+    { 13, 2, 8, 4, 6, 15, 11, 1, 10, 9, 3, 14, 5, 0, 12, 7,
+      1, 15, 13, 8, 10, 3, 7, 4, 12, 5, 6, 11, 0, 14, 9, 2,
+      7, 11, 4, 1, 9, 12, 14, 2, 0, 6, 10, 13, 15, 3, 5, 8,
+      2, 1, 14, 7, 4, 10, 8, 13, 15, 12, 9, 0, 3, 5, 6, 11 } };
+
+/* the bits of `in` (its highest is bit 1 of `width`) that a table names */
+static uint64_t des_permute(uint64_t in, const uint8_t *table, int n,
+                            int width)
+{
+    uint64_t out = 0;
+
+    for (int i = 0; i < n; i++) {
+        out = out << 1 | ((in >> (width - table[i])) & 1);
+    }
+    return out;
+}
+
+/* one block through DES with a key of 8 bytes */
+static void des_block(const uint8_t key[8], const uint8_t in[8],
+                      uint8_t out[8], bool decrypt)
+{
+    uint64_t k = 0, b = 0, sub[16];
+    uint32_t c, d, l, r;
+
+    for (int i = 0; i < 8; i++) {
+        k = k << 8 | key[i];
+        b = b << 8 | in[i];
+    }
+    k = des_permute(k, des_pc1, 56, 64);
+    c = k >> 28;
+    d = k & 0x0FFFFFFF;
+    for (int i = 0; i < 16; i++) {
+        c = ((c << des_shift[i]) | (c >> (28 - des_shift[i]))) & 0x0FFFFFFF;
+        d = ((d << des_shift[i]) | (d >> (28 - des_shift[i]))) & 0x0FFFFFFF;
+        sub[i] = des_permute((uint64_t)c << 28 | d, des_pc2, 48, 56);
+    }
+    b = des_permute(b, des_ip, 64, 64);
+    l = b >> 32;
+    r = b;
+    for (int i = 0; i < 16; i++) {
+        uint64_t x = des_permute(r, des_e, 48, 32) ^ sub[decrypt ? 15 - i : i];
+        uint32_t f = 0, t;
+
+        for (int s = 0; s < 8; s++) {
+            int six = (x >> (42 - 6 * s)) & 0x3F;
+            int row = (six >> 4 & 2) | (six & 1), col = six >> 1 & 0xF;
+
+            f = f << 4 | des_s[s][row * 16 + col];
+        }
+        t = l ^ des_permute(f, des_p, 32, 32);
+        l = r;
+        r = t;
+    }
+    b = des_permute((uint64_t)r << 32 | l, des_fp, 64, 64);
+    for (int i = 7; i >= 0; i--) {
+        out[i] = b;
+        b >>= 8;
+    }
+}
+
+/* Triple DES with two keys (16 bytes: K1, K2, K1 again), in CBC: `iv` is
+ * the last block of ciphertext when it returns */
+static void tdes2_cbc(const uint8_t key[16], uint8_t iv[8], const uint8_t *in,
+                      uint8_t *out, int blocks, bool decrypt)
+{
+    for (int n = 0; n < blocks; n++, in += 8, out += 8) {
+        uint8_t x[8], y[8];
+
+        if (decrypt) {
+            des_block(key, in, x, true);
+            des_block(key + 8, x, y, false);
+            des_block(key, y, x, true);
+            for (int i = 0; i < 8; i++) {
+                y[i] = x[i] ^ iv[i];
+            }
+            memcpy(iv, in, 8);
+            memcpy(out, y, 8);
+        } else {
+            for (int i = 0; i < 8; i++) {
+                x[i] = in[i] ^ iv[i];
+            }
+            des_block(key, x, y, false);
+            des_block(key + 8, y, x, true);
+            des_block(key, x, out, false);
+            memcpy(iv, out, 8);
+        }
+    }
+}
+
 static int t2_pages(NfcCard *c)
 {
     return c->mem_len / 4;
@@ -112,6 +355,12 @@ static bool t2_readable(NfcCard *c, int page)
 {
     int cfg = t2_cfg(c);
 
+    if (c->ulc) {
+        /* the key's pages never; from AUTH0 (page 42) on with the key,
+         * unless AUTH1 (page 43) says that only writes need it */
+        return page < 44 && (c->authed || page < c->mem[42 * 4] ||
+                             (c->mem[43 * 4] & 1));
+    }
     if (cfg < 0 || c->authed) {
         return true;
     }
@@ -123,6 +372,9 @@ static bool t2_writable(NfcCard *c, int page)
 {
     int cfg = t2_cfg(c);
 
+    if (c->ulc) {
+        return page >= 2 && page < 48 && (c->authed || page < c->mem[42 * 4]);
+    }
     return page >= 2 && page < t2_pages(c) &&
            (cfg < 0 || c->authed || page < c->mem[cfg * 4 + 3]);
 }
@@ -157,6 +409,48 @@ static int t2_command(NfcCard *c, const uint8_t *f, int n, uint8_t *out)
             return ans4(out, 0xA);
         }
         return ans4(out, 0x0);
+    }
+    if (c->ulc) {
+        bool second = c->ulc_auth;
+
+        c->ulc_auth = false;
+        if (f[0] == 0x1A && n == 4 && f[1] == 0x00) {
+            /* AUTHENTICATE: the card's number, enciphered (IV 0) */
+            qemu_guest_getrandom_nofail(c->ulc_rndb, 8);
+            memset(c->ulc_iv, 0, 8);
+            buf[0] = 0xAF;
+            tdes2_cbc(&c->mem[44 * 4], c->ulc_iv, c->ulc_rndb, &buf[1], 1,
+                      false);
+            c->ulc_auth = true;
+            c->authed = false;
+            return ans(out, buf, 9, true);
+        }
+        if (f[0] == 0xAF && n == 19 && second) {
+            /* the reader's number and ours turned by a byte, enciphered
+             * on from our ciphertext: ours has to be right; then the
+             * reader's, turned, enciphered on from the reader's */
+            uint8_t plain[16], turned[8];
+
+            tdes2_cbc(&c->mem[44 * 4], c->ulc_iv, &f[1], plain, 2, true);
+            memcpy(turned, &c->ulc_rndb[1], 7);
+            turned[7] = c->ulc_rndb[0];
+            if (!memcmp(&plain[8], turned, 8)) {
+                memcpy(turned, &plain[1], 7);
+                turned[7] = plain[0];
+                buf[0] = 0x00;
+                tdes2_cbc(&c->mem[44 * 4], c->ulc_iv, turned, &buf[1], 1,
+                          false);
+                c->authed = true;
+                return ans(out, buf, 9, true);
+            }
+            c->state = ST_IDLE;         /* a wrong key: a NAK */
+            return ans4(out, 0x0);
+        }
+        if (f[0] != 0x30 && f[0] != 0xA2 && f[0] != 0xA0) {
+            c->state = ST_IDLE;         /* none of EV1's commands */
+            return ans4(out, 0x0);
+        }
+        pages = 44;                     /* (a READ rolls over before the key) */
     }
     switch (f[0]) {
     case 0x30:                          /* READ: 4 pages, rolling over */
@@ -608,6 +902,328 @@ static int mfc_crypto_frame(NfcCard *c, const uint8_t *air, int nbits, uint8_t *
     return mfc_nak(c, 0x4, out);
 }
 
+/* ------------------------------------------------------- MIFARE DESFire */
+
+/* The next record of a type from `at` on: where its payload is and how
+ * long (-1: none).  *at is then behind it. */
+static int rec_next(NfcCard *c, int *at, int type, int *len)
+{
+    while (*at + 3 <= c->app_len) {
+        int n = c->app[*at + 1] | c->app[*at + 2] << 8;
+        int here = *at + 3;
+        bool hit = c->app[*at] == type;
+
+        if (here + n > c->app_len) {
+            break;
+        }
+        *at = here + n;
+        if (hit) {
+            *len = n;
+            return here;
+        }
+    }
+    return -1;
+}
+
+static int df_app(NfcCard *c, const uint8_t aid[3], int *len)
+{
+    int at = 0, here;
+
+    while ((here = rec_next(c, &at, REC_APP, len)) >= 0) {
+        if (*len >= 3 && !memcmp(&c->app[here], aid, 3)) {
+            return here;
+        }
+    }
+    return -1;
+}
+
+/* a file of the selected application: where its settings' length is */
+static int df_file(NfcCard *c, uint8_t id, int *len)
+{
+    int at = 0, here;
+
+    while ((here = rec_next(c, &at, REC_FILE, len)) >= 0) {
+        if (*len >= 6 && !memcmp(&c->app[here], c->df_aid, 3) &&
+            c->app[here + 3] == id) {
+            return here;
+        }
+    }
+    return -1;
+}
+
+static uint32_t le24(const uint8_t *b)
+{
+    return b[0] | b[1] << 8 | (uint32_t)b[2] << 16;
+}
+
+/* the next frame's worth of what is being read; its status says if more */
+static int df_frame(NfcCard *c, uint8_t *d, uint8_t *st)
+{
+    int n = MIN(c->df_left, DF_FRAME);
+
+    memcpy(d, &c->app[c->df_at], n);
+    c->df_at += n;
+    c->df_left -= n;
+    c->df_more = c->df_left ? DF_DATA : DF_NONE;
+    *st = c->df_left ? 0xAF : 0x00;
+    return n;
+}
+
+/* A file's contents from `off`, `want` bytes of them (0: to its end).
+ * records: `off` and `want` count records, the newest first, as ReadRecords
+ * has it (the file's settings say how long one is and how many there are) */
+static int df_read(NfcCard *c, const uint8_t *p, int pn, uint8_t *d,
+                   uint8_t *st, bool records)
+{
+    int len, here = pn >= 7 ? df_file(c, p[0], &len) : -1;
+    int nset, data, size;
+    uint32_t off, want;
+
+    if (pn < 7) {
+        *st = 0x7E;                     /* LENGTH_ERROR */
+        return 0;
+    }
+    if (here < 0) {
+        *st = 0xF0;                     /* FILE_NOT_FOUND */
+        return 0;
+    }
+    nset = c->app[here + 4];
+    data = here + 5 + nset + 1;
+    size = here + len - data;
+    if (5 + nset + 1 > len || !c->app[here + 5 + nset]) {
+        *st = 0xAE;                     /* AUTHENTICATION_ERROR: not ours */
+        return 0;
+    }
+    off = le24(p + 1);
+    want = le24(p + 4);
+    if (records) {
+        uint32_t one = nset >= 13 ? le24(&c->app[here + 9]) : 0;
+        uint32_t have = one ? MIN(le24(&c->app[here + 15]), size / one) : 0;
+
+        if (!one || off >= have || want > have - off) {
+            *st = 0xBE;
+            return 0;
+        }
+        want = (want ? want : have - off) * one;
+        off = (have - off) * one - want;
+    }
+    if (off > size || want > size - off) {
+        *st = 0xBE;                     /* BOUNDARY_ERROR */
+        return 0;
+    }
+    c->df_at = data + off;
+    c->df_left = want ? want : size - off;
+    return df_frame(c, d, st);
+}
+
+/* A DESFire command (native, or wrapped: 90 INS 00 00 Lc data 00) -> its
+ * answer (a status and data; wrapped: data and 91 status) */
+static int df_command(NfcCard *c, const uint8_t *in, int n, uint8_t *out)
+{
+    bool wrapped = n >= 5 && in[0] == 0x90;
+    uint8_t cmd = wrapped ? in[1] : in[0];
+    const uint8_t *p = wrapped ? in + 5 : in + 1;
+    int pn = wrapped ? MIN(in[4], n - 5) : n - 1;
+    uint8_t d[DF_FRAME + 4], st = 0x00;
+    int dn = 0, len, here, at = 0, more = c->df_more;
+
+    c->df_more = DF_NONE;
+    switch (cmd) {
+    case 0x60:                          /* GetVersion: three frames */
+        here = rec_next(c, &at, REC_VERSION, &len);
+        if (here < 0 || len != 28) {
+            st = 0x1C;
+            break;
+        }
+        memcpy(d, &c->app[here], dn = 7);
+        c->df_at = here + 7;
+        c->df_more = DF_VERSION_2;
+        st = 0xAF;
+        break;
+    case 0xAF:                          /* ADDITIONAL FRAME */
+        if (more == DF_VERSION_2) {
+            memcpy(d, &c->app[c->df_at], dn = 7);
+            c->df_at += 7;
+            c->df_more = DF_VERSION_3;
+            st = 0xAF;
+        } else if (more == DF_VERSION_3) {
+            memcpy(d, &c->app[c->df_at], dn = 14);
+        } else if (more == DF_DATA) {
+            dn = df_frame(c, d, &st);
+        } else {
+            st = 0xCA;                  /* COMMAND_ABORTED */
+        }
+        break;
+    case 0x6E:                          /* GetFreeMemory */
+        here = rec_next(c, &at, REC_FREE, &len);
+        if (here < 0 || len != 3) {
+            st = 0x1C;                  /* ILLEGAL_COMMAND_CODE */
+            break;
+        }
+        memcpy(d, &c->app[here], dn = 3);
+        break;
+    case 0x45:                          /* GetKeySettings */
+        here = df_app(c, c->df_aid, &len);
+        if (here < 0 || len < 5) {
+            st = 0xAE;
+            break;
+        }
+        memcpy(d, &c->app[here + 3], dn = 2);
+        break;
+    case 0x64:                          /* GetKeyVersion */
+        here = df_app(c, c->df_aid, &len);
+        if (pn < 1 || here < 0 || len < 5) {
+            st = pn < 1 ? 0x7E : 0xAE;
+        } else if (p[0] >= len - 5) {
+            st = 0x40;                  /* NO_SUCH_KEY */
+        } else {
+            d[dn++] = c->app[here + 5 + p[0]];
+        }
+        break;
+    case 0x6A:                          /* GetApplicationIDs */
+        if (c->df_aid[0] | c->df_aid[1] | c->df_aid[2]) {
+            st = 0x9D;                  /* PERMISSION_DENIED: at the card's */
+            break;
+        }
+        while ((here = rec_next(c, &at, REC_APP, &len)) >= 0) {
+            const uint8_t *aid = &c->app[here];
+
+            if (len >= 3 && (aid[0] | aid[1] | aid[2]) && dn + 3 <= 57) {
+                memcpy(&d[dn], aid, 3);
+                dn += 3;
+            }
+        }
+        break;
+    case 0x5A:                          /* SelectApplication */
+        if (pn < 3) {
+            st = 0x7E;
+        } else if ((p[0] | p[1] | p[2]) && df_app(c, p, &len) < 0) {
+            st = 0xA0;                  /* APPLICATION_NOT_FOUND */
+        } else {
+            memcpy(c->df_aid, p, 3);
+        }
+        break;
+    case 0x6F:                          /* GetFileIDs */
+        if (!(c->df_aid[0] | c->df_aid[1] | c->df_aid[2])) {
+            st = 0x9D;
+            break;
+        }
+        while ((here = rec_next(c, &at, REC_FILE, &len)) >= 0) {
+            if (len >= 6 && !memcmp(&c->app[here], c->df_aid, 3) && dn < 32) {
+                d[dn++] = c->app[here + 3];
+            }
+        }
+        break;
+    case 0xF5:                          /* GetFileSettings */
+        here = pn >= 1 ? df_file(c, p[0], &len) : -1;
+        if (here < 0) {
+            st = pn < 1 ? 0x7E : 0xF0;
+            break;
+        }
+        dn = MIN(c->app[here + 4], len - 5);
+        memcpy(d, &c->app[here + 5], dn);
+        break;
+    case 0xBD:                          /* ReadData */
+    case 0xBB:                          /* ReadRecords */
+        dn = df_read(c, p, pn, d, &st, cmd == 0xBB);
+        break;
+    case 0x6C: {                        /* GetValue */
+        uint8_t all[7] = { pn >= 1 ? p[0] : 0, 0, 0, 0, 4, 0, 0 };
+
+        dn = df_read(c, all, pn >= 1 ? 7 : 0, d, &st, false);
+        break;
+    }
+    case 0x0A: case 0x1A: case 0xAA:    /* Authenticate: no key is ours */
+        st = 0xAE;
+        break;
+    default:
+        st = 0x1C;
+        break;
+    }
+    if (wrapped) {
+        memcpy(out, d, dn);
+        out[dn] = 0x91;
+        out[dn + 1] = st;
+        return dn + 2;
+    }
+    out[0] = st;
+    memcpy(out + 1, d, dn);
+    return dn + 1;
+}
+
+/* ------------------------------------------------------------ ISO14443-4 */
+
+/* A whole command to the application that runs on the card -> its answer */
+static int app_command(NfcCard *c, const uint8_t *in, int n, uint8_t *out)
+{
+    if (c->app_kind == APP_DESFIRE && n >= 1) {
+        return df_command(c, in, n, out);
+    }
+    out[0] = 0x6D;                      /* ISO 7816: INS not supported */
+    out[1] = 0x00;
+    return 2;
+}
+
+/* a frame to an ISO14443-4 card that is selected (f: with its CRC_A) */
+static int iso4_frame(NfcCard *c, const uint8_t *f, int n, uint8_t *out)
+{
+    uint8_t r[300], pcb = f[0];
+    int at = 1, rn = 0, len = n - 2;
+
+    if (!c->dep) {
+        if (pcb == 0xE0 && n == 4) {    /* RATS */
+            c->dep = true;
+            c->dep_in_len = 0;
+            return ans(out, c->ats, c->ats_len, true);
+        }
+        card_reset(c, ST_IDLE);         /* not ours: silence, and from anew */
+        return 0;
+    }
+    if ((pcb & 0xF0) == 0xD0) {         /* PPS: as asked */
+        return ans(out, &pcb, 1, true);
+    }
+    if (pcb & 0x08) {                   /* a CID follows (ours is 0) */
+        r[1] = f[at++];
+    }
+    if ((pcb & 0xC0) == 0xC0) {         /* S-block */
+        if ((pcb & 0x30) == 0x00) {     /* DESELECT: said back, then halted */
+            r[0] = pcb;
+            rn = ans(out, r, at, true);
+            card_reset(c, ST_HALT);
+            return rn;
+        }
+        return 0;
+    }
+    if ((pcb & 0xC0) == 0x80) {         /* R-block */
+        if (pcb & 0x10) {               /* R(NAK): we are here */
+            r[0] = 0xA2 | (pcb & 0x09);
+            return ans(out, r, at, true);
+        }
+        return 0;                       /* R(ACK): we send nothing in parts */
+    }
+    if (pcb & 0xC0) {
+        return 0;
+    }
+    if (pcb & 0x04) {                   /* a NAD */
+        at++;
+    }
+    if (at > len || c->dep_in_len + len - at > sizeof(c->dep_in)) {
+        c->dep_in_len = 0;
+        return 0;
+    }
+    memcpy(&c->dep_in[c->dep_in_len], &f[at], len - at);
+    c->dep_in_len += len - at;
+    if (pcb & 0x10) {                   /* more to come: R(ACK) */
+        r[0] = 0xA2 | (pcb & 0x09);
+        return ans(out, r, pcb & 0x08 ? 2 : 1, true);
+    }
+    r[0] = 0x02 | (pcb & 0x09);         /* an I-block with its number */
+    rn = pcb & 0x08 ? 2 : 1;
+    rn += app_command(c, c->dep_in, c->dep_in_len, &r[rn]);
+    c->dep_in_len = 0;
+    return ans(out, r, rn, true);
+}
+
 /* ------------------------------------------------------------ ISO14443-3A */
 
 static void card_reset(NfcCard *c, int state)
@@ -615,9 +1231,15 @@ static void card_reset(NfcCard *c, int state)
     c->state = state;
     c->level = 0;
     c->authed = false;
+    c->ulc_auth = false;
     c->comp_write = -1;
     c->mfc = MFC_NONE;
     c->write_block = -1;
+    c->dep = false;
+    c->dep_in_len = 0;
+    c->df_more = DF_NONE;
+    memset(c->df_aid, 0, 3);
+    c->v_quiet = c->v_selected = false; /* (a field that went and came) */
 }
 
 /* the UID bytes of cascade level `level`, with the cascade tag if needed */
@@ -645,8 +1267,8 @@ int nfc_card_rx(NfcCard *c, const uint8_t *air, int nbits, uint8_t *out)
     bool parity_ok;
     int n, levels = c->uid_len == 4 ? 1 : c->uid_len == 7 ? 2 : 3;
 
-    if (c->state == ST_OFF) {
-        return 0;
+    if (c->state == ST_OFF || c->kind >= KIND_FELICA) {
+        return 0;                       /* (no ISO14443A card) */
     }
     if (c->kind == KIND_MFC && c->state == ST_ACTIVE && c->mfc != MFC_NONE) {
         if (nbits != 7) {
@@ -718,6 +1340,400 @@ int nfc_card_rx(NfcCard *c, const uint8_t *air, int nbits, uint8_t *out)
             return mfc_auth(c, f[0] == 0x61, f[1], false, out);
         }
         return 0;                       /* anything else needs a session */
+    case KIND_ISO4:
+        return iso4_frame(c, f, n, out);
+    }
+    return 0;
+}
+
+/* ---------------------------------------------------------------- FeliCa */
+
+/* CRC-16 as FeliCa has it (x^16 + x^12 + x^5 + 1 from 0, the high byte
+ * first) */
+static uint16_t felica_crc(const uint8_t *d, int n)
+{
+    uint16_t crc = 0;
+
+    for (int i = 0; i < n; i++) {
+        crc ^= d[i] << 8;
+        for (int b = 0; b < 8; b++) {
+            crc = crc & 0x8000 ? crc << 1 ^ 0x1021 : crc << 1;
+        }
+    }
+    return crc;
+}
+
+/* where a Lite-S's block is in a dump (-1: it has no such block): 0x00 to
+ * 0x0E, 0x80 to 0x88, 0x90 to 0x92, 0xA0 */
+static int felica_block(NfcCard *c, int number)
+{
+    int at = number <= 0x0E ? number :
+             number >= 0x80 && number <= 0x88 ? 15 + number - 0x80 :
+             number >= 0x90 && number <= 0x92 ? 24 + number - 0x90 :
+             number == 0xA0 ? 27 : -1;
+
+    return at >= 0 && (at + 1) * 18 <= c->mem_len ? at : -1;
+}
+
+/* A frame: its length (itself and what follows, less the CRC), the
+ * command, what the command has, the CRC */
+static int felica_frame(NfcCard *c, const uint8_t *in, int n, uint8_t *out,
+                        int max)
+{
+    uint8_t r[280];
+    int len = n >= 4 ? in[0] : 0, rn = 0, count, at;
+    const uint8_t *list;
+    uint16_t crc;
+
+    if (len < 2 || len + 2 != n || felica_crc(in, n) != 0) {
+        return 0;
+    }
+    switch (in[1]) {
+    case 0x00:                          /* Polling: a system code, or any */
+        if (len != 6 || ((in[2] != 0xFF || in[3] != 0xFF) &&
+                         (in[2] != 0x88 || in[3] != 0xB4))) {
+            return 0;
+        }
+        r[1] = 0x01;
+        memcpy(&r[2], c->uid, 8);
+        memcpy(&r[10], c->pmm, 8);
+        rn = 18;
+        if (in[4] == 0x01) {            /* the system code asked for */
+            r[rn++] = 0x88;
+            r[rn++] = 0xB4;
+        }
+        break;
+    case 0x06:                          /* Read Without Encryption */
+    case 0x08:                          /* Write Without Encryption */
+        /* IDm, one service and its code, the blocks: two bytes each */
+        if (len < 16 || memcmp(&in[2], c->uid, 8) || in[10] != 1) {
+            return 0;
+        }
+        count = in[13];
+        list = &in[14];
+        r[1] = in[1] + 1;
+        memcpy(&r[2], c->uid, 8);
+        r[10] = r[11] = 0;
+        rn = 12;
+        if (count < 1 || count > 4 || 14 + 2 * count +
+            (in[1] == 0x08 ? 16 * count : 0) != len) {
+            r[10] = 0xFF;               /* the block list as it is: no such */
+            r[11] = 0xA2;
+            break;
+        }
+        for (int i = 0; i < count && !r[10]; i++) {
+            at = (list[2 * i] & 0x80) ? felica_block(c, list[2 * i + 1]) : -1;
+            if (at < 0) {
+                r[10] = 1 << i;         /* (which block of the list) */
+                r[11] = 0xA8;           /* an illegal block number */
+            } else if (in[1] == 0x06 && c->mem[at * 18]) {
+                r[10] = c->mem[at * 18];        /* as the dump had it */
+                r[11] = c->mem[at * 18 + 1];
+            } else if (in[1] == 0x08 && list[2 * i + 1] > 0x0E &&
+                       list[2 * i + 1] != 0x80 && list[2 * i + 1] != 0x92 &&
+                       list[2 * i + 1] != 0x91) {
+                r[10] = 1 << i;         /* not one that is written so */
+                r[11] = 0xA8;
+            }
+        }
+        if (r[10]) {
+            break;
+        }
+        if (in[1] == 0x08) {
+            for (int i = 0; i < count; i++) {
+                at = felica_block(c, list[2 * i + 1]);
+                memcpy(&c->mem[at * 18 + 2], &list[2 * count + 16 * i], 16);
+            }
+            break;
+        }
+        r[rn++] = count;
+        for (int i = 0; i < count; i++) {
+            at = felica_block(c, list[2 * i + 1]);
+            memcpy(&r[rn], &c->mem[at * 18 + 2], 16);
+            rn += 16;
+        }
+        break;
+    default:
+        return 0;                       /* a Lite-S has no other */
+    }
+    r[0] = rn;
+    crc = felica_crc(r, rn);
+    r[rn++] = crc >> 8;
+    r[rn++] = crc & 0xFF;
+    if (rn > max) {
+        return 0;
+    }
+    memcpy(out, r, rn);
+    return rn;
+}
+
+/* -------------------------------------------------------------- ISO15693 */
+
+/* CRC-16 as ISO15693 has it (ISO/IEC 13239: reflected, from 0xFFFF,
+ * inverted, the low byte first) */
+static uint16_t v_crc(const uint8_t *d, int n)
+{
+    uint16_t crc = 0xFFFF;
+
+    for (int i = 0; i < n; i++) {
+        crc ^= d[i];
+        for (int b = 0; b < 8; b++) {
+            crc = crc & 1 ? crc >> 1 ^ 0x8408 : crc >> 1;
+        }
+    }
+    return ~crc;
+}
+
+static int v_blocks(NfcCard *c)
+{
+    return c->v_bsize ? c->mem_len / c->v_bsize : 0;
+}
+
+/* a request's answer: its flags (0, or 1 and an error's code), its data */
+static int v_command(NfcCard *c, const uint8_t *in, int n, uint8_t *r)
+{
+    uint8_t flags = in[0], cmd = in[1];
+    bool inventory = flags & 0x04, option = flags & 0x40;
+    int at = 2, rn = 1, blocks = v_blocks(c), first, count;
+    uint8_t uid[8];
+
+    for (int i = 0; i < 8; i++) {
+        uid[i] = c->uid[7 - i];         /* on the air: the low byte first */
+    }
+    r[0] = 0;
+#define V_ERROR(code) do { r[0] = 1; r[1] = (code); return 2; } while (0)
+    if (cmd >= 0xA0) {                  /* a manufacturer's: its code (NXP) */
+        if (!c->slix || at >= n || in[at++] != 0x04) {
+            return 0;
+        }
+    }
+    if (c->slix_privacy && cmd != 0xB2 && cmd != 0xB3) {
+        return 0;                       /* in privacy mode: silence */
+    }
+    if (inventory) {
+        int mask;
+
+        if (cmd != 0x01 || c->v_quiet) {
+            return 0;
+        }
+        if (flags & 0x10) {             /* an AFI to match */
+            if (at >= n || (in[at] && in[at] != c->v_afi)) {
+                return 0;
+            }
+            at++;
+        }
+        mask = at < n ? in[at++] : 0;
+        if (mask > 64 || at + (mask + 7) / 8 > n) {
+            return 0;
+        }
+        for (int i = 0; i < mask; i++) {
+            if (((in[at + i / 8] ^ uid[i / 8]) >> (i % 8)) & 1) {
+                return 0;
+            }
+        }
+        r[rn++] = c->v_dsfid;
+        memcpy(&r[rn], uid, 8);
+        return rn + 8;
+    }
+    if (flags & 0x20) {                 /* addressed: to this UID alone */
+        if (at + 8 > n || memcmp(&in[at], uid, 8)) {
+            return 0;
+        }
+        at += 8;
+    } else if (flags & 0x10) {          /* to the selected one */
+        if (!c->v_selected) {
+            return 0;
+        }
+    } else if (c->v_quiet) {
+        return 0;
+    }
+    switch (cmd) {
+    case 0x02:                          /* Stay quiet */
+        c->v_quiet = true;
+        return 0;
+    case 0x25:                          /* Select */
+        c->v_selected = true;
+        c->v_quiet = false;
+        break;
+    case 0x26:                          /* Reset to ready */
+        c->v_selected = c->v_quiet = false;
+        break;
+    case 0x20:                          /* Read single block */
+    case 0x23:                          /* Read multiple blocks */
+        if (at >= n || (cmd == 0x23 && at + 1 >= n)) {
+            V_ERROR(0x02);
+        }
+        first = in[at];
+        count = cmd == 0x23 ? in[at + 1] + 1 : 1;
+        if (first >= blocks || count > blocks - first ||
+            count * (c->v_bsize + option) > 120) {
+            V_ERROR(0x10);              /* no such block */
+        }
+        for (int b = first; b < first + count; b++) {
+            if (option) {
+                r[rn++] = c->v_sec[b];
+            }
+            memcpy(&r[rn], &c->mem[b * c->v_bsize], c->v_bsize);
+            rn += c->v_bsize;
+        }
+        break;
+    case 0x21:                          /* Write single block */
+        if (at + 1 + c->v_bsize > n) {
+            V_ERROR(0x02);
+        }
+        first = in[at];
+        if (first >= blocks) {
+            V_ERROR(0x10);
+        }
+        if (c->v_sec[first] & 1) {
+            V_ERROR(0x12);              /* the block is locked */
+        }
+        memcpy(&c->mem[first * c->v_bsize], &in[at + 1], c->v_bsize);
+        break;
+    case 0x22:                          /* Lock block */
+        if (at >= n || in[at] >= blocks) {
+            V_ERROR(0x10);
+        }
+        if (c->v_sec[in[at]] & 1) {
+            V_ERROR(0x11);              /* locked already */
+        }
+        c->v_sec[in[at]] |= 1;
+        break;
+    case 0x27:                          /* Write AFI */
+    case 0x29:                          /* Write DSFID */
+        if (at >= n) {
+            V_ERROR(0x02);
+        }
+        if (c->v_lock & (cmd == 0x27 ? V_LOCK_AFI : V_LOCK_DSFID)) {
+            V_ERROR(0x12);
+        }
+        *(cmd == 0x27 ? &c->v_afi : &c->v_dsfid) = in[at];
+        break;
+    case 0x28:                          /* Lock AFI */
+    case 0x2A:                          /* Lock DSFID */
+        if (c->v_lock & (cmd == 0x28 ? V_LOCK_AFI : V_LOCK_DSFID)) {
+            V_ERROR(0x11);
+        }
+        c->v_lock |= cmd == 0x28 ? V_LOCK_AFI : V_LOCK_DSFID;
+        break;
+    case 0x2B:                          /* Get system information */
+        r[rn++] = 0x0F;                 /* DSFID, AFI, memory, IC reference */
+        memcpy(&r[rn], uid, 8);
+        rn += 8;
+        r[rn++] = c->v_dsfid;
+        r[rn++] = c->v_afi;
+        r[rn++] = blocks - 1;
+        r[rn++] = c->v_bsize - 1;
+        r[rn++] = c->v_icref;
+        break;
+    case 0x2C:                          /* Get multiple block security status */
+        if (at + 1 >= n) {
+            V_ERROR(0x02);
+        }
+        first = in[at];
+        count = in[at + 1] + 1;
+        if (first >= blocks || count > blocks - first || count > 120) {
+            V_ERROR(0x10);
+        }
+        memcpy(&r[rn], &c->v_sec[first], count);
+        rn += count;
+        break;
+    /* ---- NXP's (SLIX, SLIX2) */
+    case 0xA2:                          /* Set EAS */
+    case 0xA3:                          /* Reset EAS */
+        if (c->v_lock & V_LOCK_EAS) {
+            V_ERROR(0x12);
+        }
+        c->slix_eas = cmd == 0xA2;
+        break;
+    case 0xA4:                          /* Lock EAS */
+        c->v_lock |= V_LOCK_EAS;
+        break;
+    case 0xAB:                          /* Get NXP system information */
+        r[rn++] = c->slix_pp[0];
+        r[rn++] = c->slix_pp[1];
+        r[rn++] = (c->v_lock & V_LOCK_AFI ? 1 : 0) |
+                  (c->v_lock & V_LOCK_EAS ? 2 : 0) |
+                  (c->v_lock & V_LOCK_DSFID ? 4 : 0) |
+                  (c->v_lock & V_LOCK_PPL ? 8 : 0);
+        memset(&r[rn], 0, 4);           /* feature flags */
+        rn += 4;
+        break;
+    case 0xB2:                          /* Get random number */
+        qemu_guest_getrandom_nofail(c->slix_rnd, 2);
+        memcpy(&r[rn], c->slix_rnd, 2);
+        rn += 2;
+        break;
+    case 0xB3: {                        /* Set password: it XOR the number */
+        static const uint8_t ids[5] = { 0x01, 0x02, 0x04, 0x08, 0x10 };
+        int which = -1;
+
+        if (at + 5 > n) {
+            V_ERROR(0x02);
+        }
+        for (int i = 0; i < 5; i++) {
+            which = in[at] == ids[i] ? i : which;
+        }
+        if (which < 0) {
+            V_ERROR(0x0F);
+        }
+        for (int i = 0; i < 4 && !c->slix_accept_all; i++) {
+            if ((in[at + 1 + i] ^ c->slix_rnd[i % 2]) != c->slix_pwd[which][i]) {
+                return 0;               /* a wrong one: silence */
+            }
+        }
+        if (which == 2) {
+            c->slix_privacy = false;    /* the privacy password ends it */
+        }
+        break;
+    }
+    case 0xBA:                          /* Enable privacy */
+        c->slix_privacy = true;
+        break;
+    case 0xBD:                          /* Read signature */
+        memcpy(&r[rn], c->sig, 32);
+        rn += 32;
+        break;
+    default:
+        V_ERROR(0x01);                  /* not supported */
+    }
+#undef V_ERROR
+    return rn;
+}
+
+static int v_frame(NfcCard *c, const uint8_t *in, int n, uint8_t *out, int max)
+{
+    uint8_t r[140];
+    uint16_t crc;
+    int rn;
+
+    if (n < 4 || v_crc(in, n - 2) != (in[n - 2] | in[n - 1] << 8)) {
+        return 0;
+    }
+    rn = v_command(c, in, n - 2, r);
+    if (rn <= 0 || rn + 2 > max) {
+        return 0;
+    }
+    crc = v_crc(r, rn);
+    memcpy(out, r, rn);
+    out[rn] = crc & 0xFF;
+    out[rn + 1] = crc >> 8;
+    return rn + 2;
+}
+
+/* A frame of a technology whose frames are bytes (ISO14443B, FeliCa,
+ * ISO15693), to a card of that technology -> its answer's bytes (0: none) */
+int nfc_card_bytes(NfcCard *c, int tech, const uint8_t *in, int n,
+                   uint8_t *out, int max)
+{
+    if (c->state == ST_OFF) {
+        return 0;
+    }
+    if (tech == NFC_TECH_F && c->kind == KIND_FELICA) {
+        return felica_frame(c, in, n, out, max);
+    }
+    if (tech == NFC_TECH_V && c->kind == KIND_V) {
+        return v_frame(c, in, n, out, max);
     }
     return 0;
 }
@@ -784,6 +1800,12 @@ NfcCard *nfc_card_new(const char *desc, Error **errp)
                 c->kind = KIND_T2;
             } else if (!strcmp(val, "mfc")) {
                 c->kind = KIND_MFC;
+            } else if (!strcmp(val, "iso4")) {
+                c->kind = KIND_ISO4;
+            } else if (!strcmp(val, "felica")) {
+                c->kind = KIND_FELICA;
+            } else if (!strcmp(val, "iso15693")) {
+                c->kind = KIND_V;
             } else {
                 error_setg(errp, "nfc card: unsupported type '%s'", val);
                 return NULL;
@@ -794,16 +1816,83 @@ NfcCard *nfc_card_new(const char *desc, Error **errp)
             c->counter[line[7] - '0'] = strtoul(val, NULL, 0);
             continue;
         }
+        if (!strcmp(line, "app")) {
+            if (!strcmp(g_strstrip(val), "desfire")) {
+                c->app_kind = APP_DESFIRE;
+            } else if (!strcmp(val, "none")) {
+                c->app_kind = APP_NONE;
+            } else {
+                error_setg(errp, "nfc card: no application '%s'", val);
+                return NULL;
+            }
+            continue;
+        }
+        if (!strcmp(line, "rec")) {     /* a record: its type, its payload */
+            g_autofree uint8_t *b = g_malloc(APP_MAX);
+            int got = parse_hex(val, b, APP_MAX);
+
+            if (got < 1 || c->app_len + 2 + got > APP_MAX) {
+                error_setg(errp, "nfc card: a record that is none, or more "
+                           "of them than %d bytes", APP_MAX);
+                return NULL;
+            }
+            c->app[c->app_len] = b[0];
+            c->app[c->app_len + 1] = (got - 1) & 0xFF;
+            c->app[c->app_len + 2] = (got - 1) >> 8;
+            memcpy(&c->app[c->app_len + 3], b + 1, got - 1);
+            c->app_len += 2 + got;
+            continue;
+        }
         if (!strcmp(line, "uid")) {
             n = c->uid_len = parse_hex(val, c->uid, 10);
-            if (n != 4 && n != 7 && n != 10) {
-                error_setg(errp, "nfc card: a UID is 4, 7 or 10 bytes");
+            if (n != 4 && n != 7 && n != 8 && n != 10) {
+                error_setg(errp, "nfc card: a UID is 4, 7 or 10 bytes (8: a "
+                           "FeliCa card's IDm, an ISO15693 card's UID)");
                 return NULL;
+            }
+        } else if (!strcmp(line, "pmm")) {
+            n = parse_hex(val, c->pmm, 8) == 8 ? 8 : -1;
+        } else if (!strcmp(line, "dsfid")) {
+            n = parse_hex(val, &c->v_dsfid, 1);
+        } else if (!strcmp(line, "afi")) {
+            n = parse_hex(val, &c->v_afi, 1);
+        } else if (!strcmp(line, "icref")) {
+            n = parse_hex(val, &c->v_icref, 1);
+        } else if (!strcmp(line, "blocksize")) {
+            n = parse_hex(val, &c->v_bsize, 1);
+        } else if (!strcmp(line, "lock")) {
+            n = parse_hex(val, &c->v_lock, 1);
+        } else if (!strcmp(line, "security")) {
+            n = parse_hex(val, c->v_sec, sizeof(c->v_sec));
+        } else if (!strcmp(line, "ulc")) {
+            c->ulc = strtoul(val, NULL, 0) != 0;
+        } else if (!strcmp(line, "slix")) {
+            c->slix = strtoul(val, NULL, 0) != 0;
+        } else if (!strcmp(line, "privacy")) {
+            c->slix_privacy = strtoul(val, NULL, 0) != 0;
+        } else if (!strcmp(line, "accept-all")) {
+            c->slix_accept_all = strtoul(val, NULL, 0) != 0;
+        } else if (!strcmp(line, "protection")) {
+            n = parse_hex(val, c->slix_pp, 2) == 2 ? 2 : -1;
+        } else if (!strncmp(line, "pwd-", 4)) {
+            static const char *const names[5] = { "read", "write", "privacy",
+                                                  "destroy", "eas" };
+            n = -1;
+            for (int k = 0; k < 5; k++) {
+                if (!strcmp(line + 4, names[k])) {
+                    n = parse_hex(val, c->slix_pwd[k], 4) == 4 ? 4 : -1;
+                }
             }
         } else if (!strcmp(line, "atqa")) {
             n = parse_hex(val, c->atqa, 2) == 2 ? 2 : -1;
         } else if (!strcmp(line, "sak")) {
             n = parse_hex(val, &c->sak, 1);
+        } else if (!strcmp(line, "ats")) {
+            n = c->ats_len = parse_hex(val, c->ats, sizeof(c->ats));
+            if (n < 1 || c->ats[0] != n) {
+                error_setg(errp, "nfc card: an ATS begins with its length");
+                return NULL;
+            }
         } else if (!strcmp(line, "version")) {
             n = parse_hex(val, c->version, 8);
             c->has_version = n == 8;
@@ -837,13 +1926,50 @@ NfcCard *nfc_card_new(const char *desc, Error **errp)
         error_setg(errp, "nfc card: a Type 2 tag needs its pages (mem)");
         return NULL;
     }
+    if (c->ulc && (c->kind != KIND_T2 || c->mem_len != 48 * 4)) {
+        error_setg(errp, "nfc card: a MIFARE Ultralight C is a Type 2 tag of "
+                   "48 pages");
+        return NULL;
+    }
     if (c->kind == KIND_MFC && c->mem_len != 20 * 16 && c->mem_len != 64 * 16 &&
         c->mem_len != 256 * 16) {
         error_setg(errp, "nfc card: MIFARE Classic Mini, 1K or 4K: 20, 64 or "
                    "256 blocks of 16 bytes (got %d bytes)", c->mem_len);
         return NULL;
     }
-    c->mem_len &= ~3;
+    if ((c->kind == KIND_FELICA || c->kind == KIND_V) != (c->uid_len == 8)) {
+        error_setg(errp, "nfc card: a FeliCa card's IDm and an ISO15693 "
+                   "card's UID are 8 bytes, and no other card's is");
+        return NULL;
+    }
+    if (c->kind == KIND_FELICA && c->mem_len != 28 * 18) {
+        error_setg(errp, "nfc card: a FeliCa Lite-S has 28 blocks, 18 bytes "
+                   "each here (two of status, 16 of data): got %d bytes",
+                   c->mem_len);
+        return NULL;
+    }
+    if (c->kind == KIND_V && (c->v_bsize < 1 || c->v_bsize > 32 ||
+                              c->mem_len < c->v_bsize ||
+                              c->mem_len / c->v_bsize > 256)) {
+        error_setg(errp, "nfc card: an ISO15693 card has 1 to 256 blocks of "
+                   "1 to 32 bytes (blocksize, mem)");
+        return NULL;
+    }
+    if (c->kind == KIND_ISO4) {
+        static const uint8_t ats[] = { 0x06, 0x75, 0x77, 0x81, 0x02, 0x80 };
+
+        if (!(c->sak & 0x20)) {
+            error_setg(errp, "nfc card: an ISO14443-4 card's SAK says so "
+                       "(bit 0x20); this one's is %02X", c->sak);
+            return NULL;
+        }
+        if (!c->ats_len) {              /* (a DESFire EV1's) */
+            memcpy(c->ats, ats, c->ats_len = sizeof(ats));
+        }
+    }
+    if (c->kind == KIND_T2 || c->kind == KIND_MFC) {
+        c->mem_len &= ~3;
+    }
     card_reset(c, ST_OFF);
     return g_steal_pointer(&c);
 }
@@ -869,18 +1995,34 @@ NfcCard *nfc_card_blank(void)
 static int card_post_load(void *opaque, int version_id)
 {
     NfcCard *c = opaque;
-    bool mfc = c->kind == KIND_MFC;
+    bool mfc = c->kind == KIND_MFC, iso4 = c->kind == KIND_ISO4;
+    bool bytes = c->kind == KIND_FELICA || c->kind == KIND_V;
 
-    if ((c->kind != KIND_T2 && !mfc) ||
-        (c->uid_len != 4 && c->uid_len != 7 && c->uid_len != 10) ||
+    if (c->kind < KIND_T2 || c->kind > KIND_V ||
+        (c->uid_len != 4 && c->uid_len != 7 && c->uid_len != 10 &&
+         !(bytes && c->uid_len == 8)) ||
         c->state < ST_OFF || c->state > ST_HALT ||
         c->level < 0 || c->level > 2 ||
-        c->mem_len < 16 || c->mem_len > MEM_MAX || (c->mem_len & 3) ||
+        c->mem_len < (iso4 ? 0 : 16) || c->mem_len > MEM_MAX ||
+        (!bytes && (c->mem_len & 3)) ||
+        (c->kind == KIND_FELICA && c->mem_len != 28 * 18) ||
+        (c->kind == KIND_V && (c->v_bsize < 1 || c->v_bsize > 32 ||
+                               c->mem_len / c->v_bsize > 256)) ||
         (mfc && c->mem_len != 20 * 16 && c->mem_len != 64 * 16 &&
          c->mem_len != 256 * 16) ||
-        c->comp_write < -1 || c->comp_write >= t2_pages(c) ||
-        c->write_block < -1 || c->write_block >= mfc_blocks(c) ||
-        c->mfc < MFC_NONE || c->mfc > MFC_ON) {
+        c->comp_write < -1 || c->comp_write >= MAX(t2_pages(c), 0) ||
+        c->write_block < -1 || c->write_block >= MAX(mfc_blocks(c), 0) ||
+        c->mfc < MFC_NONE || c->mfc > MFC_ON ||
+        c->ats_len < 0 || c->ats_len > sizeof(c->ats) ||
+        c->dep_in_len < 0 || c->dep_in_len > sizeof(c->dep_in) ||
+        c->app_kind < APP_NONE || c->app_kind > APP_DESFIRE ||
+        c->app_len < 0 || c->app_len > APP_MAX ||
+        c->df_more < DF_NONE || c->df_more > DF_DATA ||
+        c->df_at < 0 || c->df_left < 0 || c->df_at > c->app_len ||
+        c->df_left > c->app_len - c->df_at ||
+        (c->df_more == DF_VERSION_2 && c->df_at + 21 > c->app_len) ||
+        (c->df_more == DF_VERSION_3 && c->df_at + 14 > c->app_len) ||
+        (c->ulc && (c->kind != KIND_T2 || c->mem_len != 48 * 4))) {
         return -EINVAL;
     }
     return 0;
@@ -888,8 +2030,8 @@ static int card_post_load(void *opaque, int version_id)
 
 const VMStateDescription vmstate_nfc_card = {
     .name = "nfc-card",
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .post_load = card_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_INT32(kind, NfcCard),
@@ -918,6 +2060,38 @@ const VMStateDescription vmstate_nfc_card = {
         VMSTATE_BOOL(key_b, NfcCard),
         VMSTATE_INT32(write_block, NfcCard),
         VMSTATE_INT64(power_ns, NfcCard),
+        VMSTATE_UINT8_ARRAY(ats, NfcCard, 20),
+        VMSTATE_INT32(ats_len, NfcCard),
+        VMSTATE_BOOL(dep, NfcCard),
+        VMSTATE_UINT8_ARRAY(dep_in, NfcCard, 600),
+        VMSTATE_INT32(dep_in_len, NfcCard),
+        VMSTATE_INT32(app_kind, NfcCard),
+        VMSTATE_UINT8_ARRAY(app, NfcCard, APP_MAX),
+        VMSTATE_INT32(app_len, NfcCard),
+        VMSTATE_UINT8_ARRAY(df_aid, NfcCard, 3),
+        VMSTATE_INT32(df_more, NfcCard),
+        VMSTATE_INT32(df_at, NfcCard),
+        VMSTATE_INT32(df_left, NfcCard),
+        VMSTATE_UINT8_ARRAY(pmm, NfcCard, 8),
+        VMSTATE_UINT8(v_dsfid, NfcCard),
+        VMSTATE_UINT8(v_afi, NfcCard),
+        VMSTATE_UINT8(v_icref, NfcCard),
+        VMSTATE_UINT8(v_bsize, NfcCard),
+        VMSTATE_UINT8(v_lock, NfcCard),
+        VMSTATE_UINT8_ARRAY(v_sec, NfcCard, 256),
+        VMSTATE_BOOL(v_quiet, NfcCard),
+        VMSTATE_BOOL(v_selected, NfcCard),
+        VMSTATE_BOOL(slix, NfcCard),
+        VMSTATE_UINT8_2DARRAY(slix_pwd, NfcCard, 5, 4),
+        VMSTATE_UINT8_ARRAY(slix_pp, NfcCard, 2),
+        VMSTATE_UINT8_ARRAY(slix_rnd, NfcCard, 2),
+        VMSTATE_BOOL(slix_privacy, NfcCard),
+        VMSTATE_BOOL(slix_accept_all, NfcCard),
+        VMSTATE_BOOL(slix_eas, NfcCard),
+        VMSTATE_BOOL(ulc, NfcCard),
+        VMSTATE_BOOL(ulc_auth, NfcCard),
+        VMSTATE_UINT8_ARRAY(ulc_rndb, NfcCard, 8),
+        VMSTATE_UINT8_ARRAY(ulc_iv, NfcCard, 8),
         VMSTATE_END_OF_LIST()
     }
 };

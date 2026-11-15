@@ -4744,6 +4744,74 @@ big lock, entry 92).
       `fuzz subghz` says that their CLI does not start the radio);
       setup_check 45 with patch 0016.
 
+155. **NFC beyond Type 2 and Classic: ISO14443-4A, DESFire, FeliCa Lite-S,
+    ISO15693 and SLIX.** A card file of each is held to the Flipper, and
+    the firmware's `dump` of it is the file again.
+    - ISO14443-4 on the card model's air bits. The firmware's poller is
+      plain: it sends an I-block (PCB 02 or 03 in turn) and wants an answer
+      that begins with the very PCB it sent, so a card's chained answer
+      would be an error to it. One I-block back, then; the reader's own
+      chaining is taken, R(NAK) is a presence check.
+    - DESFire: a dump's fields become records in the card (`fe_nfc.py`),
+      and the commands answer from them. The first dump had 65 of 67 keys:
+      the file format has the ATS as its bytes by name (T0, TA(1), TB(1),
+      TC(1), T1...Tk), not as "ATS"; and the record file had 16 bytes where
+      the card has 32. The firmware reads a record file with ReadRecords,
+      offset 0 and a count that is the record's *size* (it uses its
+      ReadData routine), and wants as many bytes back as it asked for. The
+      model had answered in bytes, which no card does. Now ReadRecords
+      counts records, the newest first: 16 records of a file with two are a
+      boundary error, and the dump has no contents for the file, as it
+      would not of a real card (unless a record is one byte). 70 of 71.
+    - The other technologies. The firmware adds each CRC itself and uses
+      TRANSMIT_WITHOUT_CRC for all, so the chip model passes bytes. FeliCa:
+      the FIFO is the frame. ISO15693 is done by the firmware in the
+      chip's stream mode (furi_hal_nfc_iso15693.c): 1 out of 4 on the way
+      out, a byte to two bits; and the raw stream on the way in, which its
+      own decoder takes apart: SOF 0x17 in five bits, 01 or 10 for a bit,
+      EOF 0x1D. The model undoes and makes that (`st25_card_bytes`).
+    - FeliCa Lite-S from the firmware's own unit-test file: all 28 blocks
+      the same. Three keys differ and are the firmware's: it clears the
+      first IDm byte's high half (the system's number) in what it saves,
+      counts one block fewer as read when it had no key, and writes a newer
+      format number. SLIX from the firmware's unit-test file: 25 of 25 keys
+      at the first try (inventory, system information, 80 blocks one by
+      one, their security status, NXP's system information and signature).
+    - MIFARE Ultralight C: AUTHENTICATE needs two-key triple DES in CBC,
+      and QEMU's own ciphers depend on which library it was built with, so
+      the card model has DES itself (150 lines; FIPS 46-3's example and
+      OpenSSL's `des-ede-cbc` agree with it). The firmware's unit-test
+      card (AUTH0 = 5, a key of zeros) dumps to itself with `dump -k` and
+      32 zeros, and to its first five pages without. A made-up card with a
+      key from the firmware's dictionary did not open with `dump -k KEY`:
+      the firmware's log has "Key data: 49454D4B 49454D4B41455242214E4143"
+      for the key 49454D4B41455242214E4143554F5946. Its Ultralight poller
+      asks `key_request_data.key_provided` of an event whose data the
+      shell's callback filled as `auth_context` (a union): a byte of the
+      key is taken for "provided", and the key is then read from the
+      union's start, where the password's four bytes are before it. So the
+      official 1.5.1's `dump -k` tries the key's first four bytes and its
+      first twelve; a key of zeros hides it. The NFC app's Read asks for
+      keys the right way: with the same card it refuses four keys of the
+      dictionary and takes the fifth ("Auth success"), which is the check.
+    - Not there: ISO14443B, ST25TB, FeliCa Standard, a MAC for FeliCa (a
+      read with a card key fails), a virtual reader for these (the
+      Flipper's emulation of them has nobody to read it).
+    - The card's saved state has the new fields: version 2, and a state
+      with a card from before is refused. A SLIX with a written block
+      comes back from a snapshot with it.
+    - The check's snapshot part starts an emulator that runs by itself
+      (`snapshot load --detach`), and the check ended without stopping it:
+      ten of them were left behind two rounds of five, their folders gone.
+      Found when a build was about to be made over them (and it was made:
+      a `;` where `||` belongs after the look for running emulators). The
+      check stops its device by name at its end now.
+    - Checks: nfc_check 12 on the five firmwares (the cards' files again
+      from `dump`; Ultralight C without a key and by the app's dictionary;
+      DESFire by `apdu`, wrapped; ISO15693 and FeliCa by `raw`; the
+      snapshot); the smoke test on the five, snapshot_check 68,
+      nfc_link_check 4 and gui_check 79 on the official 1.5.1 as before.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

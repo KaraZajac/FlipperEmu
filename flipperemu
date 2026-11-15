@@ -6297,6 +6297,11 @@ def cmd_nfc(args):
             uid = bytes.fromhex(card[1].replace(":", "").replace(" ", ""))
             desc = fe_nfc.blank_mfc(card[0][3:], uid)
             label = f"a MIFARE Classic {card[0][3:].upper()} {uid.hex(' ').upper()}"
+        elif len(card) == 2 and card[0].lower().lstrip("-") in fe_nfc.SAMPLES:
+            make, words = fe_nfc.SAMPLES[card[0].lower().lstrip("-")]
+            uid = bytes.fromhex(card[1].replace(":", "").replace(" ", ""))
+            desc = fe_nfc.describe(fe_nfc.parse_nfc_text(make(uid)))
+            label = f"{words} {uid.hex(' ').upper()}"
         elif len(card) in (2, 3) and card[0].lower().lstrip("-") in fe_nfc.BLANK:
             uid = bytes.fromhex(card[1].replace(":", "").replace(" ", ""))
             url = card[2] if len(card) == 3 else None
@@ -6305,7 +6310,8 @@ def cmd_nfc(args):
                      (f" with {url}" if url else ", blank"))
         else:
             sys.exit("usage: nfc FILE.nfc | nfc DUMP.json (Proxmark3) | nfc ntag215 UID "
-                     "[URL] | nfc mfc1k UID | nfc none")
+                     "[URL] | nfc mfc1k UID | nfc ulc UID | nfc desfire UID | nfc "
+                     "felica IDM | nfc slix UID | nfc none")
     except (ValueError, KeyError, OSError) as e:
         sys.exit(f"nfc: {e}")
     m = Monitor(str(dev.monitor))

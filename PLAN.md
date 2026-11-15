@@ -200,8 +200,17 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       (`nfc --reader scan|ntag`; target mode, passive-target memory, I_wu_a); an NTAG
       reads back page for page → `devices/NAME/nfc-tx/*.nfc`. Classic emulation's
       transparent-mode answers are not decoded yet.
-      Next: Ultralight C (3DES), ISO14443-4 (DESFire, EMV), ISO14443B, ISO15693/SLIX,
-      FeliCa; decode transparent mode (Classic emulation)
+      MIFARE Ultralight C ☑ (2026-11-15): AUTHENTICATE with two-key triple DES (DES
+      in the card model), AUTH0/AUTH1; the app's dictionary finds its key.
+      ISO14443-4A and MIFARE DESFire ☑ (2026-11-15): RATS/ATS, the blocks, DESFire's
+      native and wrapped commands from a dump's tables. FeliCa Lite-S ☑ and
+      ISO15693-3 / SLIX ☑ (2026-11-15): the chip model's technologies whose frames
+      are bytes (FeliCa, ISO15693's stream coding), the cards' commands. Each dumps
+      to its own file again; `scripts/nfc_check.py` 12 on five (BRINGUP_LOG 155).
+      Next: ISO14443B and ST25TB, FeliCa Standard, what else
+      runs on ISO14443-4 (EMV, Type 4 tags: Momentum reads them), reading with keys
+      (DESFire, FeliCa's MAC); decode transparent mode (Classic emulation); a
+      virtual reader for the cards beyond ISO14443A
 - ☑ 125 kHz RFID read: COMP1 → TIM2 TI4 capture, a virtual tag in the reader's field
       (ASK/FSK/PSK, field noise), encoders ported from the firmware (`fe_rfid.py`, checked
       cycle for cycle against its emulation by `rfid_check.py`); app Read and `rfid read`
