@@ -18,6 +18,7 @@ holds in its field (see qemu/hw/arm/flipper/nfc_card.c):
     fe_nfc.py --ulc 04A1B2C3D4E5F6          -> a MIFARE Ultralight C, its pages
                                                from 16 on behind its key
     fe_nfc.py --mfplus 04C2D3E4F5A6B7       -> a MIFARE Plus EV1 2K (SL3)
+    fe_nfc.py --ntag4xx 04B1C2D3E4F5A6      -> an NTAG 424 DNA
     fe_nfc.py --t4t 04D1E2F3A4B5C6          -> a Type 4 tag with an NDEF URL
     fe_nfc.py --emv 04E1F2A3B4C5D6          -> an EMV card with a test number
     fe_nfc.py --iso14443b 1A2B3C4D          -> an ISO14443-4B card with that PUPI
@@ -193,10 +194,12 @@ def iso7816_records(fields):
 def describe_iso4(fields, atqa, desfire, plus=False):
     """An ISO14443-4A card; a MIFARE DESFire's tables as records for
     nfc_card.c: what its commands answer, taken from the dump.  A MIFARE
-    Plus: its version, when the dump has one (EV1 and EV2)"""
+    Plus: its version, when the dump has one (EV1 and EV2); an NTAG 413 DNA
+    or 424 DNA: its version"""
     uid = hexbytes(fields["UID"])
+    ntag4 = fields.get("Device type") == "NTAG4xx"
     out = ["# MIFARE DESFire" if desfire else "# MIFARE Plus" if plus else
-           "# ISO14443-4A", "type iso4",
+           "# NTAG4xx" if ntag4 else "# ISO14443-4A", "type iso4",
            f"uid {uid.hex(' ')}", f"atqa {atqa.hex(' ')}",
            f"sak {fields.get('SAK', '20')}"]
     # the ATS as the file has it: its format byte, the interface bytes that
@@ -213,10 +216,14 @@ def describe_iso4(fields, atqa, desfire, plus=False):
     if fields.get("Device type") in ("Type 4 Tag", "EMV"):
         out[0] = f"# {fields['Device type']}"
         return "\n".join(out + ["app iso7816"] + iso7816_records(fields)) + "\n"
-    if plus:
-        out.append("app mfplus")
+    if plus or ntag4:
+        out.append("app ntag4xx" if ntag4 else "app mfplus")
         version = hexbytes(fields.get("PICC Version", ""))
-        if len(version) == 28 and any(version):
+        # (an NTAG4xx's version has a 29th byte in the file, which a card
+        # that has none of it does not send: the firmware writes a zero)
+        if ntag4 and len(version) == 29 and not version[28]:
+            version = version[:28]
+        if len(version) in ((28, 29) if ntag4 else (28,)) and any(version):
             out.append(f"rec {REC_VERSION:02x} {version.hex(' ')}")
         return "\n".join(out) + "\n"
     if not desfire:
@@ -363,6 +370,39 @@ def describe_st25tb(fields):
            f"otp {fields.get('System OTP Block', 'FF FF FF FF')}"]
     for b in range(ST25TB_BLOCKS[kind]):
         out.append(f"mem {fields.get(f'Block {b}', 'FF FF FF FF')}")
+    return "\n".join(out) + "\n"
+
+
+def sample_classic(uid, kind="1K"):
+    """A MIFARE Classic as a Flipper .nfc file's text, made up: every
+    sector with keys of its own and data in every block; sector 2's data is
+    for key B alone (access bits 0F 00 FF), the others' in the transport
+    configuration (FF 07 80), where key A reads all and key B is data"""
+    kind = kind.upper()
+    sectors = {"MINI": 5, "1K": 16, "4K": 40}[kind]
+    if len(uid) != 4:
+        raise ValueError("a MIFARE Classic's UID here is 4 bytes")
+    up = lambda b: bytes(b).hex(" ").upper()
+    sak = {"MINI": 0x09, "1K": 0x08, "4K": 0x18}[kind]
+    atqa = 0x0002 if kind == "4K" else 0x0004
+    out = ["Filetype: Flipper NFC device", "Version: 4",
+           "Device type: Mifare Classic", f"UID: {up(uid)}",
+           f"ATQA: {atqa >> 8:02X} {atqa & 0xFF:02X}", f"SAK: {sak:02X}",
+           f"Mifare Classic type: {kind}", "Data format version: 2"]
+    for s in range(sectors):
+        first = s * 4 if s < 32 else 128 + (s - 32) * 16
+        count = 4 if s < 32 else 16
+        for n in range(first, first + count):
+            if n == 0:                  # the manufacturer's block
+                d = bytes(uid) + bytes((uid[0] ^ uid[1] ^ uid[2] ^ uid[3], sak,
+                                        atqa & 0xFF, atqa >> 8)) + b"FlipEmu!"
+            elif n == first + count - 1:
+                d = (bytes((0xA0 | s % 16, 1, 2, 3, 4, s))
+                     + bytes.fromhex("0F00FF69" if s == 2 else "FF078069")
+                     + bytes((0xB0 | s % 16, 9, 8, 7, 6, s)))
+            else:
+                d = bytes((n * 7 + i * 13) & 0xFF for i in range(16))
+            out.append(f"Block {n}: {up(d)}")
     return "\n".join(out) + "\n"
 
 
@@ -577,6 +617,23 @@ def sample_emv(uid):
         "Effective month: 01", "Effective day: 01", "PIN try counter: 3"]) + "\n"
 
 
+def sample_ntag4xx(uid):
+    """An NTAG 424 DNA as a Flipper .nfc file's text (the format of the
+    firmwares that know one), made up: what the firmware reads of it, its
+    version"""
+    if len(uid) != 7:
+        raise ValueError("an NTAG 424 DNA's UID is 7 bytes")
+    up = lambda b: bytes(b).hex(" ").upper()
+    version = (bytes.fromhex("04040230001105") + bytes.fromhex("04040201021105")
+               + bytes(uid) + bytes.fromhex("CF39D44680") + bytes.fromhex("0C22")
+               + b"\x00")              # (the optional byte: not on this card)
+    return "\n".join([
+        "Filetype: Flipper NFC device", "Version: 4", "Device type: NTAG4xx",
+        f"UID: {up(uid)}", "ATQA: 03 44", "SAK: 20", "T0: 77", "TA(1): 77",
+        "TB(1): 71", "TC(1): 02", "T1...Tk: 80",
+        f"PICC Version: {up(version)}"]) + "\n"
+
+
 def sample_mfplus(uid):
     """A MIFARE Plus EV1 2K in security level 3 as a Flipper .nfc file's
     text, made up (what the firmware reads of one: its version's first
@@ -769,7 +826,7 @@ def describe(fields):
     if dev in ("ISO15693-3", "SLIX"):
         return describe_iso15693(fields, dev == "SLIX")
     if dev in ("Mifare DESFire", "Mifare Plus", "ISO14443-4A",
-               "ISO14443-4A (Unknown)", "Type 4 Tag", "EMV"):
+               "ISO14443-4A (Unknown)", "Type 4 Tag", "EMV", "NTAG4xx"):
         atqa = hexbytes(fields["ATQA"])
         return describe_iso4(fields, atqa[::-1] if version >
                              LSB_ATQA_FORMAT_VERSION else atqa,
@@ -778,7 +835,7 @@ def describe(fields):
     if dev not in T2_TYPES and kind not in T2_TYPES:
         raise ValueError(f"device type {dev!r} is not supported yet "
                          "(NTAG/Ultralight, MIFARE Classic, MIFARE DESFire, "
-                         "MIFARE Plus, Type 4 Tag, EMV, "
+                         "MIFARE Plus, NTAG4xx, Type 4 Tag, EMV, "
                          "ISO14443-4A, ISO14443-3B and -4B, ST25TB, FeliCa "
                          "Lite-S, ISO15693-3 and SLIX are)")
     uid = hexbytes(fields["UID"])
@@ -971,6 +1028,7 @@ def nfc_file(desc):
 SAMPLES = {"t4t": (sample_t4t, "a Type 4 tag with a URL (made up)"),
            "emv": (sample_emv, "an EMV card (made up: a test number)"),
            "mfplus": (sample_mfplus, "a MIFARE Plus EV1 2K, SL3 (made up)"),
+           "ntag4xx": (sample_ntag4xx, "an NTAG 424 DNA (made up)"),
            "desfire": (sample_desfire, "a MIFARE DESFire EV1 (two "
                        "applications, made up)"),
            "ulc": (sample_ulc, "a MIFARE Ultralight C (made up; its key "

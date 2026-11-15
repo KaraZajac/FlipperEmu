@@ -525,10 +525,16 @@ static void cc1101_tx_end(Cc1101State *s)
     g_autoptr(GString) sub = g_string_new(NULL);
     g_autoptr(GString) last = g_string_new(NULL);
 
+    bool level = s->tx_level;
+
     if (!s->tx_active) {
         return;
     }
-    cc1101_tx_data(s, !s->tx_level, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    /* (the last level's time, as if an edge ended it; the pin stays as it
+     * is, or the next transmission's first pulse would begin with a level
+     * that is not there) */
+    cc1101_tx_data(s, !level, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    s->tx_level = level;
     s->tx_active = false;
     d = (int32_t *)s->tx->data;
     n = s->tx->len;

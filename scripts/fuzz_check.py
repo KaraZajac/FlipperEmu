@@ -92,6 +92,7 @@ def targets(b, work):
               and not files(out / "crashes") and ok
               and "no coverage" not in text, text + said)
     nfc(b, work)
+    nfc_frames(b, work)
     first = files(work / "ir" / "corpus")[0]
     code, text = b.fe("fuzz", "ir", "--replay", first, "--out", work / "again")
     check("`fuzz ir --replay FILE`: a kept input given again, and what came "
@@ -142,6 +143,56 @@ def nfc(b, work):
           ok and ((code == 1 and hung
                    and (work / "nfc-3b" / "crashes" / "001-hang").is_dir())
                   or (code == 0 and "no crash and no hang" in text)),
+          text[-800:] + said)
+
+
+def nfc_frames(b, work):
+    """`fuzz nfc-frames`: a card on the NFC link whose answers are the
+    fuzzer's, frame by frame"""
+    import fe_fuzz
+    out = work / "frames"
+    code, text = b.fe("fuzz", "nfc-frames", "--runs", 14, "--seed", 1, "--out",
+                      out, timeout=900)
+    if code == 2 and "no `nfc` shell" in text:
+        print("  (this firmware's CLI has no NFC shell: `fuzz nfc-frames` "
+              "says so)")
+        return
+    inputs, kept, crashes = numbers(text)
+    ok, said = b.answers()
+    corpus = [f.read_text() for f in files(out / "corpus")]
+    check("`fuzz nfc-frames --runs 14`: what the emulator's ISO14443A cards "
+          "answer to the NFC shell's `dump` is recorded for the seeds (a WUPA "
+          "and its ATQA in each), and exchanges made from them are answered "
+          f"by a card on the NFC link: {kept} of {inputs} kept for the new "
+          "code they reached; "
+          + ("no crash" if not crashes else
+             f"{crashes} crashes, each kept with its inputs and gone on from")
+          + "; and the firmware's CLI answers after it",
+          inputs >= 14 and kept >= 5 and ok
+          and sum("7 52 > 16 " in c for c in corpus) >= 5
+          and ((code == 0 and crashes == 0) or
+               (code == 1 and (out / "crashes").is_dir()
+                and any((out / "crashes").iterdir()))),
+          text[-1500:] + said)
+    # a card whose ATS lies about its length: 255, with five bytes behind it
+    crc = lambda hexes: hexes + fe_fuzz.crc_a(bytes.fromhex(hexes)).hex().upper()
+    lies = work / "ats.frames"
+    lies.write_text("\n".join([
+        "7 52 > 16 4403", "16 9320 > 40 8804A1B29F",
+        "72 93708804A1B29FAE4B > 24 04DA17", "16 9520 > 40 C3D4E5F604",
+        "72 9570C3D4E5F6049E03 > 24 " + crc("20"),
+        "32 E0803173 > 64 " + crc("FF7577810280")]) + "\n")
+    code, text = b.fe("fuzz", "nfc-frames", "--replay", lies, "--out",
+                      work / "frames-ats", timeout=600)
+    ok, said = b.answers()
+    check("`fuzz nfc-frames --replay` of an exchange that is written by "
+          "hand, an ISO14443-4 card whose ATS says that it is 255 bytes long "
+          "and is 6: "
+          + ("no crash and no hang" if code == 0 else
+             "found and kept (the firmware's own), and gone on from")
+          + "; the firmware's CLI answers after it",
+          ok and ((code == 0 and "no crash and no hang" in text) or
+                  (code == 1 and (work / "frames-ats" / "crashes").is_dir())),
           text[-800:] + said)
 
 

@@ -218,6 +218,52 @@ bool wb55_dma_ready_for(WB55DmaState *s, int req)
     return true;
 }
 
+/*
+ * The firmware feeds a timer from a ring that its DMA interrupt refills by
+ * halves: the half-transfer interrupt writes the first half anew while the
+ * second is played, transfer-complete the second while the first is
+ * (furi_hal_subghz's transmitter: 256 periods for TIM2's ARR; furi_hal_rfid's
+ * emulation).  Such a channel that is about to enter a half: the SoC asks
+ * the NVIC whether its handler is done (soc_tim2_dma_ready).
+ */
+int wb55_dma_at_half(WB55DmaState *s, int req)
+{
+    for (int c = 0; c < 14; c++) {
+        WB55DmaChannel *ch = &s->ch[c];
+        const uint32_t want = CCR_EN | CCR_DIR | CCR_CIRC;
+
+        if ((ch->ccr & want) == want && (ch->ccr & (CCR_HTIE | CCR_TCIE)) &&
+            (s->muxccr[c] & 0x3F) == req && ch->reload >= 2 &&
+            (ch->cndtr == ch->reload || ch->cndtr == ch->reload / 2)) {
+            return c;
+        }
+    }
+    return -1;
+}
+
+bool wb55_dma_second_is(WB55DmaState *s, int req, hwaddr periph, uint32_t value)
+{
+    for (int c = 0; c < 14; c++) {
+        WB55DmaChannel *ch = &s->ch[c];
+        const uint32_t want = CCR_EN | CCR_DIR | CCR_CIRC;
+        unsigned msize = dma_size(ch->ccr >> 10);
+        uint32_t data = 0;
+
+        if ((ch->ccr & (want | CCR_PINC | CCR_MINC)) != (want | CCR_MINC) ||
+            ch->cpar != periph || (s->muxccr[c] & 0x3F) != req ||
+            ch->reload < 2) {
+            continue;
+        }
+        if (address_space_read(&address_space_memory, ch->cmar +
+                               (ch->midx + 1) % ch->reload * msize,
+                               MEMTXATTRS_UNSPECIFIED, &data, msize) != MEMTX_OK) {
+            continue;
+        }
+        return data == value;
+    }
+    return false;
+}
+
 /* ---- DMA1/DMA2 register blocks: ISR, IFCR, then 7 x {CCR,CNDTR,CPAR,CMAR} */
 
 static uint64_t dma_read(WB55DmaState *s, int ctrl, hwaddr addr)

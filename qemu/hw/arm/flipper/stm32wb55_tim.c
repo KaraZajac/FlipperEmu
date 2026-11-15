@@ -81,6 +81,11 @@ static int64_t tim_now(WB55TimState *s)
                            : qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 }
 
+int64_t wb55_tim_now(WB55TimState *s)
+{
+    return tim_now(s);
+}
+
 static int oc_mode(WB55TimState *s, int ch)
 {
     uint32_t ccmr = ch < 2 ? REG(s, R_CCMR1) : REG(s, R_CCMR2);
@@ -411,6 +416,7 @@ static void tim_run_updates(WB55TimState *s, int64_t now)
     }
     s->in_updates = true;
     s->dma_wait = false;
+    s->marker_wait = false;
     for (int guard = 0; guard < 65536 && tim_event_driven(s) &&
                         tim_counting(s); guard++) {
         uint64_t uev = tim_uev_period(s);
@@ -424,9 +430,12 @@ static void tim_run_updates(WB55TimState *s, int64_t now)
         when = tim_time_of_tick(s, next - s->cnt_base);
         /*
          * The firmware re-arms normal-mode DMA from an ISR between two
-         * updates (furi_hal_infrared: every buffer of marks and spaces).  On
-         * silicon that ISR runs within microseconds; here the vCPU can be
-         * later than the next update.  So the update waits for it, keeping
+         * updates (furi_hal_infrared: every buffer of marks and spaces), or
+         * refills a circular channel's ring by halves from its half-transfer
+         * and transfer-complete interrupts (furi_hal_subghz's transmitter,
+         * furi_hal_rfid's emulation).  On silicon that ISR runs within
+         * microseconds; here the vCPU can be later than the next update, or
+         * than the ring's other half.  So the update waits for it, keeping
          * its exact time; if the DMA stays dry, it was left that way.
          */
         if ((REG(s, R_DIER) & DIER_UDE) && s->dma_ready &&
@@ -434,6 +443,27 @@ static void tim_run_updates(WB55TimState *s, int64_t now)
             s->dma_wait = true;
             break;
         }
+        /*
+         * A ring of periods that a loop of the firmware fills while the
+         * DMA empties it (lib/digital_signal: an edge every 590 ns for an
+         * NFC answer, 38 CPU cycles), with an ARR of 0xFFFFFFFF behind the
+         * last one written as the end's marker.  A vCPU that is slower
+         * than that loop is overtaken, and the marker would end the
+         * transmission in its middle.  So the update that would load the
+         * last period before the marker waits, keeping its exact time,
+         * until the firmware has written one more behind it - or reads
+         * ARR, which it does then only when it has no more to write and
+         * looks for the end.  (One period before the marker, not at it:
+         * with the DMA at the marker itself the firmware's ring counts as
+         * full, and it writes nothing more.)
+         */
+        if ((REG(s, R_DIER) & DIER_UDE) && s->dma_marker && !s->marker_asked &&
+            now - when < TIM_DMA_WAIT_NS &&
+            s->dma_marker(s->dma_marker_opaque)) {
+            s->dma_wait = s->marker_wait = true;
+            break;
+        }
+        s->marker_asked = false;
         tim_update_event(s, when);
     }
     s->in_updates = false;
@@ -570,6 +600,9 @@ static uint64_t tim_read(void *opaque, hwaddr addr, unsigned size)
     if (addr >= sizeof(s->regs)) {
         return 0;
     }
+    if (addr == R_ARR && s->marker_wait) {
+        s->marker_asked = true;         /* the firmware looks for the end */
+    }
     if (!s->now_override) {
         tim_run_updates(s, now);        /* batched updates that are due */
     }
@@ -704,10 +737,17 @@ static void tim_reset_hold(Object *obj, ResetType type)
     s->now_override = 0;
     s->dma_up_pending = false;
     s->in_updates = false;
+    s->marker_wait = s->marker_asked = false;
     s->rep = 0;
     s->cap_unread = 0;
     memset(s->cap_ns, 0, sizeof(s->cap_ns));
-    memset(s->oc_level, 0, sizeof(s->oc_level));
+    /* the output pins fall with the reset, and the board hears of it: a
+     * transmission that ended with its pin high (the firmware resets the
+     * timer after each) does not leave the next one's first pulse a level
+     * that is there already */
+    for (int ch = 0; ch < 4; ch++) {
+        tim_oc_set(s, ch, false, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    }
     tim_rebase(s, 0, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     if (s->timer) {
         timer_del(s->timer);

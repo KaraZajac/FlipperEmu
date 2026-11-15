@@ -111,6 +111,8 @@ firmware reads as RSSI.
 
 The program is the card in the field, and the firmware is the reader, while no card is
 set on the device (`./flipperemu nfc none`). A built-in card answers instead of the link.
+The other way round, a program as a reader in front of a Flipper that emulates a card,
+is at the end of this section.
 
 ### From the emulator
 
@@ -160,6 +162,60 @@ socat - UNIX-CONNECT:devices/NAME/nfc.sock       # and answer them yourself
 
 Start `scanner` in the `nfc` shell. The first poll is a WUPA, `poll 7 52 mode=a`; answer
 `answer 16 4400` within a second, and the next poll is the anticollision, `poll 16 9320 01 mode=a`.
+
+### A reader on the link
+
+The same link carries the other direction: the program is a reader, and the firmware
+emulates a card (NFC → Saved → Emulate, or `emulate -f` in the `nfc` shell). Every line
+of this direction starts with `reader`, both ways, and each of the program's lines gets
+exactly one line back. ISO14443A and FeliCa.
+
+| The program sends | The emulator answers | |
+|---|---|---|
+| `reader on` | `reader field on` | the reader's field around the Flipper. `reader busy`: one of the machine's own readers is there |
+| `reader off` | `reader field off` | the field goes, and the session with it. Closing the socket does the same |
+| `reader activate` | `reader target a <uid> <atqa> <sak>` | WUPA, anticollision and SELECT, which the chip answers by itself from what the firmware loaded. `reader target none`: the firmware is not emulating a card now |
+| | `reader target f <idm> <pmm> <system code>` | the firmware emulates a FeliCa card: a polling, which the chip answers by itself as well |
+| `reader send <bits> <hex> [<parity hex>]` | `reader answer <bits> <hex> <parity hex>` | a frame to the firmware and its answer, in the form of `poll` and `answer` above: the data with its CRC, the parity bits packed LSB first. `reader silence`: no answer within 250 ms of the Flipper's time |
+| `reader saved <path>` | `reader saved` | where the program kept what it read; `./flipperemu status` shows it as the last read |
+
+`reader error <why>` answers a line that could not be taken: no `reader on` before it,
+a frame while an answer is still due, bits and bytes that do not fit.
+
+```
+reader on
+reader field on
+reader activate
+reader target a A1B2C3D4 0400 08
+reader send 32 6000F57B
+reader answer 32 003F62F5 0B
+```
+
+That is an AUTH for block 0 with key A and the card's nonce. The ATQA is in the order
+of the air, low byte first. Parity bits matter for MIFARE Classic, where they are
+encrypted: give them with a frame, and take them from an answer. Without parity in
+`reader send`, odd parity is sent.
+
+The firmware gets a frame as the chip would give it: the data bytes in the FIFO, the
+parity bits checked and dropped. An answer comes back when the firmware has sent it,
+through the chip or bit by bit in the chip's transparent mode. The machine is not
+stopped in this direction: a card has no deadline for a reader's next frame, and the
+reader waits for the card.
+
+A FeliCa frame is its bytes, in both directions: the length first, the CRC (high byte
+first) last, no parity. `reader send 128 1006012E4CD21A8B3C5F010B00018000xxxx` is a
+Read Without Encryption of block 0, with the CRC in place of `xxxx`.
+
+A card answers in time, and an emulated CPU on a busy computer may not: after
+`reader silence` to a frame that should have had an answer, start again as a reader
+does with a card that has lost its place: `reader off`, `reader on`, `reader
+activate`, and the step again. `fe_nfc_reader.py` does (`Classic.restart`, `again`).
+
+`scripts/fe_nfc_reader.py` has readers written this way: `ReaderLink` is the link,
+`Classic` MIFARE Classic's authentication and reads, `IsoDep` ISO14443-4's blocks
+(RATS, APDUs chained either way, waiting time extensions), `Felica` FeliCa's
+commands. `./flipperemu nfc --reader classic CARD.nfc` (`felica`, `iso-dep`, `t4t`)
+runs them.
 
 # Bluetooth (`ble.sock`)
 

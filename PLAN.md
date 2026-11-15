@@ -202,7 +202,14 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       Linear keys beside Princeton's, each as the firmware's own encoder sends it
       (`subghz came KEY`, a .sub key file); the firmware's `subghz rx` reads each
       back; `scripts/subghz_check.py` 12 (BRINGUP_LOG 167)
-- ☐ TX-side pacing against DMA refill lag
+- ☑ TX-side pacing against DMA refill lag (2026-11-15): TIM2 waits at each half of
+      the transmitter's ring until the firmware's DMA interrupt handler is done with
+      it (pending or running in the NVIC), the update's time kept; RFID emulation's
+      buffers with it. 3000 pulses come out to the microsecond with three times more
+      load than cores; what remains there is the firmware's own (its file reader
+      falls behind and it stretches the signal). Found on the way: a second
+      transmission's first pulse was a millisecond too long (the capture kept a
+      level that was not the pin's). BRINGUP_LOG 171
   - ☐ A Send that is held for more than about 8 s does not end when OK is let go, if
         the charging LED is on (official 1.5.1, in the emulator): the radio stays in
         `tx`. It is the firmware's own. The Send scene asks for a blink every 100 ms, a
@@ -241,9 +248,34 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       FeliCa Lite-S's authentication ☑ (2026-11-15): the MAC both ways with the
       card key of a keyed dump; `dump -k` reads the blocks kept for it (BRINGUP_LOG
       159).
-      Next: MIFARE Plus SL3 (AES; Unleashed and RogueMaster try keys); decode
-      transparent mode (Classic emulation); a
-      virtual reader for the cards beyond ISO14443A
+      MIFARE Classic emulation ☑ (2026-11-15): the firmware's answers in the chip's
+      transparent mode decoded from the edges it puts on MOSI (TIM2's DMA paced
+      at its ring's end marker, so an emulated CPU is not overtaken); a reader as
+      a program on the NFC link (`reader on|activate|send`), and one for MIFARE
+      Classic with Crypto1 from the reader's side: `nfc --reader classic
+      CARD.nfc` reads every block and key of an emulated Mini, 1K and 4K
+      (BRINGUP_LOG 169).
+      More readers ☑ (2026-11-15): `nfc --reader felica` (the chip's polling from
+      the passive-target memory's FeliCa part, then a Lite-S's blocks without its
+      key), `--reader iso-dep` (RATS and the ATS), `--reader t4t` (a Type 4 tag's
+      NDEF message through ISO14443-4's blocks; no firmware here emulates one from
+      its shell, so checked against a tag played in Python). A reader starts again
+      (field off and on) when the Flipper stops answering, which a busy computer
+      brings about. `scripts/nfc_emulate_check.py` 13 on five (BRINGUP_LOG 170).
+      NTAG 413/424 DNA ☑ (2026-11-15): the card that the dev build and the three
+      forks know by its ISO-wrapped GetVersion; `nfc ntag4xx UID`; read and saved
+      by their NFC apps (nfc_check 25, 27 on the dev build, 28 on the forks).
+      A record of the air ☑ (2026-11-15): `nfc record FILE`, `nfc watch`: every
+      frame and its answer, both ways, all four technologies, with the parity
+      bits where they are not odd; nfc_emulate_check 15 on five (BRINGUP_LOG 172).
+      Next: a reader for ISO15693 and SLIX emulation. The firmware receives those
+      itself, edge by edge: a DMAMUX request generator on an EXTI line starts TIM16,
+      whose compare requests have the DMA sample a GPIO pin. Needed first: the
+      request generator, TIM16 as a timer (it is the speaker's register file now),
+      DMA requests on compare events, and the chip's demodulated signal on its
+      pin in transparent mode. Then: a Type 4 tag emulated by the forks' NFC apps
+      (not their shells); FeliCa's authentication from the reader's side; MIFARE
+      Plus SL3 (AES; Unleashed and RogueMaster try keys)
 - ☑ 125 kHz RFID read: COMP1 → TIM2 TI4 capture, a virtual tag in the reader's field
       (ASK/FSK/PSK, field noise), encoders ported from the firmware (`fe_rfid.py`, checked
       cycle for cycle against its emulation by `rfid_check.py`); app Read and `rfid read`
@@ -294,9 +326,12 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       Classic too) with firmware from v4.23346, with odd parity before; Proxmark3 JSON
       dumps as cards and .nfc files. Checked against `fe_pm3.py sim`
       (`nfc_link_check.py`; BRINGUP_LOG 55); not yet against a real Proxmark3
-- ☐ NFC: a PN532/PN533 (ACR122U over PC/SC) relay; and the other way round, listen
-      mode: an external reader (or a real one: a Proxmark3 or PN532 as the card) in
-      front of an emulating Flipper
+- ☑ NFC, the other way round (2026-11-15): a program on the link as a reader in
+      front of an emulating Flipper (`reader on`, `reader activate`, `reader send`;
+      docs/RADIO_LINK.md), ISO14443A (BRINGUP_LOG 169)
+- ☐ NFC: a PN532/PN533 (ACR122U over PC/SC) relay; a real reader in front of an
+      emulating Flipper (a Proxmark3 or PN532 as the card, relayed to the link's
+      reader)
 - ☐ 125 kHz RFID and IR through real front ends (a Proxmark3's LF, an IR transceiver),
       and iButton through a USB 1-Wire master (DS9490R)
 
@@ -801,6 +836,12 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
             refused before anything stops. `scripts/gui_check.py` 79 (80 with an SPI
             script; BRINGUP_LOG 144)
 - ☐ Checks that hold on a busy computer (Kara, 2026-11-13)
+    - ☐ The smoke test with twice as many busy loops as threads beside it
+          (2026-11-15): 26, 25 and 18 of 28. The SDR recording, the T5577's
+          write, the 1-Wire read and the infrared each fail now and then; once
+          in three the firmware's CLI queue overflows (FW-07) while the NFC app
+          reads and the check opens the port for its next step. Alone: 28
+          (BRINGUP_LOG 171)
     - ☑ A time limit in every check (2026-11-14): past it, a FAIL, where each of its
           threads stands, its emulators stopped, exit status 124; `FLIPPEREMU_CHECK_LIMIT`
           changes them (`x2`, seconds, `0`). After a window check waited three hours in a
@@ -845,7 +886,7 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           `rpc_storage.c:266`); Momentum, Unleashed and RogueMaster too. Not
           reported upstream (Kara's to decide)
     - ☑ The firmware's bugs in one list (2026-11-15): `docs/FIRMWARE_BUGS.md`,
-          18 of them (FW-01 to FW-18) with firmwares, cause, how to see each and
+          19 of them (FW-01 to FW-19) with firmwares, cause, how to see each and
           whether it was reported; a new one gets the next number (BRINGUP_LOG 168)
     - ☐ A lockup seen once after three RPC runs on one device, in the crash
           handler's walk of the heap (`vPortGetHeapStats`): what crashed first is
@@ -855,8 +896,16 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           read by the NFC shell's `dump`; about two a second. It finds Momentum's
           shell crash at its seeds and the official 1.5.1's `dump` that never
           returns as a hang (BRINGUP_LOG 166)
-    - ☐ More targets: a card's raw answers (frames that break the protocol's
-          rules, which the card model's cards never do), iButton and RFID pulses,
+    - ☑ A card's raw answers (2026-11-15): `fuzz nfc-frames`: an exchange as
+          `nfc record` writes it, each answer the fuzzer's to change (bytes, a
+          length that is not whole bytes, silence, another frame's answer; the
+          CRC made right again most times), given by a card on the NFC link.
+          Seeds: what the emulator's ISO14443A cards answer to `dump`, recorded
+          at the start. About one a second. Momentum's and Unleashed's known
+          shell crashes come again through it; nothing new in the first runs.
+          fuzz_check 20 / 14 (BRINGUP_LOG 173)
+    - ☐ More targets: the cards that are not ISO14443A on the link (a card on
+          the link is one), iButton and RFID pulses,
           the Sub-GHz decoders on Unleashed and RogueMaster (their CLI does not
           start the radio: through the app's Read), BLE's GATT writes
 - ☐ Upstream the sixteen QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:

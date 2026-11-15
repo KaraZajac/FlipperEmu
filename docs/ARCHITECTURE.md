@@ -732,9 +732,25 @@ TIM2 is a real timer model, written for TIM1/16/17's layout too:
   pulses, and the DMA (which runs synchronously) writes as if at that instant. Its write
   to the timer is the request's acknowledgement, so exactly one beat happens per update.
   This is furi_hal_subghz's transmitter: a circular DMA buffer feeds ARR, CH2 toggles
-  GDO0, and ARR = 0 blocks the counter to end the transmission. Pacing, as on the receive
-  side, isn't done yet. A guest lagging by more than half the DMA buffer (several ms)
-  would get stale durations from it.
+  GDO0, and ARR = 0 blocks the counter to end the transmission.
+- Pacing of that buffer. Its 256 periods are refilled by halves from the DMA
+  channel's interrupt: half-transfer writes the first half anew while the second is
+  played, transfer-complete the second. A guest that is later with that handler than
+  half a buffer lasts would have the lap before played again. So before the first
+  period of a half is loaded, TIM2 asks (`soc_tim2_dma_ready`) whether that channel's
+  interrupt is pending or its handler running, and waits if so, keeping the update's
+  exact time (at most 250 ms: a handler that never comes was not meant to). The flag
+  alone is not asked: the handler clears it first and writes the half after, and a
+  timer that had to wait catches up faster than the handler writes. furi_hal_rfid's
+  emulation fills its buffers the same way and is paced with it.
+  What this does not reach: `subghz tx_from_file` reads the file in a thread of its
+  own, and when that thread is behind, the firmware itself stretches the signal by
+  guard times of 999 µs (a Flipper with a slow card does the same). On a computer
+  with two or three times more to do than it has cores, that happens.
+- An output pin falls when its timer is reset, and the board hears of it. The
+  firmware resets TIM2 after each transmission, and the radio's capture keeps the
+  pin's level over its own end: a second transmission's first pulse is not measured
+  from a level that was left there.
 
 Added for 125 kHz RFID (next section):
 - External clock mode 2 (SMCR.ECE), and mode 1 on ETRF, counting a clock the board puts
@@ -1130,7 +1146,8 @@ blocks, each with the two status bytes of the dump), and ISO15693-3 with NXP's S
 quiet and selected states; blocks, security status, AFI, DSFID and their locks; SLIX:
 the manufacturer code after the command, the random number that a password is XORed
 with, privacy mode in which only those two are answered). A card on the link, and
-the virtual reader of listen mode, are ISO14443A alone.
+the built-in readers of listen mode, are ISO14443A alone; a reader on the link can
+be a FeliCa reader too.
 
 **Listen mode** (the Flipper emulating a card). The firmware sets the chip's target
 mode and loads its passive-target memory: the UID (`AUX.nfc_id` selects 4 or 7 bytes),
@@ -1149,9 +1166,63 @@ field detection (`furi_hal_nfc_field_is_present`) reads. The reader waits up to 
 an answer. It sends a command up to three times when the answer is missing or garbled
 (a NAK is final), and leaves 1 ms between an answer and its next command: an emulated
 CPU on a busy host can miss a command that comes right on its heels. At the end the
-field goes off (I_eof) and the reader writes what it read as a `.nfc` file. A MIFARE
-Classic emulation answers through transparent mode, bit-banged on a GPIO with Crypto1's
-own parity bits, which is not decoded.
+field goes off (I_eof) and the reader writes what it read as a `.nfc` file.
+
+**Transparent mode.** A MIFARE Classic's answers have parity bits that Crypto1 has
+encrypted, and the chip makes its own. So the firmware sends them itself
+(`furi_hal_nfc_iso14443a_listener_tx_custom_parity`): TRANSPARENT_MODE (0xDC), the
+SPI bus taken off its pins, and MOSI (PB5) as a plain output that modulates the
+field until the chip is selected again. What it puts on the pin is the card's side
+of 106 kbit/s: Manchester with the 847.5 kHz subcarrier, 8/fc a half wave, a 1 with
+the subcarrier in the first half of its 128/fc and a 0 in the second, a 1 as the
+start. The edges come from `lib/digital_signal`: TIM2's update request drives two
+DMA channels, one writing GPIOB's BSRR from a buffer of two words (set, reset) and
+one writing ARR from a ring of 128 periods.
+- The board reports every change of PB5 as an output to the chip model
+  (`st25r3916_mod`), with the time of the update that made it (`wb55_tim_now`: the
+  timer replays updates at their exact times). The chip model keeps the edges while
+  the mode is on.
+- When the chip is selected again, the edges are decoded: from the first rise, the
+  time the pin was high in each half of each 128/fc. The bits after the start are the
+  frame as it is on the air, eight of data and the firmware's parity bit, or four
+  alone for an encrypted ACK or NAK. That is the answer the reader gets.
+- The ring is filled by a loop of the firmware while the DMA empties it, at 38 CPU
+  cycles a period on a real Flipper, with an ARR of 0xFFFFFFFF behind the last
+  period written as the end's marker. An emulated CPU is slower than that loop, the
+  DMA overtakes it, loads the marker, and the answer ends in its middle. So TIM2
+  asks the DMA before each update whether the marker is behind the next period
+  (`wb55_dma_second_is`), and if so the update waits, keeping its exact time, until
+  the firmware has written one more period or reads ARR, which it does in that state
+  only when it has no more to write and looks for the end. One period before the
+  marker and not at it: with the DMA at the marker the firmware's own count takes the
+  ring for full and writes nothing more.
+
+**A reader on the link.** The reader can be a program on the chip's link instead of
+the two built-in ones: `reader on` (its field), `reader activate` (WUPA,
+anticollision and SELECT from the passive-target memory, I_wu_a, or I_wu_a* out of
+SLEEP), `reader send BITS DATA [PARITY]` (into the FIFO; I_par if the parity bits are
+not odd, which the firmware does not ask about) and the answer as the firmware sent
+it, through the chip or in transparent mode, or `reader silence` after 250 ms (a
+program has no second and third send of its own before it hears of it, as the
+built-in readers have after their 100 ms).
+`scripts/fe_nfc_reader.py` is such a reader for MIFARE Classic: Crypto1 from the
+reader's side, written from the same paper as the card model's.
+
+**A record of the air** (`record`, a file's whole path or `off`; `./flipperemu nfc
+record`). A line of text for each frame and its answer, written where the answer is
+known: for the firmware's own frames when the card has answered or stayed silent
+(the built-in card at the transmission's end, a card on the link when its line
+comes or its second is over), for a reader's frames when the firmware has sent its
+answer or the reader's wait is over. Frames are taken apart as the link has them,
+data bits and the parity bit of each byte; ISO15693's are decoded from the codes
+that the firmware puts into the chip's stream mode. The file is flushed every
+50 ms of the host's time. It is no part of a saved state.
+
+With the firmware emulating a FeliCa card (MODE: target with om2), `reader activate`
+is a polling: the chip answers a SENSF_REQ by itself from the passive-target memory's
+FeliCa part (the system code, IDm and PMm that the firmware wrote at 0xA8) and raises
+I_wu_f. Frames are bytes both ways there, length first and CRC last, as the firmware
+reads and writes them.
 
 `scripts/fe_nfc.py` converts a Flipper `.nfc` file into the card description (newer
 files store ATQA MSB first, and this swaps it back). It can also make a new NTAG with

@@ -610,6 +610,13 @@ struct WB55DmaState {
  * to do (enabled, count left)?  A timer waits for that before its next
  * update when the firmware re-arms normal-mode DMA from an ISR */
 bool wb55_dma_ready_for(WB55DmaState *s, int req);
+/* a circular channel on this request that an interrupt handler refills by
+ * halves (its half-transfer or transfer-complete interrupt is enabled),
+ * whose next beat is the first of a half: its number (0..13), or -1 */
+int wb55_dma_at_half(WB55DmaState *s, int req);
+/* a circular channel on this request that feeds the register at `periph`
+ * from memory: is `value` what its beat after the next will write? */
+bool wb55_dma_second_is(WB55DmaState *s, int req, hwaddr periph, uint32_t value);
 /* a request that signals events (a timer's update): one beat per channel
  * each time it rises, however long it stays up */
 void wb55_dma_set_pulse(WB55DmaState *s, int req);
@@ -699,7 +706,15 @@ struct WB55TimState {
     bool (*dma_ready)(void *opaque);
     void *dma_ready_opaque;
     bool dma_wait;               /* an update waits for the DMA */
+    /* SoC hook: is the end marker of a ring that a loop of the firmware
+     * fills behind the update DMA's next period? (see tim_run_updates) */
+    bool (*dma_marker)(void *opaque);
+    void *dma_marker_opaque;
+    bool marker_wait;            /* an update waits at such a marker */
+    bool marker_asked;           /* ... and the firmware has read ARR */
 };
+/* virtual time, or the exact time of the update that is being processed */
+int64_t wb55_tim_now(WB55TimState *s);
 /* an edge on input TI1..TI4 (ti 0..3) at virtual time `when` */
 void wb55_tim_input(WB55TimState *s, int ti, bool level, int64_t when);
 /* the clock on the ETR pin, for external clock modes (0: none) */

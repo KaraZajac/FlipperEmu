@@ -142,6 +142,40 @@ void wb55_soc_sync_pins(WB55SocState *s)
     }
 }
 
+/* TIM2's update DMA: is the period after its next the end marker of a ring
+ * that the firmware's digital_sequence fills (an ARR of 0xFFFFFFFF)? */
+static bool soc_tim2_dma_marker(void *opaque)
+{
+    WB55SocState *s = opaque;
+
+    return wb55_dma_second_is(&s->dma, WB55_DREQ_TIM2_UP,
+                            0x4000002C, 0xFFFFFFFF);
+}
+
+/*
+ * TIM2's update DMA, fed from a ring that the firmware's DMA interrupt
+ * refills by halves: before the first period of a half is loaded, that
+ * handler has to be done with what the last crossing asked of it.  Pending
+ * or running, it has not: the half ahead may be the lap before, or half
+ * written.  (Not the flag alone: the handler clears it first and writes
+ * the half after, and a timer that had to wait catches up faster than the
+ * handler writes.)
+ */
+static bool soc_tim2_dma_ready(void *opaque)
+{
+    WB55SocState *s = opaque;
+    int c = wb55_dma_at_half(&s->dma, WB55_DREQ_TIM2_UP);
+    const VecInfo *v;
+
+    if (c < 0) {
+        return true;
+    }
+    v = &s->armv7m.nvic.vectors[NVIC_INTERNAL_VECTORS +
+                                (c < 7 ? WB55_IRQ_DMA1_CH1 + c
+                                       : WB55_IRQ_DMA2_CH1 + c - 7)];
+    return !(v->active || (v->pending && v->enabled));
+}
+
 /* TIM1's update DMA: is it re-armed for the next update? */
 static bool soc_tim1_dma_ready(void *opaque)
 {
@@ -588,6 +622,10 @@ static void wb55_soc_realize(DeviceState *dev_soc, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, NVIC(WB55_IRQ_TIM2));
     qdev_connect_gpio_out_named(dev, "dma-up", 0, DREQ(WB55_DREQ_TIM2_UP));
     wb55_dma_set_pulse(&s->dma, WB55_DREQ_TIM2_UP);
+    s->tim2.dma_marker = soc_tim2_dma_marker;
+    s->tim2.dma_marker_opaque = s;
+    s->tim2.dma_ready = soc_tim2_dma_ready;
+    s->tim2.dma_ready_opaque = s;
     wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_APB1RSTR1, 0, dev);
     dev = soc_regfile("tim16", 0x40014400, 0x400, WB55_RF_TIM);
     wb55_rcc_add_reset_hook(&s->rcc, WB55_RCC_APB2RSTR, 17, dev);

@@ -21,6 +21,11 @@ The targets (what an input is, and how the firmware gets it):
   cli      a CLI command with the input in it: as hex ({hex}), as text
            ({text}), or as a file on the card ({file}) that the command
            reads
+  nfc      a card whose contents are the fuzzer's, in the field while the
+           NFC shell's `dump` reads it: a card that keeps to its protocol
+  nfc-frames
+           a card whose answers are the fuzzer's, frame by frame, on the
+           NFC link: one that does not (ISO14443A)
 
 The Flipper is not reset between inputs: it runs as a Flipper does, and an
 input meets what the ones before left.  So a crash is kept with the inputs
@@ -30,6 +35,8 @@ import os
 import pathlib
 import random
 import re
+import socket
+import threading
 import time
 
 CRASH = re.compile(rb"\[CRASH\][^\r\n]*|furi_check failed[^\r\n]*|"
@@ -641,7 +648,217 @@ class Nfc(Target):
                        f"{self.timeout:g} s")
 
 
-TARGETS = {t.name: t for t in (SubGhz, Ir, Rpc, Cli, Nfc)}
+def crc_a(data):
+    crc = 0x6363
+    for b in data:
+        b ^= crc & 0xFF
+        b = (b ^ (b << 4)) & 0xFF
+        crc = (crc >> 8) ^ (b << 8) ^ (b << 3) ^ (b >> 4)
+    return bytes((crc & 0xFF, (crc >> 8) & 0xFF))
+
+
+class Frames(Nfc):
+    """A card that does not keep to its protocol: what it answers to each
+    frame of the firmware's is the fuzzer's, while the NFC shell reads it
+    (`dump`).  An input is an exchange as `nfc record` writes it, a line for
+    each frame of the firmware's and its answer ("72 9370... > 24 04DA17",
+    "-" for none), ISO14443A.  The card is on the device's NFC link and
+    answers a frame with the answer of the first line not yet used that
+    has that frame; a frame that no line has gets the next line's answer.
+    The seeds are what the emulator's own cards answer, recorded when the
+    fuzzer starts."""
+    name = "nfc-frames"
+    ext = ".frames"
+    KINDS = ("ulc", "desfire", "mfplus", "ntag4xx", "t4t", "emv")
+
+    def __init__(self, env, opts):
+        super().__init__(env, opts)
+        self.rec = pathlib.Path(env.dir) / "fuzz-air.txt"
+        self.sock = self.thread = None
+        self.lock = threading.Lock()
+        self.script = []                # [frame, answer, used] of the input
+
+    # ---- the card on the link
+
+    def answer(self, frame):
+        """The script's answer to a frame of the firmware's ("BITS HEX")"""
+        with self.lock:
+            same = [e for e in self.script if e[0] == frame]
+            pick = next((e for e in same if not e[2]), None) \
+                or (same[-1] if same else None) \
+                or next((e for e in self.script if not e[2]), None)
+            if not pick:
+                return None
+            pick[2] = True
+            return pick[1]
+
+    def serve(self):
+        buf = b""
+        try:
+            while True:
+                data = self.sock.recv(65536)
+                if not data:
+                    return
+                buf += data
+                *lines, buf = buf.split(b"\n")
+                for raw in lines:
+                    words = raw.decode(errors="replace").split()
+                    if not words or words[0] != "poll" or len(words) < 3:
+                        continue
+                    said = self.answer(f"{words[1]} {words[2].upper()}") \
+                        if words[-1] == "mode=a" else None
+                    self.sock.sendall(f"answer {said}\n".encode() if said
+                                      else b"silence\n")
+        except OSError:
+            return
+
+    def open(self):
+        super().open()
+        self.env.mon("qom-set /machine/nfc card none")
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(3.0)
+        try:
+            self.sock.connect(str(pathlib.Path(self.env.dir) / "nfc.sock"))
+            if not self.sock.recv(65536):
+                raise OSError("closed")
+        except OSError as e:
+            self.sock.close()
+            self.sock = None
+            raise ValueError("the device's NFC link is not free for the "
+                             f"fuzzer's card ({e}): is a card of `nfc --link` "
+                             "on it?") from None
+        self.sock.settimeout(None)
+        self.thread = threading.Thread(target=self.serve, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        if self.sock:
+            try:
+                self.sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            self.sock.close()
+            self.sock = None
+        super().close()
+
+    # ---- inputs
+
+    @staticmethod
+    def parse(data):
+        """An input's lines: [frame, answer for the link or None, used]"""
+        out = []
+        for line in data.decode(errors="replace").splitlines():
+            frame, sep, said = line.partition(" > ")
+            words = said.split()
+            if not sep or len(frame.split()) != 2:
+                continue
+            answer = None
+            if len(words) >= 2 and words[0].isdigit():
+                answer = f"{words[0]} {words[1]}"
+                if len(words) > 2 and words[2].startswith("p"):
+                    answer += " " + words[2][1:]
+            out.append([frame.upper(), answer, False])
+        return out
+
+    def seeds(self):
+        import fe_nfc
+        cards = [fe_nfc.blank("ntag215", bytes.fromhex("04A1B2C3D4E5F6"),
+                              "https://flipperzero.one"),
+                 fe_nfc.blank_mfc("1k", bytes.fromhex("11223344"))]
+        for kind in self.KINDS:
+            make = fe_nfc.SAMPLES[kind][0]
+            cards.append(fe_nfc.describe(fe_nfc.parse_nfc_text(
+                make(bytes.fromhex("04A1B2C3D4E5F6")))))
+        out = []
+        for card in cards:
+            # the emulator's own card in the field (it answers before the
+            # link's does), the air recorded while the shell reads it
+            self.rec.unlink(missing_ok=True)
+            if self.env.mon(f"qom-set /machine/nfc record {self.rec}").strip():
+                raise ValueError("this emulator cannot record its NFC frames "
+                                 "(it was started by an older FlipperEmu): "
+                                 "no seeds for nfc-frames")
+            try:
+                Nfc.feed(self, card.encode())
+            except Lost:
+                pass                    # (a card this firmware hangs at: no seed)
+            finally:
+                self.env.mon("qom-set /machine/nfc record off")
+            lines = [line.split(" ", 3)[3] for line in
+                     (self.rec.read_text() if self.rec.exists() else "").splitlines()
+                     if line.split(" ")[1:3] == ["flipper", "a"]]
+            if lines:
+                out.append(("\n".join(lines) + "\n").encode())
+        self.rec.unlink(missing_ok=True)
+        if not out:
+            raise ValueError("the firmware's `dump` asked the emulator's cards "
+                             "nothing: no seeds for nfc-frames")
+        return out
+
+    def mutate(self, data, rng, other):
+        lines = data.decode(errors="replace").splitlines()
+        spots = [i for i, line in enumerate(lines) if " > " in line]
+        if not spots:
+            return data
+        theirs = [line.partition(" > ")[2].split() for line in
+                  (other or b"").decode(errors="replace").splitlines()
+                  if " > " in line]
+        theirs = [w[1] for w in theirs if len(w) >= 2 and w[0].isdigit()]
+        for _ in range(rng.choice((1, 1, 1, 2, 3))):
+            i = rng.choice(spots)
+            frame, _, said = lines[i].partition(" > ")
+            words = said.split()
+            how = rng.random()
+            if how < 0.05:              # no answer, or one where none was
+                lines[i] = frame + " > " + ("-" if words[:1] != ["-"] else
+                                            "16 0000")
+                continue
+            if how < 0.10 and len(spots) > 1:   # another frame's answer
+                j = rng.choice(spots)
+                lines[i] = frame + " > " + lines[j].partition(" > ")[2]
+                continue
+            try:
+                value = bytes.fromhex(words[1]) if len(words) >= 2 else b""
+            except ValueError:
+                value = b""
+            other_value = b""
+            if theirs and rng.random() < 0.3:
+                try:
+                    other_value = bytes.fromhex(rng.choice(theirs))
+                except ValueError:
+                    pass
+            crc = len(value) >= 3 and crc_a(value[:-2]) == value[-2:]
+            body = value[:-2] if crc else value
+            new = mutate_bytes(body, rng, other_value, max(len(body) + 16, 64))
+            if crc and rng.random() < 0.85:
+                new += crc_a(new)       # (it gets past the firmware's check)
+            elif crc:
+                new += value[-2:]
+            bits = len(new) * 8
+            if new and rng.random() < 0.05:
+                bits -= rng.randrange(1, 8)     # a last byte that is not whole
+            lines[i] = frame + " > " + (f"{bits} {new.hex().upper()}" if bits > 0
+                                        else "-")
+        return ("\n".join(lines) + "\n").encode()
+
+    def feed(self, data):
+        with self.lock:
+            self.script = self.parse(data)
+        try:
+            found, _ = self.cli.watch(f"dump -f {self.FILE}", self.PROMPT,
+                                      timeout=self.timeout, stop=False)
+            if found:
+                self.leave()
+                self.cli.run(f"storage remove {self.FILE}", timeout=10)
+                found = self.enter()
+        except (OSError, TimeoutError) as e:
+            raise Lost(f"its serial port: {e}") from None
+        if not found:
+            raise Lost("the NFC shell was not done with `dump` after "
+                       f"{self.timeout:g} s")
+
+
+TARGETS = {t.name: t for t in (SubGhz, Ir, Rpc, Cli, Nfc, Frames)}
 
 
 # -------------------------------------------------------------------- engine

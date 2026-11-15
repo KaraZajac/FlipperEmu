@@ -61,7 +61,9 @@
  * or "type iso4" with
  *   ats 06 75 77 81 02 80   app desfire   (or mfplus: MIFARE Plus, with
  *                                          its version in a record 01; or
- *                                          iso7816: REC_7816_* below)
+ *                                          ntag4xx: an NTAG 413/424 DNA,
+ *                                          the same; or iso7816:
+ *                                          REC_7816_* below)
  *   rec 01 <28 bytes>       (a record of the application's tables: a type
  *                            and its bytes, see REC_* below; may repeat)
  * or "type felica" with uid (the IDm), pmm, and in mem 18 bytes a block
@@ -96,7 +98,7 @@ enum { ST_OFF, ST_IDLE, ST_READY, ST_ACTIVE, ST_HALT };
 enum { KIND_T2 = 1, KIND_MFC, KIND_ISO4, KIND_FELICA, KIND_V, KIND_B,
        KIND_ST25TB };
 enum { MFC_NONE, MFC_AUTH, MFC_ON };    /* Crypto1 session */
-enum { APP_NONE, APP_DESFIRE, APP_MFPLUS, APP_7816 };   /* on ISO14443-4 */
+enum { APP_NONE, APP_DESFIRE, APP_MFPLUS, APP_7816, APP_NTAG4 };  /* on ISO14443-4 */
 /* what a DESFire ADDITIONAL FRAME goes on with */
 enum { DF_NONE, DF_VERSION_2, DF_VERSION_3, DF_DATA };
 
@@ -1073,7 +1075,9 @@ static int df_command(NfcCard *c, const uint8_t *in, int n, uint8_t *out)
     switch (cmd) {
     case 0x60:                          /* GetVersion: three frames */
         here = rec_next(c, &at, REC_VERSION, &len);
-        if (here < 0 || len != 28) {
+        if (here < 0 || (len != 28 && len != 29)) {     /* (29: an NTAG4xx's
+                                                         * with its last,
+                                                         * optional byte) */
             st = 0x1C;
             break;
         }
@@ -1089,7 +1093,9 @@ static int df_command(NfcCard *c, const uint8_t *in, int n, uint8_t *out)
             c->df_more = DF_VERSION_3;
             st = 0xAF;
         } else if (more == DF_VERSION_3) {
-            memcpy(d, &c->app[c->df_at], dn = 14);
+            len = 28;
+            rec_next(c, &at, REC_VERSION, &len);
+            memcpy(d, &c->app[c->df_at], dn = len - 14);
         } else if (more == DF_DATA) {
             dn = df_frame(c, d, &st);
         } else {
@@ -1403,6 +1409,31 @@ static int app_command(NfcCard *c, const uint8_t *in, int n, uint8_t *out)
         }
         c->df_more = DF_NONE;
         out[0] = 0x0B;
+        return 1;
+    }
+    if (c->app_kind == APP_NTAG4 && n >= 1) {
+        /* NTAG 413 DNA and 424 DNA: of their commands GetVersion, which a
+         * reader sends ISO-wrapped (90 60 00 00 00, three frames as a
+         * DESFire's, from the same record); the others are "illegal
+         * command", and an ISO 7816 command finds no file */
+        bool wrapped = n >= 5 && in[0] == 0x90;
+        uint8_t cmd = wrapped ? in[1] : in[0];
+
+        if (cmd == 0x60 || cmd == 0xAF) {
+            return df_command(c, in, n, out);
+        }
+        c->df_more = DF_NONE;
+        if (wrapped) {
+            out[0] = 0x91;
+            out[1] = 0x1C;
+            return 2;
+        }
+        if (n >= 4 && in[0] == 0x00) {
+            out[0] = 0x6A;
+            out[1] = 0x82;
+            return 2;
+        }
+        out[0] = 0x1C;
         return 1;
     }
     out[0] = 0x6D;                      /* ISO 7816: INS not supported */
@@ -2623,6 +2654,8 @@ NfcCard *nfc_card_new(const char *desc, Error **errp)
                 c->app_kind = APP_DESFIRE;
             } else if (!strcmp(val, "mfplus")) {
                 c->app_kind = APP_MFPLUS;
+            } else if (!strcmp(val, "ntag4xx")) {
+                c->app_kind = APP_NTAG4;
             } else if (!strcmp(val, "iso7816")) {
                 c->app_kind = APP_7816;
             } else if (!strcmp(val, "none")) {

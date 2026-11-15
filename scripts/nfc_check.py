@@ -2,8 +2,9 @@
 # Copyright (c) 2026, Kara Zajac
 # SPDX-License-Identifier: BSD-3-Clause
 """Check the cards beyond NTAG and MIFARE Classic: MIFARE Ultralight C,
-ISO14443-4A, MIFARE DESFire, MIFARE Plus, ISO 7816-4 (a Type 4 tag, an EMV
-card), ISO14443B, ST25TB, FeliCa Lite-S and Standard, ISO15693 with NXP's SLIX.
+ISO14443-4A, MIFARE DESFire, MIFARE Plus, NTAG 424 DNA, ISO 7816-4 (a Type 4
+tag, an EMV card), ISO14443B, ST25TB, FeliCa Lite-S and Standard, ISO15693
+with NXP's SLIX.
 
     scripts/nfc_check.py firmware/official-1.5.1/flipper-z-f7-update-1.5.1.tgz
 
@@ -677,6 +678,12 @@ def main():
                          "Type 4 Tag")
                 app_read(b, work, "emv", "an EMV card",
                          fe_nfc.sample_emv(bytes.fromhex("04E1F2A3B4C5D6")), "EMV")
+                # (through the app as well: Momentum's shell ends the
+                # firmware at this card too, FW-04)
+                app_read(b, work, "ntag4xx", "an NTAG 424 DNA (known by its "
+                         "version, which is all that is read of one)",
+                         fe_nfc.sample_ntag4xx(bytes.fromhex("04B1C2D3E4F5A6")),
+                         "NTAG4xx")
                 desfire(b)
                 iso7816(b)
                 st25tb(b, work)

@@ -5196,6 +5196,242 @@ big lock, entry 92).
     - Three things seen once and not explained are at the list's end, and
       not in it.
 
+169. **A reader for the MIFARE Classic that the Flipper emulates.**
+    - What was missing since entry 35: the firmware sends a Classic's
+      answers itself, in the chip's transparent mode, and the model heard
+      nothing of them. Three parts: a reader that can ask (a program on
+      the link), the answer decoded, and the firmware's ring kept from
+      running dry.
+    - The link's other direction. `reader on` is a reader's field,
+      `reader activate` the WUPA, anticollision and SELECT that the chip
+      answers by itself, `reader send BITS DATA [PARITY]` a frame into
+      the FIFO, and `reader answer` what the firmware sent, with each
+      byte's parity bit. The machine is not stopped for it: a card has no
+      deadline for the reader's next frame.
+    - Transparent mode: direct command 0xDC, the SPI off its pins, and
+      PB5 (MOSI) toggled by `lib/digital_signal`: TIM2's update request
+      with two DMA channels, one writing BSRR (set, reset, set...), one
+      writing ARR from a ring of 128 periods. The board hands every
+      change of that output to the chip model with the update's exact
+      time; when the chip is selected again, the high time in each half
+      of each 128/fc says 1 or 0 (the subcarrier is in the first half or
+      the second), from the first rise on.
+    - The first run, on the official 1.5.1: AUTH, the nonce, the reader's
+      {nR}{aR} and the card's {aT} at once; 63 of 64 blocks of a 1K in
+      0.6 s. Two answers were cut short, 17 bytes with zeros at their
+      end: the pin stood high from somewhere on. The ring: the firmware
+      fills it in a loop while the DMA empties it, an edge every 590 ns,
+      38 CPU cycles, and behind the last period written stands an ARR of
+      0xFFFFFFFF, the end's marker. A CPU that is slower than the loop is
+      overtaken, the marker is loaded, and the timer stands for 67 s.
+    - Holding the update that would load the marker until the firmware
+      has written over it was the first try and did not help. With the
+      DMA at the marker the firmware's count of free places is 0, the
+      same as for a full ring (`(128 + read - write) % 128`), so it
+      writes nothing, looks whether ARR is the marker, and that look was
+      what released the update. So the update before it waits: the one
+      that would load the last period, while the marker stands behind
+      it. The firmware then has 127 places and writes on; at the true end
+      it reads ARR for the end, which releases the last period and then
+      the marker. 64 of 64, three times.
+    - The reader: `scripts/fe_nfc_reader.py`, Crypto1 from the reader's
+      side (the register clocked with the UID and the nonce, the reader's
+      nonce fed in as it is encrypted, the parity bit of each byte under
+      the next bit of keystream; a nested authentication's nonce decrypted
+      while it is fed). It has the keys of the card's file, as a reader
+      that knows the card: key A, then key B of each sector, every block
+      that the access bits let it read. A trailer comes back without its
+      keys, as from a card; the keys that opened the sector are put in.
+      `./flipperemu nfc --reader classic CARD.nfc` runs it and keeps what
+      it read in nfc-tx/, where the built-in readers' files are.
+    - A sector whose data is for key B alone (access bits 0F 00 FF): the
+      firmware takes key A and refuses each read with a NAK, and gives
+      the blocks to key B. A reader with wrong keys for one sector: the
+      firmware is silent, the reader selects again and goes on with the
+      next; 60 of 64 and exit status 1.
+    - Checks: `scripts/nfc_emulate_check.py`, 8 on the official 1.5.1
+      and its dev build, Momentum, Unleashed and RogueMaster (an NTAG215
+      by the machine's reader; MIFARE Classic Mini, 1K and 4K block for
+      block and key for key; the wrong keys; nothing emulated), four of
+      them at once on one computer.
+    - Then the whole regression ran beside it, four chains of checks at
+      once, and the reader lost sectors: 12 of 20 blocks of a Mini, 196
+      of 256 of a 4K. A frame with no answer in 100 ms was a wrong key to
+      it, and on a busy computer the emulated CPU is that late now and
+      then (the built-in readers send a frame three times for it). A
+      card never is, so the reader does what a reader does with a card
+      that has lost its place: the field off and on, select, the key
+      again, four times before a key is given up; a refusal counts when
+      it comes twice; and a program's frame has 250 ms. With 24 busy
+      loops beside it on 16 threads: all 13 checks. With 40: one run of
+      three lost blocks, and once the emulation answered nothing more
+      until its end (12 reads more under that load did not bring it
+      back; not explained).
+
+170. **More readers, and one more card.**
+    - FeliCa. The firmware emulates a FeliCa Lite-S through the chip:
+      MODE is target with om2, the system code, IDm and PMm go into the
+      passive-target memory at 0xA8, and the chip answers a polling from
+      there by itself (the firmware's log calls a polling that reaches
+      it "Hardware Polling command leaking through"). So `reader
+      activate` answers `target f IDm PMm SC` and raises I_wu_f, and
+      frames are bytes both ways, as the firmware reads and writes them
+      (length first, CRC last). `nfc --reader felica` polls and reads
+      the 28 blocks one by one without the card key: 25, at the first
+      run. S_PAD12 and 13 are refused (01 B1), as the card's file has
+      them. Two things are the firmware's: the card key reads as zeros
+      with a good status, where the file from a card has a refusal (01
+      A8), and MAC_A is refused (01 B2) before a challenge was written.
+      And the dev build, Unleashed and RogueMaster load a PMm of their
+      own for the polling (00 F1 FF FF FF FF FF FF); the card's is in
+      its D_ID block.
+    - ISO14443-4: `IsoDep` in the reader (RATS, I-blocks chained either
+      way, a waiting time extension granted as asked). The official
+      firmware answers a RATS with the file's ATS and gives every block
+      after it to the app that emulates, and the shell's `emulate` has
+      nobody there: `nfc --reader iso-dep` is the ATS, part for part.
+    - A Type 4 tag. `nfc --reader t4t` selects the NDEF application and
+      the capability container, and reads the NDEF file in the reads
+      that the container allows. No firmware here emulates one from its
+      shell: the official 1.5.1 does not load the file, the dev build,
+      Unleashed and RogueMaster say "is not supported", and Momentum
+      mntm-012 ends in `[CRASH][ISR MemMgmt] NULL pointer dereference`
+      (FW-19 in the list). So the check has that reader read a tag that
+      is played in Python, the link's ISO14443-4 card with two files:
+      910 bytes in reads of 59, 22 frames. On the way: a reader that
+      sends a second WUPA to a card it has selected gets no answer from
+      a card that keeps to the standard; the chip model had answered.
+    - NTAG 413 DNA and 424 DNA: the dev build and the three forks know
+      the card by its GetVersion, ISO-wrapped (90 60 00 00 00, three
+      frames), with a hardware type of 4; the official 1.5.1 reads it as
+      an ISO14443-4A card. The card model had GetVersion for DESFire and
+      MIFARE Plus: a third kind of application, "ntag4xx", answers it
+      and nothing else. The version is 28 bytes from the card and 29 in
+      the firmware's file (a last, optional byte, zero when the card
+      sent none). Read by the shell's `scanner` and `dump` on the dev
+      build, Unleashed and RogueMaster at once; Momentum's shell ends
+      the firmware at this card as at the Type 4 tag and the EMV card
+      (FW-04), so the check reads it through the NFC app on all.
+    - Checks: nfc_emulate_check 13 on the five firmwares; nfc_check 25
+      on the official 1.5.1, 27 on the dev build, 28 on Momentum,
+      Unleashed and RogueMaster.
+    - Not there: a reader for ISO15693 and SLIX emulation (the firmware
+      samples a pin with TIM16 and the DMA, started by a DMAMUX request
+      generator on an EXTI line: three things the SoC model has not);
+      a Type 4 tag emulated by a fork's NFC app; FeliCa's authentication
+      from the reader's side.
+
+171. **Sub-GHz: the transmitter's ring, and a first pulse that was too
+     long.**
+    - The plan had "pacing against DMA refill lag" since the transmitter
+      was first heard: the ring of 256 periods is refilled by halves
+      from the DMA's interrupt, and an emulated CPU that is later than
+      half a ring lasts would have the lap before played again. Asked
+      first whether it happens: a RAW file of 3000 pulses of 120 to
+      900 µs, sent with `subghz tx_from_file`, the capture against the
+      file. With nothing else running, and with 48 busy loops on 16
+      threads: every duration the file's, each time. No lag seen.
+    - What was seen: from the second transmission of a device on, the
+      first pulse was 1499 µs for 451 (8930 once, under load). The
+      radio's capture closes its last level at the transmission's end
+      by pretending an edge, and kept the pretended level; the timer's
+      reset, which lets its pin fall, told nobody. So a transmission
+      that ended low left "high" behind, and the next one's first pulse
+      was measured from the radio's start: 1 ms of the timer's first
+      period more, and what the firmware took to get there. The
+      capture keeps the pin's level now, and a timer's reset reports
+      its pins.
+    - The pacing, for what was not seen: before the first period of a
+      half is loaded, TIM2 waits while the half's interrupt flag is
+      set. Under load that made things worse: 253 and 65 wrong
+      durations where there had been none. The handler clears the flag
+      first and writes the half after, and a timer that has waited
+      catches up at once, faster than the handler writes. Now the SoC
+      asks the NVIC: the channel's interrupt pending or its handler
+      running, and the update waits. 3000 of 3000 again, five runs of
+      six at a load of 48.
+    - The sixth, and four of six with pulses of 100 to 220 µs at a load
+      of 32: durations 999 µs too long at the ends of the ring's laps,
+      and a few hundred more of them than the file has. That is the
+      firmware: the file is read in a thread of its own, the interrupt
+      handler takes what that thread has ready, and when it has
+      nothing, a guard time of 999 µs is sent in its place. A Flipper
+      with a slow card does that too. Nothing in the timer reaches it:
+      the emulated CPU is simply slower than the signal there.
+    - What the wait costs in truth: a firmware of one's own that is
+      late with its refill on a real Flipper is not shown as late here,
+      up to 250 ms. The same was already so for the infrared
+      transmitter's buffers (entry 26).
+    - Checks: smoke 28, subghz_check 12, rfid_check 71 (its emulation
+      fills its buffers the same way) on the official 1.5.1.
+    - The whole regression twice with all of this, four chains at once.
+      The first time everything but the new reader (entry 169). The second
+      time everything but the smoke test, whose CLI stopped answering
+      after `mfu info`: `[CRASH][ISR USB_LP] furi_check failed`, r0
+      0xfffffffd, the CLI's queue of eight (FW-07) while the NFC app read
+      a card and the check opened the port for its next step. Alone it
+      passes, 28. With 32 busy loops beside it, 26, 25 and 18 of 28:
+      the SDR recording, the T5577, the 1-Wire read, the infrared, each
+      once or twice, and that crash once in three. The plan's "checks
+      that hold on a busy computer" has this.
+
+172. **A record of the NFC frames.**
+    - The header's buses and pins have records; the antenna had none,
+      and what a reader and a card say to each other was only to be had
+      from a program on the link, with no built-in card. `nfc record
+      FILE`: a line for each frame and its answer, its time, who asked
+      (`flipper`: the firmware as a reader; `reader`: one in front of the
+      Flipper as a card), the technology, bits and bytes; `-` for no
+      answer; the parity bits where they are not odd, so MIFARE Classic's
+      frames are whole. Fields and a reader's activation have lines.
+    - ISO15693 is a stream in the chip, which the firmware codes itself:
+      the record has the bytes behind the codes, not 0x21 0x02 0x08.
+    - `nfc watch` is the record as it is written, as `spi watch` and
+      `i2c watch` are.
+    - What the first record showed that no check had: the scanner's
+      order (A, B, ISO15693, FeliCa, ST25TB's Initiate, A again), an AUTH
+      that an NTAG answers with a 4-bit NAK, and the reader's key A
+      refused twice at each block of the sector that is for key B, as
+      the reader was told to ask twice (entry 169).
+    - Checks: nfc_emulate_check 15 on the five firmwares.
+
+173. **Fuzzing a card's frames.**
+    - `fuzz nfc` changes what a card says of itself, and the card model
+      answers by the rules whatever it holds: a length byte that lies, a
+      frame that stops in a byte, an answer to another question never
+      come from it. `fuzz nfc-frames` is the card that does those: on the
+      NFC link, where a program is the card.
+    - An input is an exchange in the record's own words, a line for each
+      frame of the firmware's and its answer. The card answers a frame
+      with the answer of the first line not used yet that has that frame,
+      and a frame that no line has with the next line's: a reader that
+      was led somewhere else by a changed answer still gets answers.
+    - The seeds are not written by hand: at its start the fuzzer holds
+      each of the emulator's ISO14443A cards to the Flipper (an NTAG215, a
+      MIFARE Classic, Ultralight C, DESFire, MIFARE Plus, NTAG 424 DNA, a
+      Type 4 tag, an EMV card), has the shell `dump` it with the record
+      on, and keeps the lines. A built-in card answers before the link's,
+      so the fuzzer's card can stay where it is meanwhile.
+    - A change is to one answer: its bytes (the fuzzer's own changes,
+      pieces of another exchange's answers), and its CRC made right
+      again 85 times in 100, or the firmware's check ends most of them
+      at once; one in twenty not whole bytes long; one in twenty silence,
+      or an answer where there was none; one in twenty another frame's.
+    - The first run, the official 1.5.1: 40 inputs in 57 s, 14 kept for
+      new code, no crash. MIFARE Classic's lines end at the nonce: the
+      recorded answers are to another reader's nonce.
+    - Momentum mntm-012 and Unleashed unlshd-094: two crashes each in 14
+      inputs, the known ones (FW-04's NULL pointer from 0x08001163, FW-05's
+      "[dump] furi_check failed"), now by a card on the link that says
+      what a Type 4 tag and an EMV card say.
+    - By hand, with `--replay`: an ISO14443-4 card whose ATS says it is
+      255 bytes long and is 6. The firmwares end the `dump` and go on.
+    - Checks: fuzz_check 20 on the official 1.5.1 (with ufbt's SDK), 14
+      on the dev build, Momentum and Unleashed. One of its older checks
+      failed once with four chains of checks beside it: the planted
+      crash was found, and the corpus did not have both steps to it that
+      the check asks for. Alone: 18 of 18, before this.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

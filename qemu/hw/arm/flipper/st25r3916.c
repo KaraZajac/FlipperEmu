@@ -34,8 +34,17 @@
  * signature, every page, the NFC counter).  When done the field goes off
  * (I_eof) and what the reader saw is written as a Flipper .nfc file to
  * "tx-dir" (the launcher: devices/NAME/nfc-tx/); "tx" names the latest.
- * (Custom-parity answers, MIFARE Classic's, go out by transparent mode on
- * a bit-banged pin, which this does not decode.)
+ * An answer whose parity bits are not the chip's to make (MIFARE Classic's
+ * encrypted ones) the firmware sends in transparent mode: the modulator
+ * follows a pin of the MCU, MOSI, until the chip is selected again.  The
+ * board reports that pin's edges (st25r3916_mod), and they are decoded
+ * back into the answer's bits when the mode ends.
+ * A reader can also be a program on the link: "reader on", "reader
+ * activate", "reader send" (docs/RADIO_LINK.md).
+ *
+ * "record" (a file's whole path, or off) writes every frame on the air and
+ * its answer as a line of text: the Flipper's as a reader, and a reader's
+ * to the Flipper as a card.
  *
  * A card can also be on the "link" chardev (docs/RADIO_LINK.md): a program
  * (scripts/fe_nfc_link.py), or real hardware's antenna.  With no card set
@@ -95,6 +104,8 @@
 #define I_EON  1, 0x10
 #define I_EOF  1, 0x08
 #define I_WU_A 3, 0x01
+#define I_WU_A_X 3, 0x02               /* ... from SLEEP, by a WUPA */
+#define I_WU_F 3, 0x08                 /* a SENSF_REQ answered (FeliCa) */
 #define MODE_TARG 0x80
 /* MODE.om as an initiator: what is on the air */
 #define MODE_OM(v)       (((v) >> 3) & 0xF)
@@ -246,6 +257,160 @@ static int nfc_air_join(const uint8_t *data, int nbits, const uint8_t *par,
     return n;
 }
 
+/* ------------------------------------------------------------- a record */
+
+#define REC_FLUSH_MS 50
+
+static void st25_rec_flush(void *opaque)
+{
+    St25r3916State *s = opaque;
+
+    if (s->rec) {
+        fflush(s->rec);
+        timer_mod(s->rec_flush,
+                  qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + REC_FLUSH_MS);
+    }
+}
+
+static bool st25_rec_begin(St25r3916State *s)
+{
+    int64_t ns;
+
+    if (!s->rec) {
+        return false;
+    }
+    ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->rec_t0;
+    fprintf(s->rec, "%" PRId64 ".%09" PRId64 " ",
+            (int64_t)(ns / NANOSECONDS_PER_SECOND),
+            (int64_t)(ns % NANOSECONDS_PER_SECOND));
+    s->rec_lines++;
+    return true;
+}
+
+/* a frame in a line: its bits, its bytes, and after a "p" the parity bits
+ * of its bytes where they are not the odd ones (MIFARE Classic's) */
+static void st25_rec_frame(St25r3916State *s, const uint8_t *d, int bits,
+                           const uint8_t *par)
+{
+    bool odd = true;
+
+    if (bits <= 0) {
+        fputc('-', s->rec);
+        return;
+    }
+    fprintf(s->rec, "%d ", bits);
+    for (int i = 0; i < (bits + 7) / 8; i++) {
+        fprintf(s->rec, "%02X", d[i]);
+        if (par && i < bits / 8) {
+            odd &= ((par[i / 8] >> (i % 8)) & 1) == !(ctpop8(d[i]) & 1);
+        }
+    }
+    if (!odd) {
+        fputs(" p", s->rec);
+        for (int i = 0; i < (bits / 8 + 7) / 8; i++) {
+            fprintf(s->rec, "%02X", par[i]);
+        }
+    }
+    s->rec_frames++;
+}
+
+/* an event that is no frame: a field, a card selected */
+static void G_GNUC_PRINTF(2, 3) st25_rec_note(St25r3916State *s,
+                                              const char *fmt, ...)
+{
+    va_list ap;
+
+    if (!st25_rec_begin(s)) {
+        return;
+    }
+    va_start(ap, fmt);
+    vfprintf(s->rec, fmt, ap);
+    va_end(ap);
+    fputc('\n', s->rec);
+}
+
+/* who asked ("flipper": the firmware as a reader; "reader": one in front of
+ * the Flipper as a card), in which technology, the frame and its answer */
+static void st25_rec_exchange(St25r3916State *s, const char *who, char tech,
+                              const uint8_t *out, int out_bits,
+                              const uint8_t *out_par, const uint8_t *in,
+                              int in_bits, const uint8_t *in_par)
+{
+    if (!st25_rec_begin(s)) {
+        return;
+    }
+    fprintf(s->rec, "%s %c ", who, tech);
+    st25_rec_frame(s, out, out_bits, out_par);
+    fputs(" > ", s->rec);
+    st25_rec_frame(s, in, in_bits, in_par);
+    fputc('\n', s->rec);
+}
+
+/* MODE.om of the firmware as a reader -> the record's letter */
+static char st25_rec_tech(St25r3916State *s)
+{
+    switch (MODE_OM(s->rega[REG_MODE])) {
+    case OM_ISO14443A: return 'a';
+    case OM_ISO14443B: return 'b';
+    case OM_FELICA: return 'f';
+    case OM_SUBCARRIER: return 'v';
+    }
+    return '?';
+}
+
+/* the firmware's frame (s->tx) and the card's answer (s->rx, s->nrx bits;
+ * 0: none), both as they are on the air */
+static void st25_rec_poll(St25r3916State *s)
+{
+    uint8_t out[NFC_AIR_MAX + 1], in[NFC_AIR_MAX + 1];
+    uint8_t out_par[NFC_AIR_MAX / 8 + 2], in_par[NFC_AIR_MAX / 8 + 2];
+    int out_bits, in_bits;
+
+    if (!s->rec) {
+        return;
+    }
+    if (MODE_OM(s->rega[REG_MODE]) == OM_SUBCARRIER && s->ntx >= 16 &&
+        s->tx[0] == 0x21) {
+        /* ISO15693 as the firmware codes it (see st25_card_bytes): the
+         * bytes that the codes stand for */
+        out_bits = in_bits = 0;
+        memset(out, 0, sizeof(out));
+        memset(in, 0, sizeof(in));
+        for (int i = 1; i < s->ntx / 8 && s->tx[i] != 0x04; i++) {
+            int pair = s->tx[i] == 0x02 ? 0 : s->tx[i] == 0x08 ? 1 :
+                       s->tx[i] == 0x20 ? 2 : s->tx[i] == 0x80 ? 3 : -1;
+
+            if (pair < 0) {
+                break;
+            }
+            out[out_bits / 8] |= pair << (out_bits % 8);
+            out_bits += 2;
+        }
+        for (int i = 5; i + 1 < s->nrx - 8; i += 2, in_bits++) {
+            in[in_bits / 8] |= bit_get(s->rx, i + 1) << (in_bits % 8);
+        }
+        st25_rec_exchange(s, "flipper", 'v', out, out_bits, NULL, in, in_bits,
+                          NULL);
+        return;
+    }
+    if (MODE_OM(s->rega[REG_MODE]) != OM_ISO14443A) {
+        st25_rec_exchange(s, "flipper", st25_rec_tech(s), s->tx, s->ntx, NULL,
+                          s->rx, s->nrx, NULL);
+        return;
+    }
+    out_bits = nfc_air_split(s->tx, s->ntx, out, out_par);
+    in_bits = s->nrx > 0 ? nfc_air_split(s->rx, s->nrx, in, in_par) : 0;
+    st25_rec_exchange(s, "flipper", 'a', out, out_bits, out_par, in, in_bits,
+                      in_par);
+}
+
+/* listening as a FeliCa card (MODE: target, om2): its frames are bytes,
+ * length first and the CRC last, with no parity */
+static bool st25_listen_f(St25r3916State *s)
+{
+    return (s->rega[REG_MODE] & MODE_TARG) && (MODE_OM(s->rega[REG_MODE]) & 4);
+}
+
 /* ------------------------------------------------------------ the field */
 
 static bool st25_field(St25r3916State *s)
@@ -263,6 +428,7 @@ static void st25_field_changed(St25r3916State *s)
             nfc_card_field(s->card, on);
         }
         flipper_link_send(&s->lk, "field %s\n", on ? "on" : "off");
+        st25_rec_note(s, "flipper field %s", on ? "on" : "off");
     }
 }
 
@@ -370,6 +536,8 @@ static void st25_rx_end(St25r3916State *s)
 
 static void st25_link_poll(St25r3916State *s);
 static void st25_silence(St25r3916State *s, int64_t now);
+static void st25_link_reader(St25r3916State *s, char *line);
+static void st25_link_rd_end(St25r3916State *s);
 
 /* the transmission is over: hand it to the card, schedule its answer */
 static void st25_tx_end(St25r3916State *s, int64_t now)
@@ -393,6 +561,7 @@ static void st25_tx_end(St25r3916State *s, int64_t now)
         st25_link_poll(s);              /* the card on the link answers */
         return;
     }
+    st25_rec_poll(s);
     if (s->nrx > 0) {
         s->stage = STAGE_RXS;
         timer_mod(s->timer, now + FDT_NS);
@@ -518,11 +687,16 @@ static void st25_link_line(void *opaque, char *line)
     long nbits;
     bool own_par;
 
+    if (g_str_has_prefix(line, "reader ")) {
+        st25_link_reader(s, line + 7);
+        return;
+    }
     if (s->stage != STAGE_LINK) {
         return;                         /* nothing asked */
     }
     if (g_str_has_prefix(line, "silence")) {
         st25_link_resume(s);
+        st25_rec_poll(s);
         st25_silence(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
         return;
     }
@@ -550,6 +724,7 @@ static void st25_link_line(void *opaque, char *line)
     st25_link_resume(s);
     now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     s->nrx = nfc_air_join(data, nbits, own_par ? par : NULL, s->rx);
+    st25_rec_poll(s);
     s->stage = STAGE_RXS;
     timer_mod(s->timer, now + FDT_NS);
 }
@@ -567,6 +742,7 @@ static void st25_link_timeout(void *opaque)
                     "silence", LINK_ANSWER_MS);
     }
     st25_link_resume(s);
+    st25_rec_poll(s);
     st25_silence(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
 }
 
@@ -578,9 +754,13 @@ static void st25_link_opened(void *opaque, bool open)
         s->link_late = false;
         flipper_link_send(&s->lk, "hello flipperemu nfc 1\nfield %s\n",
                           s->field_on ? "on" : "off");
-    } else if (s->stage == STAGE_LINK) {
-        st25_link_resume(s);            /* gone mid-frame: silence */
-        st25_silence(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    } else {
+        st25_link_rd_end(s);            /* a reader on it: gone with it */
+        if (s->stage == STAGE_LINK) {
+            st25_link_resume(s);        /* gone mid-frame: silence */
+            st25_rec_poll(s);
+            st25_silence(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+        }
     }
 }
 
@@ -612,7 +792,7 @@ static void st25_transmit(St25r3916State *s, uint8_t cmd)
             data[nbits / 8 + 1] = crc >> 8;
             nbits += 16;
         }
-        if ((s->rega[REG_ISO14443A] & A_NO_TX_PAR) ||
+        if ((s->rega[REG_ISO14443A] & A_NO_TX_PAR) || st25_listen_f(s) ||
             (MODE_OM(s->rega[REG_MODE]) != OM_ISO14443A &&
              !(s->rega[REG_MODE] & MODE_TARG))) {
             memcpy(s->tx, data, (nbits + 7) / 8);   /* as it is */
@@ -725,6 +905,10 @@ static void st25_direct(St25r3916State *s, uint8_t cmd)
     case 0xCD:                          /* GOTO_SENSE */
         s->pt_sleep = false;
         break;
+    case 0xDC:                          /* TRANSPARENT_MODE, till selected */
+        s->tm = true;
+        s->tm_n = 0;
+        break;
     case 0xCE:                          /* GOTO_SLEEP (after HLTA) */
         s->pt_sleep = true;
         break;
@@ -765,11 +949,41 @@ static void st25_ext_field(St25r3916State *s, bool session, bool standing)
         } else {
             st25_raise(s, I_EON);
         }
+        st25_rec_note(s, "reader field %s", was ? "off" : "on");
     }
 }
 #define RD_ANSWER_NS (100 * SCALE_MS)   /* no answer by then: none */
+#define RD_LINK_ANSWER_NS (250 * SCALE_MS)  /* ... to a program's frame: it
+                                         * has no second and third send of
+                                         * its own before it hears "silence" */
 #define RD_GAP_NS    (1 * SCALE_MS)     /* an answer to the next command */
 #define RD_TRIES     3                  /* sends of one command, at most */
+
+/* a reader's frame is out: kept until its answer, for the record's line */
+static void st25_rd_asked(St25r3916State *s, const uint8_t *d, int bits,
+                          const uint8_t *par)
+{
+    int n = MIN((bits + 7) / 8, (int)sizeof(s->rd_cmd));
+
+    memcpy(s->rd_cmd, d, n);
+    s->rd_cmd_bits = MIN(bits, n * 8);
+    for (int i = 0; i < n; i++) {       /* (odd, where none was given) */
+        bit_put(s->rd_cmd_par, i, par ? bit_get(par, i) : !(ctpop8(d[i]) & 1));
+    }
+}
+
+/* ... and the line: with the firmware's answer, or with none */
+static void st25_rd_recorded(St25r3916State *s, bool answered)
+{
+    bool f = st25_listen_f(s);
+
+    if (s->rec && s->rd_cmd_bits) {
+        st25_rec_exchange(s, "reader", f ? 'f' : 'a', s->rd_cmd,
+                          s->rd_cmd_bits, f ? NULL : s->rd_cmd_par, s->rd_ans,
+                          answered ? s->rd_ans_bits : 0, f ? NULL : s->rd_par);
+    }
+    s->rd_cmd_bits = 0;
+}
 
 /* a reader command reaches the firmware: into the FIFO, RXS then RXE */
 static void st25_rd_send(St25r3916State *s, const uint8_t *cmd, int n)
@@ -781,6 +995,7 @@ static void st25_rd_send(St25r3916State *s, const uint8_t *cmd, int n)
     s->fifo[n] = crc & 0xFF;
     s->fifo[n + 1] = crc >> 8;
     s->fifo_len = n + 2;
+    st25_rd_asked(s, s->fifo, (n + 2) * 8, NULL);
     s->rd_ans_bits = -1;
     s->rd_waiting = true;
     st25_raise(s, I_RXS);
@@ -791,12 +1006,17 @@ static void st25_rd_send(St25r3916State *s, const uint8_t *cmd, int n)
 /* the firmware transmitted: that is the answer to the reader's command */
 static void st25_rd_answer(St25r3916State *s)
 {
-    bool ok;
-
     if (!s->rd_waiting) {
         return;
     }
-    s->rd_ans_bits = nfc_air_decode(s->tx, s->ntx, s->rd_ans, &ok);
+    if (st25_listen_f(s)) {             /* bytes, as they are */
+        memcpy(s->rd_ans, s->tx, (s->ntx + 7) / 8);
+        memset(s->rd_par, 0, sizeof(s->rd_par));
+        s->rd_ans_bits = s->ntx;
+    } else {
+        s->rd_ans_bits = nfc_air_split(s->tx, s->ntx, s->rd_ans, s->rd_par);
+    }
+    st25_rd_recorded(s, true);
     s->rd_waiting = false;
     timer_mod(s->rd_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
                            (int64_t)(s->ntx + 2) * BIT_NS + RD_GAP_NS);
@@ -908,6 +1128,255 @@ static void st25_rd_write(St25r3916State *s)
     }
 }
 
+/* ------------------------------------------ listen: transparent mode */
+
+/*
+ * The pin's edges while the mode is on, from its first rise.  What the
+ * firmware puts there (lib/digital_signal's ISO14443A preset) is the card's
+ * side of 106 kbit/s: Manchester with the 847.5 kHz subcarrier, a half wave
+ * of it 8/fc long.  A 1 has the subcarrier in the first half of its 128/fc
+ * and a 0 in the second; the frame starts with a 1, and ends where a bit
+ * has none.  The bits after the start are the frame as it is on the air:
+ * eight of data and the parity that the firmware chose, or fewer than
+ * eight alone (MIFARE Classic's encrypted ACK and NAK).
+ */
+void st25r3916_mod(St25r3916State *s, bool level, int64_t when)
+{
+    if (!s->tm || s->tm_n >= ARRAY_SIZE(s->tm_edge) ||
+        level == (s->tm_n ? (bool)(s->tm_edge[s->tm_n - 1] & 1) : false)) {
+        return;
+    }
+    s->tm_edge[s->tm_n++] = when << 1 | level;
+}
+
+/* how long the pin was high in [a, b); *from: the first edge to look at */
+static int64_t tm_high(St25r3916State *s, int64_t a, int64_t b, int *from)
+{
+    int64_t sum = 0;
+
+    for (int i = *from; i + 1 < s->tm_n; i++) {
+        int64_t t = s->tm_edge[i] >> 1, end = s->tm_edge[i + 1] >> 1;
+
+        if (end <= a) {
+            *from = i + 1;
+            continue;
+        }
+        if (t >= b) {
+            break;
+        }
+        if (s->tm_edge[i] & 1) {
+            sum += MIN(end, b) - MAX(t, a);
+        }
+    }
+    return sum;
+}
+
+static void st25_tm_end(St25r3916State *s)
+{
+    int64_t t0 = s->tm_n ? s->tm_edge[0] >> 1 : 0;
+    int n = 0, from = 0;
+
+    s->tm = false;
+    if (s->tm_n < 2 || !(s->rega[REG_MODE] & MODE_TARG)) {
+        return;
+    }
+    memset(s->tx, 0, sizeof(s->tx));
+    for (int k = 1; n < (NFC_AIR_MAX - 1) * 8; k++) {
+        int64_t a = t0 + muldiv64((uint64_t)k * 128, NANOSECONDS_PER_SECOND,
+                                  13560000);
+        int64_t mid = a + BIT_NS / 2;
+        int64_t first = tm_high(s, a, mid, &from);
+        int64_t second = tm_high(s, mid, a + BIT_NS, &from);
+
+        if (MAX(first, second) < BIT_NS / 16) {
+            break;                      /* no subcarrier: the frame's end */
+        }
+        bit_put(s->tx, n++, first > second);
+    }
+    s->ntx = n;
+    s->tm_n = 0;
+    if (n) {
+        st25_rd_answer(s);              /* this answers the reader */
+    }
+}
+
+/* ----------------------------------------------- a reader on the link */
+
+static bool st25_rd_on_link(St25r3916State *s)
+{
+    return s->rd_prog && !strcmp(s->rd_prog, "link");
+}
+
+/* the session of a reader on the link ends: its field goes */
+static void st25_link_rd_end(St25r3916State *s)
+{
+    if (!st25_rd_on_link(s)) {
+        return;
+    }
+    timer_del(s->rd_timer);
+    s->rd_waiting = false;
+    s->rd_ans_bits = -1;
+    g_free(s->rd_prog);
+    s->rd_prog = NULL;
+    st25_ext_field(s, false, s->ext_field);
+}
+
+/* its timer: the Flipper's answer is over, or none has come */
+static void st25_link_rd_timer(St25r3916State *s)
+{
+    g_autoptr(GString) line = g_string_new(NULL);
+
+    if (s->rd_waiting || s->rd_ans_bits <= 0) {
+        st25_rd_recorded(s, false);
+        s->rd_waiting = false;
+        s->rd_ans_bits = -1;
+        flipper_link_send(&s->lk, "reader silence\n");
+        return;
+    }
+    g_string_printf(line, "reader answer %d ", s->rd_ans_bits);
+    hex_put(line, s->rd_ans, (s->rd_ans_bits + 7) / 8);
+    g_string_append_c(line, ' ');
+    hex_put(line, s->rd_par, (s->rd_ans_bits / 8 + 7) / 8);
+    s->rd_ans_bits = -1;
+    flipper_link_send(&s->lk, "%s\n", line->str);
+}
+
+/*
+ * "reader on|off|activate|send BITS DATA [PARITY]|saved PATH": the program
+ * on the link is a reader in front of a Flipper that emulates a card.
+ */
+static void st25_link_reader(St25r3916State *s, char *line)
+{
+    uint8_t data[sizeof(s->fifo)], par[sizeof(s->fifo) / 8 + 1];
+    bool listening = (s->rega[REG_MODE] & MODE_TARG) &&
+                     (s->rega[REG_OP_CONTROL] & OP_EN);
+    g_autoptr(GString) out = g_string_new(NULL);
+    bool own_par, odd = true;
+    long nbits;
+    char *end, *p;
+
+    if (g_str_has_prefix(line, "on")) {
+        if (s->rd_prog && !st25_rd_on_link(s)) {
+            flipper_link_send(&s->lk, "reader busy\n");
+            return;                     /* a reader of the machine's own */
+        }
+        g_free(s->rd_prog);
+        s->rd_prog = g_strdup("link");
+        s->rd_waiting = false;
+        s->rd_ans_bits = -1;
+        st25_ext_field(s, true, s->ext_field);
+        flipper_link_send(&s->lk, "reader field on\n");
+        return;
+    }
+    if (g_str_has_prefix(line, "off")) {
+        st25_link_rd_end(s);
+        flipper_link_send(&s->lk, "reader field off\n");
+        return;
+    }
+    if (g_str_has_prefix(line, "saved ")) {     /* what it read, as a file */
+        g_free(s->tx_last);
+        s->tx_last = g_strndup(g_strstrip((char *)line + 6), 1024);
+        flipper_link_send(&s->lk, "reader saved\n");
+        return;
+    }
+    if (!st25_rd_on_link(s)) {
+        flipper_link_send(&s->lk, "reader error no field: reader on\n");
+        return;
+    }
+    if (s->rd_waiting || s->rd_ans_bits >= 0) {
+        flipper_link_send(&s->lk, "reader error an answer is due\n");
+        return;
+    }
+    if (g_str_has_prefix(line, "activate")) {
+        /* WUPA, anticollision and SELECT, which the chip answers by itself
+         * from the passive-target memory: from SENSE, and from SLEEP too */
+        int n = (s->rega[REG_AUX] & 0x30) ? 7 : 4;
+
+        if (!listening) {
+            flipper_link_send(&s->lk, "reader target none\n");
+            return;
+        }
+        if (st25_listen_f(s)) {
+            /* a SENSF_REQ, which the chip answers from the memory that the
+             * firmware loaded for it (at 15: the system code, the response
+             * code, IDm, PMm, two bytes more) */
+            g_string_append(out, "reader target f ");
+            hex_put(out, &s->pt_mem[18], 8);
+            g_string_append_c(out, ' ');
+            hex_put(out, &s->pt_mem[26], 8);
+            g_string_append_printf(out, " %02X%02X\n", s->pt_mem[15],
+                                   s->pt_mem[16]);
+            st25_raise(s, I_WU_F);
+            flipper_link_send(&s->lk, "%s", out->str);
+            st25_rec_note(s, "reader f polling > %s",
+                          g_strchomp(out->str) + strlen("reader target f "));
+            return;
+        }
+        g_string_append(out, "reader target a ");
+        hex_put(out, s->pt_mem, n);
+        g_string_append_printf(out, " %02X%02X %02X\n", s->pt_mem[10],
+                               s->pt_mem[11], s->pt_mem[n == 4 ? 12 : 13]);
+        if (s->pt_sleep) {
+            s->pt_sleep = false;
+            st25_raise(s, I_WU_A_X);
+        } else {
+            st25_raise(s, I_WU_A);
+        }
+        flipper_link_send(&s->lk, "%s", out->str);
+        st25_rec_note(s, "reader a select > %s",
+                      g_strchomp(out->str) + strlen("reader target a "));
+        return;
+    }
+    if (!g_str_has_prefix(line, "send ")) {
+        flipper_link_send(&s->lk, "reader error on, off, activate or send\n");
+        return;
+    }
+    nbits = strtol(line + 5, &end, 10);
+    if (end == line + 5 || nbits <= 0 || nbits > (long)sizeof(data) * 8) {
+        flipper_link_send(&s->lk, "reader error a frame's bits\n");
+        return;
+    }
+    p = end;
+    while (*p == ' ') {
+        p++;
+    }
+    memset(data, 0, sizeof(data));
+    if (hex_get(p, data, sizeof(data)) < (nbits + 7) / 8) {
+        flipper_link_send(&s->lk, "reader error a frame's bytes\n");
+        return;
+    }
+    p += (nbits + 7) / 8 * 2;
+    while (*p == ' ') {
+        p++;
+    }
+    memset(par, 0, sizeof(par));
+    own_par = hex_get(p, par, sizeof(par)) > 0;
+    for (int i = 0; own_par && i < nbits / 8; i++) {
+        odd &= bit_get(par, i) == !(ctpop8(data[i]) & 1);
+    }
+    st25_rd_asked(s, data, nbits, own_par ? par : NULL);
+    if (!listening) {                   /* nobody hears it */
+        s->rd_waiting = true;
+        timer_mod(s->rd_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                               RD_LINK_ANSWER_NS);
+        return;
+    }
+    /* into the FIFO as the chip receives a frame: the data, its parity
+     * bits checked and dropped */
+    st25_fifo_clear(s);
+    memcpy(s->fifo, data, (nbits + 7) / 8);
+    s->fifo_len = (nbits + 7) / 8;
+    s->fifo_lb = nbits % 8;
+    s->rd_ans_bits = -1;
+    s->rd_waiting = true;
+    st25_raise(s, I_RXS);
+    if (!odd) {
+        st25_raise(s, I_PAR);
+    }
+    st25_raise(s, I_RXE);
+    timer_mod(s->rd_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + RD_LINK_ANSWER_NS);
+}
+
 /* the reader's program, one step per timer tick */
 static void st25_rd_timer(void *opaque)
 {
@@ -919,7 +1388,12 @@ static void st25_rd_timer(void *opaque)
     if (!s->rd_prog) {
         return;
     }
+    if (st25_rd_on_link(s)) {
+        st25_link_rd_timer(s);
+        return;
+    }
     if (s->rd_waiting) {                /* timed out: no answer */
+        st25_rd_recorded(s, false);
         s->rd_waiting = false;
         s->rd_ans_bits = -1;
     }
@@ -949,6 +1423,13 @@ static void st25_rd_timer(void *opaque)
         s->rd_atqa[1] = s->pt_mem[11];
         s->rd_sak = s->pt_mem[s->rd_uid_len == 4 ? 12 : 13];
         st25_raise(s, I_WU_A);
+        if (s->rec) {
+            g_autoptr(GString) uid = g_string_new(NULL);
+
+            hex_put(uid, s->rd_uid, s->rd_uid_len);
+            st25_rec_note(s, "reader a select > %s %02X%02X %02X", uid->str,
+                          s->rd_atqa[0], s->rd_atqa[1], s->rd_sak);
+        }
         s->rd_step = ntag ? RD_VERSION : RD_HALT;
         timer_mod(s->rd_timer, now + 1 * SCALE_MS);
         return;
@@ -1021,6 +1502,7 @@ static void st25_rd_timer(void *opaque)
         cmd[0] = 0x50;
         cmd[1] = 0x00;
         st25_rd_send(s, cmd, 2);
+        st25_rd_recorded(s, false);
         s->rd_waiting = false;          /* HLTA has no answer */
         s->rd_step = RD_FIELD_OFF;
         timer_mod(s->rd_timer, now + 2 * SCALE_MS);
@@ -1076,6 +1558,75 @@ static void st25_set_reader(Object *obj, const char *value, Error **errp)
 static char *st25_get_tx(Object *obj, Error **errp)
 {
     return g_strdup(ST25R3916(obj)->tx_last ?: "");
+}
+
+/* "LINES FRAMES NS PATH" while the air is recorded (the lines written so
+ * far, the frames in them, ns since it began, the file), else nothing */
+static char *st25_get_record(Object *obj, Error **errp)
+{
+    St25r3916State *s = ST25R3916(obj);
+
+    if (!s->rec) {
+        return g_strdup("");
+    }
+    return g_strdup_printf("%" PRIu64 " %" PRIu64 " %" PRId64 " %s",
+                           s->rec_lines, s->rec_frames,
+                           qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->rec_t0,
+                           s->rec_path);
+}
+
+/* a file to record to, with its whole path; off: the record ends */
+static void st25_set_record(Object *obj, const char *value, Error **errp)
+{
+    St25r3916State *s = ST25R3916(obj);
+    FILE *f;
+
+    if (!strcmp(value, "off")) {
+        if (s->rec) {
+            fclose(s->rec);
+            s->rec = NULL;
+        }
+        return;
+    }
+    if (s->rec) {
+        error_setg(errp, "record: it records to %s already (set it to off to "
+                   "end that)", s->rec_path);
+        return;
+    }
+    if (value[0] != '/') {
+        error_setg(errp, "record: a file with its whole path, or off");
+        return;
+    }
+    if (!s->rec_flush) {
+        error_setg(errp, "record: set it on a machine that runs");
+        return;
+    }
+    f = fopen(value, "w");
+    if (!f) {
+        error_setg_errno(errp, errno, "record: cannot write %s", value);
+        return;
+    }
+    g_free(s->rec_path);
+    s->rec_path = g_strdup(value);
+    s->rec_t0 = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    s->rec_lines = s->rec_frames = 0;
+    fprintf(f, "# FlipperEmu: the frames on the air at a Flipper Zero's NFC "
+               "antenna\n"
+               "# a line: the time in s; who asked (flipper: the firmware as a "
+               "reader, of the card held to it;\n"
+               "#   reader: a reader in front of the Flipper, of the card that "
+               "the firmware emulates);\n"
+               "#   the technology (a: ISO14443A, b: ISO14443B, f: FeliCa, v: "
+               "ISO15693); the frame's bits and bytes\n"
+               "#   (pXX: its bytes' parity bits where they are not the odd "
+               "ones, low bit first);\n"
+               "#   > the answer in the same way, or - for none\n"
+               "# other lines: a field going on or off (the flipper's own, a "
+               "reader's), and a reader's\n"
+               "#   activation of the emulated card: \"reader a select > UID "
+               "ATQA SAK\", \"reader f polling > IDm PMm SC\"\n");
+    s->rec = f;
+    st25_rec_flush(s);
 }
 
 /* ------------------------------------------------------------------ SPI */
@@ -1146,6 +1697,9 @@ static int st25_set_cs(SSIPeripheral *dev, bool level)
 {
     St25r3916State *s = ST25R3916(dev);
 
+    if (s->tm && !level) {
+        st25_tm_end(s);                 /* selected again: the mode's end */
+    }
     s->phase = PH_CMD;
     s->prefix_b = false;
     return 0;
@@ -1199,6 +1753,7 @@ static void st25_realize(SSIPeripheral *d, Error **errp)
     qdev_init_gpio_out_named(DEVICE(d), &s->irq, "irq", 1);
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, st25_timer, s);
     s->rd_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, st25_rd_timer, s);
+    s->rec_flush = timer_new_ms(QEMU_CLOCK_REALTIME, st25_rec_flush, s);
     s->link_timeout = timer_new_ms(QEMU_CLOCK_REALTIME, st25_link_timeout, s);
     s->link_stop = qemu_bh_new(st25_link_stop, s);
     flipper_link_init(&s->lk, &s->link, "NFC", st25_link_line,
@@ -1240,6 +1795,10 @@ static void st25_init(Object *obj)
     object_property_add_str(obj, "tx", st25_get_tx, NULL);
     object_property_set_description(obj, "tx",
         "What the virtual reader last read, as a .nfc file");
+    object_property_add_str(obj, "record", st25_get_record, st25_set_record);
+    object_property_set_description(obj, "record",
+        "Record the frames on the air and their answers as text: a file with "
+        "its whole path, or off (read: LINES FRAMES NS PATH)");
 }
 
 /*
@@ -1316,6 +1875,8 @@ static int st25_pre_load(void *opaque)
     s->rd_prog = NULL;
     s->rd_waiting = false;
     s->rd_ans_bits = -1;
+    s->tm = false;
+    s->tm_n = 0;
     timer_del(s->link_timeout);
     return 0;
 }
@@ -1412,6 +1973,8 @@ static void st25_reset_hold(Object *obj, ResetType type)
     }
     s->phase = PH_CMD;
     s->prefix_b = false;
+    s->tm = false;
+    s->tm_n = 0;
 }
 
 static void st25_reset_exit(Object *obj, ResetType type)

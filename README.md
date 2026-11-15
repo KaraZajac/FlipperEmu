@@ -199,7 +199,10 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
   work against it.
 - NFC emulate: `./flipperemu nfc --reader ntag` holds a virtual reader to a Flipper
   that is emulating a card, reads it like a phone reads an NTAG, and saves what it read
-  to `devices/NAME/nfc-tx/` as a `.nfc` file.
+  to `devices/NAME/nfc-tx/` as a `.nfc` file. `nfc --reader classic CARD.nfc` reads an
+  emulated MIFARE Classic with the card's keys: every block, through Crypto1.
+  `--reader felica` reads a FeliCa Lite-S, `--reader iso-dep` an ISO14443-4A card's
+  ATS, `--reader t4t` a Type 4 tag's NDEF message.
 - NFC link: `./flipperemu nfc --link iso-dep` puts a card played by a program in the
   field (an ISO14443-4A card here; any card type you write). The machine stops while it
   answers, so it can take its time, or relay to real hardware.
@@ -534,6 +537,9 @@ picture of the save to the pixel and the tag, and goes on with Pause.
 | `ibutton --reader` | read the Dallas key the device emulates, ROM and memory (to `devices/NAME/ibutton-tx/`) |
 | `nfc FILE.nfc` \| `nfc ntag215 UID [URL]` \| `nfc mfc1k UID` \| `nfc ulc UID` \| `nfc desfire UID` \| `nfc mfplus UID` \| `nfc t4t UID` \| `nfc emv UID` \| `nfc iso14443b PUPI` \| `nfc st25tb UID` \| `nfc felica IDM` \| `nfc felica-standard IDM` \| `nfc slix UID` \| `nfc none` | hold an NFC card to the device: a Flipper `.nfc` file (Type 2 with Ultralight C, MIFARE Classic, ISO14443-4A, DESFire, MIFARE Plus, Type 4 tag, EMV, ISO14443-3B/-4B, ST25TB, FeliCa Lite-S and Standard, ISO15693, SLIX), or one made up for a UID |
 | `nfc --reader ntag` \| `nfc --reader scan` | hold an NFC reader to an emulating device and print what it reads (`--no-wait`: leave it there) |
+| `nfc --reader classic CARD.nfc` | read an emulated MIFARE Classic with the keys of `CARD.nfc` (`--quiet-read`: only say where the file is) |
+| `nfc --reader felica` \| `iso-dep` \| `t4t` | read an emulated FeliCa Lite-S (without its card key), an ISO14443-4A card's ATS, a Type 4 tag's NDEF message |
+| `nfc record OUT.txt` \| `nfc record stop` \| `nfc watch` | every frame on the air at the NFC antenna and its answer, a line each with its time: the firmware's to a card, and a reader's to the card that the firmware emulates |
 | `nfc --link iso-dep` \| `--link script:FILE.py` \| `--link log` | a card played by a program, in the field until ^C |
 | `nfc --link pm3[:PORT]` \| `nfc DUMP.json` | real cards through a Proxmark3; a Proxmark3 dump as the card |
 | `enclave` \| `enclave encrypt SLOT IV TEXT` \| `enclave wrap KEY` \| `enclave reset` | the keys in the device's secure enclave, and what the firmware computes with them |
@@ -1520,14 +1526,15 @@ and the firmware's `dump` of it is the file again, key for key:
   NXP system information. `raw -p 15 -c -d 022005` in the shell reads block 5.
 
 So far: NTAG213/215/216, MIFARE Ultralight, Ultralight EV1 and Ultralight C (Type
-2), MIFARE Classic Mini/1K/4K, ISO14443-4A, MIFARE DESFire, MIFARE Plus, Type 4
-tags, EMV, ISO14443-3B and -4B, ST25TB, FeliCa Lite-S and Standard, ISO15693-3 and
-SLIX. `scripts/nfc_check.py FIRMWARE` checks the last twelve (25 checks on the
-official 1.5.1, 26 on the dev build, 27 on Momentum, Unleashed and RogueMaster,
-whose NFC apps read and save a Type 4 tag and an EMV card). The made-up cards as
+2), MIFARE Classic Mini/1K/4K, ISO14443-4A, MIFARE DESFire, MIFARE Plus, NTAG 424
+DNA, Type 4 tags, EMV, ISO14443-3B and -4B, ST25TB, FeliCa Lite-S and Standard,
+ISO15693-3 and SLIX. `scripts/nfc_check.py FIRMWARE` checks the last thirteen (25
+checks on the official 1.5.1, 27 on the dev build, 28 on Momentum, Unleashed and
+RogueMaster, whose NFC apps read and save a Type 4 tag, an EMV card and an NTAG
+424 DNA; the dev build's knows the first and the last). The made-up cards as
 files: `scripts/fe_nfc.py --nfc-file --desfire UID` (`--ulc UID`, `--mfplus UID`,
-`--t4t UID`, `--emv UID`, `--iso14443b PUPI`, `--st25tb UID`, `--felica IDM`,
-`--felica-standard IDM`, `--slix UID`).
+`--ntag4xx UID`, `--t4t UID`, `--emv UID`, `--iso14443b PUPI`, `--st25tb UID`,
+`--felica IDM`, `--felica-standard IDM`, `--slix UID`).
 
 Emulation goes the other way, as with 125 kHz RFID. Start the Flipper emulating a card
 (NFC → Saved → a card → Emulate, or `emulate -f /ext/nfc/tag.nfc` in the `nfc` shell),
@@ -1551,6 +1558,103 @@ scripts/fe_nfc.py --nfc-file --ntag215 04A1B2C3D4E5F6 https://flipperzero.one > 
 ```
 
 Or read a virtual card with NFC → Read and save it on the Flipper.
+
+A MIFARE Classic takes a reader that has its keys:
+
+```sh
+./flipperemu nfc --reader classic card.nfc    # the keys of card.nfc are the reader's
+```
+
+```
+[NAME] a MIFARE Classic reader with the keys of card.nfc in front of the Flipper...
+[NAME] it read 64 of 64 blocks: devices/NAME/nfc-tx/read-00001.nfc
+```
+
+It authenticates to each sector with key A and then key B of `card.nfc`, as a reader
+that knows the card would, reads every block that the access bits let that key read,
+and writes what it read as a `.nfc` file: the card's own file again, if the Flipper
+emulates it right. A sector that it has no right key for stays `??`, and the exit
+status is 1. `-v` shows each sector, `--quiet-read` leaves the file's text out.
+
+This reader is a program, `scripts/fe_nfc_reader.py`, on the device's NFC link. The
+firmware does not send a MIFARE Classic's answers through the chip: their parity bits
+are encrypted, and the chip would make its own. It switches the chip to transparent
+mode and modulates the answer itself, an edge every 590 ns on a pin. The emulator
+decodes those edges back into the answer, parity bits and all.
+
+The same program has three more readers, which need no card file:
+
+```sh
+./flipperemu nfc --reader felica     # a FeliCa Lite-S: polling, then its 28 blocks
+./flipperemu nfc --reader iso-dep    # an ISO14443-4A card: RATS, and its ATS
+./flipperemu nfc --reader t4t        # a Type 4 tag: its NDEF message
+```
+
+- `felica` has no card key, so the blocks that a card keeps for a reader with the
+  key come back refused (`01 B1`), as they would from the card. The chip answers the
+  polling by itself from what the firmware loaded; the dev build and the forks load
+  a PMm of their own there, not the card's.
+- `iso-dep` gets the ATS of the file. What the firmware does with a command after
+  it is the emulating app's business; the NFC shell's `emulate` answers none.
+- `t4t` reads the NDEF application, the capability container and the NDEF file
+  through ISO14443-4's blocks. None of the five firmwares emulates a Type 4 tag
+  from its NFC shell (and Momentum's shell crashes when asked to), so the check
+  runs this reader against a tag that is played in Python.
+
+A reader starts again when the Flipper stops answering in the middle: field off
+and on, select, and the last step once more. On a busy computer the emulated CPU
+can be too late with an answer, and a real card never is.
+
+`scripts/nfc_emulate_check.py FIRMWARE` checks emulation from the reader's side: an
+NTAG215, a MIFARE Classic Mini, 1K and 4K whose every block and key comes back, an
+ISO14443-4A card, a FeliCa Lite-S, and the record of the frames (15 checks on the
+official 1.5.1 and its dev build, Momentum, Unleashed and RogueMaster).
+
+Not there: a reader for ISO15693 and SLIX emulation. The firmware receives those
+by itself as well, sampling a pin with a timer and the DMA, which needs three more
+pieces of the chip modelled first (PLAN.md).
+
+#### A record of the frames on the air
+
+What the firmware and a card say to each other, frame by frame:
+
+```sh
+./flipperemu nfc record air.txt      # every frame and its answer into a text file, until
+./flipperemu nfc record stop         #   this (nfc record: does one run?)
+./flipperemu nfc watch               # the same on the terminal, as it happens (--for 10)
+```
+
+```
+1.086108863 flipper field on
+1.092085883 flipper a 7 52 > 16 4400
+1.093782826 flipper a 16 9320 > 40 8804A1B29F
+1.095726029 flipper a 72 93708804A1B29FAE4B > 24 04DA17
+1.117969656 flipper b 40 0500083973 > -
+12.371067454 reader a select > 5E6F7081 0400 09
+12.372194547 reader a 32 6000F57B > 32 B35DE88A
+12.376172359 reader a 64 8623B4836E62B3D6 p6F > 32 7F3C0E34 p0D
+```
+
+- A line is a frame and its answer: the time in seconds of the Flipper's clock, who
+  asked, the technology (`a` ISO14443A, `b` ISO14443B, `f` FeliCa, `v` ISO15693),
+  the frame's bits and its bytes, and after `>` the answer in the same form, or `-`
+  for none. A CRC is in the bytes, as it is on the air.
+- `flipper` lines are the firmware as a reader, asking the card that is held to it:
+  a built-in card (`./flipperemu nfc …`) or one on the link. Above: a WUPA and its
+  ATQA, the anticollision, a SELECT, and a REQB that nothing answers.
+- `reader` lines are a reader in front of the Flipper while the firmware emulates a
+  card: one of `nfc --reader …`. Above: the card selected (UID, ATQA, SAK), an AUTH
+  and the card's nonce, the reader's encrypted answer and the card's.
+- `p` and hex digits after a frame are the parity bits of its bytes, low bit first,
+  where they are not the odd ones a frame normally has: MIFARE Classic's encrypted
+  frames. With them a record has everything that was on the air.
+- ISO15693 frames are the bytes that the firmware coded and decoded itself (the chip
+  only carries a stream there), not the stream.
+- A field going on or off has a line too (`flipper field on`, `reader field off`): a
+  card loses its state with it.
+
+`nfc watch` reads the record that runs, or starts one of its own in the device's
+directory and removes it at its end.
 
 #### A card from a program (the NFC link)
 
@@ -1598,9 +1702,10 @@ def card(args):
 | ![nfc link](docs/img/23-nfc-link-iso-dep.png) | |
 | NFC → Read: the `iso-dep` card, played by `fe_nfc_link.py` over the link | |
 
-The protocol is in [docs/RADIO_LINK.md](docs/RADIO_LINK.md). For now the link is the card
-and the firmware the reader. The other way round still uses the built-in virtual reader
-(`--reader`).
+The protocol is in [docs/RADIO_LINK.md](docs/RADIO_LINK.md). The link works the other
+way round too: a program can be a reader in front of a Flipper that emulates a card
+(`reader on`, `reader activate`, `reader send`), which is how `nfc --reader classic`
+reads a MIFARE Classic.
 
 #### Real cards, through a Proxmark3
 
@@ -3285,6 +3390,7 @@ parser's checks one at a time. The targets:
 | `rpc` | bytes | into an RPC session on the USB serial port: the protobuf decoder and the handlers of its messages. A message's body is changed and its length kept right, mostly |
 | `cli` | bytes | in a CLI command (`--command`): as hex (`{hex}`), as text (`{text}`), or as a file on the card that the command reads (`{file}`, `--ext .sub`) |
 | `nfc` | a card: its values as the card model takes them (`scripts/fe_nfc.py`: a line each, the bytes in hex) | held to the Flipper while the NFC shell's `dump` reads it: the readers' code for what a card says of itself. A value is changed, or taken from another card's; the card still answers by its protocol's rules. About two cards a second |
+| `nfc-frames` | an exchange: a line for each frame of the firmware's and its answer, as `nfc record` writes them | answered by a card on the device's NFC link while the NFC shell's `dump` reads it: the readers' code for a card that does not keep to its protocol (ISO14443A). The seeds are what the emulator's own cards answer, recorded at the start |
 
 `--seconds N` or `--runs N` says how long (60 s without), `--first` stops at the
 first crash, `--seed N` makes the same choices again (the seed is said at the start),
@@ -3328,7 +3434,7 @@ cd scripts/fuzz_check_app && ../../flipperemu ufbt launch
 
 Its three checks of the input's bytes fall one after another, each kept input a step
 (`80000000`, `807f0065`, then `807f1065`). `scripts/fuzz_check.py FIRMWARE` checks
-all of it (16 checks on the official 1.5.1 with ufbt's SDK, 10 on the others). It is
+all of it (20 checks on the official 1.5.1 with ufbt's SDK, 14 on the others). It is
 no AFL: an input takes the time that it takes on a Flipper (a signal its length on the
 air: 8 to 10 a second; an RPC message 15 to 20; a CLI command a hundred and more),
 and nothing is reset between two.

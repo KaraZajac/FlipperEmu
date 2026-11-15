@@ -6529,6 +6529,212 @@ def cmd_rfid(args):
     return 0
 
 
+NFC_RECORD_OLD = ("this emulator cannot record its NFC frames: it was started "
+                  "by an older FlipperEmu (stop it and run it again)")
+
+
+def nfc_recording(m):
+    """The record of the NFC frames that runs: a dict of the "lines" written
+    since it began, the "frames" in them, "ns" of the Flipper's time and the
+    "path" of the file.  None: none runs.  False: an emulator that cannot
+    record."""
+    text = qom_get(m, "/machine/nfc", "record")
+    if not isinstance(text, str):
+        return False
+    if not text:
+        return None
+    lines, frames, ns, path = text.split(" ", 3)
+    return {"lines": int(lines), "frames": int(frames), "ns": int(ns),
+            "path": path}
+
+
+def set_nfc_record(m, value):
+    err = m.cmd(f"qom-set /machine/nfc record {value}").strip()
+    if err:
+        sys.exit("nfc: " + re.sub(r"^Error: (record: )?", "", err))
+
+
+def nfc_record(dev, what):
+    """nfc record FILE: every frame on the air at the Flipper's NFC antenna
+    and its answer, into a text file: the firmware's frames to a card, and a
+    reader's to the card that the firmware emulates.  nfc record stop: the
+    end of that.  nfc record: does one run?"""
+    if what and "\n" in what:
+        sys.exit("nfc: a file's name in one line")
+    m = open_monitor(dev)
+    try:
+        was = nfc_recording(m)
+        if was is False:
+            sys.exit(f"[{dev.name}] {NFC_RECORD_OLD}")
+        count = lambda n: f"{n} frame{'' if n == 1 else 's'}"
+        so_far = was and f"{count(was['frames'])} in {was['ns'] / 1e9:.1f} s"
+        if what is None:
+            print(f"[{dev.name}] " + (
+                f"recording the NFC frames to {was['path']}: {so_far} so far "
+                "(`nfc record stop` ends it)" if was else
+                "the NFC frames are not being recorded (nfc record FILE)"))
+            return 0
+        if what.lower() == "stop":
+            if not was:
+                sys.exit("nfc: nothing is being recorded (nfc record FILE)")
+            set_nfc_record(m, "off")
+            print(f"[{dev.name}] the record is {was['path']}: {so_far} of the "
+                  "Flipper's time (a text file, a line for each frame and "
+                  "its answer)")
+            return 0
+        if was:
+            sys.exit(f"nfc: it records to {was['path']} already (`nfc record "
+                     "stop` ends that)")
+        set_nfc_record(m, os.path.abspath(what))
+        print(f"[{dev.name}] recording the NFC frames to {what}: each frame "
+              "on the air and its answer (`nfc record stop` ends it)")
+        return 0
+    finally:
+        m.close()
+
+
+def nfc_watch(dev, seconds):
+    """nfc watch: the frames on the air and their answers, as they happen.
+    They are read from the record: its own, in the device's directory,
+    unless one runs already."""
+    m = open_monitor(dev)
+    try:
+        was = nfc_recording(m)
+        if was is False:
+            sys.exit(f"[{dev.name}] {NFC_RECORD_OLD}")
+        path = pathlib.Path(was["path"]) if was else dev.dir / "nfc-watch.txt"
+        if not was:
+            set_nfc_record(m, path)
+    finally:
+        m.close()
+    t0 = was["ns"] / 1e9 if was else 0.0    # the record's time as this begins
+    print(f"[{dev.name}] the frames at the NFC antenna and their answers "
+          "(flipper: the firmware asks a card; reader: a reader asks the "
+          "card that the firmware emulates)"
+          + (f", for {seconds:g} s" if seconds else "; Ctrl+C ends it")
+          + (f" (from the record that runs: {path})" if was else ""),
+          flush=True)
+    shown, rest, idle = 0, "", 0.0
+    began = time.time()
+    try:
+        watch_ends()
+        with open(path, encoding="ascii") as f:
+            while True:
+                text = f.read()
+                if text:
+                    *lines, rest = (rest + text).split("\n")
+                    for line in lines:
+                        when, _, said = line.partition(" ")
+                        try:
+                            at = float(when)
+                        except ValueError:
+                            continue    # (the file's head)
+                        if at < t0:
+                            continue
+                        print(f"{at - t0:12.6f}  {said}", flush=True)
+                        shown += " > " in said
+                    idle = 0.0
+                    continue
+                if seconds and time.time() - began >= seconds:
+                    break
+                time.sleep(0.05)
+                idle += 0.05
+                if idle >= 1.0:
+                    idle = 0.0
+                    if not dev.running():
+                        print(f"[{dev.name}] it stopped", flush=True)
+                        break
+    except KeyboardInterrupt:
+        print()
+    finally:
+        if not was:
+            try:
+                m = open_monitor(dev)
+                try:
+                    if nfc_recording(m):
+                        m.cmd("qom-set /machine/nfc record off")
+                finally:
+                    m.close()
+            except (SystemExit, OSError):
+                pass                    # the emulator is gone, and its record
+            path.unlink(missing_ok=True)
+    print(f"[{dev.name}] {shown} frame{'' if shown == 1 else 's'} in "
+          f"{time.time() - began:.1f} s")
+    return 0
+
+
+# readers that are programs on the link (scripts/fe_nfc_reader.py)
+NFC_READER_PROGRAMS = ("classic", "iso-dep", "t4t", "felica")
+
+
+def nfc_reader_program(dev, args):
+    """`nfc --reader classic CARD.nfc` (a reader with the card's keys),
+    `--reader iso-dep`, `--reader t4t`: a program reads the card that the
+    Flipper emulates; what it read goes to nfc-tx/ as the machine's own
+    readers' does"""
+    import fe_nfc
+    import fe_nfc_reader
+    text = None
+    if args.reader == "classic":
+        if len(args.card) != 1 or not args.card[0].endswith(".nfc"):
+            sys.exit("nfc --reader classic CARD.nfc: the card's file; its keys "
+                     "are the reader's")
+        try:
+            text = pathlib.Path(args.card[0]).read_text()
+            fields = fe_nfc.parse_nfc_text(text)
+        except (OSError, ValueError) as e:
+            sys.exit(f"nfc --reader: {e}")
+        if fields.get("Device type") != "Mifare Classic":
+            sys.exit(f"nfc --reader classic: {args.card[0]} is not a MIFARE Classic "
+                     f"card's file (Device type: {fields.get('Device type')})")
+        who = f"a MIFARE Classic reader with the keys of {args.card[0]}"
+    elif args.card:
+        sys.exit(f"nfc --reader {args.reader} takes no card: it reads what the "
+                 "Flipper emulates")
+    else:
+        who = {"iso-dep": "an ISO14443-4 reader",
+               "t4t": "a reader of NFC Forum Type 4 tags",
+               "felica": "a FeliCa reader"}[args.reader]
+    say = (lambda t: print(f"[{dev.name}] {t}", flush=True)) if args.verbose \
+        else (lambda t: None)
+    print(f"[{dev.name}] {who} in front of the Flipper...", flush=True)
+    try:
+        link = fe_nfc_reader.ReaderLink(dev.nfc_sock)
+    except OSError as e:
+        sys.exit(f"nfc --reader: {e}")
+    try:
+        link.on()
+        if args.reader == "classic":
+            out, (read, total) = fe_nfc_reader.read_classic(link, text, say)
+            done, words = read == total, f"{read} of {total} blocks"
+        elif args.reader == "iso-dep":
+            out, done = fe_nfc_reader.read_iso_dep(link, say)
+            words = "an ISO14443-4A card" if done else "a card that has no ATS"
+        elif args.reader == "felica":
+            out, (read, total) = fe_nfc_reader.read_felica(link, say)
+            done, words = read > 0, f"{read} of {total} blocks"
+        else:
+            out, length = fe_nfc_reader.read_t4t(link, say)
+            done, words = True, f"an NDEF message of {length} bytes"
+        folder = dev.dir / "nfc-tx"
+        folder.mkdir(exist_ok=True)
+        path = next(p for p in (folder / f"read-{k:05d}.nfc" for k in range(1, 100000))
+                    if not p.exists())
+        path.write_text(out)
+        link.saved(path)
+    except fe_nfc_reader.Silence:
+        sys.exit(f"[{dev.name}] nothing read: the card stopped answering")
+    except (OSError, RuntimeError) as e:
+        sys.exit(f"[{dev.name}] nothing read: {e}. Is the Flipper emulating the "
+                 "card (NFC -> Saved -> Emulate, or `emulate -f` in the nfc shell)?")
+    finally:
+        link.close()
+    print(f"[{dev.name}] it read {words}: {path}")
+    if not args.quiet_read:
+        print(out, end="")
+    return 0 if done else 1
+
+
 def cmd_nfc(args):
     import fe_nfc
     from fe_monitor import Monitor
@@ -6555,6 +6761,13 @@ def cmd_nfc(args):
         except (OSError, ValueError) as e:
             sys.exit(f"nfc --link: {e}")
     card = args.card
+    word = card[0].lower() if card else ""
+    if args.seconds is not None and (word != "watch" or args.seconds <= 0):
+        sys.exit("nfc: --for SECONDS goes with `nfc watch`")
+    if word == "record" and len(card) <= 2 and not args.reader:
+        return nfc_record(dev, card[1] if len(card) == 2 else None)
+    if word == "watch" and len(card) == 1 and not args.reader:
+        return nfc_watch(dev, args.seconds)
     if args.field:
         m = Monitor(str(dev.monitor))
         try:
@@ -6566,6 +6779,8 @@ def cmd_nfc(args):
         print(f"[{dev.name}] an NFC reader's field around it: {args.field}")
         if not card and not args.reader:
             return 0
+    if args.reader in NFC_READER_PROGRAMS:
+        return nfc_reader_program(dev, args)
     if args.reader:
         m = Monitor(str(dev.monitor))
         try:
@@ -6623,7 +6838,8 @@ def cmd_nfc(args):
         else:
             sys.exit("usage: nfc FILE.nfc | nfc DUMP.json (Proxmark3) | nfc ntag215 UID "
                      "[URL] | nfc mfc1k UID | nfc ulc UID | nfc desfire UID | nfc "
-                     "mfplus UID | nfc t4t UID | nfc emv UID | nfc iso14443b PUPI | nfc st25tb UID | nfc felica IDM | nfc "
+                     "mfplus UID | nfc ntag4xx UID | nfc t4t UID | nfc emv UID | nfc "
+                     "iso14443b PUPI | nfc st25tb UID | nfc felica IDM | nfc "
                      "felica-standard IDM | nfc slix UID | nfc none")
     except (ValueError, KeyError, OSError) as e:
         sys.exit(f"nfc: {e}")
@@ -7731,10 +7947,23 @@ def main():
                         "Classic), DUMP.json (a Proxmark3 dump: hf mf / hf mfu), "
                         "ntag213|ntag215|ntag216 UID [URL] (a new tag, "
                         "its NDEF a URL), mfcmini|mfc1k|mfc4k UID (a factory "
-                        "MIFARE Classic), or none; nothing: show the card")
-    p.add_argument("--reader", choices=("scan", "ntag"),
+                        "MIFARE Classic), or none; nothing: show the card. "
+                        "Or: record FILE | record stop | record (every frame "
+                        "on the air and its answer, into a text file), watch "
+                        "(the same, as it happens)")
+    p.add_argument("--reader",
+                   choices=("scan", "ntag", "classic", "iso-dep", "t4t", "felica"),
                    help="instead: hold a virtual reader to an emulating Flipper and "
-                        "print what it reads (scan: UID/ATQA/SAK; ntag: a Type 2 tag)")
+                        "print what it reads (scan: UID/ATQA/SAK; ntag: a Type 2 "
+                        "tag; classic CARD.nfc: a MIFARE Classic, by a reader that "
+                        "has the keys of CARD.nfc; iso-dep: an ISO14443-4A card's "
+                        "ATS; t4t: a Type 4 tag's NDEF message; felica: a FeliCa "
+                        "Lite-S's blocks, without its card key)")
+    p.add_argument("--for", dest="seconds", type=float, metavar="SECONDS",
+                   help="with `nfc watch`: for so long, then end")
+    p.add_argument("--quiet-read", action="store_true",
+                   help="with --reader classic, iso-dep or t4t: say where the "
+                        "read card's file is, and do not print it")
     p.add_argument("--no-wait", action="store_true",
                    help="with --reader: leave it there and return; what it reads "
                         "is in `status`, and saved to devices/NAME/nfc-tx/")
@@ -7822,7 +8051,7 @@ def main():
 
     p = sub.add_parser("fuzz", help="inputs to the firmware's parsers, made "
                        "from those that reached new code, until one crashes it",
-                       usage="flipperemu fuzz subghz|ir|rpc|cli|nfc [--seconds N] "
+                       usage="flipperemu fuzz subghz|ir|rpc|cli|nfc|nfc-frames [--seconds N] "
                              "[--runs N] [--first] [--seed N] [--out DIR] "
                              "[--seeds FILE...] [--max N] [--frequency HZ] "
                              "[--command TEMPLATE] [--ext .EXT] [--timeout S]\n"
@@ -7834,7 +8063,9 @@ def main():
                         "on the USB serial port; cli: a CLI command with the "
                         "input in it (--command); nfc: a card with contents of "
                         "the fuzzer's making in the field while the NFC "
-                        "shell's `dump` reads it")
+                        "shell's `dump` reads it; nfc-frames: a card on the "
+                        "NFC link whose every answer is the fuzzer's (the "
+                        "seeds: what the emulator's ISO14443A cards answer)")
     p.add_argument("--seconds", type=float, metavar="N",
                    help="for so long (default 60, or until --runs)")
     p.add_argument("--runs", type=int, metavar="N", help="so many inputs")

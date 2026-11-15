@@ -2058,6 +2058,14 @@ static void flipper_out_written(void *opaque, int port, hwaddr reg,
     if (reg == 0x04 || reg == 0x0c) {
         return;                         /* OTYPER, PUPDR: the header's only */
     }
+    if (port == 1) {
+        /* PB5 is the NFC chip's MOSI, and in the chip's transparent mode
+         * what modulates a card's answer: the firmware toggles it as a
+         * plain output, by TIM2's update DMA (each at its update's time) */
+        st25r3916_mod(s->nfc, ((s->soc.gpio[1].moder >> 10) & 3) == 1 &&
+                              (s->soc.gpio[1].odr & (1u << 5)),
+                      wb55_tim_now(&s->soc.tim2));
+    }
     if (port != 1 || (reg == 0x18 && !(data & (bit | bit << 16))) ||
         (reg == 0x28 && !(data & bit))) {
         return;                         /* another pin's BSRR/BRR write */

@@ -231,7 +231,21 @@ struct St25r3916State {
     bool rd_waiting;             /* a command is out, the answer due */
     bool pt_sleep;               /* passive-target logic in SLEEP (HLTA) */
     uint8_t rd_ans[NFC_AIR_MAX]; /* the Flipper's answer, as bytes */
+    uint8_t rd_par[NFC_AIR_MAX / 8 + 2];    /* ... and each byte's parity */
     int rd_ans_bits;             /* -1: none */
+    uint8_t rd_cmd[512];         /* the reader's frame that is out, */
+    uint8_t rd_cmd_par[512 / 8 + 1];    /* ... its parity bits */
+    int rd_cmd_bits;             /* ... and its length (for the record) */
+    /* a record of the frames on the air (text): property "record" */
+    FILE *rec;
+    char *rec_path;
+    int64_t rec_t0;              /* when it began (virtual clock, ns) */
+    uint64_t rec_lines, rec_frames;
+    QEMUTimer *rec_flush;        /* what it has reaches its file soon */
+    /* transparent mode: the answer modulated by a pin of the MCU */
+    bool tm;
+    int tm_n;
+    int64_t tm_edge[2048];       /* time << 1 | level, from the first rise */
     uint8_t rd_uid[10], rd_atqa[2], rd_sak;
     int rd_uid_len;
     bool rd_has_version, rd_has_sig, rd_has_cnt;
@@ -268,6 +282,8 @@ extern const VMStateDescription vmstate_nfc_card;
 NfcCard *nfc_card_blank(void);
 /* a loaded machine runs for the first time: what was in the air has ended */
 void st25r3916_loaded(St25r3916State *s);
+/* the MCU's pin that modulates in transparent mode (MOSI as an output) */
+void st25r3916_mod(St25r3916State *s, bool level, int64_t when);
 
 /* --------------------------------------------- piezo speaker (TIM16) */
 #define TYPE_FLIPPER_SPEAKER "flipper-speaker"

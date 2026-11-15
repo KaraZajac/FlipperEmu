@@ -25,7 +25,7 @@ keeps its row, with the version that fixed it.
 | FW-01 | An RPC storage list request with no path restarts the Flipper | official 1.5.1, Momentum, Unleashed, RogueMaster | crash | no |
 | FW-02 | The NFC shell's `dump` of a card that is ISO14443-3B and no more never returns; the Flipper is frozen | official 1.5.1 and dev, Momentum, Unleashed | freeze | no |
 | FW-03 | Reading an ST25TB card whose UID names no chip the firmware knows restarts the Flipper | official 1.5.1 | crash | no |
-| FW-04 | The NFC shell's `scanner` with a Type 4 tag or an EMV card restarts the Flipper | Momentum mntm-012 | crash | no |
+| FW-04 | The NFC shell's `scanner` with a Type 4 tag, an EMV card or an NTAG 424 DNA restarts the Flipper | Momentum mntm-012 | crash | no |
 | FW-05 | The NFC shell's `dump` of an EMV card restarts the Flipper | Unleashed unlshd-094 | crash | no |
 | FW-06 | The NFC app, asked to close by the loader while it reads or emulates, restarts the Flipper | official 1.5.1, Momentum, Unleashed | crash | no |
 | FW-07 | The CLI's USB service crashes when its queue of eight events is full | official 1.5.1, Unleashed | crash | no |
@@ -40,6 +40,7 @@ keeps its row, with the version that fixed it.
 | FW-16 | `crypto encrypt` encrypts what the heap held behind the text | official 1.5.1 | leak into ciphertext | no |
 | FW-17 | The Bluetooth serial service's RPC status sends three bytes of the stack | official 1.5.1 | leak over the air | no |
 | FW-18 | While a CLI command waits, the CPU never sleeps | official 1.5.1 | battery | no |
+| FW-19 | The NFC shell's `emulate -f` of a Type 4 tag's file restarts the Flipper | Momentum mntm-012 | crash | no |
 
 ## Crashes and freezes
 
@@ -87,19 +88,22 @@ keeps its row, with the version that fixed it.
   Read, which uses the same reader code; the other firmwares.
 - **Log:** entry 156.
 
-### FW-04: Momentum's NFC shell and a card of ISO 7816-4
+### FW-04: Momentum's NFC shell and the newer ISO14443-4 cards
 
-- **What happens:** `scanner` with a Type 4 tag or an EMV card in the field, and the
-  firmware is gone: "NULL pointer dereference", a MemManage fault at 0x080010a2 (a
-  read of address 0), called from 0x08001162. Six times in six tries.
+- **What happens:** `scanner` with a Type 4 tag, an EMV card or an NTAG 424 DNA in
+  the field, and the firmware is gone: "NULL pointer dereference", a MemManage fault
+  at 0x080010a2 (a read of address 0), called from 0x08001162. Six times in six
+  tries.
 - **Why:** not known. There are no symbols for this build here, and Momentum's source
-  was not read.
-- **Not affected:** Momentum's NFC app reads both cards. Unleashed's and the official
-  dev build's shells name the card ("Type 4 Tag").
-- **To see it:** `./flipperemu nfc t4t` or `nfc emv`, then `nfc` and `scanner` on the
-  CLI. `./flipperemu fuzz nfc` finds it at its first inputs.
+  was not read. The three are the kinds of ISO14443-4 card that this firmware knows
+  and the official 1.5.1 does not.
+- **Not affected:** Momentum's NFC app reads all three. Unleashed's and the official
+  dev build's shells name the card ("Type 4 Tag", "NTAG4xx").
+- **To see it:** `./flipperemu nfc t4t`, `nfc emv` or `nfc ntag4xx` with a UID, then
+  `nfc` and `scanner` on the CLI. `./flipperemu fuzz nfc` finds it at its first
+  inputs.
 - **Seen on:** Momentum mntm-012.
-- **Log:** entries 158 and 166.
+- **Log:** entries 158, 166 and 170.
 
 ### FW-05: Unleashed's `dump` of an EMV card
 
@@ -174,6 +178,21 @@ keeps its row, with the version that fixed it.
   in; `./flipperemu status` shows the radio in `tx` afterwards.
 - **Seen on:** official 1.5.1, with gdb and in its source.
 - **Log:** entry 133.
+
+### FW-19: Momentum's NFC shell, asked to emulate a Type 4 tag
+
+- **What happens:** `emulate -f FILE` in the NFC shell with a Type 4 tag's file,
+  and the firmware is gone: `[CRASH][ISR MemMgmt] NULL pointer dereference`. The
+  shell's banner comes where "Emulating" should.
+- **Why:** not known (see FW-04: the same shell, the same kind of card, the other
+  direction). The official dev build's, Unleashed's and RogueMaster's shells say that
+  emulating a Type 4 tag "is not supported"; the official 1.5.1 does not load the
+  file.
+- **To see it:** a Type 4 tag's file on the card (`scripts/fe_nfc.py --nfc-file
+  --t4t 04D1E2F3A4B5C6`), then `nfc` and `emulate -f /ext/nfc/FILE.nfc` on the CLI.
+  `scripts/nfc_emulate_check.py` meets it and says so.
+- **Seen on:** Momentum mntm-012.
+- **Log:** entry 170.
 
 ## Wrong results
 
