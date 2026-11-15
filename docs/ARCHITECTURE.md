@@ -1058,6 +1058,22 @@ A write obeys the chip's memory: blocks 0 to 4 are one-time bits (1 to 0), 5 and
 counters (a smaller number only), 7 to 15 writable while their lock bit in the system
 block (255, bits 24 to 31) is 1, the rest plain; block 255 is one-time bits too.
 
+**FeliCa Standard** is a card of systems. Each has a code (0x0003 a transit
+card's, 0xFE00 the common area), areas and services in an order of the card's own,
+and a service has blocks of 16 bytes. The reader speaks to one system at a time: the
+system's number is the high four bits of the IDm's first byte, so the card has as
+many IDm as systems. The card model keeps them as records, in the order a reader
+finds them in: a system (its code, its key's version), then its areas (code, end,
+key's version) and services (code, key's version) as Search Service Code counts
+them, and the blocks that a dump has (the service's code, the block's number, the
+bytes). A service's code is its number and six bits of what it is: bit 0 says that
+it is read without a key, and those are the blocks in a dump. The firmware's walk:
+Polling (0xFFFF), Request System Code, then for each system Search Service Code
+from 0 until 0xFFFF comes back, and Read Without Encryption of block 0, 1, 2 … of
+each service without a key until the card says "illegal block number" (01 A8). The
+newer firmwares ask Request Service for each node's key version too, and 0xFFFF
+there is the system's own.
+
 **The other technologies** are bytes on the air, and the firmware does their coding
 itself: it adds each one's CRC and sends with TRANSMIT_WITHOUT_CRC. `MODE.om` says
 which it is. For ISO14443B and FeliCa the FIFO's bytes are the frame's (the chip makes

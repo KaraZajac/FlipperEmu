@@ -209,8 +209,12 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       to its own file again (BRINGUP_LOG 155).
       ISO14443-3B / -4B and ST25TB ☑ (2026-11-15): REQB/ATQB, ATTRIB, HLTB, the
       ISO14443-4 blocks shared with Type A; ST25TB's Initiate/Select, blocks, one-time
-      bits, counters and lock bits. `scripts/nfc_check.py` 17 on five (BRINGUP_LOG 156).
-      Next: FeliCa Standard, what else
+      bits, counters and lock bits (BRINGUP_LOG 156).
+      FeliCa Standard ☑ (2026-11-15): systems, areas, services and their public blocks
+      from a dump of either file format; Search Service Code, Request Service, reading
+      and writing without encryption. `scripts/nfc_check.py` 19 on five (BRINGUP_LOG
+      157).
+      Next: what else
       runs on ISO14443-4 (EMV, Type 4 tags: Momentum reads them), reading with keys
       (DESFire, FeliCa's MAC); decode transparent mode (Classic emulation); a
       virtual reader for the cards beyond ISO14443A

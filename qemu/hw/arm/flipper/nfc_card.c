@@ -41,7 +41,10 @@
  * inventory, the addressed, selected and quiet states, system information,
  * blocks read and written singly and in runs with their security status,
  * AFI and DSFID and their locks; SLIX's system information, signature,
- * random number, passwords, privacy mode, EAS).  ISO14443B ("type
+ * random number, passwords, privacy mode, EAS).  FeliCa Standard (records
+ * of its systems, areas, services and public blocks: polling by a system's
+ * code, Request System Code, Search Service Code, Request Service, reading
+ * and writing without encryption).  ISO14443B ("type
  * iso14443b": REQB/WUPB and the ATQB, ATTRIB, HLTB, and then ISO14443-4's
  * blocks when the protocol info says so) and ST's ST25TB on its air ("type
  * st25tb": Initiate, Select, Get_UID, Read_Block and Write_Block, the
@@ -60,7 +63,8 @@
  *   rec 01 <28 bytes>       (a record of the application's tables: a type
  *                            and its bytes, see REC_* below; may repeat)
  * or "type felica" with uid (the IDm), pmm, and in mem 18 bytes a block
- * (two status bytes and its 16) for the 28 of a Lite-S in a dump's order;
+ * (two status bytes and its 16) for the 28 of a Lite-S in a dump's order,
+ * or for a FeliCa Standard card no mem and records (rec 30 ...: REC_FS_*);
  * or "type iso14443b" with uid (the PUPI, 4 bytes), appdata (4), protinfo
  * (3) and app as for iso4; or "type st25tb" with uid (8, D0 first), mem
  * (its blocks) and otp (4 bytes);
@@ -1415,6 +1419,275 @@ static int felica_block(NfcCard *c, int number)
 
 /* A frame: its length (itself and what follows, less the CRC), the
  * command, what the command has, the CRC */
+/*
+ * FeliCa Standard.  A card has systems, each with a code; a system has areas
+ * and services in an order of its own, and a service has blocks.  A reader
+ * speaks to one system at a time: its number is the high four bits of the
+ * IDm's first byte.  The records (in app[]) are a system's code, then its
+ * areas and services in the card's order, and those blocks of its services
+ * that are read without a key (a dump has no others).  A system, an area
+ * and a service each have a key's version, which Request Service tells.
+ */
+#define REC_FS_SYSTEM   0x30    /* its code (the high byte first), its key's
+                                 * version (the low byte first, as the rest) */
+#define REC_FS_AREA     0x31    /* its code, its end, its key's version */
+#define REC_FS_BLOCK    0x32    /* its service's code, its number, 16 bytes */
+#define REC_FS_SERVICE  0x33    /* its code, its key's version */
+
+/* the record at *at: where its payload is (-1: none); *at is then behind it */
+static int rec_any(NfcCard *c, int *at, int *type, int *len)
+{
+    int n, here = *at + 3;
+
+    if (here > c->app_len) {
+        return -1;
+    }
+    n = c->app[*at + 1] | c->app[*at + 2] << 8;
+    if (here + n > c->app_len) {
+        return -1;
+    }
+    *type = c->app[*at];
+    *len = n;
+    *at = here + n;
+    return here;
+}
+
+/* System `sys`: where its code is (-1: no such system), and its records,
+ * from *from up to *to.  sys < 0: none is looked for; -> how many there are */
+static int fs_system(NfcCard *c, int sys, int *from, int *to)
+{
+    int at = 0, type, len, here, code = -1, n = 0;
+
+    while ((here = rec_any(c, &at, &type, &len)) >= 0) {
+        if (type != REC_FS_SYSTEM || len != 4) {
+            continue;
+        }
+        if (code >= 0) {
+            *to = here - 3;
+            return code;
+        }
+        if (n++ == sys) {
+            code = here;
+            *from = at;
+        }
+    }
+    if (sys < 0) {
+        return n;
+    }
+    *to = at;
+    return code;
+}
+
+/* is this record an area or a service, as they are to be? */
+static bool fs_is_node(int type, int len)
+{
+    return (type == REC_FS_AREA && len == 6) ||
+           (type == REC_FS_SERVICE && len == 4);
+}
+
+/* a system's area or service of a code: where it is (-1: none), and which */
+static int fs_node(NfcCard *c, int from, int to, int code, int *type)
+{
+    int len, here;
+
+    while (from < to && (here = rec_any(c, &from, type, &len)) >= 0) {
+        if (fs_is_node(*type, len) &&
+            (c->app[here] | c->app[here + 1] << 8) == code) {
+            return here;
+        }
+    }
+    return -1;
+}
+
+/* a service's block: where its 16 bytes are (-1: none) */
+static int fs_block(NfcCard *c, int from, int to, int code, int number)
+{
+    int type, len, here;
+
+    while (from < to && (here = rec_any(c, &from, &type, &len)) >= 0) {
+        if (type == REC_FS_BLOCK && len == 19 && c->app[here + 2] == number &&
+            (c->app[here] | c->app[here + 1] << 8) == code) {
+            return here + 3;
+        }
+    }
+    return -1;
+}
+
+/* a command to a FeliCa Standard card (its length is right, and its CRC)
+ * -> the answer in r from r[1] on, and its length with r[0] (0: none) */
+static int fs_command(NfcCard *c, const uint8_t *in, int len, uint8_t *r)
+{
+    int systems = fs_system(c, -1, NULL, NULL), from = 0, to = 0, rn;
+    int code = -1;
+    int type, plen, here, n, nsvc, nblk, at;
+    int where[16];
+    bool write = in[1] == 0x08;
+
+    if (in[1] == 0x00) {
+        /* Polling: the system of a code (0xFF: any byte), or the first */
+        if (len != 6) {
+            return 0;
+        }
+        for (n = 0; n < systems; n++) {
+            code = fs_system(c, n, &from, &to);
+            if ((in[2] == 0xFF || in[2] == c->app[code]) &&
+                (in[3] == 0xFF || in[3] == c->app[code + 1])) {
+                break;
+            }
+        }
+        if (n == systems) {
+            return 0;
+        }
+        r[1] = 0x01;
+        memcpy(&r[2], c->uid, 8);
+        r[2] = (r[2] & 0x0F) | n << 4;
+        memcpy(&r[10], c->pmm, 8);
+        rn = 18;
+        if (in[4] == 0x01) {            /* the system's code */
+            r[rn++] = c->app[code];
+            r[rn++] = c->app[code + 1];
+        } else if (in[4] == 0x02) {     /* how fast it can talk: 212, 424 */
+            r[rn++] = 0x00;
+            r[rn++] = 0x83;
+        }
+        return rn;
+    }
+    /* the others are to an IDm, whose high bits are a system's number */
+    if (len < 10 || (in[2] & 0x0F) != (c->uid[0] & 0x0F) ||
+        memcmp(&in[3], &c->uid[1], 7) ||
+        fs_system(c, in[2] >> 4, &from, &to) < 0) {
+        return 0;
+    }
+    r[1] = in[1] + 1;
+    memcpy(&r[2], &in[2], 8);
+    rn = 10;
+    switch (in[1]) {
+    case 0x04:                          /* Request Response: mode 0 */
+        if (len != 10) {
+            return 0;
+        }
+        r[rn++] = 0x00;
+        return rn;
+    case 0x0C:                          /* Request System Code: all of them */
+        if (len != 10) {
+            return 0;
+        }
+        r[rn++] = systems;
+        for (n = 0; n < systems; n++) {
+            code = fs_system(c, n, &from, &to);
+            r[rn++] = c->app[code];
+            r[rn++] = c->app[code + 1];
+        }
+        return rn;
+    case 0x0A:                          /* Search Service Code: the n-th */
+        if (len != 12) {
+            return 0;
+        }
+        n = in[10] | in[11] << 8;
+        while (from < to && (here = rec_any(c, &from, &type, &plen)) >= 0) {
+            if (fs_is_node(type, plen) && !n--) {
+                plen -= 2;              /* (an area with its end) */
+                memcpy(&r[rn], &c->app[here], plen);
+                return rn + plen;
+            }
+        }
+        r[rn++] = 0xFF;                 /* no more */
+        r[rn++] = 0xFF;
+        return rn;
+    case 0x02:                          /* Request Service: key versions */
+        n = len > 10 ? in[10] : 0;
+        if (n < 1 || n > 32 || len != 11 + 2 * n) {
+            return 0;
+        }
+        r[rn++] = n;
+        code = fs_system(c, in[2] >> 4, &from, &to);
+        for (int i = 0; i < n; i++) {
+            int node = in[11 + 2 * i] | in[12 + 2 * i] << 8;
+
+            /* (0xFFFF asks for the system's; 0xFFFF is said for none) */
+            here = node == 0xFFFF ? code + 2 :
+                   fs_node(c, from, to, node, &type);
+            if (here >= 0 && node != 0xFFFF) {
+                here += type == REC_FS_AREA ? 4 : 2;
+            }
+            r[rn++] = here < 0 ? 0xFF : c->app[here];
+            r[rn++] = here < 0 ? 0xFF : c->app[here + 1];
+        }
+        return rn;
+    case 0x06:                          /* Read Without Encryption */
+    case 0x08:                          /* Write Without Encryption */
+        r[10] = r[11] = 0;
+        rn = 12;
+        nsvc = len > 10 ? in[10] : 0;
+        if (nsvc < 1 || nsvc > 16 || len < 12 + 2 * nsvc) {
+            r[10] = 0xFF;
+            r[11] = 0xA1;               /* the number of services */
+            return rn;
+        }
+        nblk = in[11 + 2 * nsvc];
+        at = 12 + 2 * nsvc;
+        if (nblk < 1 || nblk > (write ? 13 : 15)) {
+            r[10] = 0xFF;
+            r[11] = 0xA2;               /* the number of blocks */
+            return rn;
+        }
+        for (int i = 0; i < nblk; i++) {
+            /* a block of the list: two bytes or three; the service by its
+             * place in the list of services, the block's number */
+            int wide = !(at < len && (in[at] & 0x80));
+            int order, number, status = 0;
+
+            if (at + 2 + wide > len) {
+                r[10] = 0xFF;
+                r[11] = 0xA2;
+                return rn;
+            }
+            order = in[at] & 0x0F;
+            number = in[at + 1] | (wide ? in[at + 2] << 8 : 0);
+            at += 2 + wide;
+            code = order < nsvc ? in[11 + 2 * order] | in[12 + 2 * order] << 8
+                                : -1;
+            where[i] = -1;
+            if (code < 0) {
+                status = 0xA3;          /* no such place in the list */
+            } else if (fs_node(c, from, to, code, &type) < 0 ||
+                       type != REC_FS_SERVICE) {
+                status = 0xA6;          /* no such service */
+            } else if (!(code & 0x01) || (write && (code & 0x3F) != 0x09)) {
+                status = 0xA5;          /* not without a key; not written */
+            } else {
+                where[i] = fs_block(c, from, to, code, number);
+                if (where[i] < 0) {
+                    status = 0xA8;      /* an illegal block number */
+                }
+            }
+            if (status) {
+                r[10] = 1 << (i % 8);   /* (which block of the list) */
+                r[11] = status;
+                return rn;
+            }
+        }
+        if (at + (write ? 16 * nblk : 0) != len) {
+            r[10] = 0xFF;
+            r[11] = 0xA2;
+            return rn;
+        }
+        if (write) {
+            for (int i = 0; i < nblk; i++) {
+                memcpy(&c->app[where[i]], &in[at + 16 * i], 16);
+            }
+            return rn;
+        }
+        r[rn++] = nblk;
+        for (int i = 0; i < nblk; i++) {
+            memcpy(&r[rn], &c->app[where[i]], 16);
+            rn += 16;
+        }
+        return rn;
+    }
+    return 0;
+}
+
 static int felica_frame(NfcCard *c, const uint8_t *in, int n, uint8_t *out,
                         int max)
 {
@@ -1425,6 +1698,13 @@ static int felica_frame(NfcCard *c, const uint8_t *in, int n, uint8_t *out,
 
     if (len < 2 || len + 2 != n || felica_crc(in, n) != 0) {
         return 0;
+    }
+    if (c->app_len) {                   /* a FeliCa Standard card */
+        rn = fs_command(c, in, len, r);
+        if (rn <= 0) {
+            return 0;
+        }
+        goto answer;
     }
     switch (in[1]) {
     case 0x00:                          /* Polling: a system code, or any */
@@ -1494,6 +1774,7 @@ static int felica_frame(NfcCard *c, const uint8_t *in, int n, uint8_t *out,
     default:
         return 0;                       /* a Lite-S has no other */
     }
+answer:
     r[0] = rn;
     crc = felica_crc(r, rn);
     r[rn++] = crc >> 8;
@@ -2163,7 +2444,15 @@ NfcCard *nfc_card_new(const char *desc, Error **errp)
                    "bytes");
         return NULL;
     }
-    if (c->kind == KIND_FELICA && c->mem_len != 28 * 18) {
+    if (c->kind == KIND_FELICA && c->app_len) {
+        if (c->mem_len || fs_system(c, -1, NULL, NULL) < 1 ||
+            fs_system(c, -1, NULL, NULL) > 16 || c->app[0] != REC_FS_SYSTEM) {
+            error_setg(errp, "nfc card: a FeliCa Standard card has 1 to 16 "
+                       "systems (rec 30 ...), each with its areas, services "
+                       "and blocks after it, and no blocks of a Lite-S (mem)");
+            return NULL;
+        }
+    } else if (c->kind == KIND_FELICA && c->mem_len != 28 * 18) {
         error_setg(errp, "nfc card: a FeliCa Lite-S has 28 blocks, 18 bytes "
                    "each here (two of status, 16 of data): got %d bytes",
                    c->mem_len);
@@ -2219,8 +2508,9 @@ static int card_post_load(void *opaque, int version_id)
     bool mfc = c->kind == KIND_MFC, iso4 = c->kind == KIND_ISO4;
     bool bytes = c->kind == KIND_FELICA || c->kind == KIND_V ||
                  c->kind == KIND_ST25TB;
+    bool fs = c->kind == KIND_FELICA && c->app_len > 0;
 
-    iso4 = iso4 || c->kind == KIND_B;   /* (no pages either) */
+    iso4 = iso4 || c->kind == KIND_B || fs;     /* (no pages either) */
     if (c->kind < KIND_T2 || c->kind > KIND_ST25TB ||
         (c->uid_len != 4 && c->uid_len != 7 && c->uid_len != 10 &&
          !(bytes && c->uid_len == 8)) ||
@@ -2228,7 +2518,7 @@ static int card_post_load(void *opaque, int version_id)
         c->level < 0 || c->level > 2 ||
         c->mem_len < (iso4 ? 0 : 16) || c->mem_len > MEM_MAX ||
         (!bytes && (c->mem_len & 3)) ||
-        (c->kind == KIND_FELICA && c->mem_len != 28 * 18) ||
+        (c->kind == KIND_FELICA && c->mem_len != (fs ? 0 : 28 * 18)) ||
         (c->kind == KIND_V && (c->v_bsize < 1 || c->v_bsize > 32 ||
                                c->mem_len / c->v_bsize > 256)) ||
         (mfc && c->mem_len != 20 * 16 && c->mem_len != 64 * 16 &&

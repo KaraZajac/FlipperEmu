@@ -20,6 +20,8 @@ holds in its field (see qemu/hw/arm/flipper/nfc_card.c):
     fe_nfc.py --iso14443b 1A2B3C4D          -> an ISO14443-4B card with that PUPI
     fe_nfc.py --st25tb D0021C0123456789     -> an ST25TB04K with that UID
     fe_nfc.py --felica 012E4CD21A8B3C5F     -> a FeliCa Lite-S with that IDm
+    fe_nfc.py --felica-standard 0114B3C6D2F0A957
+                                            -> a FeliCa Standard card, two systems
     fe_nfc.py --slix E004010812345678       -> an NXP SLIX2 (ISO15693) with that UID
                                                (both with --nfc-file too)
 
@@ -38,6 +40,7 @@ Proxmark3 dump is its client's JSON: `hf mf autopwn`, `hf mf dump`
 """
 import json
 import pathlib
+import re
 import sys
 
 # NFC_LSB_ATQA_FORMAT_VERSION: files newer than this store ATQA MSB first
@@ -61,14 +64,15 @@ def hexbytes(text):
     return bytes(0 if x == "??" else int(x, 16) for x in text.split())
 
 
+class Fields(dict):
+    """A file's key/value lines, and its text for what is there more than
+    once (a FeliCa Standard card's systems)"""
+    text = ""
+
+
 def parse_nfc(path):
     """The key/value lines of a Flipper .nfc file (pages and blocks too)."""
-    fields = {}
-    for line in pathlib.Path(path).read_text().splitlines():
-        if line.startswith("#") or ":" not in line:
-            continue
-        key, _, value = line.partition(":")
-        fields[key.strip()] = value.strip()
+    fields = parse_nfc_text(pathlib.Path(path).read_text())
     if fields.get("Filetype") != "Flipper NFC device":
         raise ValueError(f"{path}: not a Flipper NFC device file")
     return fields
@@ -296,15 +300,108 @@ def sample_iso14443b(uid):
                       "Protocol info: 00 81 85"]) + "\n"
 
 
+def felica_systems(text):
+    """A FeliCa Standard dump's systems, in the file's order -> a list of
+    {"code", "key", "areas": [(code, first service, last)], "ends": [an
+    area's end], "area_keys", "services": [code], "service_keys", "blocks":
+    [(service's code, number, 16 bytes)]}.  An end or a key's version that
+    the file has not (a firmware's older format) is None."""
+    systems = []
+    key_of = lambda value: (lambda m: int(m.group(1), 16) if m else None)(
+        re.search(r"\| Key version ([0-9A-F]{4})", value))
+    for line in text.splitlines():
+        key, _, value = line.partition(":")
+        key, value = key.strip(), value.strip()
+        if re.fullmatch(r"System [0-9A-F]{2}", key):
+            m = re.match(r"([0-9A-F]{4})", value)
+            if not m:
+                raise ValueError(f"a system's line: {line!r}")
+            systems.append({"code": int(m.group(1), 16), "key": key_of(value),
+                            "areas": [], "ends": [], "area_keys": [],
+                            "services": [], "service_keys": [], "blocks": []})
+            continue
+        if not systems:
+            continue
+        now = systems[-1]
+        if re.fullmatch(r"Area [0-9A-F]{3}", key):
+            m = re.match(r"\| Code ([0-9A-F]{4}) (?:\| End ([0-9A-F]{4}) )?"
+                         r"\| Services #([0-9A-F]{3})-#([0-9A-F]{3})", value)
+            if not m:
+                raise ValueError(f"an area's line: {line!r}")
+            now["areas"].append((int(m.group(1), 16), int(m.group(3), 16),
+                                 int(m.group(4), 16)))
+            now["ends"].append(int(m.group(2), 16) if m.group(2) else None)
+            now["area_keys"].append(key_of(value))
+        elif re.fullmatch(r"Service [0-9A-F]{3}", key):
+            m = re.match(r"\| Code ([0-9A-F]{4})", value)
+            if not m:
+                raise ValueError(f"a service's line: {line!r}")
+            now["services"].append(int(m.group(1), 16))
+            now["service_keys"].append(key_of(value))
+        elif re.fullmatch(r"Block [0-9A-F]{4}", key):
+            m = re.match(r"\| Service code ([0-9A-F]{4}) \| Block index "
+                         r"([0-9A-F]{2}) \| Data: ((?:[0-9A-F]{2} ){16})", value)
+            if not m:
+                raise ValueError(f"a public block's line: {line!r}")
+            now["blocks"].append((int(m.group(1), 16), int(m.group(2), 16),
+                                  bytes.fromhex(m.group(3))))
+    return systems
+
+
+def felica_nodes(system):
+    """A system's areas and services in the card's order (an area before
+    the first of the services that came after it) -> [(code, its key's
+    version, an area's end or None)]"""
+    nodes = []
+    services = system["services"]
+    areas = sorted(range(len(system["areas"])),
+                   key=lambda n: system["areas"][n][1])     # (stable)
+    for i in range(len(services) + 1):
+        for n in areas:
+            code, first, last = system["areas"][n]
+            if first == i or (i == len(services) and first > i):
+                # an area's end, when the file has it not: the last service
+                # that came in it, and all of its kinds (the root's: all)
+                end = system["ends"][n]
+                if end is None:
+                    end = 0xFFFE if code == 0 else \
+                        (services[last] | 0x3F) if first <= last < len(services) \
+                        else code | 0x3F
+                nodes.append((code, system["area_keys"][n] or 0, end))
+        if i < len(services):
+            nodes.append((services[i], system["service_keys"][i] or 0, None))
+    return nodes
+
+
 def describe_felica(fields):
     """A FeliCa Lite-S: its IDm and PMm, and its 28 blocks as a dump has
     them, each with the two status bytes the card gave for it (a block that
-    the dump lacks: an illegal block number's)"""
+    the dump lacks: an illegal block number's).  A FeliCa Standard card: its
+    systems with their areas, services and the blocks that a dump has (those
+    that are read without a key)."""
     idm = hexbytes(fields.get("Manufacture id", fields["UID"]))
     pmm = hexbytes(fields.get("Manufacture parameter", "00 F1 00 00 00 01 43 00"))
+    if "System found" in fields:
+        systems = felica_systems(getattr(fields, "text", ""))
+        if not systems:
+            raise ValueError("a FeliCa Standard dump without a system")
+        # (the high four bits of its first byte are a system's number)
+        idm = bytes([idm[0] & 0x0F]) + idm[1:]
+        out = ["# FeliCa Standard", "type felica", f"uid {idm.hex(' ')}",
+               f"pmm {pmm.hex(' ')}"]
+        le = lambda v: v.to_bytes(2, "little").hex(" ")
+        for system in systems:
+            out.append(f"rec 30 {system['code'].to_bytes(2, 'big').hex(' ')} "
+                       f"{le(system['key'] or 0)}")
+            for code, key, end in felica_nodes(system):
+                out.append(f"rec 33 {le(code)} {le(key)}" if end is None else
+                           f"rec 31 {le(code)} {le(end)} {le(key)}")
+            for code, number, data in system["blocks"]:
+                out.append(f"rec 32 {le(code)} {number:02x} {data.hex(' ')}")
+        return "\n".join(out) + "\n"
     if "Block 0" not in fields:
-        raise ValueError("a FeliCa dump with its blocks (a Lite-S's): a "
-                         "FeliCa Standard card's systems are not supported yet")
+        raise ValueError("a FeliCa dump with its blocks (a Lite-S's) or its "
+                         "systems (a FeliCa Standard card's)")
     out = ["# FeliCa Lite-S", "type felica", f"uid {idm.hex(' ')}",
            f"pmm {pmm.hex(' ')}"]
     for i in range(28):
@@ -412,6 +509,54 @@ def sample_felica(idm):
     return "\n".join(out) + "\n"
 
 
+def felica_service_words(code):
+    """What the firmware writes of a service's attribute"""
+    attr = code & 0x3F
+    out = "| Public  " if attr & 1 else "| Private "
+    if attr & 0x10:
+        return out + "| Purse  |" + (" Direct     |", " Cashback   |",
+                                     " Decrement  |", " Read Only  |")[(attr & 6) >> 1]
+    return out + ("| Random |" if attr & 8 else "| Cyclic |") + \
+        (" Read Only  |" if attr & 2 else " Read/Write |")
+
+
+def sample_felica_standard(idm):
+    """A FeliCa Standard card as a Flipper .nfc file's text, made up: two
+    systems, areas, services with and without a key, their public blocks"""
+    if len(idm) != 8 or idm[0] >> 4:
+        raise ValueError("a FeliCa card's IDm is 8 bytes; a FeliCa Standard "
+                         "card's first has its high four bits clear (they are "
+                         "the system's number)")
+    up = lambda b: bytes(b).hex(" ").upper()
+    pmm = bytes.fromhex("012022042767 4EFF")
+    text = lambda s: s.encode().ljust(16, b" ")
+    systems = [
+        (0x0003, [(0x0000, 0, 2), (0x0040, 3, 3)],
+         [0x008B, 0x090F, 0x1008, 0x0049],
+         [(0x008B, 0, text("FlipperEmu card"))] +
+         [(0x090F, i, bytes([0x16, i]) + bytes(range(i, i + 14))) for i in range(3)] +
+         [(0x0049, 0, text("written without")), (0x0049, 1, text("a key"))]),
+        (0xFE00, [(0x0000, 0, 1)], [0x3949, 0x394B],
+         [(0x3949, 0, bytes(16)), (0x3949, 1, bytes([0xFF] * 16)),
+          (0x394B, 0, text("the common area"))]),
+    ]
+    out = ["Filetype: Flipper NFC device", "Version: 4", "Device type: FeliCa",
+           f"UID: {up(idm)}", "Data format version: 2",
+           f"Manufacture id: {up(idm)}", f"Manufacture parameter: {up(pmm)}",
+           "IC Type: FeliCa Standard RC-S962", f"System found: {len(systems)}"]
+    for i, (code, areas, services, blocks) in enumerate(systems):
+        out += [f"System {i:02X}: {code:04X}", f"Area found: {len(areas)}"]
+        out += [f"Area {n:03X}: | Code {a:04X} | Services #{first:03X}-#{last:03X} |"
+                for n, (a, first, last) in enumerate(areas)]
+        out.append(f"Service found: {len(services)}")
+        out += [f"Service {n:03X}: | Code {s:04X} | Attrib. {s & 0x3F:02X} "
+                f"{felica_service_words(s)}" for n, s in enumerate(services)]
+        out.append(f"Public blocks read: {len(blocks)}")
+        out += [f"Block {n:04X}: | Service code {s:04X} | Block index {b:02X} | "
+                f"Data: {up(data)} |" for n, (s, b, data) in enumerate(blocks)]
+    return "\n".join(out) + "\n"
+
+
 def sample_slix(uid):
     """An NXP SLIX2 (ICODE SLIX2, 80 blocks of 4 bytes: what a UID that
     begins E0 04 01 08 is) as a Flipper .nfc file's text, made up: an
@@ -439,7 +584,8 @@ def sample_slix(uid):
 
 
 def parse_nfc_text(text):
-    fields = {}
+    fields = Fields()
+    fields.text = text
     for line in text.splitlines():
         if not line.startswith("#") and ":" in line:
             key, _, value = line.partition(":")
@@ -668,6 +814,8 @@ SAMPLES = {"desfire": (sample_desfire, "a MIFARE DESFire EV1 (two "
            "iso14443b": (sample_iso14443b, "an ISO14443-4B card (made up)"),
            "st25tb": (sample_st25tb, "an ST25TB04K (made up)"),
            "felica": (sample_felica, "a FeliCa Lite-S (made up)"),
+           "felica-standard": (sample_felica_standard, "a FeliCa Standard card "
+                               "(made up: two systems)"),
            "slix": (sample_slix, "an NXP SLIX2, ISO15693 (made up)")}
 
 

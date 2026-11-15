@@ -2,8 +2,8 @@
 # Copyright (c) 2026, Kara Zajac
 # SPDX-License-Identifier: BSD-3-Clause
 """Check the cards beyond NTAG and MIFARE Classic: MIFARE Ultralight C,
-ISO14443-4A, MIFARE DESFire, ISO14443B, ST25TB, FeliCa Lite-S, ISO15693 with
-NXP's SLIX.
+ISO14443-4A, MIFARE DESFire, ISO14443B, ST25TB, FeliCa Lite-S and Standard,
+ISO15693 with NXP's SLIX.
 
     scripts/nfc_check.py firmware/official-1.5.1/flipper-z-f7-update-1.5.1.tgz
 
@@ -381,6 +381,102 @@ def felica(b):
           f"{poll} | {code} | {other!r} | {wrote} | {back} | {key}")
 
 
+def felica_standard(b, work):
+    """A FeliCa Standard card of two systems"""
+    idm = "0114B3C6D2F0A957"
+    card = fe_nfc.sample_felica_standard(bytes.fromhex(idm))
+    path = work / "felica-standard.nfc"
+    path.write_text(card)
+    code, text = b.fe("nfc", path)
+    sh = Shell(b)
+    try:
+        found = sh.ask("scanner", 30)
+        dumped = sh.ask("dump -f /ext/nfc/fe-check-fs.nfc", 120)
+    finally:
+        sh.close()
+    out = work / "felica-standard-dump.nfc"
+    b.fe("pull", "/ext/nfc/fe-check-fs.nfc", out)
+    b.fe("rm", "/ext/nfc/fe-check-fs.nfc")
+    got_text = out.read_text() if out.exists() else ""
+    want, got = fe_nfc.parse_nfc_text(card), fe_nfc.parse_nfc_text(got_text)
+    systems = fe_nfc.felica_systems(card)
+    try:
+        got_systems = fe_nfc.felica_systems(got_text)
+    except ValueError as e:
+        got_systems = str(e)
+    # A firmware whose files have the areas' ends and the keys' versions
+    # (Unleashed, RogueMaster, the dev build): those that the card has for a
+    # file without them.
+    newer = False
+    if isinstance(got_systems, list) and len(got_systems) == len(systems):
+        for mine, theirs in zip(systems, got_systems):
+            if theirs["key"] is not None:
+                newer = True
+                nodes = fe_nfc.felica_nodes(mine)
+                mine["key"] = 0
+                mine["ends"] = [end for _, _, end in nodes if end is not None]
+                mine["area_keys"] = [0] * len(mine["areas"])
+                mine["service_keys"] = [0] * len(mine["services"])
+    head = ("UID", "Manufacture id", "Manufacture parameter", "System found")
+    blocks = sum(len(s["blocks"]) for s in systems)
+    check("a FeliCa Standard card of two systems: in the field, the "
+          "firmware's `scanner` finds it (FeliCa), and its `dump` has the "
+          f"card's own file's systems: their codes, {sum(len(s['areas']) for s in systems)} "
+          f"areas, {sum(len(s['services']) for s in systems)} services and the "
+          f"{blocks} blocks of those that are read without a key"
+          + (" (and each area's end and each key's version, which this "
+             "firmware asks for)" if newer else ""),
+          code == 0 and "protocols detected: felica" in found.lower()
+          and got_systems == systems
+          and all(want[k].upper() == (got.get(k) or "").upper() for k in head),
+          f"{text}\n{found}\n{dumped}\n{got_systems}\n"
+          + "\n".join(f"{k}: {want[k]} | {got.get(k)}" for k in head))
+    b.fe("nfc", "felica-standard", idm)
+    sh = Shell(b)
+    try:
+        if "raw" not in sh.commands:
+            return
+        raw = lambda data: " ".join(re.findall(
+            r"Rx: ([0-9A-F ]+)", sh.ask(f"raw -p felica -c -d {data}"))).strip()
+        second = "1" + idm[1:]                  # the second system's IDm
+        new = b"new words here!!".hex().upper()
+        poll = raw("0600FE000100")
+        codes = raw(f"0A0C{idm}")
+        area = raw(f"0C0A{idm}0400")
+        end = raw(f"0C0A{idm}0600")
+        other = raw(f"0C0A{second}0100")
+        private = raw(f"1006{idm}010810018000")
+        wrote = raw(f"2008{idm}014900018001{new}")
+        back = raw(f"1206{idm}0149000280008001")
+        readonly = raw(f"2008{idm}018B00018000{new}")
+        versions = raw(f"1102{idm}038B0008104B39")
+    finally:
+        sh.close()
+    b.fe("nfc", "none")
+    at = lambda answer, n: answer.split()[n:]
+    spaced = " ".join(new[i:i + 2] for i in range(0, 32, 2))
+    check("FeliCa Standard's commands (the shell's `raw -p felica`): a "
+          "polling for the second system's code is answered with its number "
+          "in the IDm; Request System Code has both; Search Service Code "
+          "gives an area with its end, a service of the other system, FFFF "
+          "past the last; a service with a key is not read (status A5); a "
+          "block written and read with its neighbour; a read-only service "
+          "not written; Request Service knows a service of the other system "
+          "not",
+          at(poll, 2)[:1] == ["11"] and at(poll, 18)[:2] == ["FE", "00"]
+          and at(codes, 10)[:5] == ["02", "00", "03", "FE", "00"]
+          and at(area, 10)[:4] == ["40", "00", "7F", "00"]
+          and at(end, 10)[:2] == ["FF", "FF"] and end.startswith("0C")
+          and at(other, 10)[:2] == ["49", "39"]
+          and at(private, 10)[:2] == ["01", "A5"]
+          and at(wrote, 10)[:2] == ["00", "00"]
+          and at(back, 10)[:3] == ["00", "00", "02"] and spaced in back
+          and at(readonly, 10)[:2] == ["01", "A5"]
+          and at(versions, 10)[:7] == ["03", "00", "00", "00", "00", "FF", "FF"],
+          f"{poll} | {codes} | {area} | {end} | {other} | {private} | {wrote} "
+          f"| {back} | {readonly} | {versions}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("firmware")
@@ -421,6 +517,7 @@ def main():
                 st25tb(b, work)
                 iso14443b(b, work)
                 felica(b)
+                felica_standard(b, work)
                 if iso15693(b):
                     snapshot(b)
                 b.fe("nfc", "none")

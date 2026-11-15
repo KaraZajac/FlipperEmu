@@ -4849,6 +4849,37 @@ big lock, entry 92).
     - The card's saved state: version 3 (the chip model's with it).
     - Checks: nfc_check 17 on the five firmwares.
 
+157. **FeliCa Standard cards.**
+    - A dump has a card's systems, their areas and services, and the
+      blocks of the services that need no key; the card model keeps them
+      as records in the order the firmware found them (the records of
+      DESFire's tables, with types of their own), and answers the
+      commands of the firmware's walk from them: Polling, Request System
+      Code, Search Service Code by a running number, Read Without
+      Encryption block by block until "illegal block number".
+    - A file has an area as "Code 0000, Services #000-#002": which
+      services came after it, not where it was among them. An area goes
+      before the first service that came after it, which is the order the
+      firmware saw.
+    - The first dump was the file but for the IDm: the made-up file had
+      the last system's number in its first byte, as the firmware's poller
+      has while it reads; what it saves is the IDm of the polling.
+    - The official 1.5.1 and Momentum passed; Unleashed, RogueMaster and
+      the dev build failed in the check's own parser. Their files are
+      "Data format version: 4": a system with "| Key version FFFF |", an
+      area with "| End FFFE |" and a key's version, a service with one.
+      They ask Request Service for each node, and with 0xFFFF for the
+      system's key, which the model had answered as "no such node". So a
+      system, an area and a service have a key's version now (0 for a file
+      without), an area its end (made up for a file without: the last
+      service that came in it; 0xFFFE for the root), and both formats are
+      read.
+    - Writing: in a service that is "random, read/write, no key" (its
+      code's low six bits 0x09), to a block that the dump has.
+    - Checks: nfc_check 19 on the five firmwares (the dump's systems are
+      the card's, with the ends and versions on the three that ask; the
+      commands by `raw -p felica`).
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
