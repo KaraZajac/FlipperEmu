@@ -61,6 +61,7 @@ from gpio_check import app_lines, hold, own_app, row, skip, skipped, status
 from uart_check import fe, start
 from ufbt_check import log_tail, tool
 import check_limit
+import fe_header
 
 OWN = ROOT / "scripts" / "spi_check_app"
 TAG = "FeSpi"
@@ -328,6 +329,8 @@ def app_checks(b, folder):
     was, first = rom.read_bytes(), bus(b)
     base = count(first)
     before = len(app_lines(b, TAG))
+    rec = b.dir / "spi-record.txt"
+    recording = fe(b, "spi", "record", rec)
     code, text = tool(b, folder, "launch")
     got = lines(b, before, "4 done")
     check("`ufbt launch` starts the check's own app (scripts/spi_check_app). "
@@ -353,8 +356,27 @@ def app_checks(b, folder):
           "3", code == 0 and f"{said_count(st)}; the last at 4 MHz, mode 3, "
           "MSB first, 8 bits" in out, out + err)
 
+    code, out, err, _ = fe(b, "spi", "record")
+    check("`spi record FILE` before the app, and `spi record` now: it "
+          "records, and has those 86 bytes so far",
+          recording[0] == 0 and code == 0 and str(rec) in out
+          and "86 bytes clocked, all with a device selected" in out,
+          f"{recording[1]}{recording[2]}\n{out}{err}")
+    watch = subprocess.Popen(
+        [sys.executable, str(ROOT / "flipperemu"), "-d", b.name, "spi", "watch",
+         "--for", "6"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, stdin=subprocess.DEVNULL)
+    time.sleep(1.5)
     got = hold(b, "PB2", "high", line="5 done", tag=TAG)
     st = bus(b)
+    seen = watch.communicate(timeout=60)[0]
+    check("`spi watch` meanwhile (from the record that runs): the next run "
+          "of frames as it happens, with the device that heard it: the "
+          "bytes as the firmware wrote and read them (f9 out, f7 02 68 in)",
+          watch.returncode == 0 and "from the record that runs" in seen
+          and re.search(r"pin 4 +w25q32 +out f9 00 00 00  in [0-9a-f]{2} "
+                        r"f7 02 68", seen) and "1 run of frames" in seen,
+          seen)
     check("the least significant bit first: the command goes out turned "
           "around (f9 for 9f), and so comes the answer (f7 02 68 for ef 40 "
           "16)", got == ["5 LSB first: f7 02 68", "5 done"]
@@ -372,6 +394,37 @@ def app_checks(b, folder):
           and st.get("last") == frame(2000000, bits=16)
           and "the last at 2 MHz, mode 0, MSB first, 16 bits" in out,
           "\n".join(got) + f"\n{st}\n{out}{err}")
+
+    code, out, err, _ = fe(b, "spi", "record", "stop")
+    text = rec.read_text() if rec.exists() else ""
+    try:
+        runs = [r for r in map(fe_header.spi_part, text.splitlines()) if r]
+    except ValueError as e:
+        runs = str(e)
+    how = lambda r: (r["select"], r["hz"], r["mode"], r["lsb_first"], r["bits"])
+    find = lambda want: next((r for r in runs if how(r) == want
+                              and r["out"][:1] in (b"\x9f", b"\xf9")), None) \
+        if isinstance(runs, list) else None
+    plain, other = find((4, 2000000, 0, False, 8)), find((7, 4000000, 3, False, 8))
+    turned, wide = find((4, 2000000, 0, True, 8)), find((4, 2000000, 0, False, 16))
+    check("`spi record stop`: the file names what is on the bus and has a "
+          "line for each run of frames under one chip select, 94 bytes in "
+          "all: the JEDEC ID asked of the flash on pin 4 (9f out, ef 40 16 "
+          "in), of the one on pin 7 at 4 MHz in mode 3 (ef 40 14), with the "
+          "least significant bit first (f9 out, f7 02 68 in), and in frames "
+          "of 16 bits (9f 00 00 00 out, 00 ef 40 16 in)",
+          code == 0 and "94 bytes clocked" in out
+          and "# on the bus: w25q32 at pin 4, w25q80bl at pin 7" in text
+          and isinstance(runs, list) and sum(len(r["out"]) for r in runs) == 94
+          and plain and plain["in"][1:4] == bytes.fromhex("ef4016")
+          and other and other["in"][1:4] == bytes.fromhex("ef4014")
+          and turned and turned["in"][1:4] == bytes.fromhex("f70268")
+          and wide and wide["out"] == bytes.fromhex("9f000000")
+          and wide["in"] == bytes.fromhex("00ef4016"),
+          f"{out}{err}\n{text[:3000]}")
+    code, out, err, _ = fe(b, "spi", "record")
+    check("and no record runs after it", code == 0
+          and "is not being recorded" in out, out + err)
 
     got = hold(b, "PB2", "high", line="11 the bus is held", tag=TAG)
     st = bus(b)

@@ -1647,6 +1647,16 @@ ufbt is not run at all, and `update` sends the package without the stage (BRINGU
   flashed (a pin that may be one, one device to a pin, no `bus`, `cs` or `id` of
   the user's, none of the Flipper's own SPI chips) and asks QEMU for the types it
   has (`-device help`, those on the SSI bus).
+- **A record of it**: the machine property `header-spi-record` (a file with its whole
+  path; `off` ends it; read: the lines so far, the bytes heard and unheard, ns, the
+  file). The bus's own end, which gets every frame, collects the bytes out and in of
+  a run and writes the run as one line when it ends: a chip select of a device on
+  the bus changes level (`flipper_header_spi_selects()`), a frame comes that is
+  clocked otherwise or under another chip select, the line is full (4096 bytes: it
+  ends with `+`), or, for bytes with nobody selected, the records' flush timer finds
+  that none has come since its last look. The flush timer is the one the pins' and
+  the I2C bus's records have. `spi watch` reads the file as it grows, a record of its
+  own in the device's folder unless one runs.
 - **What was clocked there**: the machine property `header-spi` (read only) is
   `SPI1:2:3:5:HEARD:UNHEARD:LAST` and then `TYPE@PIN:selected|idle` for each device:
   the pins of MOSI, MISO and SCK by their numbers on the header, how many bytes the

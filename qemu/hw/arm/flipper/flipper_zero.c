@@ -250,6 +250,17 @@ struct FlipperZeroState {
     bool i2c_rec_reads;
     uint64_t i2c_rec_calls, i2c_rec_unanswered;
     uint64_t i2c_rec_written, i2c_rec_read;     /* bytes */
+    FILE *spi_rec;               /* the record of the header's SPI bus (text) */
+    char *spi_rec_path;
+    int64_t spi_rec_t0;          /* ... when it began (virtual clock, ns) */
+    GByteArray *spi_rec_out, *spi_rec_in;       /* the line that is being made */
+    int64_t spi_rec_at;          /* ... its first byte's time */
+    int spi_rec_cs;              /* ... its chip select's pin (0: no device) */
+    uint32_t spi_rec_hz;         /* ... and how its frames are clocked */
+    uint8_t spi_rec_mode, spi_rec_bits;
+    bool spi_rec_lsb;
+    bool spi_rec_fresh;          /* a byte came since the flush last looked */
+    uint64_t spi_rec_lines, spi_rec_heard, spi_rec_unheard;     /* bytes */
     Notifier exit_notifier;
 };
 
@@ -915,6 +926,94 @@ static bool header_spi_cs_level(FlipperZeroState *s, SSIPeripheral *p)
            header_level(s, i) == (high ? '1' : '0') ? high : !high;
 }
 
+/*
+ * ---- a record of the bus ("header-spi-record"): what the firmware clocks
+ * there, a line of text for each run of frames under one chip select:
+ *
+ *   SECONDS CS HZ MODE msb|lsb BITS  OUT... > IN... [+|...]
+ *
+ * SECONDS: the virtual clock at the run's first frame, from where the
+ * record began.  CS: the header pin of the chip select of the device that
+ * was selected, "-" when none was (the bytes nobody heard).  HZ, MODE (0 to
+ * 3), which bit went first and a frame's bits: how it was clocked.  OUT:
+ * the bytes the firmware sent, as the wire had them; IN: what came back,
+ * as many.  "+": the line was full, the next goes on.  "...": the record
+ * ended there.  A run ends when a chip select changes, when the clocking
+ * does, or, with no device selected, when nothing came for a while.
+ */
+#define SPI_REC_LINE 4096               /* bytes a line has at most */
+
+static void flipper_spi_rec_line(FlipperZeroState *s, const char *end)
+{
+    FILE *f = s->spi_rec;
+    int64_t ns = s->spi_rec_at;
+
+    if (!f || !s->spi_rec_out->len) {
+        return;
+    }
+    fprintf(f, "%" PRId64 ".%09" PRId64 " ",
+            (int64_t)(ns / NANOSECONDS_PER_SECOND),
+            (int64_t)(ns % NANOSECONDS_PER_SECOND));
+    if (s->spi_rec_cs) {
+        fprintf(f, "%d", s->spi_rec_cs);
+    } else {
+        fputc('-', f);
+    }
+    fprintf(f, " %u %u %s %u ", s->spi_rec_hz, s->spi_rec_mode,
+            s->spi_rec_lsb ? "lsb" : "msb", s->spi_rec_bits);
+    for (guint i = 0; i < s->spi_rec_out->len; i++) {
+        fprintf(f, " %02x", s->spi_rec_out->data[i]);
+    }
+    fputs(" >", f);
+    for (guint i = 0; i < s->spi_rec_in->len; i++) {
+        fprintf(f, " %02x", s->spi_rec_in->data[i]);
+    }
+    fprintf(f, "%s\n", end);
+    s->spi_rec_lines++;
+    g_byte_array_set_size(s->spi_rec_out, 0);
+    g_byte_array_set_size(s->spi_rec_in, 0);
+}
+
+/* a frame's bytes, as the wire had them (the first that went first) */
+static void flipper_spi_rec_frame(FlipperZeroState *s, FlipperHeaderSpi *h,
+                                  int cs, uint32_t tx, uint32_t rx)
+{
+    unsigned bytes = (h->last_bits + 7) / 8;
+
+    if (!s->spi_rec) {
+        return;
+    }
+    if (s->spi_rec_out->len &&
+        (cs != s->spi_rec_cs || h->last_hz != s->spi_rec_hz ||
+         h->last_mode != s->spi_rec_mode || h->last_bits != s->spi_rec_bits ||
+         h->last_lsb != s->spi_rec_lsb)) {
+        flipper_spi_rec_line(s, "");
+    } else if (s->spi_rec_out->len + bytes > SPI_REC_LINE) {
+        flipper_spi_rec_line(s, " +");
+    }
+    if (!s->spi_rec_out->len) {
+        s->spi_rec_at = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->spi_rec_t0;
+        s->spi_rec_cs = cs;
+        s->spi_rec_hz = h->last_hz;
+        s->spi_rec_mode = h->last_mode;
+        s->spi_rec_bits = h->last_bits;
+        s->spi_rec_lsb = h->last_lsb;
+    }
+    for (unsigned n = 0; n < bytes; n++) {
+        int shift = h->last_lsb ? 8 * n : 8 * (bytes - 1 - n);
+        uint8_t out = tx >> shift, in = rx >> shift;
+
+        g_byte_array_append(s->spi_rec_out, &out, 1);
+        g_byte_array_append(s->spi_rec_in, &in, 1);
+    }
+    s->spi_rec_fresh = true;
+    if (cs) {
+        s->spi_rec_heard += bytes;
+    } else {
+        s->spi_rec_unheard += bytes;
+    }
+}
+
 /* The chip selects of what is on the header's SPI bus, after a level of a
  * pin of that port may have changed (-1: of any). */
 static void flipper_header_spi_selects(FlipperZeroState *s, int port)
@@ -937,6 +1036,7 @@ static void flipper_header_spi_selects(FlipperZeroState *s, int port)
         level = header_spi_cs_level(s, p);
         if (p->cs != level &&
             object_property_find(OBJECT(p), SSI_GPIO_CS "[0]")) {
+            flipper_spi_rec_line(s, "");        /* (a run ends, or begins) */
             qemu_set_irq(qdev_get_gpio_in_named(DEVICE(p), SSI_GPIO_CS, 0),
                          level);
         }
@@ -1012,6 +1112,7 @@ static uint32_t flipper_header_spi_transfer(SSIPeripheral *dev, uint32_t tx)
     unsigned bits = wb55_spi_bits(spi), bytes = (bits + 7) / 8;
     bool lsb = extract32(spi->cr1, 7, 1), any = false;
     uint32_t rx = 0;
+    int cs = 0;
     BusChild *kid;
 
     if (!header_spi_pin(s, HDR_SPI_SCK)) {
@@ -1024,7 +1125,12 @@ static uint32_t flipper_header_spi_transfer(SSIPeripheral *dev, uint32_t tx)
     h->last_lsb = lsb;
     if (bits == 8 || bits == 16) {
         QTAILQ_FOREACH(kid, &BUS(h->bus)->children, sibling) {
-            any |= header_spi_selected(SSI_PERIPHERAL(kid->child));
+            SSIPeripheral *p = SSI_PERIPHERAL(kid->child);
+
+            if (header_spi_selected(p)) {
+                any = true;
+                cs = cs ? cs : MAX(p->cs_index, 1);     /* (for the record) */
+            }
         }
     }
     if (!any) {
@@ -1044,7 +1150,9 @@ static uint32_t flipper_header_spi_transfer(SSIPeripheral *dev, uint32_t tx)
         }
         h->heard += bytes;
     }
-    return header_spi_pin(s, HDR_SPI_MISO) ? rx & ((1u << bits) - 1) : 0;
+    rx = header_spi_pin(s, HDR_SPI_MISO) ? rx & ((1u << bits) - 1) : 0;
+    flipper_spi_rec_frame(s, h, cs, tx, rx);
+    return rx;
 }
 
 /*
@@ -1183,7 +1291,7 @@ static void flipper_lptim2_changed(void *opaque)
     flipper_header_look(opaque, 0);
 }
 
-/* (for both records: the pins' and the I2C bus's) */
+/* (for the records: the pins', the I2C bus's and the SPI bus's) */
 static void flipper_header_rec_flush(void *opaque)
 {
     FlipperZeroState *s = opaque;
@@ -1194,7 +1302,16 @@ static void flipper_header_rec_flush(void *opaque)
     if (s->i2c_rec) {
         fflush(s->i2c_rec);
     }
-    if (s->hdr_rec || s->i2c_rec) {
+    if (s->spi_rec) {
+        /* bytes that no device heard have no chip select to end their
+         * line: it ends when none has come for a while */
+        if (!s->spi_rec_cs && !s->spi_rec_fresh) {
+            flipper_spi_rec_line(s, "");
+        }
+        s->spi_rec_fresh = false;
+        fflush(s->spi_rec);
+    }
+    if (s->hdr_rec || s->i2c_rec || s->spi_rec) {
         timer_mod(s->hdr_rec_flush,
                   qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + HDR_REC_FLUSH_MS);
     }
@@ -1636,6 +1753,92 @@ static void flipper_set_header_i2c_record(Object *obj, const char *value,
             QTAILQ_EMPTY(&BUS(i->bus)->children) ? " nothing" : "");
     fflush(f);
     s->i2c_rec = f;
+    flipper_header_rec_flushes(s);
+}
+
+static void flipper_spi_rec_stop(FlipperZeroState *s)
+{
+    if (!s->spi_rec) {
+        return;
+    }
+    flipper_spi_rec_line(s, " ...");
+    fclose(s->spi_rec);
+    s->spi_rec = NULL;
+}
+
+/* "LINES HEARD UNHEARD NS PATH" while it records (the lines written so
+ * far, the bytes that a device heard and those that none did, ns since it
+ * began, the file), and nothing while it does not */
+static char *flipper_get_header_spi_record(Object *obj, Error **errp)
+{
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+
+    if (!s->spi_rec) {
+        return g_strdup("");
+    }
+    return g_strdup_printf("%" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRId64
+                           " %s", s->spi_rec_lines, s->spi_rec_heard,
+                           s->spi_rec_unheard,
+                           qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) -
+                           s->spi_rec_t0, s->spi_rec_path);
+}
+
+/* a file to record to, with its whole path; off: the record ends */
+static void flipper_set_header_spi_record(Object *obj, const char *value,
+                                          Error **errp)
+{
+    FlipperZeroState *s = FLIPPER_ZERO(obj);
+    const char *sep = " ";
+    BusChild *kid;
+    FILE *f;
+
+    if (!strcmp(value, "off")) {
+        flipper_spi_rec_stop(s);
+        return;
+    }
+    if (!s->hdr_spi) {
+        error_setg(errp, "header-spi-record: this machine has no SPI bus on "
+                   "its header");
+        return;
+    }
+    f = flipper_rec_open("header-spi-record", value,
+                         s->spi_rec ? s->spi_rec_path : NULL, errp);
+    if (!f) {
+        return;
+    }
+    g_free(s->spi_rec_path);
+    s->spi_rec_path = g_strdup(value);
+    s->spi_rec_t0 = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    if (!s->spi_rec_out) {
+        s->spi_rec_out = g_byte_array_new();
+        s->spi_rec_in = g_byte_array_new();
+    }
+    g_byte_array_set_size(s->spi_rec_out, 0);
+    g_byte_array_set_size(s->spi_rec_in, 0);
+    s->spi_rec_fresh = false;
+    s->spi_rec_lines = s->spi_rec_heard = s->spi_rec_unheard = 0;
+    fprintf(f, "# FlipperEmu: the SPI bus of a Flipper Zero's GPIO header "
+               "(SPI1: MOSI pin %d, MISO pin %d, SCK pin %d)\n# on the bus:",
+            HDR_SPI_MOSI, HDR_SPI_MISO, HDR_SPI_SCK);
+    for (int pin = 0; pin <= 18; pin++) {       /* in their pins' order */
+        QTAILQ_FOREACH(kid, &BUS(s->hdr_spi->bus)->children, sibling) {
+            if (SSI_PERIPHERAL(kid->child)->cs_index == pin) {
+                fprintf(f, "%s%s at pin %d", sep,
+                        object_get_typename(OBJECT(kid->child)), pin);
+                sep = ", ";
+            }
+        }
+    }
+    fprintf(f, "%s\n"
+               "# a line: its first frame's time in s, the chip select's pin "
+               "(-: no device was selected),\n"
+               "#   the clock in Hz, the SPI mode, msb or lsb first, a "
+               "frame's bits; the bytes out > the bytes in\n"
+               "#   +: the line was full, the next goes on    "
+               "...: the record ended there\n",
+            QTAILQ_EMPTY(&BUS(s->hdr_spi->bus)->children) ? " nothing" : "");
+    fflush(f);
+    s->spi_rec = f;
     flipper_header_rec_flushes(s);
 }
 
@@ -2667,6 +2870,14 @@ static void flipper_zero_instance_init(Object *obj)
         "address called, the bytes written and read (off: the record ends)."
         "  Read: calls, those unanswered, bytes written, bytes read, ns, "
         "the file");
+    object_property_add_str(obj, "header-spi-record",
+                            flipper_get_header_spi_record,
+                            flipper_set_header_spi_record);
+    object_property_set_description(obj, "header-spi-record",
+        "A text file that gets what the firmware clocks on the header's SPI "
+        "bus: a line for each run of frames under one chip select, the "
+        "bytes out and in (off: the record ends).  Read: lines, bytes "
+        "heard, bytes unheard, ns, the file");
     object_property_add_str(obj, "header-record", flipper_get_header_record,
                             flipper_set_header_record);
     object_property_set_description(obj, "header-record",

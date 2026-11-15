@@ -5064,6 +5064,25 @@ big lock, entry 92).
       run to another check that was building in ufbt's one build folder
       at that moment, and has its 31 alone.)
 
+163. **A record of the header's SPI bus.**
+    - As the I2C bus has one. What a line is, is the question there: I2C
+      has STARTs; SPI has a chip select, and the bus's end in the model
+      sees frames, not selects. So the frames' bytes are collected, and
+      the line is written when the run is over: the model's function for
+      the devices' chip selects says so when one changes; a frame that is
+      clocked otherwise ends it too; and bytes that no device hears have
+      no select at all, so their line ends when the flush timer finds
+      that nothing came since it last looked.
+    - The bytes are the firmware's (what it wrote to the data register
+      and read from it), with msb or lsb in the line: with lsb the wire
+      has each turned around, which is a reader's to know.
+    - The devices in the file's first lines came in the bus's order (the
+      one made last first); by pin now, as `spi` has them.
+    - Checks: spi_check 49 on the official 1.5.1 (the record around the C
+      app's steps: 94 bytes in lines by chip select, the four ways of
+      clocking; `spi watch` on the record that runs); `spi watch` with a
+      record of its own tried on Momentum with examples/spi/flash.js.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

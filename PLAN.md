@@ -586,8 +586,10 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         64 on those three, 55 on the dev build (BRINGUP_LOG 116)
   - ☐ More on that bus: the C app on the other firmwares, each with its own
         SDK
-  - ☐ A record of what goes over the SPI bus (`spi record`, `spi watch`), as
-        `i2c record` is one for the I2C bus
+  - ☑ A record of what goes over the SPI bus (2026-11-15): `spi record FILE`,
+        `spi watch [PIN]`, a line for each run of frames under one chip select
+        with the bytes out and in; `scripts/spi_check.py` 49 on the official
+        1.5.1 (BRINGUP_LOG 163)
   - ☐ More devices for the SPI bus: a radio module (the external CC1101 that
         Momentum, Unleashed and RogueMaster have a setting for, an NRF24
         board), a display

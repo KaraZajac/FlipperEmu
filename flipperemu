@@ -36,6 +36,7 @@ you flash stays flashed, settings and files persist across runs.
                                              --i2c tmp105@0x48` put a sensor: the
                                              devices' values; set one
   ./flipperemu i2c record OUT.txt | i2c watch
+  ./flipperemu spi record OUT.txt | spi watch
                                              every transfer on that bus: the address
                                              called, the bytes written and read
   ./flipperemu spi                           the SPI bus of its header, where `run
@@ -3121,11 +3122,173 @@ def spi_device(dev, m, d):
                 file=str(spi_rom(dev, d["select"])) if own else None)
 
 
+SPI_RECORD_OLD = ("this emulator cannot record its SPI bus: it was started "
+                  "before it could (`stop`, and `run` again)")
+
+
+def spi_recording(m):
+    """The record of the header's SPI bus that runs
+    (fe_header.parse_spi_record).  None: none runs.  False: an emulator that
+    cannot record."""
+    text = qom_get(m, "/machine", "header-spi-record")
+    if not isinstance(text, str):
+        return False
+    return fe_header.parse_spi_record(text)
+
+
+def set_spi_record(m, value):
+    err = m.cmd(f"qom-set /machine header-spi-record {value}").strip()
+    if err:
+        sys.exit("spi: " + re.sub(r"^Error: (header-spi-record: )?", "", err))
+
+
+def spi_record(dev, what):
+    """spi record FILE: what the firmware clocks on the header's SPI bus,
+    into a text file: a line for each run of frames under one chip select,
+    the bytes out and in.  spi record stop: the end of that.  spi record:
+    does one run?"""
+    if what and "\n" in what:
+        sys.exit("spi: a file's name in one line")
+    m = open_monitor(dev)
+    try:
+        was = spi_recording(m)
+        if was is False:
+            sys.exit(f"[{dev.name}] {SPI_RECORD_OLD}")
+        so_far = was and (f"{fe_header.spi_recorded(was)} in "
+                          f"{was['ns'] / 1e9:.1f} s")
+        if what is None:
+            print(f"[{dev.name}] " + (
+                f"recording the header's SPI bus to {was['path']}: {so_far} "
+                "so far (`spi record stop` ends it)" if was else
+                "the header's SPI bus is not being recorded "
+                "(spi record FILE)"))
+            return 0
+        if what.lower() == "stop":
+            if not was:
+                sys.exit("spi: nothing is being recorded (spi record FILE)")
+            set_spi_record(m, "off")
+            print(f"[{dev.name}] the record is {was['path']}: {so_far} of "
+                  "the Flipper's time (a text file, a line for each run of "
+                  "frames under one chip select)")
+            return 0
+        if was:
+            sys.exit(f"spi: it records to {was['path']} already (`spi "
+                     "record stop` ends that)")
+        set_spi_record(m, os.path.abspath(what))
+        print(f"[{dev.name}] recording the header's SPI bus to {what}: "
+              "the bytes out and in, by chip select (`spi record stop` ends "
+              "it)")
+        return 0
+    finally:
+        m.close()
+
+
+def spi_watch(dev, word, seconds):
+    """spi watch [PIN]: what the firmware clocks on the header's SPI bus, as
+    it happens (PIN: only what a device with its chip select there heard).
+    It is read from the record: its own, in the device's directory, unless
+    one runs already."""
+    m = open_monitor(dev)
+    try:
+        was = spi_recording(m)
+        if was is False:
+            sys.exit(f"[{dev.name}] {SPI_RECORD_OLD}")
+        bus = read_spi(m)
+        only = None
+        if word is not None:
+            hit = [d for d in bus["devices"]
+                   if word.upper() in (str(d["select"]), d["pin"])]
+            if not hit:
+                sys.exit(f"spi watch {word}: no device has its chip select "
+                         "there (" + (fe_header.spi_devices(bus)) + ")")
+            only = hit[0]["select"]
+        path = (pathlib.Path(was["path"]) if was
+                else dev.dir / "spi-watch.txt")
+        if not was:
+            set_spi_record(m, path)
+    finally:
+        m.close()
+    there = {d["select"]: d["type"] for d in bus["devices"]}
+    wide = max(map(len, there.values()), default=1)
+    t0 = was["ns"] if was else 0        # the record's time as the watch begins
+    print(f"[{dev.name}] " + (
+        f"what the device on pin {only} hears on the header's SPI bus"
+        if only is not None else "the header's SPI bus")
+          + " as the firmware clocks it (on it: "
+          f"{fe_header.spi_devices(bus)})"
+          + (f", for {seconds:g} s" if seconds else "; Ctrl+C ends it")
+          + (f" (from the record that runs: {path})" if was else ""),
+          flush=True)
+    shown, rest, idle = 0, "", 0.0
+    began = time.time()
+    try:
+        watch_ends()
+        with open(path, encoding="ascii") as f:
+            while True:
+                text = f.read()
+                if text:
+                    *lines, rest = (rest + text).split("\n")
+                    for line in lines:
+                        part = fe_header.spi_part(line)
+                        if not part or part["ns"] < t0 or \
+                                only not in (None, part["select"]):
+                            continue
+                        pin = part["select"]
+                        print(f"{(part['ns'] - t0) / 1e9:12.6f}  "
+                              + (f"pin {pin:<2} {there.get(pin, ''):{wide}}"
+                                 if pin else f"{'nobody':{wide + 7}}")
+                              + "  " + fe_header.spi_part_text(part),
+                              flush=True)
+                        shown += 1
+                    idle = 0.0
+                    continue
+                if seconds and time.time() - began >= seconds:
+                    break
+                time.sleep(0.05)
+                idle += 0.05
+                if idle >= 1.0:
+                    idle = 0.0
+                    if not dev.running():
+                        print(f"[{dev.name}] it stopped", flush=True)
+                        break
+    except KeyboardInterrupt:
+        print()
+    finally:
+        if not was:
+            try:
+                m = open_monitor(dev)
+                try:
+                    if spi_recording(m):
+                        m.cmd("qom-set /machine header-spi-record off")
+                finally:
+                    m.close()
+            except (SystemExit, OSError):
+                pass                    # the emulator is gone, and its record
+            path.unlink(missing_ok=True)
+    print(f"[{dev.name}] {shown} run{'' if shown == 1 else 's'} of frames in "
+          f"{time.time() - began:.1f} s")
+    return 0
+
+
 def cmd_spi(args):
     """The SPI bus of a running device's GPIO header: the devices on it,
     with where a flash's contents are kept, and what the firmware clocked
-    there"""
+    there.  record, watch: what it clocks, into a file or as it happens."""
     dev = Device(args.device)
+    word = (args.action or "").lower()
+    if args.seconds is not None and (word != "watch" or args.seconds <= 0):
+        sys.exit("spi: --for goes with watch, and is more than 0 seconds: "
+                 "spi watch --for 5")
+    if word in ("record", "watch"):
+        if args.json:
+            sys.exit(f"spi {word}: not with --json (the record is a text "
+                     "file, a line for each run of frames)")
+        if word == "record":
+            return spi_record(dev, args.what)
+        return spi_watch(dev, args.what, args.seconds)
+    if word:
+        sys.exit(f"spi {args.action}: `spi`, `spi record FILE`, `spi record "
+                 "stop` or `spi watch [PIN]`")
     m = open_monitor(dev)
     try:
         bus = read_spi(m)
@@ -7198,7 +7361,19 @@ def main():
         "while a device was selected (the others nobody heard: the "
         "firmware's chip select is another pin, or none), and how it "
         "clocked the last frame: the clock's rate, the SPI mode, which bit "
-        "came first, and the bits of a frame.")
+        "came first, and the bits of a frame.  `record FILE`: what the "
+        "firmware clocks there into a text file, a line for each run of "
+        "frames under one chip select with its time, the chip select's pin "
+        "and the bytes out and in, until `record stop`; `record`: does one "
+        "run.  `watch [PIN]`: the same as it happens (PIN: only what the "
+        "device with its chip select there hears).")
+    p.add_argument("action", nargs="?", metavar="record|watch",
+                   help="see above")
+    p.add_argument("what", nargs="?", metavar="FILE|stop|PIN",
+                   help="after `record`: the file, or `stop`; after `watch`: "
+                        "a chip select's pin (4, PA4)")
+    p.add_argument("--for", dest="seconds", type=float, metavar="S",
+                   help="watch: for so many seconds (not given: until Ctrl+C)")
     p.add_argument("--json", action="store_true",
                    help="for a program: the bus as `status --json` has it, "
                         "each device with the drive and the file that its "

@@ -506,6 +506,7 @@ picture of the save to the pixel and the tag, and goes on with Pause.
 | `i2c record OUT.txt` \| `i2c record stop` \| `i2c watch [ADDRESS]` | every transfer on that bus, a line for each START with its time: the address called, the bytes written or read; into a text file, or printed as it happens |
 | `run --spi TYPE@PIN` | start with a device on the SPI bus of its header (pins 2, 3 and 5), PIN its chip select: `--spi flash` (a W25Q32, its chip select on pin 4), `--spi w25q80bl@PC3`; once for each device. `run --spi help` lists the types |
 | `spi` | that bus: its devices, which of them is selected, how many bytes the firmware clocked there and how many of them a device heard, and how the last was clocked. `spi --json`: the same for a program |
+| `spi record OUT.txt` \| `spi record stop` \| `spi watch [PIN]` | what the firmware clocks on that bus, a line for each run of frames under one chip select with its time: the chip select's pin, how it was clocked, the bytes out and in; into a text file, or as it happens (`watch 4`: what the device on pin 4 hears) |
 | `reset` | reboot it, as holding Left + Back does |
 | `pause` \| `continue` | time stands still on it (screen, timers, radios), and goes on from there |
 | `snapshot save [NAME]` \| `snapshot load [NAME]` \| `snapshot` \| `snapshot rm NAME` | a running device as it stands, kept with its card and what is on its header; a stopped device started at that moment again (`--paused`: standing still there); the list; remove one |
@@ -2580,6 +2581,10 @@ bus, and `spi` is a look at the bus from outside:
 ./flipperemu run --spi help           # the types there are
 ./flipperemu spi                      # the bus: its devices, who is selected, the bytes
 ./flipperemu spi --json               # the same, for a program
+./flipperemu spi record bus.txt       # what the firmware clocks there into a text file,
+./flipperemu spi record stop          #   until this (spi record: does one run?)
+./flipperemu spi watch                # the same as it happens (--for S; else to Ctrl+C)
+./flipperemu spi watch 4              #   what the device on pin 4 hears
 ```
 
 With Momentum, whose JavaScript has an `spi` module, and `examples/spi/flash.js`,
@@ -2668,6 +2673,26 @@ chip select, speed or mode; the check's app, `scripts/spi_check_app/spi.c`, has 
   selected and with none), `last` (`hz`, `mode`, `lsb_first`, `bits`; null before the
   first byte) and the `devices`, each with its `type`, its `select` (the pin's number
   on the header), its `pin`, `selected`, and a flash with its `file`.
+- **`spi record FILE`** writes what the firmware clocks on the bus into a text file,
+  and `spi watch` shows it as it happens. A line is a run of frames under one chip
+  select: it ends when a chip select changes or the clocking does (bytes that no
+  device heard: when none has come for a moment).
+
+  ```
+  $ ./flipperemu spi watch
+  [flipper] the header's SPI bus as the firmware clocks it (on it: w25q32 with its chip select on pin 4); Ctrl+C ends it
+      2.171382  pin 4  w25q32  out 9f 00 00 00  in 00 ef 40 16
+      2.176099  pin 4  w25q32  out 06  in 00
+      2.181023  pin 4  w25q32  out 02 00 10 00 46 6c 69 70 70 65 72  in 00 00 00 00 00 00 00 00 00 00 00
+  ```
+
+  In the file a line has more: `2.171382000 4 2000000 0 msb 8  9f 00 00 00 > 00 ef 40
+  16` is the time of the run's first frame in seconds of the Flipper's time, the chip
+  select's pin (`-`: nobody was selected), the clock in Hz, the SPI mode, which bit
+  went first, a frame's bits, and then the bytes out, `>`, the bytes in. The bytes are
+  as the firmware wrote and read them; with `lsb` the wire had each turned around.
+  Lines that begin with `#` say what the file is and what was on the bus.
+  `fe_header.spi_part()` reads a line for a program.
 - **The bus's line** counts what the firmware clocked there since the emulator
   started, how many of those bytes a device heard, and how the last one was clocked:
   the speed, the mode (0 to 3) and the bit that went first. It is the first place to

@@ -655,6 +655,84 @@ def spi_text(bus):
     return f"{spi_devices(bus)}; {spi_did(bus)}"
 
 
+def parse_spi_record(text):
+    """What the machine says of the record of the SPI bus (its
+    `header-spi-record`, as read), a dict: the "lines" written since it
+    began, the bytes that a device "heard" and those that none did
+    ("unheard"), "ns" of the Flipper's time, the "path" of the file; None:
+    none runs"""
+    if not isinstance(text, str) or not text:
+        return None
+    lines, heard, unheard, ns, path = text.split(" ", 4)
+    return {"lines": int(lines), "heard": int(heard), "unheard": int(unheard),
+            "ns": int(ns), "path": path}
+
+
+def spi_recorded(record):
+    """What a record of the SPI bus has so far, in words"""
+    heard, unheard = record["heard"], record["unheard"]
+    if not heard + unheard:
+        return "no byte clocked"
+    count = lambda n: f"{n} byte{'' if n == 1 else 's'}"
+    return (f"{count(heard + unheard)} clocked, " +
+            ("all" if not unheard else "none" if not heard else str(heard))
+            + " with a device selected")
+
+
+def spi_part(line):
+    """A line of a record of the SPI bus (a text file the machine writes): a
+    run of frames under one chip select.  A dict: "ns" of the Flipper's time
+    at its first frame, from where the record began; the pin of the chip
+    "select" of the device that was selected (None: none was); how it was
+    clocked ("hz", "mode", "lsb_first", "bits"); the bytes "out" and "in",
+    as many; "more": the line was full, the next goes on; "whole": the
+    record did not end inside it.  None: a line that is no run (a comment,
+    an empty one).  ValueError: no line of such a file."""
+    words = line.split()
+    if not words or words[0].startswith("#"):
+        return None
+    try:
+        s, ns = words[0].split(".")
+        if len(ns) != 9 or words[4] not in ("msb", "lsb"):
+            raise ValueError
+        part = {"ns": int(s) * 1000000000 + int(ns),
+                "select": None if words[1] == "-" else int(words[1]),
+                "hz": int(words[2]), "mode": int(words[3]),
+                "lsb_first": words[4] == "lsb", "bits": int(words[5]),
+                "more": False, "whole": True}
+        rest = words[6:]
+        if rest[-1:] == ["+"]:
+            part["more"], rest = True, rest[:-1]
+        elif rest[-1:] == ["..."]:
+            part["whole"], rest = False, rest[:-1]
+        at = rest.index(">")
+        if any(len(w) != 2 for w in rest[:at] + rest[at + 1:]):
+            raise ValueError
+        part["out"] = bytes(int(w, 16) for w in rest[:at])
+        part["in"] = bytes(int(w, 16) for w in rest[at + 1:])
+        if len(part["out"]) != len(part["in"]) or not part["out"]:
+            raise ValueError
+    except (ValueError, IndexError):
+        raise ValueError(f"no line of a record of the SPI bus: {line!r}") \
+            from None
+    return part
+
+
+def spi_part_text(part, most=16):
+    """A run of frames in words: what went out and what came in (of many
+    bytes the first `most`, and how many there were)"""
+    def some(data):
+        shown = data[:most]
+        return shown.hex(" ") + (f" ... ({len(data)} bytes)"
+                                 if len(shown) < len(data) else "")
+    said = f"out {some(part['out'])}  in {some(part['in'])}"
+    if part["more"]:
+        said += "  (goes on)"
+    if not part["whole"]:
+        said += "  (the record ended there)"
+    return said
+
+
 def spi_pin(p, bus):
     """Is a pin of the header one of the SPI bus's just now?  "MOSI", "MISO",
     "SCK" or None.  They are the bus's while the firmware has them in its
