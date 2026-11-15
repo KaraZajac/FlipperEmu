@@ -2,8 +2,8 @@
 # Copyright (c) 2026, Kara Zajac
 # SPDX-License-Identifier: BSD-3-Clause
 """Check the cards beyond NTAG and MIFARE Classic: MIFARE Ultralight C,
-ISO14443-4A, MIFARE DESFire, ISO14443B, ST25TB, FeliCa Lite-S and Standard,
-ISO15693 with NXP's SLIX.
+ISO14443-4A, MIFARE DESFire, MIFARE Plus, ISO14443B, ST25TB, FeliCa Lite-S and
+Standard, ISO15693 with NXP's SLIX.
 
     scripts/nfc_check.py firmware/official-1.5.1/flipper-z-f7-update-1.5.1.tgz
 
@@ -104,12 +104,17 @@ def read_card(b, work, name, words, card, protocol, but=(), may=()):
     b.fe("rm", f"/ext/nfc/fe-check-{name}.nfc")
     want = fe_nfc.parse_nfc_text(card)
     got = fe_nfc.parse_nfc_text(out.read_text()) if out.exists() else {}
+    # (what a firmware has more and could not read, "??": its own)
+    unread = [k for k in got if k not in want and set(got[k].split()) == {"??"}]
     differ = sorted(k for k in set(want) | set(got) if k not in may
+                    and k not in unread
                     and (want.get(k) or "").upper() != (got.get(k) or "").upper())
     check(f"{words}: in the field, the firmware's `scanner` finds it "
           f"({protocol}), and its `dump` writes the card's own file: "
-          f"{len(want) - len(but) - len(may)} keys the same"
-          + (f" (and not {', '.join(but)}: the firmware's own)" if but else ""),
+          f"{len(set(want) - set(but) - set(may))} keys the same"
+          + (f" (and not {', '.join(but)}: the firmware's own)" if but else "")
+          + (f" (and {len(unread)} more of this firmware's, for what it "
+             "would read with keys: not read)" if unread else ""),
           code == 0 and f"Protocols detected: {protocol}".lower() in found.lower()
           and got and differ == sorted(but),
           f"{text}\n{found}\n{dumped}\n" + "\n".join(
@@ -506,6 +511,18 @@ def main():
                           "Mifare DESFire", ("Application 563412 File 3",))
                 read_card(b, work, "iso4a", "an ISO14443-4A card with no "
                           "application that is known", ISO4A, "Iso14443-4a")
+                plus = fe_nfc.sample_mfplus(bytes.fromhex("04C2D3E4F5A6B7"))
+                read_card(b, work, "mfplus", "a MIFARE Plus EV1 (known by "
+                          "its version)", plus, "Mifare Plus",
+                          may=("Data format version",))
+                read_card(b, work, "mfplusx", "a MIFARE Plus X, which has no "
+                          "version (known by its ATS)",
+                          plus.replace("C1 05 21 30 00 77 C1", "C1 05 2F 2F 01 BC D6")
+                          .replace("04 02 01 11 00 16 04", "00 00 00 00 00 00 00")
+                          .replace("Plus EV1", "Plus X").replace("ATQA: 00 44",
+                                                                 "ATQA: 00 42")
+                          .replace("Size: 2K", "Size: 4K"), "Mifare Plus",
+                          may=("Data format version",))
                 read_card(b, work, "felica", "a FeliCa Lite-S",
                           fe_nfc.sample_felica(bytes.fromhex("012E4CD21A8B3C5F")),
                           "FeliCa", may=("Data format version",))

@@ -17,6 +17,7 @@ holds in its field (see qemu/hw/arm/flipper/nfc_card.c):
     fe_nfc.py --nfc-file --desfire 04A1B2C3D4E5F6   -> ... as a Flipper .nfc file
     fe_nfc.py --ulc 04A1B2C3D4E5F6          -> a MIFARE Ultralight C, its pages
                                                from 16 on behind its key
+    fe_nfc.py --mfplus 04C2D3E4F5A6B7       -> a MIFARE Plus EV1 2K (SL3)
     fe_nfc.py --iso14443b 1A2B3C4D          -> an ISO14443-4B card with that PUPI
     fe_nfc.py --st25tb D0021C0123456789     -> an ST25TB04K with that UID
     fe_nfc.py --felica 012E4CD21A8B3C5F     -> a FeliCa Lite-S with that IDm
@@ -108,11 +109,13 @@ def describe_mfc(fields, atqa):
 REC_VERSION, REC_FREE, REC_APP, REC_FILE = 0x01, 0x02, 0x10, 0x20
 
 
-def describe_iso4(fields, atqa, desfire):
+def describe_iso4(fields, atqa, desfire, plus=False):
     """An ISO14443-4A card; a MIFARE DESFire's tables as records for
-    nfc_card.c: what its commands answer, taken from the dump"""
+    nfc_card.c: what its commands answer, taken from the dump.  A MIFARE
+    Plus: its version, when the dump has one (EV1 and EV2)"""
     uid = hexbytes(fields["UID"])
-    out = ["# MIFARE DESFire" if desfire else "# ISO14443-4A", "type iso4",
+    out = ["# MIFARE DESFire" if desfire else "# MIFARE Plus" if plus else
+           "# ISO14443-4A", "type iso4",
            f"uid {uid.hex(' ')}", f"atqa {atqa.hex(' ')}",
            f"sak {fields.get('SAK', '20')}"]
     # the ATS as the file has it: its format byte, the interface bytes that
@@ -126,6 +129,12 @@ def describe_iso4(fields, atqa, desfire):
         out.append(f"ats {bytes([len(ats) + 1]).hex()} {ats.hex(' ')}".rstrip())
     elif fields.get("ATS"):
         out.append(f"ats {hexbytes(fields['ATS']).hex(' ')}")
+    if plus:
+        out.append("app mfplus")
+        version = hexbytes(fields.get("PICC Version", ""))
+        if len(version) == 28 and any(version):
+            out.append(f"rec {REC_VERSION:02x} {version.hex(' ')}")
+        return "\n".join(out) + "\n"
     if not desfire:
         return "\n".join(out + ["app none"]) + "\n"
     out.append("app desfire")
@@ -448,6 +457,22 @@ def describe_iso15693(fields, slix):
     return "\n".join(out) + "\n"
 
 
+def sample_mfplus(uid):
+    """A MIFARE Plus EV1 2K in security level 3 as a Flipper .nfc file's
+    text, made up (what the firmware reads of one: its version's first
+    part)"""
+    if len(uid) != 7:
+        raise ValueError("this MIFARE Plus's UID is 7 bytes")
+    up = lambda b: bytes(b).hex(" ").upper()
+    version = bytes.fromhex("04020111001604") + bytes(21)
+    return "\n".join([
+        "Filetype: Flipper NFC device", "Version: 4", "Device type: Mifare Plus",
+        f"UID: {up(uid)}", "ATQA: 00 44", "SAK: 20", "T0: 75", "TA(1): 77",
+        "TB(1): 80", "TC(1): 02", "T1...Tk: C1 05 21 30 00 77 C1",
+        f"PICC Version: {up(version)}", "Card Type: Mifare Plus EV1",
+        "Security Level: SL3", "Memory Size: 2K"]) + "\n"
+
+
 ULC_KEY = bytes.fromhex("49454D4B41455242214E4143554F5946")    # (made up)
 
 
@@ -609,15 +634,17 @@ def describe(fields):
         return describe_st25tb(fields)
     if dev in ("ISO15693-3", "SLIX"):
         return describe_iso15693(fields, dev == "SLIX")
-    if dev in ("Mifare DESFire", "ISO14443-4A", "ISO14443-4A (Unknown)"):
+    if dev in ("Mifare DESFire", "Mifare Plus", "ISO14443-4A",
+               "ISO14443-4A (Unknown)"):
         atqa = hexbytes(fields["ATQA"])
         return describe_iso4(fields, atqa[::-1] if version >
                              LSB_ATQA_FORMAT_VERSION else atqa,
-                             dev == "Mifare DESFire")
+                             dev == "Mifare DESFire", dev == "Mifare Plus")
     kind = fields.get("NTAG/Ultralight type", dev)
     if dev not in T2_TYPES and kind not in T2_TYPES:
         raise ValueError(f"device type {dev!r} is not supported yet "
                          "(NTAG/Ultralight, MIFARE Classic, MIFARE DESFire, "
+                         "MIFARE Plus, "
                          "ISO14443-4A, ISO14443-3B and -4B, ST25TB, FeliCa "
                          "Lite-S, ISO15693-3 and SLIX are)")
     uid = hexbytes(fields["UID"])
@@ -807,7 +834,8 @@ def nfc_file(desc):
 
 
 # cards that are made up for a UID: (what makes the .nfc text, in words)
-SAMPLES = {"desfire": (sample_desfire, "a MIFARE DESFire EV1 (two "
+SAMPLES = {"mfplus": (sample_mfplus, "a MIFARE Plus EV1 2K, SL3 (made up)"),
+           "desfire": (sample_desfire, "a MIFARE DESFire EV1 (two "
                        "applications, made up)"),
            "ulc": (sample_ulc, "a MIFARE Ultralight C (made up; its key "
                    f"{ULC_KEY.hex().upper()})"),

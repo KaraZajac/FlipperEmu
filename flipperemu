@@ -6311,7 +6311,7 @@ def cmd_nfc(args):
         else:
             sys.exit("usage: nfc FILE.nfc | nfc DUMP.json (Proxmark3) | nfc ntag215 UID "
                      "[URL] | nfc mfc1k UID | nfc ulc UID | nfc desfire UID | nfc "
-                     "iso14443b PUPI | nfc st25tb UID | nfc felica IDM | nfc "
+                     "mfplus UID | nfc iso14443b PUPI | nfc st25tb UID | nfc felica IDM | nfc "
                      "felica-standard IDM | nfc slix UID | nfc none")
     except (ValueError, KeyError, OSError) as e:
         sys.exit(f"nfc: {e}")

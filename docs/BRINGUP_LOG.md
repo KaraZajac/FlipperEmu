@@ -4879,6 +4879,17 @@ big lock, entry 92).
     - Checks: nfc_check 19 on the five firmwares (the dump's systems are
       the card's, with the ends and versions on the three that ask; the
       commands by `raw -p felica`).
+    - MIFARE Plus, the last card of the official firmware's list on
+      ISO14443-4A. Its reader sends GetVersion (0x60, bare) and takes an
+      answer of 28 bytes, or of 8 that begin with 0xAF: the first of a
+      DESFire's three frames, and the only one it reads ("HACK" in its
+      source). hw_type 0x02 is a Plus EV1 or EV2, with kind and size from
+      the version; a card without a version is known by the historical
+      bytes of its ATS and its SAK (Plus S, X, SE). The card model answers
+      GetVersion from DESFire's version record and "command invalid"
+      (0x0B) to the rest, so that a DESFire's reader, which asks for a key
+      version first, takes it for none. An EV1 and an X dump to their own
+      files; nfc_check 21 on the five.
 
 ## Things that were right the first time (and why)
 

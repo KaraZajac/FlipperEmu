@@ -59,7 +59,8 @@
  *   mem <bytes>             (pages in order; may repeat)
  * or, for MIFARE Classic, "type mfc" and the blocks in mem (16 bytes each);
  * or "type iso4" with
- *   ats 06 75 77 81 02 80   app desfire
+ *   ats 06 75 77 81 02 80   app desfire   (or mfplus: MIFARE Plus, with
+ *                                          its version in a record 01)
  *   rec 01 <28 bytes>       (a record of the application's tables: a type
  *                            and its bytes, see REC_* below; may repeat)
  * or "type felica" with uid (the IDm), pmm, and in mem 18 bytes a block
@@ -94,7 +95,7 @@ enum { ST_OFF, ST_IDLE, ST_READY, ST_ACTIVE, ST_HALT };
 enum { KIND_T2 = 1, KIND_MFC, KIND_ISO4, KIND_FELICA, KIND_V, KIND_B,
        KIND_ST25TB };
 enum { MFC_NONE, MFC_AUTH, MFC_ON };    /* Crypto1 session */
-enum { APP_NONE, APP_DESFIRE };         /* what runs on ISO14443-4 */
+enum { APP_NONE, APP_DESFIRE, APP_MFPLUS };     /* what runs on ISO14443-4 */
 /* what a DESFire ADDITIONAL FRAME goes on with */
 enum { DF_NONE, DF_VERSION_2, DF_VERSION_3, DF_DATA };
 
@@ -1175,6 +1176,18 @@ static int app_command(NfcCard *c, const uint8_t *in, int n, uint8_t *out)
 {
     if (c->app_kind == APP_DESFIRE && n >= 1) {
         return df_command(c, in, n, out);
+    }
+    if (c->app_kind == APP_MFPLUS && n >= 1) {
+        /* MIFARE Plus: of its commands GetVersion (EV1 and EV2 have it:
+         * three frames, as a DESFire's, from the same record; a Plus S or X
+         * has no such record and says so); the others are "command
+         * invalid", by which a DESFire's reader knows that it is none */
+        if (n == 1 && (in[0] == 0x60 || in[0] == 0xAF)) {
+            return df_command(c, in, n, out);
+        }
+        c->df_more = DF_NONE;
+        out[0] = 0x0B;
+        return 1;
     }
     out[0] = 0x6D;                      /* ISO 7816: INS not supported */
     out[1] = 0x00;
@@ -2304,6 +2317,8 @@ NfcCard *nfc_card_new(const char *desc, Error **errp)
         if (!strcmp(line, "app")) {
             if (!strcmp(g_strstrip(val), "desfire")) {
                 c->app_kind = APP_DESFIRE;
+            } else if (!strcmp(val, "mfplus")) {
+                c->app_kind = APP_MFPLUS;
             } else if (!strcmp(val, "none")) {
                 c->app_kind = APP_NONE;
             } else {
@@ -2528,7 +2543,7 @@ static int card_post_load(void *opaque, int version_id)
         c->mfc < MFC_NONE || c->mfc > MFC_ON ||
         c->ats_len < 0 || c->ats_len > sizeof(c->ats) ||
         c->dep_in_len < 0 || c->dep_in_len > sizeof(c->dep_in) ||
-        c->app_kind < APP_NONE || c->app_kind > APP_DESFIRE ||
+        c->app_kind < APP_NONE || c->app_kind > APP_MFPLUS ||
         c->app_len < 0 || c->app_len > APP_MAX ||
         c->df_more < DF_NONE || c->df_more > DF_DATA ||
         c->df_at < 0 || c->df_left < 0 || c->df_at > c->app_len ||
