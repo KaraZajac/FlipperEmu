@@ -162,8 +162,10 @@ struct NfcCard {
     /* ISO 7816-4: the application and the file that are selected (where
      * their records' payloads are in `app`; -1: none) */
     int iso_df, iso_ef;
-    /* FeliCa: uid is the IDm, mem the blocks (18 bytes each) */
+    /* FeliCa: uid is the IDm, mem the blocks (18 bytes each); a Lite-S
+     * knows the reader (its STATE was written with a MAC that was right) */
     uint8_t pmm[8];
+    bool fl_auth;
     /* ISO14443B: uid is the PUPI; the application data and protocol info
      * of its ATQB.  ST25TB: uid as it is printed (D0 first), mem its
      * blocks of 4 bytes, the system OTP block, the chip ID of this session */
@@ -1508,6 +1510,7 @@ static void card_reset(NfcCard *c, int state)
     c->df_more = DF_NONE;
     memset(c->df_aid, 0, 3);
     c->iso_df = c->iso_ef = -1;
+    c->fl_auth = false;
     c->v_quiet = c->v_selected = false; /* (a field that went and came) */
 }
 
@@ -1898,6 +1901,68 @@ static int fs_command(NfcCard *c, const uint8_t *in, int len, uint8_t *r)
     return 0;
 }
 
+/*
+ * FeliCa Lite-S's authentication.  The reader writes a random challenge
+ * (RC); the card key (CK) and it make a session key, two-key triple DES;
+ * a read whose last block is MAC_A has there a MAC of the list and the
+ * blocks' data, by which the reader knows the card ("internal"); a write
+ * of STATE with a MAC_A that the card finds right makes the card know the
+ * reader ("external"), and opens the blocks that MC keeps for that.  Each
+ * eight bytes go in turned round.
+ */
+#define FL_RC       15                  /* where the blocks are in mem */
+#define FL_CK       22
+#define FL_MC       23
+#define FL_WCNT     24
+
+static void fl_rev8(const uint8_t *in, uint8_t *out)
+{
+    for (int i = 0; i < 8; i++) {
+        out[i] = in[7 - i];
+    }
+}
+
+static void fl_session(NfcCard *c, uint8_t sk[16])
+{
+    const uint8_t *ck = &c->mem[FL_CK * 18 + 2], *rc = &c->mem[FL_RC * 18 + 2];
+    uint8_t key[16], data[16], iv[8] = { 0 };
+
+    fl_rev8(ck, key);
+    fl_rev8(ck + 8, key + 8);
+    fl_rev8(rc, data);
+    fl_rev8(rc + 8, data + 8);
+    tdes2_cbc(key, iv, data, sk, 2, false);
+}
+
+/* a MAC of a first block (what is read or written) and `len` bytes of data */
+static void fl_mac(NfcCard *c, bool write, const uint8_t first[8],
+                   const uint8_t *data, int len, uint8_t mac[8])
+{
+    uint8_t sk[16], key[16], iv[8], block[8], enc[8];
+
+    fl_session(c, sk);
+    memcpy(key, write ? sk + 8 : sk, 8);        /* (a write: the halves swapped) */
+    memcpy(key + 8, write ? sk : sk + 8, 8);
+    fl_rev8(&c->mem[FL_RC * 18 + 2], iv);
+    fl_rev8(first, block);
+    for (int i = 0; ; i += 8) {
+        tdes2_cbc(key, iv, block, enc, 1, false);       /* (iv: enc after it) */
+        if (i >= len) {
+            break;
+        }
+        fl_rev8(data + i, block);
+    }
+    fl_rev8(enc, mac);
+}
+
+/* is this block read only by a reader that the card knows (MC's bytes 6, 7)? */
+static bool fl_restricted(NfcCard *c, int number)
+{
+    const uint8_t *mc = &c->mem[FL_MC * 18 + 2];
+
+    return number <= 0x0E && ((mc[6] | mc[7] << 8) >> number & 1);
+}
+
 static int felica_frame(NfcCard *c, const uint8_t *in, int n, uint8_t *out,
                         int max)
 {
@@ -1957,6 +2022,10 @@ static int felica_frame(NfcCard *c, const uint8_t *in, int n, uint8_t *out,
             } else if (in[1] == 0x06 && c->mem[at * 18]) {
                 r[10] = c->mem[at * 18];        /* as the dump had it */
                 r[11] = c->mem[at * 18 + 1];
+            } else if (in[1] == 0x06 && !c->fl_auth &&
+                       fl_restricted(c, list[2 * i + 1])) {
+                r[10] = 1 << i;         /* authentication required */
+                r[11] = 0xB1;
             } else if (in[1] == 0x08 && list[2 * i + 1] > 0x0E &&
                        list[2 * i + 1] != 0x80 && list[2 * i + 1] != 0x92 &&
                        list[2 * i + 1] != 0x91) {
@@ -1968,9 +2037,31 @@ static int felica_frame(NfcCard *c, const uint8_t *in, int n, uint8_t *out,
             break;
         }
         if (in[1] == 0x08) {
+            const uint8_t *data = &list[2 * count];
+
+            if (count == 2 && list[1] == 0x92 && list[3] == 0x91) {
+                /* STATE with a MAC of it and of the write counter: the
+                 * reader shows that it has the card's key */
+                uint8_t *wcnt = &c->mem[FL_WCNT * 18 + 2], mac[8];
+                uint8_t first[8] = { wcnt[0], wcnt[1], wcnt[2], 0,
+                                     0x92, 0, 0x91, 0 };
+
+                fl_mac(c, true, first, data, 16, mac);
+                if (memcmp(mac, data + 16, 8) || memcmp(wcnt, data + 24, 3)) {
+                    r[10] = 0x02;       /* the MAC is not right */
+                    r[11] = 0xB2;
+                    break;
+                }
+                memcpy(&c->mem[felica_block(c, 0x92) * 18 + 2], data, 16);
+                c->fl_auth = data[0] & 1;
+                for (int i = 0; i < 3 && !++wcnt[i]; i++) {
+                    /* (the counter of writes: three bytes, the low first) */
+                }
+                break;
+            }
             for (int i = 0; i < count; i++) {
                 at = felica_block(c, list[2 * i + 1]);
-                memcpy(&c->mem[at * 18 + 2], &list[2 * count + 16 * i], 16);
+                memcpy(&c->mem[at * 18 + 2], &data[16 * i], 16);
             }
             break;
         }
@@ -1978,7 +2069,23 @@ static int felica_frame(NfcCard *c, const uint8_t *in, int n, uint8_t *out,
         for (int i = 0; i < count; i++) {
             at = felica_block(c, list[2 * i + 1]);
             memcpy(&r[rn], &c->mem[at * 18 + 2], 16);
+            if (list[2 * i + 1] == 0x92) {
+                r[rn] = c->fl_auth;     /* STATE: whether it knows the reader */
+            }
             rn += 16;
+        }
+        if (count >= 2 && list[2 * count - 1] == 0x91) {
+            /* MAC_A as the last: a MAC of the list and of the blocks
+             * before it, with the session's key */
+            uint8_t first[8];
+
+            memset(first, 0xFF, 8);
+            for (int i = 0; i < count; i++) {
+                first[2 * i] = list[2 * i + 1];
+                first[2 * i + 1] = 0;
+            }
+            memset(&r[rn - 16], 0, 16);
+            fl_mac(c, false, first, &r[13], 16 * (count - 1), &r[rn - 16]);
         }
         break;
     default:
@@ -2759,8 +2866,8 @@ static int card_post_load(void *opaque, int version_id)
 
 const VMStateDescription vmstate_nfc_card = {
     .name = "nfc-card",
-    .version_id = 4,                    /* (4: ISO 7816-4's selection) */
-    .minimum_version_id = 4,
+    .version_id = 5,                    /* (5: FeliCa Lite-S's authentication) */
+    .minimum_version_id = 5,
     .post_load = card_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_INT32(kind, NfcCard),
@@ -2804,6 +2911,7 @@ const VMStateDescription vmstate_nfc_card = {
         VMSTATE_INT32(iso_df, NfcCard),
         VMSTATE_INT32(iso_ef, NfcCard),
         VMSTATE_UINT8_ARRAY(pmm, NfcCard, 8),
+        VMSTATE_BOOL(fl_auth, NfcCard),
         VMSTATE_UINT8(v_dsfid, NfcCard),
         VMSTATE_UINT8(v_afi, NfcCard),
         VMSTATE_UINT8(v_icref, NfcCard),

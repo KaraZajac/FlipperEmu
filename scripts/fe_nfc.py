@@ -625,9 +625,15 @@ def sample_ulc(uid):
     return "\n".join(out) + "\n"
 
 
-def sample_felica(idm):
+FELICA_KEY = b"FlipperEmuCardKy"                # (made up)
+
+
+def sample_felica(idm, keyed=True):
     """A FeliCa Lite-S as a Flipper .nfc file's text, made up: its user
-    blocks with something in them, its ID blocks, its card key not given"""
+    blocks with something in them, the last two (S_PAD12, S_PAD13) only for
+    a reader with the card key (FELICA_KEY), its ID blocks.  keyed: the
+    file of a read with the card key, which has the key and those blocks;
+    else that of a read without"""
     if len(idm) != 8:
         raise ValueError("a FeliCa card's IDm is 8 bytes")
     up = lambda b: bytes(b).hex(" ").upper()
@@ -635,21 +641,29 @@ def sample_felica(idm):
     blocks = [bytes(16)] * 28
     blocks[0] = b"FlipperEmu FeliCa"[:16]
     blocks[1] = bytes(range(0x10, 0x20))
+    blocks[12] = b"with the card key"[:16]
     blocks[13] = bytes(range(0xD0, 0xE0))
     blocks[14] = bytes([0xFF] * 4 + [0] * 12)           # REG
     blocks[17] = idm + bytes(8)                         # ID
     blocks[18] = idm + pmm                              # D_ID
     blocks[20] = bytes.fromhex("88B4") + bytes(14)      # SYS_C
-    blocks[23] = bytes.fromhex("FFFFFF00FF00100000000000000000 00")  # MC
+    # MC: all of it written freely; S_PAD12 and 13 read after authentication
+    blocks[23] = bytes.fromhex("FFFFFF0107000030") + bytes(8)
     status = [bytes(2)] * 28
-    status[22] = bytes.fromhex("01A8")                  # CK: not to be read
+    status[22] = bytes.fromhex("01A8")                  # CK: never read
+    if keyed:
+        blocks[22] = FELICA_KEY                         # (the firmware's own)
+        blocks[26] = b"\x01" + bytes(15)                # STATE: authenticated
+    else:
+        status[12] = status[13] = bytes.fromhex("01B1")
+    read = sum(1 for s in status if not s[0])
     out = ["Filetype: Flipper NFC device", "Version: 4", "Device type: FeliCa",
            f"UID: {up(idm)}", "Data format version: 2",
            f"Manufacture id: {up(idm)}", f"Manufacture parameter: {up(pmm)}",
            "IC Type: FeliCa Lite-S RC-S966", "Blocks total: 28",
            # (the firmware counts one fewer than it read, without a key)
-           f"Blocks read: {sum(1 for s in status if not s[0]) - 1}"]
-    out += [f"Block {i}: {up(status[i] + (blocks[i] if not status[i][0] else bytes(16)))}"
+           f"Blocks read: {read if keyed else read - 1}"]
+    out += [f"Block {i}: {up(status[i] + (blocks[i] if not status[i][0] or i == 22 else bytes(16)))}"
             for i in range(28)]
     return "\n".join(out) + "\n"
 
@@ -963,7 +977,8 @@ SAMPLES = {"t4t": (sample_t4t, "a Type 4 tag with a URL (made up)"),
                    f"{ULC_KEY.hex().upper()})"),
            "iso14443b": (sample_iso14443b, "an ISO14443-4B card (made up)"),
            "st25tb": (sample_st25tb, "an ST25TB04K (made up)"),
-           "felica": (sample_felica, "a FeliCa Lite-S (made up)"),
+           "felica": (sample_felica, "a FeliCa Lite-S (made up; its key "
+                      f"{FELICA_KEY.hex().upper()})"),
            "felica-standard": (sample_felica_standard, "a FeliCa Standard card "
                                "(made up: two systems)"),
            "slix": (sample_slix, "an NXP SLIX2, ISO15693 (made up)")}

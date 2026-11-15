@@ -4942,6 +4942,39 @@ big lock, entry 92).
     - Checks: nfc_check 23 on the official 1.5.1, 24 on the dev build, 25
       on Momentum, Unleashed and RogueMaster.
 
+159. **FeliCa Lite-S with its card key.**
+    - The firmware's `dump -k KEY` authenticates both ways before it
+      reads: it writes a challenge to RC, reads ID, WCNT and MAC_A in one
+      command and checks the MAC ("internal"), then writes STATE and MAC_A
+      with a MAC of its own ("external"). The card model had DES since
+      Ultralight C; this is the session key and the two MACs around it,
+      from the firmware's own code for them (every eight bytes turned
+      round on the way in; the write's MAC with the key's halves swapped).
+      Right at the first run: the firmware took the card's MAC, the card
+      the firmware's.
+    - Where the card has its key from: a card never gives CK. After a read
+      where both steps held, the firmware copies the key it was given into
+      the CK block of its data, and saves it with the status of the read
+      that failed (01 A8) before it. So a keyed dump has the key, and the
+      card of such a file can be read with a key again.
+    - MC's bytes 6 and 7 name the blocks that are read only after the
+      external step; without it the card answers 01 B1 for them. The
+      made-up Lite-S keeps S_PAD12 and 13 so.
+    - STATE's first byte is what the card knows of the reader now, not
+      what a file had there.
+    - The check: the card read without the key (two blocks refused), with
+      it (all of them, the key in the file), with another key (as
+      without). A keyed dump differs from the next one in RC (the
+      challenge) and WCNT (one more), which are let be.
+    - Once, in the first run of the new check on the official 1.5.1, the
+      shell stopped answering during `scanner` with the MIFARE Plus X
+      card, a step that had passed in every run before and passed in the
+      seven after. Nothing was left of the device to look at. The check
+      prints the device's `status` now when that happens.
+    - The card's saved state: version 5.
+    - Checks: nfc_check 25 on the official 1.5.1, 26 on the dev build, 27
+      on Momentum, Unleashed and RogueMaster.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

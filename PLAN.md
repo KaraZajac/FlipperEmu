@@ -216,11 +216,13 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       GetVersion (EV1, EV2) or the ATS (S, X, SE), which is all the firmware reads of
       one. ISO 7816-4 ☑ (2026-11-15): applications, files, records, data objects;
       Type 4 tags and EMV cards from the files of the firmwares that read them, read
-      and saved by their NFC apps. `scripts/nfc_check.py` 23 to 25 on five
-      (BRINGUP_LOG 158).
-      Next: reading with keys
-      (DESFire, FeliCa's MAC, MIFARE Plus SL3); decode transparent mode (Classic
-      emulation); a
+      and saved by their NFC apps (BRINGUP_LOG 158). `scripts/nfc_check.py` 25 to
+      27 on five.
+      FeliCa Lite-S's authentication ☑ (2026-11-15): the MAC both ways with the
+      card key of a keyed dump; `dump -k` reads the blocks kept for it (BRINGUP_LOG
+      159).
+      Next: MIFARE Plus SL3 (AES; Unleashed and RogueMaster try keys); decode
+      transparent mode (Classic emulation); a
       virtual reader for the cards beyond ISO14443A
 - ☑ 125 kHz RFID read: COMP1 → TIM2 TI4 capture, a virtual tag in the reader's field
       (ASK/FSK/PSK, field noise), encoders ported from the firmware (`fe_rfid.py`, checked

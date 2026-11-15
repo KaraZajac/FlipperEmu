@@ -1077,6 +1077,21 @@ A write obeys the chip's memory: blocks 0 to 4 are one-time bits (1 to 0), 5 and
 counters (a smaller number only), 7 to 15 writable while their lock bit in the system
 block (255, bits 24 to 31) is 1, the rest plain; block 255 is one-time bits too.
 
+**FeliCa Lite-S's authentication** is two MACs. The reader writes 16 random bytes
+to RC; the session key is RC enciphered with the card key CK (two-key triple DES,
+CBC, IV 0), every eight bytes turned round before and none after. A read whose
+last block is MAC_A gets there a MAC of the block list (two bytes a block, 0xFF to
+eight) and of the data of the blocks before it: CBC with the session key from an
+IV that is RC's first half turned round, each eight bytes turned round, the last
+cipher block turned round ("internal": the reader sees that the card has the key).
+The reader then writes STATE (its first byte 1) and MAC_A together, the MAC over
+the write counter, the two block numbers and STATE's data, with the session key's
+halves swapped; the card makes the same MAC, and when it is the reader's, the card
+knows the reader until the field goes ("external"), the counter goes up by one, and
+the blocks named in MC's bytes 6 and 7 are read, which before answer 01 B1. The
+card key is never read; the firmware writes the key it was given into its file
+after a read where both steps held, and that is where the card model has it from.
+
 **FeliCa Standard** is a card of systems. Each has a code (0x0003 a transit
 card's, 0xFE00 the common area), areas and services in an order of the card's own,
 and a service has blocks of 16 bytes. The reader speaks to one system at a time: the

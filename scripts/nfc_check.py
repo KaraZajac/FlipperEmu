@@ -87,17 +87,20 @@ class Shell:
         self.cli.close()
 
 
-def read_card(b, work, name, words, card, protocol, but=(), may=()):
+def read_card(b, work, name, words, card, protocol, but=(), may=(), hold=None,
+              dump="dump"):
     """A card file in the field, found and dumped by the firmware: the dump
     is the card's file (but: the keys that the firmware leaves out; may:
-    those that are a firmware's own, as its file format's number)"""
+    those that are a firmware's own, as its file format's number).  hold:
+    the card that is in the field, when the dump is to be another file than
+    the card's own; dump: the shell's command"""
     path = work / f"{name}.nfc"
-    path.write_text(card)
+    path.write_text(hold or card)
     code, text = b.fe("nfc", path)
     sh = Shell(b)
     try:
         found = sh.ask("scanner", 30)
-        dumped = sh.ask(f"dump -f /ext/nfc/fe-check-{name}.nfc", 90)
+        dumped = sh.ask(f"{dump} -f /ext/nfc/fe-check-{name}.nfc", 90)
     finally:
         sh.close()
     out = work / f"{name}-dump.nfc"
@@ -640,9 +643,28 @@ def main():
                                                                  "ATQA: 00 42")
                           .replace("Size: 2K", "Size: 4K"), "Mifare Plus",
                           may=("Data format version",))
-                read_card(b, work, "felica", "a FeliCa Lite-S",
-                          fe_nfc.sample_felica(bytes.fromhex("012E4CD21A8B3C5F")),
-                          "FeliCa", may=("Data format version",))
+                # A FeliCa Lite-S with a card key: without the key the
+                # blocks that are kept for it are refused; with it (the
+                # MAC both ways) all are read, and the firmware puts the key
+                # into its file.  (Block 15 is the challenge of the read, 24
+                # the counter of writes, which the authentication is one of.)
+                lite = bytes.fromhex("012E4CD21A8B3C5F")
+                read_card(b, work, "felica", "a FeliCa Lite-S, read without "
+                          "its card key (two blocks are kept for a reader "
+                          "that has it)", fe_nfc.sample_felica(lite, keyed=False),
+                          "FeliCa", may=("Data format version",),
+                          hold=fe_nfc.sample_felica(lite))
+                read_card(b, work, "felica-key", "the same card, read with its "
+                          "key (`dump -k`: a MAC from the card, a MAC to it)",
+                          fe_nfc.sample_felica(lite), "FeliCa",
+                          may=("Data format version", "Block 15", "Block 24"),
+                          dump=f"dump -k {fe_nfc.FELICA_KEY.hex().upper()}")
+                read_card(b, work, "felica-wrong", "the same card, read with "
+                          "another key: as without",
+                          fe_nfc.sample_felica(lite, keyed=False), "FeliCa",
+                          may=("Data format version", "Block 15"),
+                          hold=fe_nfc.sample_felica(lite),
+                          dump="dump -k 000102030405060708090A0B0C0D0E0F")
                 read_card(b, work, "slix", "an NXP SLIX2 (ISO15693)",
                           fe_nfc.sample_slix(bytes.fromhex("E004010812345678")),
                           "Slix")
@@ -670,6 +692,12 @@ def main():
             crash = CRASH.search(log)
             check("no crash in the firmware's logs", not crash,
                   crash and log[max(0, crash.start() - 300):crash.end() + 300])
+    except TimeoutError:
+        # (a shell that answers no more: what the device says of itself,
+        # before it is gone with this check)
+        print("the device, when its shell stopped answering:\n"
+              + b.fe("status", timeout=60)[1])
+        raise
     finally:
         b.stop()
         b.fe("stop")                    # (a loaded snapshot's emulator runs

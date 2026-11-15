@@ -252,8 +252,8 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
   modelled yet.
 - A real phone or computer over Bluetooth: the central is a program on the link, not a
   Bluetooth adapter.
-- NFC: reading with a card's keys (DESFire, FeliCa's MAC, MIFARE Plus in security
-  level 3). The cards beyond ISO14443A are
+- NFC: MIFARE Plus in security level 3 (AES, which Unleashed and RogueMaster try
+  keys for). The cards beyond ISO14443A are
   read, not emulated: no virtual reader speaks FeliCa or ISO15693 to a Flipper that
   emulates one. When the Flipper emulates a MIFARE Classic, the virtual reader gets as
   far as its UID, ATQA and SAK: the Crypto1 answers go out through a bit-banged pin
@@ -1479,8 +1479,14 @@ and the firmware's `dump` of it is the file again, key for key:
   to 4 only go to 0, the counters in 5 and 6 only down, blocks 7 to 15 are behind the
   lock bits of the system block (255), which is read and written too.
 - **FeliCa Lite-S**: polling, and its 28 blocks read and written, each with the status
-  that the dump has for it. Its MAC is the dump's: reading with a card key
-  (`dump -k`) fails as with a wrong key.
+  that the dump has for it; and its authentication, when the file has the card key
+  (the firmware puts the key into the file of a read that was made with it): the
+  reader's challenge, a MAC from the card over what is read (two-key triple DES with
+  a session key), a MAC from the reader with the write of STATE, after which the
+  blocks that the card keeps for such a reader are read (MC's read restriction).
+  `dump -k KEY` in the shell reads them, and a read without the key or with another
+  gets "authentication required" for them. The made-up card (`nfc felica IDM`) has a
+  key, which the launcher says, and keeps its last two user blocks for it.
 - **FeliCa Standard** (the transit and payment cards), from what a dump has of it:
   its systems, each with its areas and services, and the blocks of the services that
   are read without a key. Polling by a system's code, Request System Code, Search
@@ -1499,8 +1505,8 @@ and the firmware's `dump` of it is the file again, key for key:
 So far: NTAG213/215/216, MIFARE Ultralight, Ultralight EV1 and Ultralight C (Type
 2), MIFARE Classic Mini/1K/4K, ISO14443-4A, MIFARE DESFire, MIFARE Plus, Type 4
 tags, EMV, ISO14443-3B and -4B, ST25TB, FeliCa Lite-S and Standard, ISO15693-3 and
-SLIX. `scripts/nfc_check.py FIRMWARE` checks the last twelve (23 checks on the
-official 1.5.1, 24 on the dev build, 25 on Momentum, Unleashed and RogueMaster,
+SLIX. `scripts/nfc_check.py FIRMWARE` checks the last twelve (25 checks on the
+official 1.5.1, 26 on the dev build, 27 on Momentum, Unleashed and RogueMaster,
 whose NFC apps read and save a Type 4 tag and an EMV card). The made-up cards as
 files: `scripts/fe_nfc.py --nfc-file --desfire UID` (`--ulc UID`, `--mfplus UID`,
 `--t4t UID`, `--emv UID`, `--iso14443b PUPI`, `--st25tb UID`, `--felica IDM`,
