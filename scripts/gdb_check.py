@@ -61,6 +61,13 @@ STOCK = "/ext/apps/Games/snake_game.fap"    # a stock app that needs nothing
 OURS = "/ext/apps/Examples/fe_hello.fap"    # where `ufbt launch` puts the example
 
 
+# Where the app's debug ELF is taken from, once it is built: this check's
+# own copy (the app folder's dist/debug).  ufbt's one build folder has the
+# app of that id as it was built last, by whichever check: another's, with
+# other lines, when checks run side by side.
+APPS = []
+
+
 def batch(commands):
     out = ["--", "-batch"]
     for c in commands:
@@ -70,7 +77,7 @@ def batch(commands):
 
 def gdb(b, *commands, options=(), timeout=180):
     """`./flipperemu gdb -- -batch -ex ...`: (exit status, what was said)"""
-    return b.fe("gdb", *options, *batch(commands), timeout=timeout)
+    return b.fe("gdb", *APPS, *options, *batch(commands), timeout=timeout)
 
 
 class Gdb:
@@ -83,7 +90,8 @@ class Gdb:
         self.out = open(self.path, "wb")
         self.p = subprocess.Popen(
             [sys.executable, str(ROOT / "flipperemu"), "-d", b.name, "gdb",
-             *batch(commands)], stdin=subprocess.DEVNULL, stdout=self.out,
+             *APPS, *batch(commands)], stdin=subprocess.DEVNULL,
+            stdout=self.out,
             stderr=subprocess.STDOUT, start_new_session=True)
 
     def said(self):
@@ -216,7 +224,7 @@ def vscode_checks(b, work, folder, port, program):
     """`gdb --vscode`, with the stub on that port already"""
     launch = folder / ".vscode" / "launch.json"
     name = f"FlipperEmu ({b.name})"
-    serve = ("gdb", "--vscode", "--serve", port)
+    serve = ("gdb", *APPS, "--vscode", "--serve", port)
 
     # (first: no SDK where it is looked for.  The next `gdb` finds it again.)
     empty = work / "no-sdk"
@@ -342,6 +350,8 @@ def gdb_checks(b, work, folder):
     if not check("`ufbt` alone: the app is built", code == 0 and fap.is_file(),
                  text[-1500:]):
         return False
+    if (folder / "dist" / "debug" / "fe_hello_d.elf").is_file():
+        APPS[:] = ["--apps", str(folder / "dist" / "debug")]
     code, text = b.fe("app", "--no-start", "--to", "/ext/apps/fe-check", fap)
     b.fe("rm", "-r", "/ext/apps/fe-check")
     if "which is this firmware's" not in text:

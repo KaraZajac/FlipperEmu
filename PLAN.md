@@ -801,6 +801,11 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           threads stands, its emulators stopped, exit status 124; `FLIPPEREMU_CHECK_LIMIT`
           changes them (`x2`, seconds, `0`). After a window check waited three hours in a
           dialog unseen (BRINGUP_LOG 145)
+    - ☑ Checks that build an app with ufbt, side by side (2026-11-15): ufbt has
+          one build folder for every app; `./flipperemu ufbt` takes a lock on it for
+          as long as a ufbt runs, and gdb_check takes the app's symbols from its own
+          folder. coverage, ufbt, app and gdb checks together, twice: all pass
+          (BRINGUP_LOG 165)
     - ☐ The Metakom read of the smoke test under load (0 of 10 at a load of 20 on 16
           cores, BRINGUP_LOG 136 and 141). Not reproduced on 2026-11-14 with busy loops
           and with other emulated checks at a load of 15 to 20 (BRINGUP_LOG 146): to be

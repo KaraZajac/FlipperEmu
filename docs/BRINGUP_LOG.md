@@ -5111,6 +5111,26 @@ big lock, entry 92).
     - Checks: coverage_check 31 on the official 1.5.1, 25 on the dev
       build, 22 on Momentum.
 
+165. **Checks that build apps, side by side.**
+    - Three times in two days a check lost a step when others ran beside
+      it: "fe_hello.fap does not exist", an ELF that was empty at its
+      link, a breakpoint that never came. ufbt builds every app in one
+      folder (its home's build/), by the app's id. Two ufbt at once there:
+      one cleans what the other is about to send, or both link fe_hello,
+      which four checks build, each from its own copy of the example.
+    - `./flipperemu ufbt` holds a lock on that folder for as long as its
+      ufbt runs (not for `ufbt cli`, which is a person's for as long as
+      they like). A `ufbt launch` is one ufbt: it builds from its folder
+      and sends what it built.
+    - That left gdb_check's breakpoint by a file's full path: gdb had the
+      app's symbols from the shared folder, where the app of that id was
+      another check's by then, built from another path. It gives `gdb`
+      its own folder's dist/debug now (`--apps`), for its IDE's
+      configuration too.
+    - Checks: coverage_check, ufbt_check, app_check and gdb_check side by
+      side, twice: 31, 31, 32 and 30 each time (before: one of them lost a
+      step in every such run).
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

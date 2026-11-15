@@ -5488,10 +5488,38 @@ def cmd_tool(args):
         # list above fails on that name, and does not find a real Flipper)
         rest.append(f"FLIP_PORT={dev.usb_tty}")
     try:
-        return subprocess.call([*cmd, *rest], cwd=cwd)
+        with tool_build_lock(name, targets):
+            return subprocess.call([*cmd, *rest], cwd=cwd)
     finally:
         if lock:
             leave_port(lock)
+
+
+class tool_build_lock:
+    """ufbt builds every app in one folder (its home's build/), and two of
+    them at once step on each other: one cleans what the other is about to
+    send, or both link the app of one id.  So one ufbt at a time has that
+    folder, for as long as it runs; those that talk to a person for longer
+    (`ufbt cli`) wait for nobody and keep nobody waiting."""
+    def __init__(self, name, targets):
+        self.path = (sdk_home() / ".flipperemu-build.lock"
+                     if name == "ufbt" and "cli" not in targets else None)
+        self.file = None
+
+    def __enter__(self):
+        if self.path:
+            import fcntl
+            try:
+                self.file = open(self.path, "w")
+                fcntl.flock(self.file, fcntl.LOCK_EX)
+            except OSError:
+                self.file = None        # (no such folder: ufbt will say so)
+        return self
+
+    def __exit__(self, *exc):
+        if self.file:
+            self.file.close()           # (and the lock with it)
+        return False
 
 
 # ---- files on the SD card
