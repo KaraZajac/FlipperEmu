@@ -51,12 +51,19 @@ import sys
 import tarfile
 import tempfile
 import time
+import zlib
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from files_check import ROOT, Bench, CRASH, check, results  # noqa: E402
 import check_limit  # noqa: E402
 
 OVERLAY = pathlib.Path(__file__).resolve().parent.parent / "keystores" / "overlay"
+FULL_EXT_IMAGE = None
+# ST's BLE Full extended 1.20.0 image (flipperdevices/stm32wb_copro v1.20.0),
+# where a firmware tree has it; --full-ext names another
+FULL_EXT = (ROOT / "third_party" / "flipperzero-firmware-1.5.1" / "lib" /
+            "stm32wb_copro" / "firmware" /
+            "stm32wb5x_BLE_Stack_full_extended_fw.bin")
 VERSION = re.compile(r"(?m)^firmware\.version *: (.*)$")
 
 
@@ -216,6 +223,80 @@ def run_update(b, pkg, ours, after, timeout=900):
     crash = CRASH.search(b.uart_text())
     check("... with no crash in the firmware's log", not crash,
           crash and crash.group(0))
+
+
+def with_stack(pkg, folder, image, address, version):
+    """The update package with another stack in its radio stage: its image,
+    the manifest's address and version (major, minor, sub, branch, release,
+    type) for it, and its CRC (fbt's update.py: zlib's CRC-32)"""
+    if pkg.is_file():
+        shutil.unpack_archive(str(pkg), str(folder), "gztar")
+    else:
+        shutil.copytree(pkg, folder)
+    radio = next(folder.rglob("radio.bin"))
+    data = image.read_bytes()
+    radio.write_bytes(data)
+    fuf = radio.parent / "update.fuf"
+    hexa = lambda raw: " ".join(f"{x:02X}" for x in raw)
+    text = fuf.read_text()
+    text = re.sub(r"(?m)^Radio address: .*$", "Radio address: "
+                  + hexa(address.to_bytes(4, "little")), text)
+    text = re.sub(r"(?m)^Radio version: .*$", "Radio version: "
+                  + hexa(bytes(version)), text)
+    text = re.sub(r"(?m)^Radio CRC: .*$", "Radio CRC: "
+                  + hexa(zlib.crc32(data).to_bytes(4, "little")), text)
+    fuf.write_text(text)
+    return radio.parent
+
+
+def full_extended(b, pkg, work, image):
+    """The package with ST's BLE Full extended stack in its radio stage, as
+    old MoonOS builds had it: the FUS deletes BLE Light and installs it,
+    and from the restart on CPU2 keeps 30 KB of SRAM2a and 22 of SRAM2b
+    (its footer says what CPU1 keeps: 2 and 10).  A firmware whose block
+    shared with CPU2 is where the stock linker puts it (to 0x20031377)
+    wipes that at its start, and CPU1 locks up there."""
+    if not image or not image.is_file():
+        print(f"  (no BLE Full extended image ({image}): its install by the "
+              "FUS is not tried; --full-ext IMAGE names one)")
+        return
+    folder = with_stack(pkg, work / "full-ext", image, 0x080C5000,
+                        (1, 20, 0, 0, 2, 6))
+    b.fe("log", "--set-level", "info")
+    code, text = b.fe("update", "--no-wait", folder, timeout=1800)
+    check("a package with BLE Full extended 1.20.0 in its radio stage "
+          "(ST's image, at 0x080C5000): kept for CPU2's FUS to install",
+          code == 0 and "updater started" in text
+          and "installs its stack 1.20.0 (BLE Full extended" in text, text)
+    st, end = {}, time.time() + 900
+    while time.time() < end:
+        code, out = b.fe("status", "--json")
+        try:
+            st = json.loads(out)
+        except ValueError:
+            st = {}
+        if (st.get("halted") or {}).get("kind") == "LOCKUP":
+            break
+        time.sleep(5)
+    try:
+        state = (b.dir / "radio.state").read_text()
+    except OSError:
+        state = ""
+    ram = st.get("sram2") or {}
+    halt = st.get("halted") or {}
+    log = b.uart_text()
+    check("... the updater has the FUS delete BLE Light and install BLE "
+          "Full extended from the image (47 sectors; SRAM2a CPU2's from "
+          "0x20030800 and SRAM2b from 0x2003a800, as its footer says, and "
+          "kept in radio.state); at the restart the firmware's start wipes "
+          "its block in CPU2's SRAM2a, and CPU1 locks up there, as old "
+          "MoonOS builds did",
+          halt.get("kind") == "LOCKUP" and "Installing stack" in log
+          and "type 6 sectors 47" in state and "sram2 2 10" in state
+          and (ram.get("sram2a"), ram.get("sram2b")) == ("0x20030800",
+                                                          "0x2003a800")
+          and ram.get("refused", 0) > 0,
+          f"{halt} {ram}\n{state}\n{log[-1500:]}")
 
 
 def update_checks(b, pkg, work, other):
@@ -408,8 +489,14 @@ def main():
                     help="seconds to wait for the firmware to start")
     ap.add_argument("--keep", action="store_true",
                     help="keep the throwaway device")
+    ap.add_argument("--full-ext", metavar="IMAGE", type=pathlib.Path,
+                    default=FULL_EXT,
+                    help="ST's BLE Full extended 1.20.0 image, for the FUS's "
+                         f"install of it (default: {FULL_EXT})")
     args = ap.parse_args()
     check_limit.arm(2700)
+    global FULL_EXT_IMAGE
+    FULL_EXT_IMAGE = args.full_ext
     pkg = pathlib.Path(args.package or args.firmware).resolve()
 
     b = Bench(f"updcheck-{int(time.time())}-{os.getpid()}", args.firmware, args.timeout)
@@ -425,6 +512,9 @@ def main():
             refusals(b, pkg, work)
             ours, after = update_checks(b, pkg, work, bool(args.package))
             run_update(b, pkg, ours, after)
+            # (last: it leaves the device locked up, its stack BLE Full
+            # extended)
+            full_extended(b, pkg, work, FULL_EXT_IMAGE)
             b.stop()
     finally:
         b.stop()
