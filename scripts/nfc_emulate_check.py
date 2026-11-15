@@ -18,7 +18,9 @@ reader with a wrong key for one sector reads the others, and the firmware
 goes on emulating.  With nothing emulated the reader says so.
 An ISO14443-4A card by a reader that asks for its ATS (`nfc --reader iso-dep`).
 A FeliCa Lite-S by a FeliCa reader without the card key (`nfc --reader
-felica`).  A Type 4 tag whose NDEF message of 910 bytes is read through
+felica`).  With keys: a MIFARE Ultralight C (`nfc --reader ulc CARD.nfc`) and
+the FeliCa Lite-S (`nfc --reader felica CARD.nfc`), each also by a reader
+that has another key.  A Type 4 tag whose NDEF message of 910 bytes is read through
 ISO14443-4's blocks (`nfc --reader t4t`), emulated by the NFC app of the
 firmwares that know one (the dev build and the forks); and one that is
 played in Python, for the official 1.5.1 and for shorter reads.  `nfc record` writes every frame on the air and its answer
@@ -414,6 +416,84 @@ def record(b, work):
           and "from the record that runs" in watched, watched[-600:])
 
 
+def keyed(b, work):
+    """Cards that want a key of their reader: MIFARE Ultralight C (two-key
+    triple DES, each side's number turned and sent back) and FeliCa Lite-S
+    (a MAC from the card and a MAC to it), each with the card's key and
+    with another"""
+    def other(card, line, new):
+        lines = card.splitlines()
+        at = next(i for i, text in enumerate(lines) if text.startswith(line))
+        lines[at] = new
+        return "\n".join(lines) + "\n"
+
+    card = fe_nfc.sample_ulc(bytes.fromhex("04A1B2C3D4E5F6"))
+    with Emulated(b, work, "ulc", card) as emu:
+        if check("the firmware emulates a MIFARE Ultralight C's file", emu.on,
+                 emu.said[-300:]):
+            code, text = b.fe("nfc", "--reader", "ulc", emu.path,
+                              "--quiet-read", "--verbose")
+            path = last_read(b)
+            read = pathlib.Path(path).read_text() if path else ""
+            differ = same(card, read)
+            check("a MIFARE Ultralight C that the firmware emulates, read by "
+                  "a reader with its key: the card takes the key and shows "
+                  "that it has it (AUTHENTICATE, two-key triple DES both "
+                  "ways), and its 48 pages are the card's",
+                  code == 0 and "took the key, and answered with it" in text
+                  and "48 of 48 pages" in text and read and not differ,
+                  text + "\n" + "\n".join(differ[:8]))
+            wrong = work / "ulc-wrong.nfc"
+            wrong.write_text(other(card, "Page 44:", "Page 44: 00 11 22 33"))
+            code, text = b.fe("nfc", "--reader", "ulc", wrong, "--quiet-read",
+                              "--verbose")
+            path = last_read(b)
+            read = pathlib.Path(path).read_text() if path else ""
+            got = fe_nfc.parse_nfc_text(read)
+            want = fe_nfc.parse_nfc_text(card)
+            check("a reader with another key: the card does not take it, and "
+                  "gives the pages before AUTH0, 16 of 48 (exit status 1)",
+                  code == 1 and "did not take the key" in text
+                  and "16 of 48 pages" in text
+                  and all(got.get(f"Page {n}") == want[f"Page {n}"]
+                          for n in range(16))
+                  and got.get("Page 16") == "00 00 00 00", text)
+    card = fe_nfc.sample_felica(bytes.fromhex("012E4CD21A8B3C5F"))
+    with Emulated(b, work, "felica-key", card) as emu:
+        if not check("the firmware emulates a FeliCa Lite-S's file that has "
+                     "its card key", emu.on, emu.said[-300:]):
+            return
+        code, text = b.fe("nfc", "--reader", "felica", emu.path,
+                          "--quiet-read", "--verbose")
+        path = last_read(b)
+        read = pathlib.Path(path).read_text() if path else ""
+        # (the counter of writes: the reader wrote twice; the last block is
+        # the firmware's own)
+        differ = same(card, read, but=("Blocks read", "Block 24", "Block 27",
+                                       "Manufacture parameter"))
+        got = fe_nfc.parse_nfc_text(read)
+        check("a FeliCa Lite-S that the firmware emulates, read by a reader "
+              "with its card key: the card's MAC of its ID is the key's, the "
+              "card takes the reader's MAC, and the two blocks that are kept "
+              "for such a reader are read with the rest: 27 of 28, the "
+              "card's (and two writes on its counter)",
+              code == 0 and "have shown each other the key" in text
+              and "27 of 28 blocks" in text and read and not differ
+              and got.get("Block 24", "").startswith("00 00 02 00"),
+              text + "\n" + "\n".join(differ[:8]))
+        wrong = work / "felica-wrong.nfc"
+        wrong.write_text(other(card, "Block 22:", "Block 22: 01 A8 "
+                               + " ".join(["5A"] * 16)))
+        code, text = b.fe("nfc", "--reader", "felica", wrong, "--quiet-read",
+                          "--verbose")
+        check("a reader with another key: the card's MAC is not that key's, "
+              "the reader says so and reads as anyone does: 26 of 28, one "
+              "more than a reader that wrote no challenge, for MAC_A is read "
+              "once there is one",
+              code == 0 and "the card's MAC is not the key's" in text
+              and "26 of 28 blocks" in text, text)
+
+
 def ntag(b, work):
     uid = bytes.fromhex("04A1B2C3D4E5F6")
     card = fe_nfc.nfc_file(fe_nfc.blank("ntag215", uid, "https://flipperzero.one"))
@@ -470,6 +550,7 @@ def main():
                 classic(b, work, "4K", "9A8B7C6D")
                 iso_dep(b, work)
                 felica(b, work)
+                keyed(b, work)
                 record(b, work)
                 t4t(b, work)
                 t4t_reader()

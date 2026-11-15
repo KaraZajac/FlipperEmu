@@ -201,8 +201,9 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
   that is emulating a card, reads it like a phone reads an NTAG, and saves what it read
   to `devices/NAME/nfc-tx/` as a `.nfc` file. `nfc --reader classic CARD.nfc` reads an
   emulated MIFARE Classic with the card's keys: every block, through Crypto1.
-  `--reader felica` reads a FeliCa Lite-S, `--reader iso-dep` an ISO14443-4A card's
-  ATS, `--reader t4t` a Type 4 tag's NDEF message.
+  `--reader ulc` and `--reader felica` read a MIFARE Ultralight C and a FeliCa
+  Lite-S, with their keys too; `--reader iso-dep` an ISO14443-4A card's ATS,
+  `--reader t4t` a Type 4 tag's NDEF message.
 - NFC link: `./flipperemu nfc --link iso-dep` puts a card played by a program in the
   field (an ISO14443-4A card here; any card type you write). The machine stops while it
   answers, so it can take its time, or relay to real hardware.
@@ -539,7 +540,8 @@ picture of the save to the pixel and the tag, and goes on with Pause.
 | `nfc FILE.nfc` \| `nfc ntag215 UID [URL]` \| `nfc mfc1k UID` \| `nfc ulc UID` \| `nfc desfire UID` \| `nfc mfplus UID` \| `nfc t4t UID` \| `nfc emv UID` \| `nfc iso14443b PUPI` \| `nfc st25tb UID` \| `nfc felica IDM` \| `nfc felica-standard IDM` \| `nfc slix UID` \| `nfc none` | hold an NFC card to the device: a Flipper `.nfc` file (Type 2 with Ultralight C, MIFARE Classic, ISO14443-4A, DESFire, MIFARE Plus, Type 4 tag, EMV, ISO14443-3B/-4B, ST25TB, FeliCa Lite-S and Standard, ISO15693, SLIX), or one made up for a UID |
 | `nfc --reader ntag` \| `nfc --reader scan` | hold an NFC reader to an emulating device and print what it reads (`--no-wait`: leave it there) |
 | `nfc --reader classic CARD.nfc` | read an emulated MIFARE Classic with the keys of `CARD.nfc` (`--quiet-read`: only say where the file is) |
-| `nfc --reader felica` \| `iso-dep` \| `t4t` | read an emulated FeliCa Lite-S (without its card key), an ISO14443-4A card's ATS, a Type 4 tag's NDEF message |
+| `nfc --reader ulc CARD.nfc` \| `nfc --reader felica [CARD.nfc]` | read an emulated MIFARE Ultralight C with its key (two-key triple DES), a FeliCa Lite-S with its card key or without one |
+| `nfc --reader iso-dep` \| `nfc --reader t4t` | an emulated ISO14443-4A card's ATS, a Type 4 tag's NDEF message |
 | `nfc record OUT.txt` \| `nfc record stop` \| `nfc watch` | every frame on the air at the NFC antenna and its answer, a line each with its time: the firmware's to a card, and a reader's to the card that the firmware emulates |
 | `nfc --link iso-dep` \| `--link script:FILE.py` \| `--link log` | a card played by a program, in the field until ^C |
 | `nfc --link pm3[:PORT]` \| `nfc DUMP.json` | real cards through a Proxmark3; a Proxmark3 dump as the card |
@@ -1583,18 +1585,27 @@ are encrypted, and the chip would make its own. It switches the chip to transpar
 mode and modulates the answer itself, an edge every 590 ns on a pin. The emulator
 decodes those edges back into the answer, parity bits and all.
 
-The same program has three more readers, which need no card file:
+The same program has more readers:
 
 ```sh
-./flipperemu nfc --reader felica     # a FeliCa Lite-S: polling, then its 28 blocks
-./flipperemu nfc --reader iso-dep    # an ISO14443-4A card: RATS, and its ATS
-./flipperemu nfc --reader t4t        # a Type 4 tag: its NDEF message
+./flipperemu nfc --reader ulc card.nfc      # a MIFARE Ultralight C, with the key in card.nfc
+./flipperemu nfc --reader felica            # a FeliCa Lite-S: polling, then its 28 blocks
+./flipperemu nfc --reader felica card.nfc   # ... with the card key in card.nfc
+./flipperemu nfc --reader iso-dep           # an ISO14443-4A card: RATS, and its ATS
+./flipperemu nfc --reader t4t               # a Type 4 tag: its NDEF message
 ```
 
-- `felica` has no card key, so the blocks that a card keeps for a reader with the
-  key come back refused (`01 B1`), as they would from the card. The chip answers the
-  polling by itself from what the firmware loaded; the dev build and the forks load
-  a PMm of their own there, not the card's.
+- `ulc` shows the card the key of the file's pages 44 to 47 and has the card show
+  that it has it too (AUTHENTICATE: two-key triple DES both ways), then reads the
+  pages, 48 with the key's own. A card that does not take the key gives the pages
+  before its AUTH0, and the exit status is 1.
+- `felica` without a file has no card key, so the blocks that a card keeps for a
+  reader with the key come back refused (`01 B1`), as they would from the card. With
+  a file that has the key (its block 22, as the firmware saves a key it was given),
+  the reader writes a challenge, checks the card's MAC of its ID, and writes the
+  card a MAC of its own: 27 of 28 blocks then. The chip answers the polling by
+  itself from what the firmware loaded; the dev build and the forks load a PMm of
+  their own there, not the card's.
 - `iso-dep` gets the ATS of the file. What the firmware does with a command after
   it is the emulating app's business; the NFC shell's `emulate` answers none.
 - `t4t` reads the NDEF application, the capability container and the NDEF file
@@ -1608,10 +1619,11 @@ and on, select, and the last step once more. On a busy computer the emulated CPU
 can be too late with an answer, and a real card never is.
 
 `scripts/nfc_emulate_check.py FIRMWARE` checks emulation from the reader's side: an
-NTAG215, a MIFARE Classic Mini, 1K and 4K whose every block and key comes back, an
-ISO14443-4A card, a FeliCa Lite-S, a Type 4 tag with an NDEF message of 910 bytes
-where the firmware emulates one, and the record of the frames (15 checks on the
-official 1.5.1, 16 on its dev build, Momentum, Unleashed and RogueMaster).
+NTAG215, a MIFARE Classic Mini, 1K and 4K whose every block and key comes back, a
+MIFARE Ultralight C and a FeliCa Lite-S with their keys and with wrong ones, an
+ISO14443-4A card, a Type 4 tag with an NDEF message of 910 bytes where the firmware
+emulates one, and the record of the frames (21 checks on the official 1.5.1, 22 on
+its dev build, Momentum, Unleashed and RogueMaster).
 
 Not there: a reader for ISO15693 and SLIX emulation. The firmware receives those
 by itself as well, sampling a pin with a timer and the DMA, which needs three more

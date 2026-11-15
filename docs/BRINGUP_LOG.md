@@ -5553,6 +5553,35 @@ big lock, entry 92).
       and RogueMaster, 15 on the official 1.5.1 (whose app does not know
       the card).
 
+178. **Readers that have a card's key: Ultralight C and FeliCa Lite-S.**
+    - The firmware's two listeners that want a key of the reader had
+      been read as by anyone. Both keys are two-key triple DES, and
+      Python has no DES of its own: the card model's (FIPS 46-3's tables,
+      entry 155) once more in `fe_nfc_reader.py`, 40 lines, with the
+      standard's example and OpenSSL's `des-ede-cbc` for its proof.
+    - MIFARE Ultralight C: `1A 00`, the card's number enciphered; the
+      reader's number and the card's turned by a byte, enciphered on from
+      the card's ciphertext; the reader's turned, back from the card. The
+      key is the file's pages 44 to 47, as the firmware has it. The
+      firmware's listener took it at the first try, and the 44 pages
+      that are read, with the key's four, are the card's file. With
+      another key: no second answer, and the 16 pages before AUTH0.
+    - FeliCa Lite-S: the reader writes a challenge (RC), reads ID, the
+      key's version and MAC_A in one read and checks the MAC (the session
+      key from the card key and the challenge, the MAC over what was
+      asked and what came, each eight bytes turned round: the card
+      model's `fl_mac`, the other way), reads the write counter, and
+      writes STATE and MAC_A with a MAC of its own, the session key's
+      halves swapped. The firmware's listener took that too, at the first
+      try: S_PAD12 and 13 are read then, 27 of 28 (the key itself never).
+      The write counter stands at 2 afterwards.
+    - With another key the card's MAC is not that key's, and the reader
+      says so and reads on as anyone: 26 blocks, not 25, since MAC_A is
+      readable once a challenge was written (entry 170 had it refused
+      before one).
+    - Checks: nfc_emulate_check 21 on the official 1.5.1, 22 on the dev
+      build, Momentum, Unleashed and RogueMaster.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

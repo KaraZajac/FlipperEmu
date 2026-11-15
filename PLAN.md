@@ -266,6 +266,12 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       NTAG 413/424 DNA ☑ (2026-11-15): the card that the dev build and the three
       forks know by its ISO-wrapped GetVersion; `nfc ntag4xx UID`; read and saved
       by their NFC apps (nfc_check 25, 27 on the dev build, 28 on the forks).
+      Readers with keys ☑ (2026-11-15): `nfc --reader ulc CARD.nfc` (MIFARE
+      Ultralight C: AUTHENTICATE with two-key triple DES both ways, then its 48
+      pages) and `nfc --reader felica CARD.nfc` (FeliCa Lite-S: a challenge, the
+      card's MAC checked, the reader's MAC written, 27 of 28 blocks); DES in
+      Python for the reader (the card model's tables); each also with a wrong
+      key. nfc_emulate_check 21 / 22 on five (BRINGUP_LOG 178).
       A record of the air ☑ (2026-11-15): `nfc record FILE`, `nfc watch`: every
       frame and its answer, both ways, all four technologies, with the parity
       bits where they are not odd; nfc_emulate_check 15 on five (BRINGUP_LOG 172).
@@ -274,8 +280,8 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       whose compare requests have the DMA sample a GPIO pin. Needed first: the
       request generator, TIM16 as a timer (it is the speaker's register file now),
       DMA requests on compare events, and the chip's demodulated signal on its
-      pin in transparent mode. Then: FeliCa's authentication from the reader's
-      side; MIFARE Plus SL3 (AES; Unleashed and RogueMaster try keys)
+      pin in transparent mode. Then: MIFARE Plus SL3 (AES; Unleashed and
+      RogueMaster try keys)
 - ☑ 125 kHz RFID read: COMP1 → TIM2 TI4 capture, a virtual tag in the reader's field
       (ASK/FSK/PSK, field noise), encoders ported from the firmware (`fe_rfid.py`, checked
       cycle for cycle against its emulation by `rfid_check.py`); app Read and `rfid read`
