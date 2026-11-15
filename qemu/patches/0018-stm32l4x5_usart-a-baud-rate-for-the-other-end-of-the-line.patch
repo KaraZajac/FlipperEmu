@@ -1,0 +1,290 @@
+From: FlipperEmu
+Subject: [PATCH] stm32l4x5_usart: a baud rate for the other end of the line
+
+The model has the guest's baud rate, for the time a character takes. What
+is wired to the port had none: whatever the guest set, the backend's
+characters were the guest's characters. A guest with the wrong baud rate
+for its peripheral, which on hardware reads other characters and framing
+errors, worked.
+
+A property "line-baud" gives the line's other end a speed of its own (0,
+the default: the guest's, as before). With it, a character is taken as a
+UART at the receiver's speed takes the sender's frame: a falling edge
+begins a frame if the line is still low half a bit later, the data bits
+and the stop bit are sampled in their middles, a stop bit that is low is
+a framing error (FE), and the next falling edge begins another frame for
+as long as the sender's lasts. At the same speed, and within a UART's
+few percent of it, that is the character itself. A slow sender's long
+levels are several characters of zeros with framing errors, and a fast
+sender's frame is one 0xFF or nothing. Both directions: what the guest
+receives, and what the backend gets of the guest's characters.
+
+The characters that the receiver makes of one of the line's wait their
+turn at the guest's speed; they and the property are not in a saved
+state.
+
+Seen with the Flipper Zero firmware: an app that opened its port at
+another baud rate than the module on it was understood all the same.
+
+Signed-off-by: FlipperEmu
+---
+--- a/hw/char/stm32l4x5_usart.c
++++ b/hw/char/stm32l4x5_usart.c
+@@ -220,6 +220,8 @@
+     return (s->cr1 & R_CR1_UE_MASK) && (s->cr1 & R_CR1_RE_MASK);
+ }
+ 
++static void usart_rx_more(Stm32l4x5UsartBaseState *s);
++
+ /* The baud rate the registers say, 0 when they do not say one yet */
+ static uint32_t usart_baud(Stm32l4x5UsartBaseState *s)
+ {
+@@ -280,6 +282,56 @@
+ }
+ 
+ /*
++ * A character as a receiver at another speed takes it.  The sender's frame
++ * (a start bit, eight data bits from the lowest, a stop bit, and an idle
++ * line after it) is sampled as a UART samples: a falling edge begins a
++ * frame if the line is still low half a bit later; the data bits are taken
++ * in their middles, and so is the stop bit, which is a framing error when
++ * it is low.  From there the next falling edge begins another frame, for as
++ * long as the sender's lasts.  -> how many characters the receiver has of
++ * it: one, the same, at the same speed and near it; none, when the start
++ * bit was over too soon; several, of a slow sender's long levels.
++ */
++static int usart_resample(uint8_t ch, uint32_t from, uint32_t to,
++                          uint8_t *out, uint16_t *fe, int max)
++{
++    /* in units of 1 / (from * to) s, a sender's bit is `to` long and a
++     * receiver's `from`; bit n of the line: 0 the start, 9 the stop */
++    const uint64_t sb = to, rb = from;
++    const unsigned line = 0x200 | (ch << 1);
++#define LINE(t) ((t) / sb > 9 ? 1u : (line >> ((t) / sb)) & 1)
++    uint64_t edge = 0, k;
++    int n = 0;
++
++    *fe = 0;
++    while (n < max) {
++        if (!LINE(edge + rb / 2)) {
++            uint8_t v = 0;
++
++            for (int i = 0; i < 8; i++) {
++                v |= LINE(edge + rb * (2 * i + 3) / 2) << i;
++            }
++            if (!LINE(edge + rb * 19 / 2)) {
++                *fe |= 1u << n;
++            }
++            out[n++] = v;
++            edge += rb * 19 / 2;
++        }
++        for (k = edge / sb + 1; k <= 9; k++) {
++            if (((line >> (k - 1)) & 1) && !((line >> k) & 1)) {
++                break;
++            }
++        }
++        if (k > 9) {
++            break;
++        }
++        edge = k * sb;
++    }
++#undef LINE
++    return n;
++}
++
++/*
+  * The receiver may be able to take a character again: tell the backend,
+  * which otherwise looks when the main loop next turns for a reason of its
+  * own, but not before the line could have brought one.  And when a
+@@ -291,6 +343,7 @@
+ 
+     if (!usart_rx_enabled(s)) {
+         /* Nobody listens, and what is on the line is lost at any speed */
++        s->rx_more_n = s->rx_more_at = 0;
+         timer_del(&s->rx_timer);
+         timer_del(&s->idle_timer);
+         s->idle_armed = false;
+@@ -305,6 +358,10 @@
+         timer_mod(&s->rx_timer, s->rx_next);
+         return;
+     }
++    if (s->rx_more_n) {
++        usart_rx_more(s);               /* of the line's last character */
++        return;
++    }
+     qemu_chr_fe_accept_input(&s->chr);
+     if (s->idle_armed) {
+         timer_mod(&s->idle_timer,
+@@ -331,6 +388,50 @@
+     stm32l4x5_update_irq(s);
+ }
+ 
++/* A character is in: RDR has it, with what was wrong with its frame */
++static void usart_rx_char(Stm32l4x5UsartBaseState *s, uint8_t ch, bool fe)
++{
++    /* Check if overrun detection is enabled and if there is an overrun */
++    if (!(s->cr3 & R_CR3_OVRDIS_MASK) && (s->isr & R_ISR_RXNE_MASK)) {
++        /*
++         * A character has been received while
++         * the previous has not been read = Overrun.
++         */
++        s->isr |= R_ISR_ORE_MASK;
++        trace_stm32l4x5_usart_overrun_detected(s->rdr, ch);
++    } else {
++        /* No overrun */
++        s->rdr = ch;
++        s->isr |= R_ISR_RXNE_MASK;
++        if (fe) {
++            s->isr |= R_ISR_FE_MASK;    /* its stop bit was not one */
++        }
++        trace_stm32l4x5_usart_rx(s->rdr);
++    }
++
++    /* Before the flags go out: a DMA transfer takes the character at once */
++    s->rx_next = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + usart_frame_ns(s);
++    s->idle_armed = true;
++    timer_del(&s->idle_timer);
++
++    stm32l4x5_update_irq(s);
++}
++
++/* The next of the characters that the receiver made of the line's last */
++static void usart_rx_more(Stm32l4x5UsartBaseState *s)
++{
++    int i = s->rx_more_at++;
++
++    usart_rx_char(s, s->rx_more[i], s->rx_more_fe & (1u << i));
++    if (s->rx_more_at >= s->rx_more_n) {
++        s->rx_more_n = s->rx_more_at = 0;
++        s->rx_next = MAX(s->rx_next, s->line_free);
++    }
++    if (!(s->isr & R_ISR_RXNE_MASK)) {
++        usart_rx_ready(s);              /* (the DMA has it already) */
++    }
++}
++
+ static int stm32l4x5_usart_base_can_receive(void *opaque)
+ {
+     Stm32l4x5UsartBaseState *s = opaque;
+@@ -338,7 +439,7 @@
+     if (!usart_rx_enabled(s)) {
+         return 1;
+     }
+-    if (s->isr & R_ISR_RXNE_MASK) {
++    if ((s->isr & R_ISR_RXNE_MASK) || s->rx_more_n) {
+         return 0;
+     }
+     /* A character at a time, and each no sooner than the line has it */
+@@ -361,27 +462,24 @@
+         return;
+     }
+ 
+-    /* Check if overrun detection is enabled and if there is an overrun */
+-    if (!(s->cr3 & R_CR3_OVRDIS_MASK) && (s->isr & R_ISR_RXNE_MASK)) {
+-        /*
+-         * A character has been received while
+-         * the previous has not been read = Overrun.
+-         */
+-        s->isr |= R_ISR_ORE_MASK;
+-        trace_stm32l4x5_usart_overrun_detected(s->rdr, *buf);
+-    } else {
+-        /* No overrun */
+-        s->rdr = *buf;
+-        s->isr |= R_ISR_RXNE_MASK;
+-        trace_stm32l4x5_usart_rx(s->rdr);
++    if (s->line_baud && usart_baud(s)) {
++        /* What the receiver makes of it at its own speed */
++        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++
++        s->rx_more_at = 0;
++        s->rx_more_n = usart_resample(*buf, s->line_baud, usart_baud(s),
++                                      s->rx_more, &s->rx_more_fe,
++                                      ARRAY_SIZE(s->rx_more));
++        s->line_free = now + 10 * NANOSECONDS_PER_SECOND / s->line_baud;
++        if (!s->rx_more_n) {
++            s->rx_next = s->line_free;  /* nothing it takes for a character */
++            usart_rx_ready(s);
++            return;
++        }
++        usart_rx_more(s);
++        return;
+     }
+-
+-    /* Before the flags go out: a DMA transfer takes the character at once */
+-    s->rx_next = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + usart_frame_ns(s);
+-    s->idle_armed = true;
+-    timer_del(&s->idle_timer);
+-
+-    stm32l4x5_update_irq(s);
++    usart_rx_char(s, *buf, false);
+ }
+ 
+ /*
+@@ -425,6 +523,19 @@
+         return G_SOURCE_REMOVE;
+     }
+ 
++    if (s->line_baud && usart_baud(s)) {
++        /* What a receiver at the line's speed makes of it */
++        uint8_t out[16];
++        uint16_t fe;
++        int n = usart_resample(ch, usart_baud(s), s->line_baud, out, &fe,
++                               ARRAY_SIZE(out));
++
++        if (n) {
++            qemu_chr_fe_write_all(&s->chr, out, n);
++        }
++        goto buffer_drained;
++    }
++
+     ret = qemu_chr_fe_write(&s->chr, &ch, 1);
+     if (ret <= 0) {
+         s->watch_tag = qemu_chr_fe_add_watch(&s->chr, G_IO_OUT | G_IO_HUP,
+@@ -548,6 +659,7 @@
+     s->tdr = 0x00000000;
+     s->presc = 0x00000000;
+     s->rx_next = 0;
++    s->rx_more_n = s->rx_more_at = 0;
+ 
+     usart_cancel_transmit(s);
+     stm32l4x5_update_irq(s);
+@@ -741,6 +853,10 @@
+     qdev_init_gpio_out_named(DEVICE(obj), &s->rx_unheard, "rx-unheard", 1);
+     timer_init_ns(&s->rx_timer, QEMU_CLOCK_VIRTUAL, usart_rx_timer, s);
+     timer_init_ns(&s->tx_timer, QEMU_CLOCK_VIRTUAL, usart_tx_timer, s);
++    object_property_add_uint32_ptr(obj, "line-baud", &s->line_baud,
++                                   OBJ_PROP_FLAG_READWRITE);
++    object_property_set_description(obj, "line-baud",
++        "The baud rate of what is wired to the port; 0: the guest's own");
+     timer_init_ns(&s->idle_timer, QEMU_CLOCK_VIRTUAL, usart_idle_timer, s);
+ 
+     memory_region_init_io(&s->mmio, obj, &stm32l4x5_usart_base_ops, s,
+@@ -754,6 +870,7 @@
+ {
+     Stm32l4x5UsartBaseState *s = (Stm32l4x5UsartBaseState *)opaque;
+ 
++    s->rx_more_n = s->rx_more_at = 0;   /* (the line's own: not in a state) */
+     stm32l4x5_update_params(s);
+     return 0;
+ }
+--- a/include/hw/char/stm32l4x5_usart.h
++++ b/include/hw/char/stm32l4x5_usart.h
+@@ -67,6 +67,18 @@
+     int64_t rx_next;        /* the line has no next character before this */
+     bool idle_armed;        /* a character came since the last idle line */
+ 
++    /*
++     * What is wired to the port has a speed of its own ("line-baud"; 0: the
++     * guest's, whatever that is).  A character at another speed than the
++     * receiver's is taken as that receiver takes it: other characters, more
++     * of them or none, and framing errors.  Those of one character wait here.
++     */
++    uint32_t line_baud;
++    uint8_t rx_more[16];
++    uint16_t rx_more_fe;    /* ... the stop bit of each was missing */
++    uint8_t rx_more_n, rx_more_at;
++    int64_t line_free;      /* the sender's character is over then */
++
+     /* Transmission at the line's speed */
+     QEMUTimer tx_timer;     /* the character on the line has been sent */
+     uint32_t tx_shift;      /* that character: the shift register */

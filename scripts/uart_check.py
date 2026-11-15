@@ -647,6 +647,112 @@ def speed_checks(b):
           f"{code} {out!r} {err}\nthe CLI: {said}")
 
 
+def resample(byte, sender, receiver):
+    """A byte as a UART at another speed takes it: the bytes it has of it.
+    The sender's frame (start bit, eight bits from the lowest, stop bit, an
+    idle line) sampled as a UART samples, in bit middles from each falling
+    edge on: the emulator's own rule (QEMU patch 0018), once more"""
+    line = 0x200 | byte << 1
+    level = lambda t: 1 if t // receiver > 9 else line >> t // receiver & 1
+    edge, out = 0, []
+    while len(out) < 16:
+        if not level(edge + sender // 2):
+            out.append(sum(level(edge + sender * (2 * i + 3) // 2) << i
+                           for i in range(8)))
+            edge += sender * 19 // 2
+        k = edge // receiver + 1
+        while k <= 9 and not (line >> (k - 1) & 1 and not line >> k & 1):
+            k += 1
+        if k > 9:
+            break
+        edge = k * receiver
+    return bytes(out)
+
+
+def line_checks(b):
+    """The wire's own speed (`uart --line-baud`): what is wired to the port
+    at the app's baud rate, near it, and far from it"""
+    once = b.dir / "once.js"
+    once.write_text(ONCE)
+    fe(b, "push", once, "/ext")
+    fe(b, "uart", "--line-baud", "57600")
+    start = len(sent(b))
+    text = ended(script(b, "/ext/once.js"))
+    time.sleep(0.3)
+    got = sent(b)[start:]
+    want = b"".join(resample(c, 115200, 57600) for c in b"hello\r\n")
+    fe(b, "uart", "--line-baud", "auto")
+    fe(b, "rm", "/ext/once.js")
+    # (the script ends the port right after its write: its last two
+    # characters may be cut off, FW-20)
+    check("a wire at 57600 baud and an app that writes `hello` at 115200: "
+          "what is on the wire's other end is what a UART at half the speed "
+          f"takes those bytes for, sampled bit by bit ({want.hex(' ')}; "
+          "here " + got.hex(" ") + ")",
+          "once done" in text and got and want.startswith(got)
+          and len(got) >= len(b"".join(resample(c, 115200, 57600)
+                                       for c in b"hello")),
+          f"{got!r} for {want!r}\n{text}")
+    p = script(b)
+    code, out, err, took = fe(b, "uart", "wait", "ready", "--for", 30)
+    if not check("the script again, at 115200 baud: its first line comes",
+                 code == 0 and "ready" in out, f"{code} {out!r} {err}"):
+        print("        the CLI: " + ended(p, 5))
+        return
+    said = lambda word, seconds=5: fe(b, "uart", "send", word + "\\n",
+                                      "--expect", f"you said: {word}\\r\\n",
+                                      "--for", seconds)
+    before = fe(b, "uart")[1]
+    c1, o1, e1, _ = fe(b, "uart", "--line-baud", "115200")
+    c2, o2, e2, _ = said("same")
+    c3, o3, e3, _ = fe(b, "uart", "--line-baud", "119000")
+    c4, o4, e4, _ = said("near")
+    check("`uart --line-baud 115200`: the other end of the wire has a speed "
+          "of its own, the app's, and a line is answered as before; at "
+          "119000 baud, 3 % off, as well: a UART takes that",
+          "the other end of the wire" not in before
+          and (c1, c2, c3, c4) == (0, 0, 0, 0)
+          and "is at 115200 baud, which the firmware's port is at too" in o1
+          and "is at 119000 baud, which the firmware's port is at too" in o3,
+          "\n".join((o1 + e1, o2 + e2, o3 + e3, o4 + e4)))
+    start = len(sent(b))
+    c1, o1, e1, _ = fe(b, "uart", "--line-baud", "9600")
+    table = fe(b, "uart")[1]
+    c2, o2, e2, took = said("slow", 2)
+    garbage = sent(b)[start:]
+    check("`uart --line-baud 9600` with the app at 115200: the launcher "
+          "says what will come of it, `uart` has the wire's speed in its "
+          "lines, and a line that is sent is not the app's line: no answer "
+          "to it (exit status 1)",
+          c1 == 0 and "is at 9600 baud, and the firmware's port at 115200: "
+          "each side takes the other's bytes for others" in o1
+          and "the other end of the wire is at 9600 baud" in table
+          and c2 == 1 and b"you said: slow" not in garbage,
+          "\n".join((o1 + e1, table, o2 + e2, repr(garbage[:60]))))
+    c1, o1, e1, _ = fe(b, "uart", "--line-baud", "auto")
+    # (what the app took the slow bytes for is in its line still: ended)
+    fe(b, "uart", "send", "\\n", "--for", 2)
+    time.sleep(0.5)
+    c2, o2, e2, _ = said("back")
+    table = fe(b, "uart")[1]
+    c3, o3, e3, _ = fe(b, "uart", "--line-baud", "fast")
+    c4, o4, e4, _ = fe(b, "uart", "send", "x", "--line-baud", "9600")
+    check("`uart --line-baud auto`: the wire at the firmware's speed again, "
+          "whatever that is, and a line is answered; a word that is no "
+          "speed, and a speed with something to send: refused in a line",
+          (c1, c2) == (0, 0) and "at the firmware's speed" in o1
+          and "the other end of the wire" not in table
+          and c3 != 0 and "a baud rate (9600), or auto" in e3
+          and c4 != 0 and "goes alone" in e4,
+          "\n".join((o1 + e1, o2 + e2, table, e3, e4)))
+    code, out, err, took = fe(b, "uart", "send", "bye\\n", "--expect",
+                              "closing")
+    text = ended(p)
+    check("... the script closes the port and ends, with no crash",
+          code == 0 and "echo done" in text and CRASH.search(text) is None,
+          f"{code} {out!r} {err}\nthe CLI: {text}")
+
+
 def bridge_checks(b):
     """The firmware's USB-UART bridge (in its GPIO app), which reads pins
     13 and 14 by DMA, and has the USB serial port instead of the CLI"""
@@ -862,6 +968,7 @@ def main():
                 usart_checks(b)
                 pace_checks(b)
                 speed_checks(b)
+                line_checks(b)
                 bridge_checks(b)
                 other_checks(b)
                 none_checks(b, args.timeout)

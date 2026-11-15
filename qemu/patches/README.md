@@ -30,8 +30,10 @@ without them it does not build.
 report have no place of a fault.
 0017 is an addition: without it the machine runs, and what the firmware sends on a
 serial port is there at once at any baud rate.
+0018 is an addition: without it the machine runs, and what is wired to a serial port
+has the firmware's baud rate, whatever that is (`uart --line-baud` says so).
 A source tree that was set up before a patch came (0006 to 0009: 2026-11-11; 0010 to
-0013: 2026-11-12; 0014 and 0015: 2026-11-14; 0016 and 0017: 2026-11-15) gets it from
+0013: 2026-11-12; 0014 and 0015: 2026-11-14; 0016 to 0018: 2026-11-15) gets it from
 one more
 run of that script.
 
@@ -77,6 +79,7 @@ without a change to the check.
 | 0015 | `hw/intc/armv7m_nvic.c`, `include/hw/intc/armv7m_nvic.h` | a Lockup (a fault that cannot be taken) ended QEMU with `cpu_abort()`; on the chip the processor stops until it is reset and the rest runs on. Now it stops so (powered off, as PSCI does, until a reset), and the NVIC's `lockup` property says where and why |
 | 0016 | `hw/intc/armv7m_nvic.c`, `include/hw/intc/armv7m_nvic.h` | nothing kept where a fault was: a guest's handler seldom says (the Flipper's prints a message and its own registers, and resets). The NVIC notes each fault as it is pended: the exception, the PC and LR it was raised at, the fault status and addresses, and whether it is imprecise; its `last-fault` property has that as JSON, with a count, over a reset too |
 | 0017 | `hw/char/stm32l4x5_usart.c`, `include/hw/char/stm32l4x5_usart.h` | a character written to TDR was the backend's at once, with TXE and TC set again before the write returned: a guest sent any amount in no time, and one that waits for TC before it switches the UART off never waited. The transmitter has its shift register now: a character is on the line for a frame's time at the baud rate, TXE when TDR is free, TC when a frame ends with nothing behind it |
+| 0018 | `hw/char/stm32l4x5_usart.c`, `include/hw/char/stm32l4x5_usart.h` | the line's other end had no baud rate: a guest with the wrong one for its peripheral was understood all the same. A property `line-baud` gives it one; a character is then taken as a UART at the receiver's speed samples the sender's frame (the same character within a few percent, otherwise other characters, more or none, and framing errors), in both directions |
 
 **Licence:** these patches modify QEMU's own source files, which are GPL-2.0-or-later,
 so the patches are GPL-2.0-or-later too, unlike the rest of this repository (BSD-3-Clause).

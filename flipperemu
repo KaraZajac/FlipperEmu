@@ -4723,6 +4723,27 @@ def open_cli(dev, prompt=True, timeout=15.0):
 UART_PORTS = {"lpuart": ("lpuart-user", "15 and 16", "LPUART1"),
               "usart": ("uart-user", "13 and 14", "USART1")}
 UART_OWN = {"lpuart": "lpuart-own", "usart": "uart-own"}
+UART_QOM = {"lpuart": "/machine/soc/lpuart1", "usart": "/machine/soc/usart1"}
+
+
+def uart_line_baud(m, port):
+    """The baud rate of what is wired to a port (0: the firmware's own,
+    whatever it is); None from an emulator that has no such thing"""
+    value = qom_get(m, UART_QOM[port], "line-baud")
+    return value if isinstance(value, int) else None
+
+
+def uart_line_text(line, state):
+    """The wire's own speed beside the firmware's, in words"""
+    said = f"the other end of the wire is at {line} baud"
+    baud = state.get("baud") if state and state.get("on") else None
+    if not baud:
+        return said
+    if abs(baud - line) * 20 <= baud:
+        return said + ", which the firmware's port is at too"
+    return (said + f", and the firmware's port at {baud}: each side takes the "
+            "other's bytes for others, with framing errors (--line-baud auto: "
+            "the wire at the firmware's speed again)")
 
 
 def uart_state(dev, port):
@@ -4891,8 +4912,34 @@ def cmd_uart(args):
         ports = {port: usb_endpoint(m, UART_PORTS[port][0]) for port in UART_PORTS}
         own = usb_endpoint(m, UART_OWN[args.port])
         states = {p["name"]: p for p in read_serial(m) or ()}
+        if args.line_baud is not None:
+            # the speed of what is wired to the port: its own from now on
+            if args.action:
+                sys.exit("uart --line-baud N goes alone: it is the wire's "
+                         "speed from then on, for `send`, `term` and a "
+                         "program of yours alike")
+            word = args.line_baud.lower()
+            if word != "auto" and not (word.isdigit() and 50 <= int(word) <= 4000000):
+                sys.exit("uart --line-baud: a baud rate (9600), or auto for "
+                         "the firmware's own, whatever it is")
+            if uart_line_baud(m, args.port) is None:
+                sys.exit(f"[{dev.name}] this emulator's serial ports have no "
+                         "speed of the wire's own: it was started by an older "
+                         "FlipperEmu, or its QEMU lacks patch 0018 "
+                         "(scripts/setup_qemu.sh)")
+            m.cmd(f"qom-set {UART_QOM[args.port]} line-baud "
+                  f"{0 if word == 'auto' else int(word)}")
+        lines = {port: uart_line_baud(m, port) for port in UART_PORTS}
     finally:
         m.close()
+    if args.line_baud is not None:
+        _, pins, chip = UART_PORTS[args.port]
+        line = lines[args.port]
+        print(f"[{dev.name}] pins {pins} ({chip}): "
+              + (uart_line_text(line, states.get(chip)) if line else
+                 "the other end of the wire is at the firmware's speed, "
+                 "whatever that is"))
+        return 0
     if not args.action:
         for port in ("lpuart", "usart"):
             _, pins, chip = UART_PORTS[port]
@@ -4904,6 +4951,9 @@ def cmd_uart(args):
             if chip in states:
                 print(f"[{dev.name}]   the firmware has it as: "
                       f"{fe_header.port_text(states[chip])}")
+            if lines[port]:
+                print(f"[{dev.name}]   "
+                      + uart_line_text(lines[port], states.get(chip)))
         return 0
     port, at = args.port, ports[args.port]
     _, pins, chip = UART_PORTS[port]
@@ -7649,6 +7699,13 @@ def main():
                    help="wait, --expect: for so many seconds (default 5); "
                         "send: give up when the firmware has taken nothing "
                         "for so long")
+    p.add_argument("--line-baud", metavar="N",
+                   help="alone: the baud rate of what is wired to the port, "
+                        "from now on (auto: the firmware's own, whatever it "
+                        "is, as at the start).  With another rate than the "
+                        "firmware's, each side takes the other's bytes as a "
+                        "UART at the wrong speed does: for others, or none, "
+                        "with framing errors")
     p.set_defaults(func=cmd_uart)
 
     p = sub.add_parser(

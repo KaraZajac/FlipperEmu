@@ -1506,6 +1506,19 @@ ufbt is not run at all, and `update` sends the package without the stage (BRINGU
   the two registers: the firmware's write is back when its last character is in TDR,
   and a port that is closed right after it loses that character and the one before
   (FW-20 in FIRMWARE_BUGS.md).
+- **The wire's own speed** (`qemu/patches/0018`, the device's property `line-baud`;
+  `./flipperemu uart --line-baud`). 0 is the firmware's speed, whatever it is. With
+  a speed of its own, a character goes through `usart_resample()`: the sender's
+  frame as levels (start, eight bits, stop, idle), sampled as a UART samples it at
+  the receiver's speed, from each falling edge that is still low half a bit later:
+  eight bits in their middles and the stop bit, whose low level is a framing error
+  (ISR.FE with the character). Times are in units of 1 / (the two speeds
+  multiplied), so nothing is rounded. One character of the line's can be several of
+  the receiver's, which wait in the device and come at the firmware's frame time;
+  the line is not free for its next before the sender's frame is over. What the
+  firmware sends goes through the same function the other way before the chardev
+  has it. Each character by itself: two that follow each other without a gap do
+  not run into each other, as they would on a wire.
 - **A start bit on the RX pin**: `qemu/patches/0008` gives the UART model one more
   line, `rx-unheard`, pulsed for a byte that comes while the receiver is off (or the
   whole port is). The firmware's expansion service waits that way for a module: RE

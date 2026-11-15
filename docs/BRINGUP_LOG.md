@@ -5497,7 +5497,44 @@ big lock, entry 92).
       Flipper. A first start is at "Startup complete" after 2601 ms of
       the firmware's own time, in the range it was (2450 to 2850).
     - Checks: uart_check 80 and smoke 28 on the official 1.5.1;
-      setup_check 47 with the patch.
+      setup_check 47 with the patch. The whole regression on the
+      official 1.5.1 with it, and smoke on the four other firmwares.
+
+176. **A baud rate for the other end of the wire.**
+    - An app that opens its port at 9600 baud for a module that talks at
+      115200 does not work on a Flipper, and worked here: the bytes of
+      `uart send` and of a program on the pty were the app's bytes at
+      any speed.
+    - QEMU patch 0018: the device's `line-baud` (0: the firmware's own
+      speed). With a speed of its own, a character is what a UART at the
+      receiver's speed has of the sender's frame. The frame is ten levels
+      and an idle line; the receiver begins at a falling edge, wants the
+      line still low half a bit later, takes eight bits in their middles
+      and the stop bit, and a stop bit that is low is a framing error.
+      Then the next falling edge, while the sender's frame lasts.
+    - Tried in Python before a line of C: every byte is itself at the
+      same speed and up to 5 % off either way, 32 of 256 at 8 %. A byte
+      at 9600 for a receiver at 115200 is one to five zeros with framing
+      errors; one at 115200 for a receiver at 9600 is `ff`, or nothing
+      for `ff` itself. As a UART on a bench does it.
+    - Both directions, by the same function: what the firmware receives
+      (the characters of one byte wait their turn in the device, a frame
+      time of the firmware's apart), and what the chardev gets of the
+      firmware's.
+    - `./flipperemu uart --line-baud 9600` (`auto`: the firmware's
+      again), and `uart` has the wire's speed beside the firmware's,
+      with what comes of the two.
+    - The check has the rule a second time, in Python, and compares:
+      `hello` written at 115200 on a wire at 57600 is `fc ff fd fd fe
+      f8`, and that is what the port's log has (but for its end, which
+      the script's `end()` cuts off: FW-20, entry 175). At 119000 a line
+      is answered; at 9600 it is not.
+    - Not there: two characters that follow each other with no gap run
+      into each other on a wire at the wrong speed, and here each is
+      taken by itself. An overrun in the UART: left out, see the plan.
+    - Checks: uart_check 86 on the official 1.5.1, the dev build, Momentum
+      and Unleashed; setup_check 48; smoke 28 and snapshot_check on the
+      official 1.5.1.
 
 ## Things that were right the first time (and why)
 

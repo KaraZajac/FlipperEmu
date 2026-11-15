@@ -577,8 +577,15 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         ends with nothing behind it; 964 bytes at 9600 baud take their second.
         With it a firmware bug shows: a port closed right after a write loses its
         last two bytes (FW-20). `uart_check.py` 80 (BRINGUP_LOG 175)
-  - ☐ The UART model's other half, the rest: a rate on the host's side (a wrong
-        baud rate is understood now), an overrun when the firmware does not read
+  - ☑ A baud rate for the wire's other end (2026-11-15, QEMU patch 0018):
+        `uart --line-baud N|auto`; with another rate than the firmware's each side
+        takes the other's bytes as a UART at the wrong speed samples them (other
+        bytes, more or none, framing errors); the same within a few percent.
+        `uart_check.py` 86 (BRINGUP_LOG 176)
+  - ☐ An overrun in the UART itself: left out on purpose. The firmware reads a
+        port by interrupt or DMA, so an overrun is an interrupt that came late,
+        and an emulated CPU's lateness is the host's as often as the firmware's;
+        a byte waits on the wire for the reader instead
   - ☑ The serial ports by name (2026-11-11): what the firmware has each port as
         (off, or its baud rate and frame, and who takes what comes in: an
         interrupt, the DMA, nobody) in `gpio`, `status`, `uart` and the window's
@@ -915,15 +922,15 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           the link is one), iButton and RFID pulses,
           the Sub-GHz decoders on Unleashed and RogueMaster (their CLI does not
           start the radio: through the app's Read), BLE's GATT writes
-- ☐ Upstream the seventeen QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:
+- ☐ Upstream the eighteen QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:
       register reads without the big lock under TCG, 2026-11-10; 0006 to 0009: a
       chardev's log file, the UART's reception, a byte no receiver took, an EEPROM's
       file, 2026-11-11; 0010 to 0013: Winbond's read-ID commands, the load of a saved
       state with an SD card on SPI, an EEPROM's address counter after an address that
       was cut short, an EEPROM's saved state, 2026-11-12; 0014 and 0015: an imprecise
       BusFault, a Lockup that stops the processor, 2026-11-14; 0016: where the last
-      fault was, and 0017: a UART's transmission at the baud rate, 2026-11-15);
-      consider upstreaming the machine
+      fault was, 0017: a UART's transmission at the baud rate, and 0018: a baud
+      rate for the line's other end, 2026-11-15); consider upstreaming the machine
 
 ## Non-goals (for now)
 - Running ST's radio stack on an emulated CPU2 (closed, encrypted binary)

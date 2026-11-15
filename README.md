@@ -506,6 +506,7 @@ picture of the save to the pixel and the tag, and goes on with Pause.
 | `gpio` \| `gpio PIN` \| `gpio PIN high\|low\|1.25V\|free` \| `gpio PIN --wait high\|low\|pwm` | its GPIO header: what the firmware has the pins as; one pin's level, or that it has a PWM; a pin held from outside (at a voltage: for the firmware's ADC), or let go of; wait for a level, or for a PWM |
 | `gpio record OUT.vcd` \| `gpio record stop` \| `gpio watch [PIN,PIN]` | every change of a pin's level with its time: into a file a logic analyzer's program opens, or printed as it happens |
 | `uart` \| `uart send TEXT [--expect TEXT]` \| `uart wait TEXT` \| `uart term` | the serial port on pins 15 and 16 of its header: where it goes; send to the app that has it open, and wait for its answer; wait for what the app sends; a terminal on it. `--port usart`: the one on pins 13 and 14 |
+| `uart --line-baud N` \| `uart --line-baud auto` | the baud rate of what is wired to that port, from then on: with another than the firmware's, each side takes the other's bytes as a UART at the wrong speed does (`auto`: the firmware's own, whatever it is) |
 | `expansion [--rpc] [--baud N] [--for S] [--port P]` | be an expansion module on its header, to the firmware's expansion service: the call, the baud rate, heartbeats, an RPC session; every frame printed |
 | `run --i2c TYPE@ADDRESS[,NAME=VALUE]` | start with a device on the I2C bus of its header (pins 15 and 16): `--i2c tmp105@0x48,temperature=23.5`, `--i2c eeprom@0x50`; once for each device. `run --i2c help` lists the types |
 | `i2c` \| `i2c ADDRESS` \| `i2c ADDRESS NAME` \| `i2c ADDRESS NAME VALUE` | that bus: its devices with their values, and what the firmware called; one device; one value, bare; set a value while the firmware runs. `i2c --json`: the bus and its devices' values for a program |
@@ -2211,6 +2212,31 @@ seconds at 1200 baud and after a fiftieth of a second at 115200. When the last b
 has come and the line stays quiet, the firmware is told (the UART's idle interrupt),
 which is how an app that reads whole messages knows that one has ended.
 
+**The wire's own speed.** At the start your side of the wire has the app's baud rate,
+whatever the app sets. `uart --line-baud` gives it one of its own, as a module or an
+adapter has:
+
+```sh
+./flipperemu uart --line-baud 9600     # what is wired to pins 15 and 16 is at 9600 baud
+./flipperemu uart --line-baud auto     # at the firmware's speed again, whatever it is
+```
+
+```
+[flipper] pins 15 and 16 (LPUART1): the other end of the wire is at 9600 baud, and the
+firmware's port at 115200: each side takes the other's bytes for others, with framing
+errors (--line-baud auto: the wire at the firmware's speed again)
+```
+
+It is the wire's speed from then on, for `uart send`, `uart term` and a program of
+yours on the pty alike, and `uart` has it in its lines. With the same speed on both
+sides, or one within a UART's few percent (119000 for 115200), bytes are the bytes
+that were sent. With another, each side gets what a UART at its speed makes of the
+other's bits, sampled in their middles from each falling edge on: a slow sender's
+byte is a few zeros with framing errors, a fast sender's an `ff` or nothing, and
+`hello` at 115200 on a wire at 57600 is `fc ff fd fd fe f8`. So an app with the wrong
+baud rate for its module does not work here either. `--port usart` is pins 13 and
+14.
+
 What the app sends takes the line's time too: a thousand bytes at 9600 baud are a
 second on their way, and the firmware's write is busy for as long, as on a Flipper.
 One thing shows with that which a port without a speed hid: the firmware's write is
@@ -2354,12 +2380,10 @@ waits for the next call. Exit status 0: all of that went as the protocol says.
 
 What it does not do yet:
 
-- The speed is the app's alone. Your side of the wire has no rate to get wrong, so an
-  app with the wrong baud rate is understood all the same, only slower or faster, and
-  a framing error never comes.
-- No overrun. When the app does not read, the next byte waits on the wire instead of
-  being lost, and `uart send` says after its `--for` that the firmware did not take
-  the rest.
+- No overrun in the UART itself. The firmware reads a port by interrupt or by DMA,
+  and here a byte waits on the wire until that has taken the one before: an emulated
+  CPU that is late is not a Flipper that is late. (An app that does not empty its
+  own buffer loses what does not fit, as on a Flipper: that is the firmware's.)
 - A program that has the pty or the TCP port open and does not read holds up the
   firmware's sending, once the buffer between them is full (a few hundred bytes).
 - The pty has a pty's ways: QEMU looks once a second whether a program has opened
@@ -2376,7 +2400,7 @@ for your program, and a socket (`devices/NAME/lpuart.sock`, `usart.sock`) for `u
 send` and `uart term`, which is why the two do not take the port from each other.
 
 `scripts/uart_check.py FIRMWARE` checks both ports with that script on the Flipper's
-side, the bridge, a module's call and `expansion`: 80 checks, on the official 1.5.1, the
+side, the bridge, a module's call and `expansion`: 86 checks, on the official 1.5.1, the
 official dev build, Momentum, Unleashed and RogueMaster.
 
 Two bugs were in the way, and both are fixed (docs/BRINGUP_LOG.md, 104). After every
@@ -2389,9 +2413,10 @@ when the program on the port was slow to read (`qemu/patches/0006`).
 The baud rate, the idle line and reception by DMA are an addition to QEMU's UART
 model (`qemu/patches/0007`, docs/BRINGUP_LOG.md, 106), and the call is one more
 (`qemu/patches/0008`, 108): the model tells the board of a byte that came while its
-receiver was off. Sending at the baud rate is `qemu/patches/0017` (175); a tree from
-before it wants the script once more too, and without it what is sent is there at
-once. **A QEMU tree that was set up before these three patches came
+receiver was off. Sending at the baud rate is `qemu/patches/0017` (175) and the
+wire's own speed `qemu/patches/0018` (176); a tree from before them wants the script
+once more too. Without 0017 what is sent is there at once, and without 0018 `uart
+--line-baud` says that the emulator has no such thing. **A QEMU tree that was set up before these three patches came
 (2026-11-11) wants `scripts/setup_qemu.sh` once more.** Without 0007 the machine
 still runs, with the port as it was: about 1000 bytes a second at any baud rate, and
 a bridge that sends and does not hear. Without 0008 it runs too, and no byte is a
