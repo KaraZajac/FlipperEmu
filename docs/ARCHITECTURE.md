@@ -29,7 +29,7 @@ it; the file comments name that function. Register layouts come from RM0434 and 
    I2C1 ── bq27220 @0x55   bq25896 @0x6B   lp5562 @0x30
    I2C3 ── pins 15 (SDA) and 16 (SCL) of the header: what `run --i2c` puts there
    ADC1 ←─ pins 2, 3, 4, 7, 15 and 16 of the header: a voltage held there (`gpio PIN 1.25V`)
-   TIM1 CH1N (PA7), LPTIM2 OUT (PA4) ──→ pins 2 and 4 of the header: a PWM, as its numbers (`gpio`)
+   TIM1 CH1N (PA7), LPTIM2 OUT (PA4) ──→ pins 2 and 4 of the header: a PWM, as its numbers (`gpio`) and as edges in a record
    TIM16 CH1 (PB8) ── piezo → flipper-speaker → QEMU audio (desktop or WAV)
    PA0 + TIM2 TI1  ←─ IR receiver ← /machine/ir rx (marks/spaces)
    PA1 + TIM2 TI2  ←─ CC1101 GDO0 (async RX) ← /machine/subghz rx (the "air"),
@@ -1676,10 +1676,16 @@ ufbt is not run at all, and `update` sends the package without the stage (BRINGU
   `NAME:PIN:on|off:CLOCK:DIVIDER:PERIOD:HIGH`; `fe_header.parse_pwm` reads it and
   `pwm_text` says it, for `gpio`, `status` and the window, which watches the
   property over the panel link. The pins' record looks at the header after a write
-  to either timer (`changed` hooks) and has `x` for a PWM. Not there: any other
-  timer's output on a header pin (`unknown`, as before), a PWM's edges in the
-  record, dead time, what the firmware reads from the pin's input register, and a
-  PWM as a voltage for the ADC (0 V, or 3.3 V when it is high all the time).
+  to either timer and to the RCC, where a timer's clock is chosen (`changed` and
+  `written` hooks). It has a PWM's edges, though nothing makes them one by one:
+  edge n is at the PWM's start plus n/2 periods, and the period's first part for
+  an odd n, in ticks times the divider over the clock (`hdr_rec_pwm_at`), so no
+  rounding adds up. They are written up to the time of every look and every flush,
+  those of two PWMs merged by their times; a PWM starts anew where it appears on
+  the pin or one of its numbers changes. Above 100 kHz the pin is `x`. Not there:
+  any other timer's output on a header pin (`unknown`, as before), dead time, what
+  the firmware reads from the pin's input register, and a PWM as a voltage for the
+  ADC (0 V, or 3.3 V when it is high all the time).
 - **The low-power timers' clock** (`stm32wb55_lptim.c`): it was 32768 Hz for both.
   It is what RCC_CCIPR picks now (PCLK1, LSI, HSI16 or LSE; the SoC answers), since
   LPTIM2 as a PWM runs from PCLK1 at 64 MHz, and from LSE where a frequency is too

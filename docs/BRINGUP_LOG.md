@@ -5432,6 +5432,41 @@ big lock, entry 92).
       crash was found, and the corpus did not have both steps to it that
       the check asks for. Alone: 18 of 18, before this.
 
+174. **A PWM's edges in the record of the pins.**
+    - A PWM on the header is a period and its high part in the model: no
+      timer makes its edges, and a record had an `x` for such a pin. The
+      record writes them now, since it has all it needs: edge n of a PWM
+      is at its start plus n/2 periods (and the first part, for an odd
+      n), in ticks times the divider over the clock, so nothing drifts.
+      They are written up to the moment of every look at the pins and of
+      every flush (50 ms), merged by time where both pins have one. A
+      first period begins where the PWM appears on the pin, and again
+      when its numbers change.
+    - LPTIM2's output is low to the compare value and high from it, TIM1's
+      channel depends on its mode and the polarity bits: which part of a
+      period is the high one is told with the rest now.
+    - The check's script: 1 kHz at 50 % was 2802 periods of 1,000,000 ns
+      with 500,000 high; 9.998 kHz 28,010 periods of 100,015 or 100,016;
+      440 Hz, 100 Hz, and 5 Hz of the 32768 Hz crystal: 200,012,207 ns.
+    - The first record of that had 3000 periods of 102,406 ns where the
+      5 Hz belonged: LPTIM2 with the period for 32768 Hz and still the
+      clock of 64 MHz. The firmware changes the timer's clock in the RCC,
+      and a write there was no look at the pins. It is one now (a hook
+      of the RCC's, as LPTIM2 and TIM1 have theirs).
+    - A pin is `x` for the moment in which it is the timer's and the
+      timer does not run yet, and for a PWM above 100 kHz, which would be
+      more than 200,000 lines a second.
+    - `gpio watch` reads the record, and 30,000 lines a second are no
+      watching: a pin whose last eight changes came within 80 ms has one
+      line, "changes 1 kHz, high 50 % of the time", said when the first
+      four of them are as the last four and not what was said before.
+    - Seen once in six runs of gpio_check on the official 1.5.1 today:
+      its record of `ikey read` had the firmware's reset pulse and the
+      key's presence, and the firmware read a ROM of FF. Not in the five
+      others.
+    - Checks: gpio_check 112 on the official 1.5.1 (three times), 83 on
+      the dev build, Momentum and Unleashed.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

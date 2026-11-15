@@ -1958,8 +1958,14 @@ gpio     : PA7 has a PWM (1 kHz, high 50 %)
 - What is held to such a pin does not show, as with any pin that the firmware
   drives both ways. On an open-drain output of the timer a wire to GND wins: the
   pin is low then.
-- A record (`gpio record`, `gpio watch`) has no edges of a PWM: the pin is unknown
-  in it, `x`, for as long as the PWM runs.
+- A record (`gpio record`) has a PWM's edges: each one's time from the PWM's period
+  and its high part, to the nanosecond, a first period beginning where the PWM
+  appears on the pin or its numbers change. Up to 100 kHz; a faster one is unknown
+  in the record, `x`. A record with a 10 kHz PWM in it grows by 20,000 lines a
+  second.
+- `gpio watch` has one line for a pin that changes that fast, with its changes a
+  second and the part of the time it is high (`PA7  changes 1 kHz, high 50 % of
+  the time`), again when they become others, and the edges' number at its end.
 - Only those two outputs, which are the firmware's own. Another timer on another
   pin of the header stays `unknown`. What the firmware reads from a pin that has a
   PWM, and such a pin as a voltage for the ADC, are not modelled.

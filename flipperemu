@@ -3455,6 +3455,10 @@ def gpio_watch(dev, pins, words, seconds):
           + (f" (from the record that runs: {path})" if was else ""),
           flush=True)
     record, since, shown, rest, idle = fe_header.Record(), {}, 0, "", 0.0
+    # a pin that changes many times a second (a PWM's edges are in the
+    # record) has a line for what it does, not one for each change: its
+    # last nine changes, and what was said of it last
+    FAST, recent, said, hidden = 80e6, {}, {}, 0
     began = time.time()
     try:
         watch_ends()
@@ -3468,11 +3472,43 @@ def gpio_watch(dev, pins, words, seconds):
                         if not change:
                             continue
                         ns, pin, level, before = change
+                        last = recent.setdefault(pin, [])
+                        last.append((ns, level))
+                        del last[:-9]
+                        fast = (len(last) == 9 and ns - last[0][0] < FAST
+                                and {x for _, x in last} == {"high", "low"})
+                        if not fast:
+                            said.pop(pin, None)
                         if ns >= t0 and (not want or pin in want):
-                            print(f"{(ns - t0) / 1e9:12.6f}  {pin:5} {level}"
-                                  + (f"  ({before} for "
-                                     f"{fe_header.span(ns - since[pin])})"
-                                     if pin in since else ""), flush=True)
+                            if fast:
+                                # (eight changes: four periods of a PWM; said
+                                # when the first two are as the last two, and
+                                # not what was said last)
+                                span = ns - last[0][0]
+                                half = last[4][0] - last[0][0]
+                                highs = [sum(b[0] - a[0] for a, b in
+                                             zip(part, part[1:]) if a[1] == "high")
+                                         for part in (last[:5], last[4:])]
+                                now = (4e9 / span, 100 * sum(highs) / span)
+                                was = said.get(pin)
+                                hidden += 1
+                                if abs(2 * half - span) > span / 50 or \
+                                        abs(highs[0] - highs[1]) > span / 100 or \
+                                        (was and abs(now[0] - was[0]) < was[0] / 50
+                                         and abs(now[1] - was[1]) < 1):
+                                    since[pin] = ns
+                                    continue
+                                said[pin] = now
+                                print(f"{(ns - t0) / 1e9:12.6f}  {pin:5} "
+                                      f"changes {fe_header.hertz(now[0])}, "
+                                      f"high {now[1]:.0f} % of the time (a "
+                                      "PWM's edges: not shown one by one)",
+                                      flush=True)
+                            else:
+                                print(f"{(ns - t0) / 1e9:12.6f}  {pin:5} {level}"
+                                      + (f"  ({before} for "
+                                         f"{fe_header.span(ns - since[pin])})"
+                                         if pin in since else ""), flush=True)
                             shown += 1
                         since[pin] = ns
                     idle = 0.0
@@ -3500,7 +3536,9 @@ def gpio_watch(dev, pins, words, seconds):
             except (SystemExit, OSError):
                 pass                    # the emulator is gone, and its record
             path.unlink(missing_ok=True)
-    print(f"[{dev.name}] {changes_text(shown)} in {time.time() - began:.1f} s")
+    print(f"[{dev.name}] {changes_text(shown)} in {time.time() - began:.1f} s"
+          + (f", and {hidden} edges of what changes too fast to show each"
+             if hidden else ""))
     return 0
 
 

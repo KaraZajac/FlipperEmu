@@ -280,6 +280,9 @@ static void wb55_rcc_write(void *opaque, hwaddr addr, uint64_t val64,
         s->regs[idx] = val;
         break;
     }
+    if (s->written) {
+        s->written(s->written_opaque);
+    }
 }
 
 static const MemoryRegionOps wb55_rcc_ops = {

@@ -18,7 +18,7 @@
  *            PA6 (3) IN11, PA7 (2) IN12: "header" holds a voltage to a pin,
  *            /machine "header-adc" says what the firmware converted
  *   PWM (header):   TIM1 CH1N on PA7 (2), LPTIM2's output on PA4 (4), told
- *            as numbers and not as edges: /machine "header-pwm"
+ *            as numbers: /machine "header-pwm"; a record has their edges"
  *   SPI1 (header):  the radio's bus again, on MOSI PA7 (2), MISO PA6 (3),
  *            SCK PB3 (5) while those are its pins; devices by -device
  *            TYPE,bus=spi-header,cs=N, N the header pin of the chip select
@@ -243,6 +243,13 @@ struct FlipperZeroState {
     int64_t hdr_rec_at;          /* ... and the last time written to it */
     uint64_t hdr_rec_changes;
     QEMUTimer *hdr_rec_flush;    /* what was recorded reaches the file */
+    struct HdrRecPwm {           /* a pin whose PWM the record writes out */
+        bool on;
+        uint32_t clock, divider, period, high;  /* (as HeaderPwm has them) */
+        bool high_last;
+        int64_t t0;              /* its first period began then */
+        uint64_t next;           /* the next edge: two a period, 0 at t0 */
+    } hdr_rec_pwm[HDR_PINS];
     FILE *i2c_rec;               /* the record of the header's I2C bus (text) */
     char *i2c_rec_path;
     int64_t i2c_rec_t0;          /* ... when it began (virtual clock, ns) */
@@ -745,12 +752,14 @@ static void flipper_header_held(FlipperZeroState *s, int port)
  * TIM1's channel 1N on pin 2 (PA7, alternate function 1) and LPTIM2's output
  * on pin 4 (PA4, alternate function 14).  A pin has a PWM while its timer
  * makes one and the pin is in that timer's alternate function.  The signal
- * is not made edge by edge: it is told as a period and its high part.
+ * is not made edge by edge: it is told as a period and its high part (and
+ * a record of the pins writes the edges from those: flipper_header_pwm_edges).
  */
 typedef struct HeaderPwm {
     uint32_t clock;             /* the timer's clock, Hz */
     uint32_t divider;           /* what its prescaler divides that by */
     uint32_t period, high;      /* in ticks of the divided clock */
+    bool high_last;             /* a period's high part is its second */
 } HeaderPwm;
 
 enum { HDR_PWM_TIM1, HDR_PWM_LPTIM2, HDR_PWMS };
@@ -789,6 +798,7 @@ static bool header_pwm_tim1(FlipperZeroState *s, HeaderPwm *p)
     p->high = MIN(r[0x34 / 4] & 0xFFFF, p->period);
     if ((oc1m == 7) ^ extract32(ccer, 0, 1) ^ extract32(ccer, 3, 1)) {
         p->high = p->period - p->high;
+        p->high_last = true;
     }
     return true;
 }
@@ -802,7 +812,7 @@ static bool header_pwm(FlipperZeroState *s, int which, HeaderPwm *p)
     }
     return which == HDR_PWM_TIM1 ? header_pwm_tim1(s, p) :
            wb55_lptim_pwm(&s->soc.lptim[1], &p->clock, &p->divider,
-                          &p->period, &p->high);
+                          &p->period, &p->high, &p->high_last);
 }
 
 /* a header pin's PWM, if it has one now */
@@ -1241,13 +1251,90 @@ static uint32_t flipper_adc_input(void *opaque, int channel)
  * The record: every change of a header pin's level with its time, as a VCD
  * file, which GTKWave, PulseView and sigrok read.  Times are the virtual
  * clock's, in ns from where the record began.  A level is 0, 1, z (nothing
- * drives the pin) or x (a peripheral's pin; a PWM too, whose edges are not
- * made).  Looked at where a level can change: after the firmware's write to
- * a GPIO register or to a register of a timer that has a PWM output here,
- * after a reset, when the outside holds a pin or lets go of it, and when an
- * iButton key or reader of the emulator's pulls pin 17 or lets go of it.
+ * drives the pin) or x (a peripheral's pin).  Looked at where a level can
+ * change: after the firmware's write to a GPIO register or to a register of
+ * a timer that has a PWM output here, after a reset, when the outside holds
+ * a pin or lets go of it, and when an iButton key or reader of the
+ * emulator's pulls pin 17 or lets go of it.
+ *
+ * A PWM's edges are in it too, though no timer makes them one by one: they
+ * are written from the period and its high part, up to the moment of each
+ * look and of each flush, a first period beginning where the PWM appears on
+ * the pin or changes.  Up to HDR_REC_PWM_HZ; a faster one is an x.
  */
 #define HDR_REC_FLUSH_MS 50
+#define HDR_REC_PWM_HZ 100000
+
+/* a PWM's edge n in the record's time: two a period, the first at t0 */
+static int64_t hdr_rec_pwm_at(const struct HdrRecPwm *w, uint64_t n)
+{
+    uint64_t first = w->high_last ? w->period - w->high : w->high;
+    uint64_t ticks = (n / 2) * w->period + (n % 2 ? first : 0);
+
+    return w->t0 + muldiv64(ticks * w->divider, NANOSECONDS_PER_SECOND,
+                            w->clock);
+}
+
+/* the edges of the PWMs that are in the record, up to a time (not at it) */
+static void flipper_header_pwm_edges(FlipperZeroState *s, int64_t until)
+{
+    for (;;) {
+        int64_t at = until;
+        struct HdrRecPwm *w;
+        int best = -1;
+        char level;
+
+        for (int i = 0; i < HDR_PINS; i++) {
+            if (s->hdr_rec_pwm[i].on) {
+                int64_t t = hdr_rec_pwm_at(&s->hdr_rec_pwm[i],
+                                           s->hdr_rec_pwm[i].next);
+
+                if (t < at) {
+                    at = t;
+                    best = i;
+                }
+            }
+        }
+        if (best < 0) {
+            return;
+        }
+        w = &s->hdr_rec_pwm[best];
+        level = (w->next % 2 == 0) == !w->high_last ? '1' : '0';
+        w->next++;
+        if (at > s->hdr_rec_at) {
+            fprintf(s->hdr_rec, "#%" PRId64 "\n", at);
+            s->hdr_rec_at = at;
+        }
+        fprintf(s->hdr_rec, "%c%c\n", level, 'a' + best);
+        s->hdr_rec_last[best] = level;
+        s->hdr_rec_changes++;
+    }
+}
+
+/* a pin of the record whose level is a PWM's: its edges are written from
+ * now on (-> the level its first period begins with), or go on as they
+ * were (-> 0), or it is too fast for that (-> '?') */
+static char flipper_header_pwm_begins(FlipperZeroState *s, int i, int64_t now)
+{
+    struct HdrRecPwm *w = &s->hdr_rec_pwm[i];
+    HeaderPwm p;
+
+    if (!header_pin_pwm(s, i, &p) || !p.clock || !p.period ||
+        (uint64_t)p.period * p.divider * HDR_REC_PWM_HZ < p.clock) {
+        w->on = false;
+        return '?';
+    }
+    if (w->on && w->clock == p.clock && w->divider == p.divider &&
+        w->period == p.period && w->high == p.high &&
+        w->high_last == p.high_last) {
+        return 0;
+    }
+    *w = (struct HdrRecPwm) {
+        .on = true, .clock = p.clock, .divider = p.divider, .period = p.period,
+        .high = p.high, .high_last = p.high_last, .t0 = now, .next = 1,
+    };
+    return p.high_last ? '0' : '1';
+}
 
 static void flipper_header_look(FlipperZeroState *s, int port)
 {
@@ -1258,6 +1345,7 @@ static void flipper_header_look(FlipperZeroState *s, int port)
         return;
     }
     now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->hdr_rec_t0;
+    flipper_header_pwm_edges(s, now);   /* (those before this look) */
     if (now <= s->hdr_rec_at) {         /* two looks in one tick of the */
         now = s->hdr_rec_at + 1;        /* clock: both are in the record */
     }
@@ -1269,7 +1357,12 @@ static void flipper_header_look(FlipperZeroState *s, int port)
         }
         level = header_level(s, i);
         if (level == 'p') {
-            level = '?';                /* a PWM's edges are not in it */
+            level = flipper_header_pwm_begins(s, i, now);
+            if (!level) {
+                continue;               /* its edges go on as they were */
+            }
+        } else {
+            s->hdr_rec_pwm[i].on = false;
         }
         if (level == s->hdr_rec_last[i]) {
             continue;
@@ -1291,12 +1384,20 @@ static void flipper_lptim2_changed(void *opaque)
     flipper_header_look(opaque, 0);
 }
 
+/* ... and to one of the RCC's: the clock that it counts may be another */
+static void flipper_rcc_written(void *opaque)
+{
+    flipper_header_look(opaque, 0);
+}
+
 /* (for the records: the pins', the I2C bus's and the SPI bus's) */
 static void flipper_header_rec_flush(void *opaque)
 {
     FlipperZeroState *s = opaque;
 
     if (s->hdr_rec) {
+        flipper_header_pwm_edges(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) -
+                                    s->hdr_rec_t0);
         fflush(s->hdr_rec);
     }
     if (s->i2c_rec) {
@@ -1363,6 +1464,7 @@ static void flipper_header_rec_stop(FlipperZeroState *s)
     }
     /* its end, so that the last level has a length */
     now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->hdr_rec_t0;
+    flipper_header_pwm_edges(s, now);
     if (now > s->hdr_rec_at) {
         fprintf(s->hdr_rec, "#%" PRId64 "\n", now);
     }
@@ -1407,19 +1509,25 @@ static void flipper_set_header_record(Object *obj, const char *value,
     s->hdr_rec_at = 0;
     s->hdr_rec_changes = 0;
     fprintf(f, "$version FlipperEmu, the GPIO header of a Flipper Zero $end\n"
-               "$comment x: a peripheral has the pin; z: nothing drives it "
-               "$end\n$timescale 1 ns $end\n$scope module header $end\n");
+               "$comment x: a peripheral has the pin; z: nothing drives it; a "
+               "PWM's edges are written from its period and its high part $end\n"
+               "$timescale 1 ns $end\n$scope module header $end\n");
     for (int i = 0; i < HDR_PINS; i++) {
         fprintf(f, "$var wire 1 %c P%c%d $end\n", 'a' + i, header[i].port,
                 header[i].pin);
     }
     fprintf(f, "$upscope $end\n$enddefinitions $end\n#0\n$dumpvars\n");
+    memset(s->hdr_rec_pwm, 0, sizeof(s->hdr_rec_pwm));
     for (int i = 0; i < HDR_PINS; i++) {
         s->hdr_rec_last[i] = header_level(s, i);
+        if (s->hdr_rec_last[i] == 'p') {        /* a PWM that runs already: */
+            s->hdr_rec_last[i] = '?';           /* its edges from the first */
+        }                                       /* look on, just below */
         fprintf(f, "%c%c\n", s->hdr_rec_last[i] == '?' ? 'x' :
                 s->hdr_rec_last[i], 'a' + i);
     }
     fprintf(f, "$end\n");
+    flipper_header_look(s, -1);
     fflush(f);
     flipper_header_rec_flushes(s);
 }
@@ -2550,6 +2658,8 @@ static void flipper_zero_init(MachineState *machine)
     s->soc.tim1.update_opaque = s;
     s->soc.lptim[1].changed = flipper_lptim2_changed;   /* PWM on PA4 */
     s->soc.lptim[1].changed_opaque = s;
+    s->soc.rcc.written = flipper_rcc_written;
+    s->soc.rcc.written_opaque = s;
 
     /* ---- iButton: PB14, open drain with a pull-up (1-Wire keys);
      *      COMP1 with the 125 kHz field off (Cyfral, Metakom) */

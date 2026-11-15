@@ -222,7 +222,7 @@ static uint64_t wb55_lptim_read(void *opaque, hwaddr addr, unsigned size)
  * the polarity turned (CFGR.WAVPOL) for the other CMP + 1.
  */
 bool wb55_lptim_pwm(WB55LptimState *s, uint32_t *clock, uint32_t *divider,
-                    uint32_t *period, uint32_t *high)
+                    uint32_t *period, uint32_t *high, bool *high_last)
 {
     uint32_t cmp = s->cmp & 0xFFFF, arr = s->arr & 0xFFFF;
 
@@ -233,8 +233,10 @@ bool wb55_lptim_pwm(WB55LptimState *s, uint32_t *clock, uint32_t *divider,
     *divider = 1u << ((s->cfgr >> 9) & 7);
     *period = arr + 1;
     *high = cmp < arr ? arr - cmp : 0;
+    *high_last = true;                  /* (from the compare value on) */
     if (s->cfgr & CFGR_WAVPOL) {
         *high = *period - *high;
+        *high_last = false;
     }
     return true;
 }

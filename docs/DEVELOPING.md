@@ -356,8 +356,8 @@ A pin is named as the MCU has it (`PA7`), as the case has it (`A7`) or by that n
   which is not always what was asked for: 10 kHz at 30 % on pin 4 comes out as 9.998
   kHz at 30.01 %, since the firmware sets LPTIM2 one tick long. The pin has to be the
   timer's too: a timer that runs while the pin is something else is no PWM in the
-  table, and neither is a pin that waits for a timer. A record has no edges of a PWM,
-  only an `x` for as long as it is one.
+  table, and neither is a pin that waits for a timer. A record has a PWM's edges
+  (up to 100 kHz), and `gpio watch` one line for what such a pin does.
 - What another peripheral puts on a pin (a UART, SPI, I2C, a timer other than those
   two outputs) is `unknown`: only the levels
   of plain inputs and outputs are on the header so far. (The

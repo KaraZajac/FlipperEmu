@@ -102,6 +102,10 @@ struct WB55RccState {
     uint32_t regs[WB55_RCC_NREGS];
     WB55RccHook hooks[64];
     int nhooks;
+    /* board hook: after a write to one of its registers (a clock that a
+     * timer's output on the header is made from may be another now) */
+    void (*written)(void *opaque);
+    void *written_opaque;
     bool powered;                /* backup domain has seen power           */
     uint32_t pending_reset_flags;/* CSR flags for the next reset           */
     DeviceState *rtc;            /* backup domain reset target             */
@@ -531,7 +535,7 @@ struct WB55LptimState {
 /* the output as a PWM, if it is one: the timer's clock in Hz, what the
  * prescaler divides it by, and a period and its high part in ticks */
 bool wb55_lptim_pwm(WB55LptimState *s, uint32_t *clock, uint32_t *divider,
-                    uint32_t *period, uint32_t *high);
+                    uint32_t *period, uint32_t *high, bool *high_last);
 
 /* ----------------------------------------------------------------- SPI */
 #define TYPE_WB55_SPI "stm32wb55-spi"

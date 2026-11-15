@@ -634,9 +634,12 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         board), a display
   - ☐ More on the SPI bus: an example app in C beside the script, and the
         check's app on the other firmwares, each with its own SDK
-  - ☐ A PWM's edges in the pins' record (`gpio record` has `x` for a pin with a
-        PWM, and `gpio watch` no line); other timers' outputs on the header's
-        pins than the firmware's two
+  - ☑ A PWM's edges in the pins' record (2026-11-15): written from the PWM's
+        period and its high part, to the nanosecond, up to 100 kHz; a change of
+        the timer's clock in the RCC is a change of the PWM; `gpio watch` has a
+        line for what a fast pin does, not one for each edge. `gpio_check.py`
+        112, 83 without the SDK (BRINGUP_LOG 174)
+  - ☐ Other timers' outputs on the header's pins than the firmware's two
   - ☑ SPI devices on the header (2026-11-12): `run --spi TYPE@PIN` puts one of
         QEMU's SPI devices on SPI1 as the header has it, MOSI on pin 2, MISO on
         pin 3 and SCK on pin 5, with a pin of the header as its chip select (4,

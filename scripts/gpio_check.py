@@ -38,7 +38,8 @@ frequency and the part of the time for which it is high; `--wait pwm` waits
 for one; `status --json` has the timer's numbers, which the check works out
 from the firmware's arithmetic beforehand, with and without a prescaler and
 with LPTIM2 on its 32768 Hz clock.  A PWM that is high for none or for all of
-the time is a low or a high pin, and a record has no edges of a PWM.  (Skipped
+the time is a low or a high pin, and a record has a PWM's edges, to the
+nanosecond of its period and its high part.  (Skipped
 on a firmware whose JavaScript makes none.)
 
 Then what the firmware's `gpio` command cannot do, with three apps of the
@@ -827,8 +828,21 @@ def pwm_checks(b):
                                    "while the firmware drives the pin",
           out + err + table)
 
+    code, out, err, took = fe(b, "gpio", "watch", "PA7,PA4", "--for", 1.5)
+    check("`gpio watch` of the two while their PWMs run: a line for what "
+          "each does (its changes a second and the part of the time it is "
+          "high), not thirty thousand for the edges, and their number at "
+          "the end",
+          code == 0
+          and len(re.findall(r"PA7 +changes 1 kHz, high 50 % of the time", out)) == 1
+          and len(re.findall(r"PA4 +changes 9\.998 kHz, high 30 % of the "
+                             r"time", out)) == 1
+          and len(out.splitlines()) < 12
+          and re.search(r"and \d{5} edges of what changes too fast", out),
+          out + err)
     ok, st, table = step("high", {"PA7": (64000000, 3, 48484, 12121),
                                   "PA4": (32768, 1, 6554, 3277)})
+    time.sleep(0.8)                     # (a few periods of 5 Hz for the record)
     check("other numbers for both (pwmWrite(440, 25), pwmWrite(5, 50)).  "
           "TIM1 with a prescaler: 64 MHz over 3, and 48484 ticks, 440 Hz.  "
           "LPTIM2, for which 5 Hz is too slow with the 64 MHz, on the "
@@ -881,13 +895,55 @@ def pwm_checks(b):
           text + log_tail(b))
     code, out, err, took = fe(b, "gpio", "record", "stop")
     changes, wrong = recorded(vcd)
-    check("a record of all that has no edges of a PWM: such a pin is "
-          "unknown (x) in it for as long as the PWM runs.  PA7: unknown, "
-          "low (0 %), floating; PA4: unknown, high (100 %), floating",
+
+    def periods(pin):
+        """A PWM's periods in the record: (ns from a rise to the next, ns
+        high in it) -> how many there are of it"""
+        rises, fall, seen = [], None, {}
+        for ns, p, level, before in changes:
+            if p != pin:
+                continue
+            if level == "high" and before == "low":
+                if rises and fall is not None:
+                    key = (ns - rises[-1], fall - rises[-1])
+                    seen[key] = seen.get(key, 0) + 1
+                rises.append(ns)
+                fall = None
+            elif level == "low" and before == "high":
+                fall = ns
+            else:
+                rises, fall = [], None  # (a PWM's end, or its beginning)
+        return seen
+
+    def has(seen, period, high, least):
+        """So many periods of these ticks' lengths, to the ns"""
+        return sum(n for (p, h), n in seen.items()
+                   if abs(p - period) <= 1 and abs(h - high) <= 1) >= least
+
+    a7, a4 = periods("PA7"), periods("PA4")
+    ns = lambda ticks, divider, clock: ticks * divider * 1e9 / clock
+    check("a record of all that has the PWMs' edges, written from each "
+          "one's period and its high part, to the nanosecond.  PA7: 1 kHz "
+          "with 500 µs high, 440 Hz (2272687 ns) with a quarter of it, "
+          "100 Hz with 1 ms, then low (0 %) and floating.  PA4: 9.998 kHz "
+          "(100016 ns, 30016 high: 20,000 edges a second), 5 Hz of the "
+          "32768 Hz clock, 100 Hz, then high (100 %) and floating",
           code == 0 and not wrong
-          and of(changes, "PA7") == ["unknown", "low", "floating"]
-          and of(changes, "PA4") == ["unknown", "high", "floating"],
-          out + err + wrong + repr(changes))
+          and has(a7, 1e6, 5e5, 200) and has(a7, ns(48484, 3, 64e6),
+                                             ns(12121, 3, 64e6), 50)
+          and has(a7, 1e7, 1e6, 10)
+          and of(changes, "PA7")[-2:] == ["low", "floating"]
+          and has(a4, ns(6401, 1, 64e6), ns(1921, 1, 64e6), 2000)
+          and has(a4, ns(6554, 1, 32768), ns(3277, 1, 32768), 1)
+          and has(a4, ns(40001, 16, 64e6), ns(4001, 16, 64e6), 10)
+          and of(changes, "PA4")[-2:] == ["high", "floating"]
+          # (unknown once at most: the pin is the timer's a moment before
+          # the timer runs)
+          and of(changes, "PA7").count("unknown") <= 1
+          and of(changes, "PA4").count("unknown") <= 1,
+          out + err + wrong + repr(sorted(a7.items(), key=lambda kv: -kv[1])[:6])
+          + repr(sorted(a4.items(), key=lambda kv: -kv[1])[:6])
+          + repr(of(changes, "PA7")[-3:]) + repr(of(changes, "PA4")[-3:]))
     tidy()
 
 
