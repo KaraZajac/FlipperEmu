@@ -4428,6 +4428,101 @@ big lock, entry 92).
       the record's own; the two devices still have to answer. 66 and 79 on
       the official 1.5.1.
 
+148. **CPU2's part of SRAM2, and a Lockup that stops the processor.** For
+    firmwares built for another stack than BLE Light (MoonOS, Kara's): the
+    stack keeps the upper parts of SRAM2a and SRAM2b for CPU2, and CPU1
+    has to stay out of them.
+    - SRRVR's SBRSA and SNBRSA say how much of SRAM2a and SRAM2b is CPU1's,
+      in KB (the factory's, BLE Light's: 0x964B5C00, 18 and 11). The flash
+      model applies them when it loads the option bytes, at reset: an I/O
+      region inside each SRAM2 RAM region (its aliases at 0x10000000 have it
+      too) over CPU2's part. CPU2's accesses (the model's, marked with
+      requester 0xC2) and a debugger's reach the RAM underneath.
+    - What a CPU1 access there does on the chip is not in ST's documents.
+      ST's community has the write case: firmwares for Full extended with
+      an unadapted linker script "stuck in hard fault handler after calling
+      scatterload". A write is taken by the bus and fails later: an
+      imprecise BusFault, asynchronous. QEMU had none: QEMU patch 0014 adds
+      `armv7m_nvic_set_pending_async()` (not escalated for its priority; a
+      disabled one is a pending HardFault; never a Lockup), and a CPU1
+      write there is dropped and pends one. A read is a precise BusFault, a
+      DMA's access a transfer error. Each refusal is counted with its
+      address (`c2-ram`; `status`: `sram2`).
+    - Found with it: a fault inside the HardFault handler ended QEMU
+      ("Lockup: can't escalate 3 to HardFault (current priority -1)", the 3
+      being HardFault's own number). The five firmwares under Full extended
+      do that: their reset handler wipes MB_MEM2 (to 0x20031377) into CPU2's
+      SRAM2a (from 0x20030800), a BusFault that becomes a HardFault, and
+      `furi_crash` writes its crash registers there and reads one back, the
+      read a precise fault inside HardFault. QEMU patch 0015 models the
+      Lockup: the processor stops (powered off, as PSCI does: no interrupt
+      wakes it, a reset does), the machine runs on, the NVIC's `lockup`
+      says where and why. The launcher takes it for a halt: `status`, `wait`
+      ("no CLI: the firmware locked up at 0x080122c4: ... the last a read of
+      0x20031364") and the CLI's commands say so.
+    - Official 1.5.1 on BLE Light's boundaries (from 0x20034800 and
+      0x2003AC00): no refusal at all.
+    - The LCD is reset with the MCU here; on a Flipper its reset is a GPIO
+      of CPU1's, and a locked-up device shows its last picture ("dies at
+      'Core 2 busy'", MoonOS's notes). Not done: the PLAN has it.
+
+149. **BLE Full and BLE Full extended.** The FUS installs three kinds
+    now. ST's 1.20.0 images carry placeholder info words in their FUS
+    footer (0xABCDABCD), and their memory word is what tells them apart:
+    4 KB sectors, then what they leave CPU1 of SRAM2a and SRAM2b in KB.
+    BLE Light 29, 18, 11; BLE Full 38, 10, 15; BLE Full extended 47, 2, 10
+    (read from stm32wb_copro v1.20.0's binaries, past their 64-byte
+    signatures). The FUS sets SFSA (0xF4 less the sectors), SBRV (SFSA's
+    word address: 0x31400 for Full extended) and SBRSA/SNBRSA from them,
+    in effect at the restart that follows the install, and the stack
+    reports its type (6 for Full extended) and that memory word: the
+    firmware's `info device` has `radio.stack.sram2a: 10K` for Full.
+    - `radio.state` keeps the type and a line `sram2 A B`, which stays when
+      the stack is deleted. `run --radio-stack full`, `full-ext`,
+      `VERSION:KIND` start a Flipper from the factory with them.
+    - The launcher keeps a package's radio stage of those three kinds, and
+      compares version and type for "the same". An image of another kind
+      (an HCI layer, BLE Basic) the FUS refuses with an error.
+    - It is one model of the stack for the three: what the Full stacks
+      have more (the central role, a GATT client, advertising sets, L2CAP
+      CoC, the enhanced connection-complete event) is not modelled.
+    - Official 1.5.1 runs on BLE Full (type 1, which it supports): its
+      block shared with CPU2 fits the 10 KB of SRAM2a that Full leaves.
+
+150. **The proof: old MoonOS on Full extended.** Old MoonOS (the Momentum
+    fork in MoonOS/Moon-Firmware) tried BLE Full extended four times in
+    April 2026 and went back to Full; its update packages of the attempts
+    were committed and deleted again, and come out of its history as they
+    were. Each was installed on a device that ran `bm-dev-1ac16f44` (the
+    build before, BLE Light 1.20.0), with `update --no-wait`.
+    - Attempt 2 (`bm-dev-7ad78943`, type 6, its own updater): the updater
+      has the FUS delete the stack, restarts, finds no stack, and deletes
+      again: every 40 s, for ever, as on the device ("a boot loop during
+      the update"). It is the updater's own loop, which MoonOS's research
+      found (an extra FUS delete in the stack-missing path; taken out in
+      the next attempt), and it never gets to install Full extended.
+    - Attempt 3's last (`bm-dev-84e98b7d`, that delete taken out): the FUS
+      deletes BLE Light and installs BLE Full extended ("the flash from
+      0x080c5000 and SRAM2 from 0x20030800 and 0x2003a800 are CPU2's after
+      the restart"); at the restart the firmware's reset handler wipes its
+      MB_MEM2 into CPU2's SRAM2a, and CPU1 locks up in its HardFault
+      handler, at every start alike. On the device that is dead, its last
+      screen on it: "dies at 'Core 2 busy' after FUS reboot", "makes the
+      device appear completely dead" (the fork's notes), which the fork's
+      developer took for a quick loop of resets.
+    - So the emulator catches the bug that MoonOS's new design fixes (the
+      mailboxes into SRAM2b); a build with them there is what it can tell
+      apart from these.
+    - Checks with 148 to 150: ble_check 30 on the five (two more: BLE Full
+      runs; Full extended locks the official firmware up at its start, and
+      `wait` says so); update_check 37 on the five, its Full extended part
+      last because it leaves the device locked up (the first run had it
+      before `run --update`, which then found a dead device); the smoke
+      test as before (28 on the official 1.5.1, Momentum and dev, 27 on
+      Unleashed and RogueMaster); every other check on the official 1.5.1
+      as before (setup_check 44, gui_check 79). Momentum's slideshow crash
+      of entry 120 came once, in the first of its two update runs.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

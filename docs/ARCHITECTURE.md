@@ -161,10 +161,23 @@ CPU2 runs ST's closed radio firmware, so it's modelled by behaviour instead. As 
 Flipper from the factory it has a wireless stack and runs it: ST's BLE Light 1.20.0, the
 stack that the update packages of the five firmwares here carry (their manifests say
 `Radio version: 01 14 00 00 02 03`). The machine's `radio-stack=VERSION` gives it
-another version of that stack, and `radio-stack=none` (`run --radio-stack none`) a FUS
-with no stack, which is a real device's state too. What the FUS installs later it
-keeps, as a chip's flash keeps it: in a file (`radio=FILE`; the launcher's
-`devices/NAME/radio.state`), which says what is installed when it exists.
+another version of that stack, `radio-stack=KIND` or `VERSION:KIND` another kind
+(`full`, `full-ext`), and `radio-stack=none` (`run --radio-stack none`) a FUS with no
+stack, which is a real device's state too. What the FUS installs later it keeps, as a
+chip's flash keeps it: in a file (`radio=FILE`; the launcher's
+`devices/NAME/radio.state`: the stack's version, type and sectors, and what the FUS set
+of SRAM2), which says what is installed when it exists.
+
+The kinds are BLE Light, BLE Full and BLE Full extended (types 3, 1 and 6). ST's 1.20.0
+images say in their FUS footer how many 4 KB sectors they take and how much SRAM2a and
+SRAM2b they leave CPU1, in KB (29, 18, 11; 38, 10, 15; 47, 2, 10); the footer's info
+words are ST's placeholders, so those sizes are what tells the FUS which kind it
+installs. The model is one BLE stack for all three: what it takes from the kind is the
+type that it reports, the flash (SFSA, SBRV) and SRAM2 (SBRSA, SNBRSA: [Flash and
+option bytes](#flash-and-option-bytes-stm32wb55_flashc)), and the MemorySize word of
+its InfoTable (sectors, SRAM2a and SRAM2b as the footer has them). An image of another
+kind (an HCI layer, BLE Basic) the FUS does not install: it says why, and
+FUS_GET_STATE reports an error.
 - `PWR_CR4.C2BOOT` (set by `HW_IPCC_Enable()`) boots it after 5 ms. With a stack it
   writes `MB_DeviceInfoTable_t` (the SafeBoot, FUS 1.2.0 and stack versions, the stack's
   type and its 29 pages of flash) where the transport table at SRAM2A + 4·`IPCCBR`
@@ -461,7 +474,30 @@ is set, because the firmware does `furi_check(FLASH->SR == 0)`. Programmed pages
 flushed from the TCG translation cache (`memory_region_flush_rom_device`), so freshly
 written code runs; that's what XIP app loaders and the OTA updater need. With a
 `-drive if=pflash` image every program/erase is written through to the file. Pages from
-SFSA (0xD7) up belong to CPU2 and refuse writes.
+SFSA (0xD7 with BLE Light) up belong to CPU2 and refuse writes.
+
+**CPU2's part of SRAM2.** SRRVR's SBRSA and SNBRSA say how much of SRAM2a and SRAM2b
+stays CPU1's (in KB); the rest is the wireless stack's. The FUS sets them when it
+installs a stack, from the image's footer (`wb55_flash_set_c2_sram()`), and the flash
+model applies them when it loads the option bytes, at reset (and after a state is
+loaded): an I/O region inside each SRAM2's RAM region over CPU2's part, so the aliases
+at 0x10000000 have it too. It takes CPU2's accesses (the CPU2 model marks them,
+`WB55_C2_ATTRS`) and a debugger's, which reach the RAM underneath. CPU1's write is
+dropped and pends an imprecise BusFault (BFSR.IMPRECISERR, QEMU patch 0014's
+`armv7m_nvic_set_pending_async()`): asynchronous, so one inside the HardFault handler
+waits and does not lock the processor up. CPU1's read is a precise BusFault
+(`MEMTX_ERROR`), and so is a DMA's access (a transfer error). Each refusal is counted
+with its address (property `c2-ram`, `status`'s `sram2`). The chip's rule for reads is
+not documented; ST's community has firmwares "stuck in hard fault handler after calling
+scatterload" with an unadapted linker script, which is the write case.
+
+**Lockup.** A fault inside the HardFault handler that cannot be taken is a Lockup:
+QEMU patch 0015 stops the processor there (powered off, as PSCI does: no interrupt
+wakes it, a reset does) instead of ending the emulator, and the NVIC's `lockup`
+property says where and why; the launcher's `status` and `wait` report it as a halt
+of the firmware. The LCD is reset with the MCU here, where on a Flipper it keeps its
+last picture (its reset is a GPIO of CPU1's): a locked-up Flipper's screen is blank in
+the emulator.
 
 ## USB (`stm32wb55_usb.c`)
 

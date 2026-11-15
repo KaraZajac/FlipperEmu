@@ -237,9 +237,12 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
   (`./flipperemu snapshot save`, `snapshot load`).
 
 **Not yet** (see [PLAN.md](PLAN.md))
-- A radio stack of another kind than BLE Light (BLE Full, BLE Basic): the emulated
-  stack is BLE Light, so `./flipperemu update` and `run --update` leave such a
-  package's radio stage out. A BLE Light stack of any version CPU2's FUS installs.
+- A radio stack of another kind than BLE Light, BLE Full and BLE Full extended (BLE
+  Basic, an HCI layer, Thread): `./flipperemu update` and `run --update` leave such a
+  package's radio stage out. The three kinds are one model of ST's BLE stack, which
+  reports the kind's type and keeps its flash and SRAM2 for CPU2; what the Full stacks
+  have more (the central role, a GATT client, extended advertising, L2CAP CoC) is not
+  modelled yet.
 - A real phone or computer over Bluetooth: the central is a program on the link, not a
   Bluetooth adapter.
 - NFC: Ultralight C, ISO14443-4 (DESFire, bank cards), ISO14443B, ISO15693 and FeliCa
@@ -469,7 +472,7 @@ picture of the save to the pixel and the tag, and goes on with Pause.
 | `run --update PKG` | install an update package through the firmware's own updater (keeps settings and files) |
 | `update PKG [--cli] [--keep-radio] [--no-wait] [--timeout S]` | the same on a device that runs: the package is written to its card, which is out of its slot for that moment (`--cli`: sent through the firmware's CLI), and the launcher waits until the Flipper is back |
 | `run --unplugged` \| `run --battery PERCENT` \| `run --gtk` | start on battery (USB cable out); with this charge; in QEMU's own window (the bare LCD) |
-| `run --radio-stack none` \| `run --radio-stack VERSION` | a CPU2 from the factory with no wireless stack (a FUS alone: no Bluetooth), or with another version of the BLE stack than 1.20.0; a plain `run` keeps what CPU2's FUS installed (`devices/NAME/radio.state`) |
+| `run --radio-stack none` \| `run --radio-stack VERSION` \| `run --radio-stack KIND` | a CPU2 from the factory with no wireless stack (a FUS alone: no Bluetooth), with another version of the BLE stack than 1.20.0, or with another kind (`full`, `full-ext`: BLE Full, BLE Full extended 1.20.0; `VERSION:KIND`), with the flash and SRAM2 that the kind keeps for CPU2; a plain `run` keeps what CPU2's FUS installed (`devices/NAME/radio.state`) |
 | `stop` | shut a running device down cleanly (saves its NVRAM) |
 | `gui [--scale N]` | the window that looks like a Flipper, for a device that runs already |
 | `status [--json]` | what is plugged into a running device and held to it; whether its firmware has halted, or has started again after a crash |
@@ -1062,9 +1065,12 @@ image into the flash, the FUS installs it from there and starts it: the Flipper 
 four to six times on the way, a minute or so in all, as a real one does. CPU2 keeps
 what its FUS installed in `devices/NAME/radio.state`, across runs, until
 `run --radio-stack VERSION` (or `none`) gives it a stack from the factory again. The
-model is a BLE Light stack, so a package whose stack is another kind (BLE Full, BLE
-Basic) has its radio stage left out: its updater would install it, find the kind it
-asked for not running, and begin again, for ever (`--keep-radio` for one is refused).
+FUS installs BLE Light, BLE Full and BLE Full extended: ST's 1.20.0 images, which it
+tells apart by their footers, and it gives CPU2 the flash and the SRAM2 that the image
+asks for ([CPU2's flash and SRAM2](#cpu2s-flash-and-sram2)). A package whose stack is
+another kind (BLE Basic, an HCI layer) has its radio stage left out: its updater would
+install it, find the kind it asked for not running, and begin again, for ever
+(`--keep-radio` for one is refused).
 When the updater stops at an error (a damaged image, say), the launcher says so within
 seconds, and a held Back (`press --hold 1500 back`) starts the firmware that is there.
 
@@ -2669,6 +2675,40 @@ device's state too: the firmware says "Stack isn't installed!" and has no Blueto
 An update package brings the stack back: CPU2's FUS installs it from the package's
 radio stage ([below](#updating-like-qflipper-does)), and keeps it.
 How the stack is modelled: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#the-ble-stack-stm32wb55_blec).
+
+#### CPU2's flash and SRAM2
+
+The stack's kind decides how much of the chip is CPU2's: the flash from where the stack
+begins, and the upper parts of SRAM2a and SRAM2b. CPU2's FUS writes that into the option
+bytes (SFSA, SBRSA, SNBRSA) when it installs a stack, from the image's footer, and it
+holds from the next reset on. BLE Light leaves CPU1 18 KB of SRAM2a and 11 KB of SRAM2b,
+BLE Full 10 and 15, BLE Full extended 2 and 10. `run --radio-stack full` and
+`full-ext` start a Flipper from the factory with those, and an update package's radio
+stage installs them as on a Flipper. CPU1 gets a bus error in CPU2's parts, as on the
+chip (a write's BusFault is imprecise, a read's precise; a DMA's transfer fails), and
+`status` says where they begin and what CPU1 touched there:
+
+```
+sram2    : CPU2's (the wireless stack's) from 0x20034800 and 0x2003ac00
+```
+
+A firmware whose block shared with CPU2 does not fit CPU1's part fails as it would on a
+chip. With the stock linker that block (the mailboxes: 4,984 bytes from 0x20030000)
+fits BLE Light and BLE Full, not Full extended: the five firmwares' start wipes it, a
+BusFault, and their HardFault handler reads its crash registers back from CPU2's part,
+a fault inside HardFault: CPU1 locks up, and a chip stops there until it is reset.
+`status` and `wait` say so, and why:
+
+```
+firmware : it locked up at 0x080122c4: a fault it could not take (can't escalate BusFault to HardFault (current priority -1); CPU1 got bus errors in the SRAM2 that the wireless stack keeps for CPU2, 16 of them, the last a read of 0x20031364). A chip stops there until it is reset, its screen as it was
+```
+
+That is how old MoonOS builds with the Full extended stack ended: the FUS installed it,
+and at the restart the device was dead. A firmware for Full extended moves its
+mailboxes to SRAM2b, as ST's `BLE_p2pServer_Ext` does.
+**An emulator built before this (2026-11-14) wants `scripts/setup_qemu.sh` once more**:
+QEMU patches 0014 (an imprecise BusFault) and 0015 (a Lockup that stops the processor
+instead of ending the emulator).
 
 ### The secure enclave
 

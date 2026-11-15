@@ -73,6 +73,31 @@ qFlipper / lab.flipper.net / `ufbt launch` only run over USB CDC.
           over RPC, asks the device info, forgets the bond, and opens Settings >
           Bluetooth. `scripts/gui_check.py` 76 (77 with an SPI script),
           `scripts/ble_check.py` 28 (BRINGUP_LOG 143)
+- ☐ Custom firmware with another radio stack, as MoonOS (Kara, 2026-11-14): what a
+      firmware built for BLE Full extended needs of the emulator
+    - ☑ Reserved RAM (2026-11-14): CPU2's parts of SRAM2a and SRAM2b, from the option
+          bytes (SBRSA, SNBRSA) at reset; CPU1 gets a bus error there (a write's
+          imprecise, QEMU patch 0014; a read's precise), and a fault it cannot take is a
+          Lockup that stops the processor (QEMU patch 0015) instead of ending QEMU;
+          `status` and `wait` say so; `scripts/ble_check.py` 30 (BRINGUP_LOG 148)
+    - ☑ BLE Full and Full extended (2026-11-14): types 1 and 6, installed by the FUS from
+          a package's radio stage as BLE Light is (ST's 1.20.0 images, told apart by
+          their footers), with their flash and SRAM2; `run --radio-stack full|full-ext`
+          (BRINGUP_LOG 149)
+    - ☑ The proof (2026-11-14): old MoonOS builds with Full extended fail as on the
+          devices: attempt 2's updater loops deleting a stack that is gone; attempt 3's
+          last package has the FUS install Full extended, and the firmware's start locks
+          CPU1 up in CPU2's SRAM2a; `scripts/update_check.py` 37 does it (BRINGUP_LOG
+          150)
+    - ☐ The LCD keeps its picture over a reset of the MCU (on a Flipper its reset is a
+          GPIO of CPU1's): a locked-up device's screen is blank here, frozen there
+    - ☐ CPU2 hard-faults when CPU1 gives it a buffer in CPU2's part of SRAM2 (ST's
+          1.20.0 does, and leaves its marker at SRAM2A_BASE, which the firmware looks
+          for every 5 s): a firmware that hands CPU2 such a buffer without touching it
+          itself runs on here
+    - ☐ What the Full stacks have more: the central role, a GATT client, advertising
+          sets, L2CAP CoC, LE Enhanced Connection Complete (with EXT_ADV)
+    - ☐ XIP app loaders exercised (MoonOS's .rock apps run from flash)
 - ☐ Stretch: second CDC port of the dual-CDC mode; mass storage
 
 The double-buffer question from the notes was settled by what libusb_stm32 requires:
@@ -741,13 +766,14 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           shift, which would keep a busy host out of the emulated time altogether
 - ☐ TCG plugin for coverage/trace of firmware or a single FAP
 - ☐ Fuzzing harness (AFL++/libafl QEMU mode) for parsers in the firmware
-- ☐ Upstream the thirteen QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:
+- ☐ Upstream the fifteen QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:
       register reads without the big lock under TCG, 2026-11-10; 0006 to 0009: a
       chardev's log file, the UART's reception, a byte no receiver took, an EEPROM's
       file, 2026-11-11; 0010 to 0013: Winbond's read-ID commands, the load of a saved
       state with an SD card on SPI, an EEPROM's address counter after an address that
-      was cut short, an EEPROM's saved state, 2026-11-12); consider upstreaming the
-      machine
+      was cut short, an EEPROM's saved state, 2026-11-12; 0014 and 0015: an imprecise
+      BusFault, a Lockup that stops the processor, 2026-11-14); consider upstreaming
+      the machine
 
 ## Non-goals (for now)
 - Running ST's radio stack on an emulated CPU2 (closed, encrypted binary)
