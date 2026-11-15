@@ -252,8 +252,8 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
   modelled yet.
 - A real phone or computer over Bluetooth: the central is a program on the link, not a
   Bluetooth adapter.
-- NFC: ISO14443B and ST25TB cards, FeliCa Standard, and what runs on ISO14443-4
-  beside DESFire (bank cards, Type 4 tags). The cards beyond ISO14443A are
+- NFC: FeliCa Standard, and what runs on ISO14443-4 beside DESFire (bank cards,
+  Type 4 tags). The cards beyond ISO14443A are
   read, not emulated: no virtual reader speaks FeliCa or ISO15693 to a Flipper that
   emulates one. When the Flipper emulates a MIFARE Classic, the virtual reader gets as
   far as its UID, ATQA and SAK: the Crypto1 answers go out through a bit-banged pin
@@ -520,7 +520,7 @@ picture of the save to the pixel and the tag, and goes on with Pause.
 | `ibutton FILE.ibtn` \| `ibutton ds1990 ROM` \| `ibutton cyfral DATA` \| `ibutton none` | touch an iButton key to the device (also ds1992, ds1996, ds1971, dallas, metakom) |
 | `ibutton rw1990` \| `ibutton tm2004` \| … | touch a blank the device can write; `ibutton` shows its ROM |
 | `ibutton --reader` | read the Dallas key the device emulates, ROM and memory (to `devices/NAME/ibutton-tx/`) |
-| `nfc FILE.nfc` \| `nfc ntag215 UID [URL]` \| `nfc mfc1k UID` \| `nfc ulc UID` \| `nfc desfire UID` \| `nfc felica IDM` \| `nfc slix UID` \| `nfc none` | hold an NFC card to the device: a Flipper `.nfc` file (Type 2 with Ultralight C, MIFARE Classic, ISO14443-4A, DESFire, FeliCa Lite-S, ISO15693, SLIX), or one made up for a UID |
+| `nfc FILE.nfc` \| `nfc ntag215 UID [URL]` \| `nfc mfc1k UID` \| `nfc ulc UID` \| `nfc desfire UID` \| `nfc iso14443b PUPI` \| `nfc st25tb UID` \| `nfc felica IDM` \| `nfc slix UID` \| `nfc none` | hold an NFC card to the device: a Flipper `.nfc` file (Type 2 with Ultralight C, MIFARE Classic, ISO14443-4A, DESFire, ISO14443-3B/-4B, ST25TB, FeliCa Lite-S, ISO15693, SLIX), or one made up for a UID |
 | `nfc --reader ntag` \| `nfc --reader scan` | hold an NFC reader to an emulating device and print what it reads (`--no-wait`: leave it there) |
 | `nfc --link iso-dep` \| `--link script:FILE.py` \| `--link log` | a card played by a program, in the field until ^C |
 | `nfc --link pm3[:PORT]` \| `nfc DUMP.json` | real cards through a Proxmark3; a Proxmark3 dump as the card |
@@ -1393,6 +1393,8 @@ the memory keys with random memory, compared byte for byte.
 ./flipperemu nfc mfc1k 11223344                             # a factory MIFARE Classic 1K
 ./flipperemu nfc ulc 04A1B2C3D4E5F6                         # a MIFARE Ultralight C, made up
 ./flipperemu nfc desfire 04A1B2C3D4E5F6                     # a MIFARE DESFire EV1, made up
+./flipperemu nfc iso14443b 1A2B3C4D                         # an ISO14443-4B card, made up
+./flipperemu nfc st25tb D0021C0123456789                    # an ST25TB04K, made up
 ./flipperemu nfc felica 012E4CD21A8B3C5F                    # a FeliCa Lite-S, made up
 ./flipperemu nfc slix E004010812345678                      # an NXP SLIX2 (ISO15693), made up
 ./flipperemu nfc none                                       # take it away
@@ -1437,6 +1439,18 @@ and the firmware's `dump` of it is the file again, key for key:
   shell's `apdu -p 4a -d 9060000000` talks to it in ISO 7816's wrapping. (A record
   file's contents are not in the firmware's own dump of a real card either: it asks
   for as many records as a record is long.)
+- **ISO14443B** (ISO14443-3B and -4B): REQB and WUPB with the ATQB (the card's PUPI,
+  application data and protocol info, as the file has them), ATTRIB, HLTB, and
+  ISO14443-4's blocks after it when the protocol info says so. `raw -p 14b -c -d
+  050008` in the shell is a REQB. (Not the shell's `dump` of a card that is
+  ISO14443-3B and no more, on the official 1.5.1: its callback for that protocol never
+  stops the reader, whose thread is the firmware's highest and then runs for ever. The
+  Flipper is frozen, in the emulator as it would be in the hand. `scanner` and `raw`
+  are fine, and so is a card that is ISO14443-4B.)
+- **ST25TB** (ST's SRI, SRT and SRIX: 512, 2K, 4K): Initiate and Select with a chip ID
+  for the session, Get_UID, Read_Block and Write_Block: the one-time bits of blocks 0
+  to 4 only go to 0, the counters in 5 and 6 only down, blocks 7 to 15 are behind the
+  lock bits of the system block (255), which is read and written too.
 - **FeliCa Lite-S**: polling, and its 28 blocks read and written, each with the status
   that the dump has for it. Its MAC is the dump's: reading with a card key
   (`dump -k`) fails as with a wrong key.
@@ -1446,10 +1460,11 @@ and the firmware's `dump` of it is the file again, key for key:
   NXP system information. `raw -p 15 -c -d 022005` in the shell reads block 5.
 
 So far: NTAG213/215/216, MIFARE Ultralight, Ultralight EV1 and Ultralight C (Type
-2), MIFARE Classic Mini/1K/4K, ISO14443-4A, MIFARE DESFire, FeliCa Lite-S,
-ISO15693-3 and SLIX. `scripts/nfc_check.py FIRMWARE` checks the last six (12 checks
-on the five firmwares). The made-up cards as files: `scripts/fe_nfc.py --nfc-file
---desfire UID` (`--ulc UID`, `--felica IDM`, `--slix UID`).
+2), MIFARE Classic Mini/1K/4K, ISO14443-4A, MIFARE DESFire, ISO14443-3B and -4B,
+ST25TB, FeliCa Lite-S, ISO15693-3 and SLIX. `scripts/nfc_check.py FIRMWARE` checks
+the last eight (17 checks on the five firmwares). The made-up cards as files:
+`scripts/fe_nfc.py --nfc-file --desfire UID` (`--ulc UID`, `--iso14443b PUPI`,
+`--st25tb UID`, `--felica IDM`, `--slix UID`).
 
 Emulation goes the other way, as with 125 kHz RFID. Start the Flipper emulating a card
 (NFC → Saved → a card → Emulate, or `emulate -f /ext/nfc/tag.nfc` in the `nfc` shell),

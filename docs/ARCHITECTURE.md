@@ -1042,6 +1042,22 @@ counts in records, the newest first, as a card does: the firmware asks for as ma
 records as a record has bytes, gets a boundary error from a card with fewer, and its
 dump has no contents for that file.
 
+**ISO14443B** has no anticollision in bits: REQB or WUPB (0x05, an AFI, PARAM) is
+answered by the ATQB (0x50, the PUPI, four bytes of application data, three of
+protocol info), ATTRIB (0x1D, the PUPI, four parameters with the CID) selects the
+card, HLTB (0x50, the PUPI) halts it. From there the blocks are ISO14443-4's, the
+same as a Type A card's after its RATS: `iso4_block()` is that layer for both, with
+CRC_A and the air's bits around it for one and CRC_B around it for the other. A card
+whose protocol info does not say ISO14443-4 is selected and silent.
+
+**ST25TB** (SRI, SRT, SRIX) uses ISO14443B's air and CRC and none of its commands:
+Initiate (0x06 0x00) is answered with a chip ID that the chip makes up for the
+session, Select (0x0E, the ID) with the ID again, and then Get_UID (0x0B: the UID
+from its low byte), Read_Block (0x08) and Write_Block (0x09, which has no answer).
+A write obeys the chip's memory: blocks 0 to 4 are one-time bits (1 to 0), 5 and 6
+counters (a smaller number only), 7 to 15 writable while their lock bit in the system
+block (255, bits 24 to 31) is 1, the rest plain; block 255 is one-time bits too.
+
 **The other technologies** are bytes on the air, and the firmware does their coding
 itself: it adds each one's CRC and sends with TRANSMIT_WITHOUT_CRC. `MODE.om` says
 which it is. For ISO14443B and FeliCa the FIFO's bytes are the frame's (the chip makes

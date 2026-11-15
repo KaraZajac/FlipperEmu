@@ -41,7 +41,11 @@
  * inventory, the addressed, selected and quiet states, system information,
  * blocks read and written singly and in runs with their security status,
  * AFI and DSFID and their locks; SLIX's system information, signature,
- * random number, passwords, privacy mode, EAS).
+ * random number, passwords, privacy mode, EAS).  ISO14443B ("type
+ * iso14443b": REQB/WUPB and the ATQB, ATTRIB, HLTB, and then ISO14443-4's
+ * blocks when the protocol info says so) and ST's ST25TB on its air ("type
+ * st25tb": Initiate, Select, Get_UID, Read_Block and Write_Block, the
+ * system OTP block at 255).
  *
  * The description (scripts/fe_nfc.py writes it from a Flipper .nfc file) is
  * one "key value" per line:
@@ -57,6 +61,9 @@
  *                            and its bytes, see REC_* below; may repeat)
  * or "type felica" with uid (the IDm), pmm, and in mem 18 bytes a block
  * (two status bytes and its 16) for the 28 of a Lite-S in a dump's order;
+ * or "type iso14443b" with uid (the PUPI, 4 bytes), appdata (4), protinfo
+ * (3) and app as for iso4; or "type st25tb" with uid (8, D0 first), mem
+ * (its blocks) and otp (4 bytes);
  * or "type iso15693" with uid (as it is printed, E0 first), dsfid, afi,
  * icref, blocksize, lock (bit 0 DSFID, 1 AFI, 2 EAS, 3 PPL), mem (the
  * blocks), security (a byte a block), and for a SLIX: slix 1, signature,
@@ -80,7 +87,8 @@
 #define APP_MAX 16384                   /* an ISO14443-4 application's tables */
 
 enum { ST_OFF, ST_IDLE, ST_READY, ST_ACTIVE, ST_HALT };
-enum { KIND_T2 = 1, KIND_MFC, KIND_ISO4, KIND_FELICA, KIND_V };
+enum { KIND_T2 = 1, KIND_MFC, KIND_ISO4, KIND_FELICA, KIND_V, KIND_B,
+       KIND_ST25TB };
 enum { MFC_NONE, MFC_AUTH, MFC_ON };    /* Crypto1 session */
 enum { APP_NONE, APP_DESFIRE };         /* what runs on ISO14443-4 */
 /* what a DESFire ADDITIONAL FRAME goes on with */
@@ -147,6 +155,11 @@ struct NfcCard {
     int df_at, df_left;                 /* ... and where in `app`, how much */
     /* FeliCa: uid is the IDm, mem the blocks (18 bytes each) */
     uint8_t pmm[8];
+    /* ISO14443B: uid is the PUPI; the application data and protocol info
+     * of its ATQB.  ST25TB: uid as it is printed (D0 first), mem its
+     * blocks of 4 bytes, the system OTP block, the chip ID of this session */
+    uint8_t b_app[4], b_info[3];
+    uint8_t tb_otp[4], tb_id;
     /* ISO15693: uid as it is printed (E0 first), mem the blocks */
     uint8_t v_dsfid, v_afi, v_icref, v_bsize;
     uint8_t v_lock;                     /* V_LOCK_* */
@@ -1164,40 +1177,37 @@ static int app_command(NfcCard *c, const uint8_t *in, int n, uint8_t *out)
     return 2;
 }
 
-/* a frame to an ISO14443-4 card that is selected (f: with its CRC_A) */
-static int iso4_frame(NfcCard *c, const uint8_t *f, int n, uint8_t *out)
+/* A block to an ISO14443-4 card (without its CRC) -> the card's block in r
+ * (0: none).  *halt: the card was deselected and is halted after its answer */
+static int iso4_block(NfcCard *c, const uint8_t *f, int len, uint8_t *r,
+                      bool *halt)
 {
-    uint8_t r[300], pcb = f[0];
-    int at = 1, rn = 0, len = n - 2;
+    uint8_t pcb = f[0];
+    int at = 1, rn;
 
-    if (!c->dep) {
-        if (pcb == 0xE0 && n == 4) {    /* RATS */
-            c->dep = true;
-            c->dep_in_len = 0;
-            return ans(out, c->ats, c->ats_len, true);
-        }
-        card_reset(c, ST_IDLE);         /* not ours: silence, and from anew */
-        return 0;
-    }
+    *halt = false;
     if ((pcb & 0xF0) == 0xD0) {         /* PPS: as asked */
-        return ans(out, &pcb, 1, true);
+        r[0] = pcb;
+        return 1;
     }
     if (pcb & 0x08) {                   /* a CID follows (ours is 0) */
+        if (len < 2) {
+            return 0;
+        }
         r[1] = f[at++];
     }
     if ((pcb & 0xC0) == 0xC0) {         /* S-block */
         if ((pcb & 0x30) == 0x00) {     /* DESELECT: said back, then halted */
             r[0] = pcb;
-            rn = ans(out, r, at, true);
-            card_reset(c, ST_HALT);
-            return rn;
+            *halt = true;
+            return at;
         }
         return 0;
     }
     if ((pcb & 0xC0) == 0x80) {         /* R-block */
         if (pcb & 0x10) {               /* R(NAK): we are here */
             r[0] = 0xA2 | (pcb & 0x09);
-            return ans(out, r, at, true);
+            return at;
         }
         return 0;                       /* R(ACK): we send nothing in parts */
     }
@@ -1215,13 +1225,40 @@ static int iso4_frame(NfcCard *c, const uint8_t *f, int n, uint8_t *out)
     c->dep_in_len += len - at;
     if (pcb & 0x10) {                   /* more to come: R(ACK) */
         r[0] = 0xA2 | (pcb & 0x09);
-        return ans(out, r, pcb & 0x08 ? 2 : 1, true);
+        return pcb & 0x08 ? 2 : 1;
     }
     r[0] = 0x02 | (pcb & 0x09);         /* an I-block with its number */
     rn = pcb & 0x08 ? 2 : 1;
     rn += app_command(c, c->dep_in, c->dep_in_len, &r[rn]);
     c->dep_in_len = 0;
-    return ans(out, r, rn, true);
+    return rn;
+}
+
+/* a frame to an ISO14443-4A card that is selected (f: with its CRC_A) */
+static int iso4_frame(NfcCard *c, const uint8_t *f, int n, uint8_t *out)
+{
+    uint8_t r[300];
+    bool halt;
+    int rn;
+
+    if (!c->dep) {
+        if (f[0] == 0xE0 && n == 4) {   /* RATS */
+            c->dep = true;
+            c->dep_in_len = 0;
+            return ans(out, c->ats, c->ats_len, true);
+        }
+        card_reset(c, ST_IDLE);         /* not ours: silence, and from anew */
+        return 0;
+    }
+    rn = iso4_block(c, f, n - 2, r, &halt);
+    if (rn <= 0) {
+        return 0;
+    }
+    rn = ans(out, r, rn, true);
+    if (halt) {
+        card_reset(c, ST_HALT);
+    }
+    return rn;
 }
 
 /* ------------------------------------------------------------ ISO14443-3A */
@@ -1270,6 +1307,7 @@ int nfc_card_rx(NfcCard *c, const uint8_t *air, int nbits, uint8_t *out)
     if (c->state == ST_OFF || c->kind >= KIND_FELICA) {
         return 0;                       /* (no ISO14443A card) */
     }
+    /* (KIND_B's blocks are ISO14443-4's too, but its air is not this) */
     if (c->kind == KIND_MFC && c->state == ST_ACTIVE && c->mfc != MFC_NONE) {
         if (nbits != 7) {
             return mfc_crypto_frame(c, air, nbits, out);    /* encrypted */
@@ -1721,6 +1759,162 @@ static int v_frame(NfcCard *c, const uint8_t *in, int n, uint8_t *out, int max)
     return rn + 2;
 }
 
+/* ------------------------------------------------ ISO14443B and ST25TB */
+
+/* an answer's bytes and their CRC_B (ISO/IEC 13239, as ISO15693's) */
+static int b_answer(const uint8_t *r, int rn, uint8_t *out, int max)
+{
+    uint16_t crc = v_crc(r, rn);
+
+    if (rn + 2 > max) {
+        return 0;
+    }
+    memcpy(out, r, rn);
+    out[rn] = crc & 0xFF;
+    out[rn + 1] = crc >> 8;
+    return rn + 2;
+}
+
+static int b_frame(NfcCard *c, const uint8_t *in, int n, uint8_t *out, int max)
+{
+    uint8_t r[300];
+    bool halt;
+    int rn;
+
+    if (n < 3 || v_crc(in, n - 2) != (in[n - 2] | in[n - 1] << 8)) {
+        return 0;
+    }
+    n -= 2;
+    if (in[0] == 0x05 && n == 3) {      /* REQB / WUPB (bit 3 of PARAM) */
+        if (c->state == ST_ACTIVE || (c->state == ST_HALT && !(in[2] & 0x08)) ||
+            (in[1] && in[1] != c->b_app[0])) {      /* (an AFI to match) */
+            return 0;
+        }
+        c->state = ST_READY;
+        c->dep = false;
+        r[0] = 0x50;                    /* ATQB */
+        memcpy(&r[1], c->uid, 4);
+        memcpy(&r[5], c->b_app, 4);
+        memcpy(&r[9], c->b_info, 3);
+        return b_answer(r, 12, out, max);
+    }
+    if (in[0] == 0x1D && n >= 9 && c->state == ST_READY &&
+        !memcmp(&in[1], c->uid, 4)) {   /* ATTRIB: selected, with a CID */
+        c->state = ST_ACTIVE;
+        c->dep = c->b_info[1] & 0x01;   /* ISO14443-4, if it says so */
+        c->dep_in_len = 0;
+        r[0] = in[8] & 0x0F;            /* MBLI 0, the CID */
+        return b_answer(r, 1, out, max);
+    }
+    if (in[0] == 0x50 && n == 5 && !memcmp(&in[1], c->uid, 4) &&
+        c->state != ST_IDLE) {          /* HLTB */
+        card_reset(c, ST_HALT);
+        r[0] = 0x00;
+        return b_answer(r, 1, out, max);
+    }
+    if (c->state != ST_ACTIVE || !c->dep) {
+        return 0;
+    }
+    rn = iso4_block(c, in, n, r, &halt);
+    if (rn <= 0) {
+        return 0;
+    }
+    rn = b_answer(r, rn, out, max);
+    if (halt) {
+        card_reset(c, ST_HALT);
+    }
+    return rn;
+}
+
+static uint32_t tb_le32(const uint8_t *p)
+{
+    return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+/* ST's ST25TB / SRI / SRT: ISO14443B's air and CRC, commands of its own */
+static int tb_frame(NfcCard *c, const uint8_t *in, int n, uint8_t *out,
+                    int max)
+{
+    uint8_t r[8];
+    int blocks = c->mem_len / 4;
+
+    if (n < 3 || v_crc(in, n - 2) != (in[n - 2] | in[n - 1] << 8)) {
+        return 0;
+    }
+    n -= 2;
+    if (in[0] == 0x06 && n == 2 && (in[1] == 0x00 || in[1] == 0x04)) {
+        /* Initiate (and Pcall16): the chip takes an ID for the session */
+        if (c->state == ST_ACTIVE || c->state == ST_HALT) {
+            return 0;
+        }
+        qemu_guest_getrandom_nofail(&c->tb_id, 1);
+        c->state = ST_READY;
+        return b_answer(&c->tb_id, 1, out, max);
+    }
+    if (in[0] == 0x0E && n == 2) {      /* Select: by the ID */
+        if (c->state == ST_READY && in[1] == c->tb_id) {
+            c->state = ST_ACTIVE;
+            return b_answer(&c->tb_id, 1, out, max);
+        }
+        if (c->state == ST_ACTIVE && in[1] != c->tb_id) {
+            c->state = ST_READY;        /* another is meant */
+        }
+        return 0;
+    }
+    if (c->state != ST_ACTIVE) {
+        return 0;
+    }
+    switch (in[0]) {
+    case 0x0B:                          /* Get_UID: the low byte first */
+        if (n != 1) {
+            return 0;
+        }
+        for (int i = 0; i < 8; i++) {
+            r[i] = c->uid[7 - i];
+        }
+        return b_answer(r, 8, out, max);
+    case 0x08:                          /* Read_Block */
+        if (n != 2 || (in[1] != 0xFF && in[1] >= blocks)) {
+            return 0;
+        }
+        return b_answer(in[1] == 0xFF ? c->tb_otp : &c->mem[in[1] * 4], 4,
+                        out, max);
+    case 0x09:                          /* Write_Block: no answer */
+        if (n != 6) {
+            return 0;
+        }
+        if (in[1] == 0xFF) {            /* the system OTP block: 1 to 0 */
+            for (int i = 0; i < 4; i++) {
+                c->tb_otp[i] &= in[2 + i];
+            }
+        } else if (in[1] < 5) {         /* the resettable OTP bits: 1 to 0 */
+            for (int i = 0; i < 4; i++) {
+                c->mem[in[1] * 4 + i] &= in[2 + i];
+            }
+        } else if (in[1] < 7) {         /* the counters: only down */
+            if (tb_le32(&in[2]) < tb_le32(&c->mem[in[1] * 4])) {
+                memcpy(&c->mem[in[1] * 4], &in[2], 4);
+            }
+        } else if (in[1] < blocks) {
+            /* blocks 7 to 15 behind the lock bits of the system block
+             * (b24: 7 and 8, b25: 9 ... b31: 15; 0 is locked) */
+            int bit = in[1] < 9 ? 0 : in[1] - 8;
+
+            if (in[1] > 15 || (c->tb_otp[3] >> bit) & 1) {
+                memcpy(&c->mem[in[1] * 4], &in[2], 4);
+            }
+        }
+        return 0;
+    case 0x0C:                          /* Reset_to_Inventory */
+        c->state = ST_IDLE;
+        return 0;
+    case 0x0F:                          /* Completion: done with */
+        c->state = ST_HALT;
+        return 0;
+    }
+    return 0;
+}
+
 /* A frame of a technology whose frames are bytes (ISO14443B, FeliCa,
  * ISO15693), to a card of that technology -> its answer's bytes (0: none) */
 int nfc_card_bytes(NfcCard *c, int tech, const uint8_t *in, int n,
@@ -1734,6 +1928,12 @@ int nfc_card_bytes(NfcCard *c, int tech, const uint8_t *in, int n,
     }
     if (tech == NFC_TECH_V && c->kind == KIND_V) {
         return v_frame(c, in, n, out, max);
+    }
+    if (tech == NFC_TECH_B && c->kind == KIND_B) {
+        return b_frame(c, in, n, out, max);
+    }
+    if (tech == NFC_TECH_B && c->kind == KIND_ST25TB) {
+        return tb_frame(c, in, n, out, max);
     }
     return 0;
 }
@@ -1806,6 +2006,10 @@ NfcCard *nfc_card_new(const char *desc, Error **errp)
                 c->kind = KIND_FELICA;
             } else if (!strcmp(val, "iso15693")) {
                 c->kind = KIND_V;
+            } else if (!strcmp(val, "iso14443b")) {
+                c->kind = KIND_B;
+            } else if (!strcmp(val, "st25tb")) {
+                c->kind = KIND_ST25TB;
             } else {
                 error_setg(errp, "nfc card: unsupported type '%s'", val);
                 return NULL;
@@ -1852,6 +2056,12 @@ NfcCard *nfc_card_new(const char *desc, Error **errp)
             }
         } else if (!strcmp(line, "pmm")) {
             n = parse_hex(val, c->pmm, 8) == 8 ? 8 : -1;
+        } else if (!strcmp(line, "appdata")) {
+            n = parse_hex(val, c->b_app, 4) == 4 ? 4 : -1;
+        } else if (!strcmp(line, "protinfo")) {
+            n = parse_hex(val, c->b_info, 3) == 3 ? 3 : -1;
+        } else if (!strcmp(line, "otp")) {
+            n = parse_hex(val, c->tb_otp, 4) == 4 ? 4 : -1;
         } else if (!strcmp(line, "dsfid")) {
             n = parse_hex(val, &c->v_dsfid, 1);
         } else if (!strcmp(line, "afi")) {
@@ -1937,9 +2147,20 @@ NfcCard *nfc_card_new(const char *desc, Error **errp)
                    "256 blocks of 16 bytes (got %d bytes)", c->mem_len);
         return NULL;
     }
-    if ((c->kind == KIND_FELICA || c->kind == KIND_V) != (c->uid_len == 8)) {
-        error_setg(errp, "nfc card: a FeliCa card's IDm and an ISO15693 "
-                   "card's UID are 8 bytes, and no other card's is");
+    if ((c->kind == KIND_FELICA || c->kind == KIND_V ||
+         c->kind == KIND_ST25TB) != (c->uid_len == 8)) {
+        error_setg(errp, "nfc card: a FeliCa card's IDm and an ISO15693 or "
+                   "ST25TB card's UID are 8 bytes, and no other card's is");
+        return NULL;
+    }
+    if (c->kind == KIND_B && c->uid_len != 4) {
+        error_setg(errp, "nfc card: an ISO14443B card's PUPI is 4 bytes");
+        return NULL;
+    }
+    if (c->kind == KIND_ST25TB && (c->mem_len < 16 * 4 || c->mem_len > 256 * 4
+                                   || (c->mem_len & 3))) {
+        error_setg(errp, "nfc card: an ST25TB has 16 to 255 blocks of 4 "
+                   "bytes");
         return NULL;
     }
     if (c->kind == KIND_FELICA && c->mem_len != 28 * 18) {
@@ -1996,9 +2217,11 @@ static int card_post_load(void *opaque, int version_id)
 {
     NfcCard *c = opaque;
     bool mfc = c->kind == KIND_MFC, iso4 = c->kind == KIND_ISO4;
-    bool bytes = c->kind == KIND_FELICA || c->kind == KIND_V;
+    bool bytes = c->kind == KIND_FELICA || c->kind == KIND_V ||
+                 c->kind == KIND_ST25TB;
 
-    if (c->kind < KIND_T2 || c->kind > KIND_V ||
+    iso4 = iso4 || c->kind == KIND_B;   /* (no pages either) */
+    if (c->kind < KIND_T2 || c->kind > KIND_ST25TB ||
         (c->uid_len != 4 && c->uid_len != 7 && c->uid_len != 10 &&
          !(bytes && c->uid_len == 8)) ||
         c->state < ST_OFF || c->state > ST_HALT ||
@@ -2030,8 +2253,8 @@ static int card_post_load(void *opaque, int version_id)
 
 const VMStateDescription vmstate_nfc_card = {
     .name = "nfc-card",
-    .version_id = 2,
-    .minimum_version_id = 2,
+    .version_id = 3,                    /* (3: ISO14443B, ST25TB) */
+    .minimum_version_id = 3,
     .post_load = card_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_INT32(kind, NfcCard),
@@ -2092,6 +2315,10 @@ const VMStateDescription vmstate_nfc_card = {
         VMSTATE_BOOL(ulc_auth, NfcCard),
         VMSTATE_UINT8_ARRAY(ulc_rndb, NfcCard, 8),
         VMSTATE_UINT8_ARRAY(ulc_iv, NfcCard, 8),
+        VMSTATE_UINT8_ARRAY(b_app, NfcCard, 4),
+        VMSTATE_UINT8_ARRAY(b_info, NfcCard, 3),
+        VMSTATE_UINT8_ARRAY(tb_otp, NfcCard, 4),
+        VMSTATE_UINT8(tb_id, NfcCard),
         VMSTATE_END_OF_LIST()
     }
 };

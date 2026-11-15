@@ -206,8 +206,11 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       native and wrapped commands from a dump's tables. FeliCa Lite-S ☑ and
       ISO15693-3 / SLIX ☑ (2026-11-15): the chip model's technologies whose frames
       are bytes (FeliCa, ISO15693's stream coding), the cards' commands. Each dumps
-      to its own file again; `scripts/nfc_check.py` 12 on five (BRINGUP_LOG 155).
-      Next: ISO14443B and ST25TB, FeliCa Standard, what else
+      to its own file again (BRINGUP_LOG 155).
+      ISO14443-3B / -4B and ST25TB ☑ (2026-11-15): REQB/ATQB, ATTRIB, HLTB, the
+      ISO14443-4 blocks shared with Type A; ST25TB's Initiate/Select, blocks, one-time
+      bits, counters and lock bits. `scripts/nfc_check.py` 17 on five (BRINGUP_LOG 156).
+      Next: FeliCa Standard, what else
       runs on ISO14443-4 (EMV, Type 4 tags: Momentum reads them), reading with keys
       (DESFire, FeliCa's MAC); decode transparent mode (Classic emulation); a
       virtual reader for the cards beyond ISO14443A

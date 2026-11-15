@@ -4812,6 +4812,43 @@ big lock, entry 92).
       snapshot); the smoke test on the five, snapshot_check 68,
       nfc_link_check 4 and gui_check 79 on the official 1.5.1 as before.
 
+156. **ISO14443B and ST25TB cards.**
+    - The chip model had the technology already (MODE.om = ISO14443B: the
+      FIFO's bytes are the frame's, the firmware adds CRC_B itself and
+      sends without CRC), so this is the card model alone. ISO14443-4's
+      block layer came out of the Type A card's frame function
+      (`iso4_block()`), for both: RATS before it and CRC_A around it for A,
+      ATTRIB and CRC_B for B.
+    - The firmware's activation: `05 00 08` (WUPB), an ATQB of exactly 12
+      bytes, `1D` PUPI `00 08 01 00` (ATTRIB, CID 0), an answer whose low
+      seven bits are the CID. ST25TB is found by Initiate (`06 00`), which
+      no ISO14443B card answers, as no ST25TB answers a REQB: the two
+      share the air and nothing else. The firmware knows an ST25TB's kind
+      by the UID's third byte (and crashes on one it does not know:
+      "unsupported st25tb type"), so a made-up UID has to be a real kind's:
+      D0 02 1C… for a 4K.
+    - Both dumped to their own files at the first try (134 keys of an
+      ST25TB04K, 6 of an ISO14443-4B card).
+    - A card that is ISO14443-3B and no more: `scanner` finds it, and the
+      shell's `dump` never comes back. gdb on the device: the NFC worker
+      is in `nfc_cli_dump_poller_callback_iso14443_3b`, again and again.
+      That callback, alone of the twelve protocols', ends with `return
+      NfcCommandContinue;` where the others have `return command;`: the
+      reader is never told to stop, a reader that is activated calls the
+      callback at once again with no delay, and its thread has the
+      firmware's highest priority, so the shell's thread, which was to
+      stop it, never runs again. A frozen Flipper, in the emulator as it
+      would be in the hand (the official 1.5.1; the third firmware bug of
+      this batch, with the Ultralight C key and DESFire's ReadRecords). The
+      check does not ask for that dump: `scanner`, and `raw -p 14b -s`
+      for the activation and the card's silence to an ISO14443-4 block.
+    - ST25TB by `raw -p 14b -c -k` (the field kept on between commands):
+      Initiate, Select, Get_UID, a block written and read, a locked block
+      and a counter upward refused, the system OTP block, silence beyond
+      the last block.
+    - The card's saved state: version 3 (the chip model's with it).
+    - Checks: nfc_check 17 on the five firmwares.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

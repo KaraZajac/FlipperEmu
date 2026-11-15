@@ -2,7 +2,8 @@
 # Copyright (c) 2026, Kara Zajac
 # SPDX-License-Identifier: BSD-3-Clause
 """Check the cards beyond NTAG and MIFARE Classic: MIFARE Ultralight C,
-ISO14443-4A, MIFARE DESFire, FeliCa Lite-S, ISO15693 with NXP's SLIX.
+ISO14443-4A, MIFARE DESFire, ISO14443B, ST25TB, FeliCa Lite-S, ISO15693 with
+NXP's SLIX.
 
     scripts/nfc_check.py firmware/official-1.5.1/flipper-z-f7-update-1.5.1.tgz
 
@@ -157,6 +158,104 @@ def ulc(b, work):
           "keys, and the card takes the right one and no other (two-key "
           f"triple DES, both ways: {failed} keys refused, one taken)",
           ok and failed >= 1, text + b.uart_text()[-600:])
+
+
+def raw_b(sh, data, keep=False, select=False):
+    """The answer's bytes to a frame on ISO14443B's air (with its CRC_B)"""
+    text = sh.ask(f"raw -p 14b -c {'-k ' if keep else ''}"
+                  f"{'-s ' if select else ''}-d {data}")
+    return " ".join(re.findall(r"Rx: ([0-9A-F ]+)", text)).strip(), text
+
+
+def st25tb(b, work):
+    """ST's ST25TB04K: its own commands on ISO14443B's air"""
+    uid = bytes.fromhex("D0021C0123456789")
+    read_card(b, work, "st25tb", "an ST25TB04K", fe_nfc.sample_st25tb(uid),
+              "St25tb")
+    b.fe("nfc", "st25tb", uid.hex())
+    sh = Shell(b)
+    try:
+        if "raw" not in sh.commands:
+            return
+        ask = lambda data: raw_b(sh, data, keep=True)[0]
+        chip = ask("0600")[:2]                  # Initiate: an ID for now
+        selected = ask("0E" + chip)
+        got_uid = ask("0B")
+        before = ask("0810")
+        ask("0910DEADBEEF")                     # (a write has no answer)
+        after = ask("0810")
+        ask("0907AABBCCDD")                     # block 7: locked in the card
+        locked = ask("0807")
+        ask("0905FDFFFFFF")                     # a counter: down
+        down = ask("0805")
+        ask("0905FFFFFFFF")                     # and not up again
+        up = ask("0805")
+        otp = ask("08FF")
+        beyond = ask("0880")
+        raw_b(sh, "0F")                         # Completion; the field off
+    finally:
+        sh.close()
+    b.fe("nfc", "none")
+    text = (f"{chip} | {selected} | {got_uid} | {before} | {after} | {locked} "
+            f"| {down} | {up} | {otp} | {beyond}")
+    check("ST25TB commands (the shell's `raw -p 14b`, the field kept on): "
+          "Initiate gives a chip ID, Select by it, Get_UID the UID from its "
+          "low byte, a block written and read, a locked block and a counter "
+          "upward refused, the system OTP block, no answer beyond the last "
+          "block",
+          len(chip) == 2 and selected.startswith(chip)
+          and got_uid.startswith("89 67 45 23 01 1C 02 D0")
+          and before.startswith("30 30 31 36") and after.startswith("DE AD BE EF")
+          and locked.startswith("30 30 30 37") and down.startswith("FD FF FF FF")
+          and up.startswith("FD FF FF FF") and otp.startswith("FF FF FF FE")
+          and beyond == "", text)
+
+
+def iso14443b(b, work):
+    """ISO14443B: REQB, ATTRIB, and ISO14443-4's blocks after it"""
+    pupi = bytes.fromhex("1A2B3C4D")
+    card = fe_nfc.sample_iso14443b(pupi)
+    read_card(b, work, "iso4b", "an ISO14443-4B card", card, "Iso14443-4b")
+    b.fe("nfc", "iso14443b", pupi.hex())
+    sh = Shell(b)
+    have_raw = "raw" in sh.commands
+    try:
+        if have_raw:
+            atqb = raw_b(sh, "050008")[0]
+            block, said = raw_b(sh, "0200A4040000", select=True)
+            nak = raw_b(sh, "B2", select=True)[0]
+            deselect = raw_b(sh, "C2", select=True)[0]
+    finally:
+        sh.close()
+    if have_raw:
+        check("ISO14443B commands (the shell's `raw -p 14b`): REQB gives the "
+              "ATQB with the card's PUPI, application data and protocol "
+              "info; after ATTRIB (`-s`) an I-block is answered by one with "
+              "its number, an R(NAK) by an R(ACK), DESELECT by itself",
+              atqb.startswith("50 1A 2B 3C 4D 00 12 34 E1 00 81 85")
+              and "Protocol: 1" in said and block.startswith("02 6D 00")
+              and nak.startswith("A2") and deselect.startswith("C2"),
+              f"{atqb} | {block} | {nak} | {deselect}\n{said}")
+    # A card that is ISO14443-3B and no more.  (Not its `dump`: the official
+    # 1.5.1's callback for it never stops the reader, whose thread, the
+    # firmware's highest, then runs for ever: the Flipper is frozen.)
+    path = work / "iso3b.nfc"
+    path.write_text(card.replace("ISO14443-4B", "ISO14443-3B")
+                    .replace("Protocol info: 00 81 85", "Protocol info: 00 80 80"))
+    code, text = b.fe("nfc", path)
+    sh = Shell(b)
+    try:
+        found = sh.ask("scanner", 30)
+        silent, said = raw_b(sh, "0200A4040000", select=True) if have_raw \
+            else ("", "Protocol: 0")
+    finally:
+        sh.close()
+    b.fe("nfc", "none")
+    check("a card that is ISO14443-3B and no more: the firmware's `scanner` "
+          "finds it as that, and it has no answer to an ISO14443-4 block",
+          code == 0 and "protocols detected: iso14443-3b" in found.lower()
+          and "Protocol: 0" in said and silent == "",
+          f"{text}\n{found}\n{said}")
 
 
 def desfire(b):
@@ -319,6 +418,8 @@ def main():
                           "Slix")
                 ulc(b, work)
                 desfire(b)
+                st25tb(b, work)
+                iso14443b(b, work)
                 felica(b)
                 if iso15693(b):
                     snapshot(b)

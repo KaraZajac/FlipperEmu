@@ -17,6 +17,8 @@ holds in its field (see qemu/hw/arm/flipper/nfc_card.c):
     fe_nfc.py --nfc-file --desfire 04A1B2C3D4E5F6   -> ... as a Flipper .nfc file
     fe_nfc.py --ulc 04A1B2C3D4E5F6          -> a MIFARE Ultralight C, its pages
                                                from 16 on behind its key
+    fe_nfc.py --iso14443b 1A2B3C4D          -> an ISO14443-4B card with that PUPI
+    fe_nfc.py --st25tb D0021C0123456789     -> an ST25TB04K with that UID
     fe_nfc.py --felica 012E4CD21A8B3C5F     -> a FeliCa Lite-S with that IDm
     fe_nfc.py --slix E004010812345678       -> an NXP SLIX2 (ISO15693) with that UID
                                                (both with --nfc-file too)
@@ -233,6 +235,67 @@ def sample_desfire(uid):
     return "\n".join(out) + "\n"
 
 
+def describe_iso14443b(fields, dev):
+    """An ISO14443-3B or -4B card: its PUPI and what its ATQB says"""
+    uid = hexbytes(fields["UID"])
+    if len(uid) != 4:
+        raise ValueError("an ISO14443B card's UID (its PUPI) is 4 bytes")
+    app = hexbytes(fields.get("Application data", "00 00 00 00"))
+    info = hexbytes(fields.get("Protocol info", "00 00 00"))
+    if len(app) != 4 or len(info) != 3:
+        raise ValueError("Application data is 4 bytes, Protocol info 3")
+    return "\n".join([f"# {dev}", "type iso14443b", f"uid {uid.hex(' ')}",
+                      f"appdata {app.hex(' ')}", f"protinfo {info.hex(' ')}",
+                      "app none"]) + "\n"
+
+
+ST25TB_BLOCKS = {"512AT": 16, "512AC": 16, "X512": 16, "2K": 64, "4K": 128,
+                 "X4K": 128}
+
+
+def describe_st25tb(fields):
+    """An ST25TB (SRI, SRT, SRIX): its blocks and the system OTP block"""
+    kind = fields.get("ST25TB Type", "")
+    if kind not in ST25TB_BLOCKS:
+        raise ValueError(f"ST25TB type {kind!r}: one of "
+                         f"{', '.join(ST25TB_BLOCKS)}")
+    uid = hexbytes(fields["UID"])
+    if len(uid) != 8:
+        raise ValueError("an ST25TB's UID is 8 bytes")
+    out = [f"# ST25TB {kind}", "type st25tb", f"uid {uid.hex(' ')}",
+           f"otp {fields.get('System OTP Block', 'FF FF FF FF')}"]
+    for b in range(ST25TB_BLOCKS[kind]):
+        out.append(f"mem {fields.get(f'Block {b}', 'FF FF FF FF')}")
+    return "\n".join(out) + "\n"
+
+
+def sample_st25tb(uid):
+    """An ST25TB04K as a Flipper .nfc file's text, made up"""
+    if len(uid) != 8 or uid[0] != 0xD0 or uid[1] != 0x02 or uid[2] >> 2 != 7:
+        raise ValueError("an ST25TB04K's UID is 8 bytes, D0 02 and then 1C "
+                         "to 1F")
+    up = lambda b: bytes(b).hex(" ").upper()
+    out = ["Filetype: Flipper NFC device", "Version: 4", "Device type: ST25TB",
+           f"UID: {up(uid)}", "ST25TB Type: 4K"]
+    for b in range(128):
+        block = (bytes(4) if b < 5 else b"\xfe\xff\xff\xff" if b < 7 else
+                 f"{b:04d}".encode())
+        out.append(f"Block {b}: {up(block)}")
+    out.append("System OTP Block: FF FF FF FE")         # blocks 7, 8 locked
+    return "\n".join(out) + "\n"
+
+
+def sample_iso14443b(uid):
+    """An ISO14443-4B card as a Flipper .nfc file's text, made up"""
+    if len(uid) != 4:
+        raise ValueError("an ISO14443B card's UID (its PUPI) is 4 bytes")
+    up = lambda b: bytes(b).hex(" ").upper()
+    return "\n".join(["Filetype: Flipper NFC device", "Version: 4",
+                      "Device type: ISO14443-4B", f"UID: {up(uid)}",
+                      "Application data: 00 12 34 E1",
+                      "Protocol info: 00 81 85"]) + "\n"
+
+
 def describe_felica(fields):
     """A FeliCa Lite-S: its IDm and PMm, and its 28 blocks as a dump has
     them, each with the two status bytes the card gave for it (a block that
@@ -394,6 +457,10 @@ def describe(fields):
                             else atqa)
     if dev == "FeliCa":
         return describe_felica(fields)
+    if dev in ("ISO14443-3B", "ISO14443-4B"):
+        return describe_iso14443b(fields, dev)
+    if dev == "ST25TB":
+        return describe_st25tb(fields)
     if dev in ("ISO15693-3", "SLIX"):
         return describe_iso15693(fields, dev == "SLIX")
     if dev in ("Mifare DESFire", "ISO14443-4A", "ISO14443-4A (Unknown)"):
@@ -405,8 +472,8 @@ def describe(fields):
     if dev not in T2_TYPES and kind not in T2_TYPES:
         raise ValueError(f"device type {dev!r} is not supported yet "
                          "(NTAG/Ultralight, MIFARE Classic, MIFARE DESFire, "
-                         "ISO14443-4A, FeliCa Lite-S, ISO15693-3 and SLIX "
-                         "are)")
+                         "ISO14443-4A, ISO14443-3B and -4B, ST25TB, FeliCa "
+                         "Lite-S, ISO15693-3 and SLIX are)")
     uid = hexbytes(fields["UID"])
     atqa = hexbytes(fields["ATQA"])
     if version > LSB_ATQA_FORMAT_VERSION:
@@ -598,6 +665,8 @@ SAMPLES = {"desfire": (sample_desfire, "a MIFARE DESFire EV1 (two "
                        "applications, made up)"),
            "ulc": (sample_ulc, "a MIFARE Ultralight C (made up; its key "
                    f"{ULC_KEY.hex().upper()})"),
+           "iso14443b": (sample_iso14443b, "an ISO14443-4B card (made up)"),
+           "st25tb": (sample_st25tb, "an ST25TB04K (made up)"),
            "felica": (sample_felica, "a FeliCa Lite-S (made up)"),
            "slix": (sample_slix, "an NXP SLIX2, ISO15693 (made up)")}
 
