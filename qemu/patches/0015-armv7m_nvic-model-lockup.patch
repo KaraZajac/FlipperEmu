@@ -1,0 +1,171 @@
+From: FlipperEmu
+Subject: [PATCH] armv7m_nvic: model Lockup
+
+A fault that cannot be taken (one to escalate to HardFault while the
+processor already runs at HardFault's priority, a terminal derived
+exception, a HardFault during lazy FP stacking) is a Lockup: the
+processor stops executing, and stays so until it is reset (ARMv7-M ARM
+B1.5.15). QEMU did not model it and ended with cpu_abort(): the whole
+emulator went away, where a chip sits there with its peripherals still
+running and its last picture on the screen, until something resets it.
+
+Stop the processor instead, as PSCI stops a CPU: power_state off, which
+no interrupt wakes, and which a reset turns on again. The machine runs
+on. Why and where it stopped is the NVIC's "lockup" property (empty
+while the processor runs), and a warning says so once. A debugger's
+halt and an NMI, which may take a chip out of Lockup too, are not
+modelled.
+
+Seen with the Flipper Zero machine: a firmware whose HardFault handler
+reads its crash registers from a part of the STM32WB55's SRAM2 that the
+wireless stack keeps for CPU2 faults again there, inside HardFault. On
+the chip the device is dead, its screen as it was; with QEMU the
+emulator ended with "Lockup: can't escalate 3 to HardFault (current
+priority -1)" (and the 3 was HardFault's own number, not the fault's).
+
+Signed-off-by: FlipperEmu
+---
+--- a/include/hw/intc/armv7m_nvic.h
++++ b/include/hw/intc/armv7m_nvic.h
+@@ -81,6 +81,9 @@
+     uint32_t num_irq;
+     qemu_irq excpout;
+     qemu_irq sysresetreq;
++
++    /* Lockup: why the processor stopped ("" while it runs); property "lockup" */
++    char lockup[160];
+ };
+ 
+ /* Interface between CPU and Interrupt controller.  */
+--- a/hw/intc/armv7m_nvic.c
++++ b/hw/intc/armv7m_nvic.c
+@@ -26,6 +26,8 @@
+ #include "exec/memop.h"
+ #include "qemu/log.h"
+ #include "qemu/module.h"
++#include "qemu/error-report.h"
++#include "accel/tcg/cpu-loop.h"
+ #include "trace.h"
+ 
+ /* IRQ number counting:
+@@ -544,6 +546,38 @@
+     }
+ }
+ 
++/*
++ * Lockup (ARMv7-M ARM B1.5.15): a fault that cannot be taken.  The processor
++ * stops, and executes nothing more until it is reset; the rest of the
++ * machine runs on, as a chip's peripherals do.  (A debugger's halt and an
++ * NMI, which may take a chip out of it too, are not modelled.)  Why it
++ * stopped is the NVIC's "lockup" property until the next reset.
++ */
++static void G_GNUC_PRINTF(2, 3) nvic_lockup(NVICState *s, const char *fmt, ...)
++{
++    ARMCPU *cpu = s->cpu;
++    CPUState *cs = CPU(cpu);
++    va_list ap;
++    int n;
++
++    n = snprintf(s->lockup, sizeof(s->lockup), "at 0x%08x: ",
++                 cpu->env.regs[15]);
++    va_start(ap, fmt);
++    vsnprintf(s->lockup + n, sizeof(s->lockup) - n, fmt, ap);
++    va_end(ap);
++    warn_report("armv7m: Lockup %s: the processor stops until it is reset",
++                s->lockup);
++    /* off, as a CPU that PSCI took down: no interrupt wakes it, a reset does */
++    cpu->power_state = PSCI_OFF;
++    cpu->env.halt_reason = HALT_PSCI;
++    cs->halted = 1;
++    cs->exception_index = EXCP_HLT;
++    if (current_cpu == cs) {
++        cpu_loop_exit(cs);
++    }
++    cpu_exit(cs);
++}
++
+ static void do_armv7m_nvic_set_pending(void *opaque, int irq, bool secure,
+                                        bool derived)
+ {
+@@ -602,10 +636,10 @@
+              * which saves having to have an extra argument is_terminal
+              * that we'd only use in one place.
+              */
+-            cpu_abort(CPU(s->cpu),
+-                      "Lockup: can't take terminal derived exception "
+-                      "(original exception priority %d)\n",
+-                      s->vectpending_prio);
++            nvic_lockup(s, "can't take terminal derived exception "
++                        "(original exception priority %d)",
++                        s->vectpending_prio);
++            return;
+         }
+         /* We now continue with the same code as for a normal pending
+          * exception, which will cause us to pend the derived exception.
+@@ -648,6 +682,7 @@
+         }
+ 
+         if (escalate) {
++            int fault = irq;
+ 
+             /* We need to escalate this exception to a synchronous HardFault.
+              * If BFHFNMINS is set then we escalate to the banked HF for
+@@ -665,12 +700,11 @@
+             if (running <= vec->prio) {
+                 /* We want to escalate to HardFault but we can't take the
+                  * synchronous HardFault at this point either. This is a
+-                 * Lockup condition due to a guest bug. We don't model
+-                 * Lockup, so report via cpu_abort() instead.
++                 * Lockup condition due to a guest bug.
+                  */
+-                cpu_abort(CPU(s->cpu),
+-                          "Lockup: can't escalate %d to HardFault "
+-                          "(current priority %d)\n", irq, running);
++                nvic_lockup(s, "can't escalate exception %d to HardFault "
++                            "(current priority %d)", fault, running);
++                return;
+             }
+ 
+             /* HF may be banked but there is only one shared HFSR */
+@@ -808,9 +842,9 @@
+              * We want to escalate to HardFault but the context the
+              * FP state belongs to prevents the exception pre-empting.
+              */
+-            cpu_abort(CPU(s->cpu),
+-                      "Lockup: can't escalate to HardFault during "
+-                      "lazy FP register stacking\n");
++            nvic_lockup(s, "can't escalate to HardFault during lazy FP "
++                        "register stacking");
++            return;
+         }
+     }
+ 
+@@ -2670,6 +2704,8 @@
+     int resetprio;
+     NVICState *s = NVIC(dev);
+ 
++    s->lockup[0] = '\0';
++
+     memset(s->vectors, 0, sizeof(s->vectors));
+     memset(s->sec_vectors, 0, sizeof(s->sec_vectors));
+     s->prigroup[M_REG_NS] = 0;
+@@ -2803,6 +2839,11 @@
+     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->sysregmem);
+ }
+ 
++static char *nvic_get_lockup(Object *obj, Error **errp)
++{
++    return g_strdup(NVIC(obj)->lockup);
++}
++
+ static void armv7m_nvic_instance_init(Object *obj)
+ {
+     DeviceState *dev = DEVICE(obj);
+@@ -2814,6 +2855,7 @@
+     qdev_init_gpio_in_named(dev, nvic_systick_trigger, "systick-trigger",
+                             M_REG_NUM_BANKS);
+     qdev_init_gpio_in_named(dev, nvic_nmi_trigger, "NMI", 1);
++    object_property_add_str(obj, "lockup", nvic_get_lockup, NULL);
+ }
+ 
+ static void armv7m_nvic_class_init(ObjectClass *klass, const void *data)

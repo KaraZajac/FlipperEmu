@@ -1,0 +1,102 @@
+From: FlipperEmu
+Subject: [PATCH] armv7m_nvic: pend an asynchronous fault
+
+The NVIC treats every fault as synchronous: a BusFault that is disabled,
+or not of a higher priority than the execution, is escalated to
+HardFault at once, and where HardFault cannot be taken either that is a
+Lockup, which QEMU reports with cpu_abort(). QEMU's own data aborts are
+all precise, so this was enough. A board's memory may refuse a write the
+way a bus does, though, after the bus has taken it: an imprecise
+BusFault, which the architecture makes an asynchronous exception
+(ARMv7-M ARM B1.5.8): it is not escalated for its priority, it remains
+pending until it can be taken, and a disabled one escalates to a
+HardFault that is pending in turn. None of that is a Lockup.
+
+Add armv7m_nvic_set_pending_async() for such a fault.
+
+Seen with the Flipper Zero machine and the STM32WB55's SRAM2, whose
+upper parts the wireless stack keeps for CPU2: a write there by CPU1 is
+an imprecise BusFault on the chip. A firmware whose shared block reaches
+into that part wipes it in its reset handler (BusFault disabled: a
+HardFault), and its HardFault handler writes its crash registers there
+too, then resets the chip. On the chip that is a loop of resets. With a
+synchronous fault QEMU ended at the handler's first write, "Lockup:
+can't escalate 3 to HardFault (current priority -1)".
+
+Signed-off-by: FlipperEmu
+---
+--- a/include/hw/intc/armv7m_nvic.h
++++ b/include/hw/intc/armv7m_nvic.h
+@@ -123,6 +123,21 @@
+  */
+ void armv7m_nvic_set_pending_lazyfp(NVICState *s, int irq, bool secure);
+ /**
++ * armv7m_nvic_set_pending_async: mark an asynchronous fault as pending
++ * @s: the NVIC
++ * @irq: the exception number to mark pending (BusFault, for an imprecise
++ * one, which a board's memory may raise for a write it does not take)
++ * @secure: false for non-banked exceptions or for the nonsecure
++ * version of a banked exception, true for the secure version of a banked
++ * exception.
++ *
++ * Similar to armv7m_nvic_set_pending(), but for a fault that is not
++ * synchronous: it is not escalated for its priority, and remains pending
++ * until it can be taken.  A disabled one still escalates to HardFault,
++ * which is pending in turn, and is never a Lockup.
++ */
++void armv7m_nvic_set_pending_async(NVICState *s, int irq, bool secure);
++/**
+  * armv7m_nvic_get_pending_irq_info: return highest priority pending
+  *    exception, and whether it targets Secure state
+  * @s: the NVIC
+--- a/hw/intc/armv7m_nvic.c
++++ b/hw/intc/armv7m_nvic.c
+@@ -694,6 +694,48 @@
+     do_armv7m_nvic_set_pending(s, irq, secure, true);
+ }
+ 
++void armv7m_nvic_set_pending_async(NVICState *s, int irq, bool secure)
++{
++    /*
++     * An asynchronous fault (an imprecise BusFault: a write that the bus
++     * took and that failed later) is not escalated for its priority, as
++     * a synchronous one is: it remains pending until it can be taken.  A
++     * disabled one escalates to HardFault, which is then pending; while
++     * the processor runs at HardFault's priority or above, that waits too,
++     * and it is never a Lockup (ARMv7-M ARM B1.5.8, B1.5.15).
++     */
++    bool banked = exc_is_banked(irq);
++    VecInfo *vec;
++    bool targets_secure;
++
++    assert(irq >= ARMV7M_EXCP_HARD && irq < ARMV7M_EXCP_PENDSV);
++    assert(!secure || banked);
++
++    vec = (banked && secure) ? &s->sec_vectors[irq] : &s->vectors[irq];
++    targets_secure = banked ? secure : exc_targets_secure(s, irq);
++
++    trace_nvic_set_pending(irq, secure, targets_secure, false, vec->enabled,
++                           vec->prio);
++
++    if (!vec->enabled) {
++        trace_nvic_escalate_disabled(irq);
++        irq = ARMV7M_EXCP_HARD;
++        if (arm_feature(&s->cpu->env, ARM_FEATURE_M_SECURITY) &&
++            (targets_secure ||
++             !(s->cpu->env.v7m.aircr & R_V7M_AIRCR_BFHFNMINS_MASK))) {
++            vec = &s->sec_vectors[irq];
++        } else {
++            vec = &s->vectors[irq];
++        }
++        s->cpu->env.v7m.hfsr |= R_V7M_HFSR_FORCED_MASK;
++    }
++
++    if (!vec->pending) {
++        nvic_update_pending_state(s, vec, irq, 1);
++        nvic_irq_update(s);
++    }
++}
++
+ void armv7m_nvic_set_pending_lazyfp(NVICState *s, int irq, bool secure)
+ {
+     /*
