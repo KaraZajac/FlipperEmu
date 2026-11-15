@@ -436,6 +436,9 @@ static void bq25896_reset_hold(Object *obj, ResetType type)
 {
     Bq25896State *s = BQ25896(obj);
 
+    if (flipper_board_keeps()) {
+        return;         /* battery powered: the MCU's reset is not its own */
+    }
     memcpy(s->regs, bq25896_defaults, sizeof(s->regs));
     bq25896_adc(s);
 }
@@ -918,6 +921,9 @@ static void lp5562_reset_hold(Object *obj, ResetType type)
 {
     Lp5562State *s = LP5562(obj);
 
+    if (flipper_board_keeps()) {
+        return;         /* its lights stay, its programs run on */
+    }
     lp5562_reset(s);
     timer_del(s->timer);
 }

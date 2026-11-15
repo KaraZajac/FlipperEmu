@@ -230,6 +230,7 @@ struct FlipperZeroState {
     uint32_t halt_at;            /* where, when it last looked (0: it has not) */
     bool halt_rest;              /* ... and the CPU rests because of it */
     bool halt_said;
+    bool powered;                /* the power-on's reset is done */
     uint8_t hdr_hold[HDR_PINS];  /* what the outside holds on a header pin */
     uint16_t hdr_mv[HDR_PINS];   /* ... and at how many mV it holds it */
     QEMUTimer *hdr_rx_end[2];    /* a start bit on a serial port's RX pin */
@@ -1789,6 +1790,14 @@ static void flipper_drive_pins(FlipperZeroState *s)
     flipper_header_spi_selects(s, -1);  /* ... and its SPI chip selects */
     flipper_sd_detect(s);
     qemu_set_irq(soc_in(s, 'C', 2), 0);     /* SPI2 MISO idle low */
+    /* the LCD's RST (PB0) stays high while the pin floats, from the MCU's
+     * reset until the firmware drives it: the official firmware puts a
+     * pull-up on it in PWR_PUCRB ("Explicit, surviving reset, pulls",
+     * furi_hal_resources_init_early(), which then holds the panel in reset
+     * until its display's init).  So a Flipper that dies before that, in
+     * its reset handler, shows its last screen.  (The PWR model keeps no
+     * pull over a reset: this one is the board's.) */
+    qemu_set_irq(soc_in(s, 'B', 0), 1);
     qemu_set_irq(soc_in(s, 'B', 4), 0);     /* SPI1 MISO: CC1101 CHIP_RDYn */
     flipper_ir_idle(s->ir);                 /* IR receiver output idles high */
     flipper_ibutton_reset(s->ibutton);      /* iButton line pulled up */
@@ -1970,6 +1979,22 @@ static void flipper_halt_vm_state(void *opaque, bool running, RunState state)
     }
 }
 
+static bool board_keeps;
+
+bool flipper_board_keeps(void)
+{
+    return board_keeps;
+}
+
+/*
+ * The first reset is the power-on: an emulator that is switched off exits,
+ * and one that is switched on again is a new process.  A later one is the
+ * MCU's alone, and the board's chips keep what they have: the LCD its
+ * picture (its RST line is pulled up, flipper_drive_pins), the LED driver
+ * its lights and running programs, the charger its settings, the radios
+ * what they were doing, until the firmware's start resets each of them.
+ * A saved state's load resets everything, and the state comes after it.
+ */
 static void flipper_zero_reset(MachineState *machine, ResetType type)
 {
     FlipperZeroState *s = FLIPPER_ZERO(machine);
@@ -1977,10 +2002,13 @@ static void flipper_zero_reset(MachineState *machine, ResetType type)
     flipper_halt_rest(s, false);
     s->halt_at = 0;
     s->halt_said = false;
-    wb55_soc_latch_boot(&FLIPPER_ZERO(machine)->soc);
+    wb55_soc_latch_boot(&s->soc);
+    board_keeps = s->powered && type == RESET_TYPE_COLD;
     qemu_devices_reset(type);
-    flipper_drive_pins(FLIPPER_ZERO(machine));
-    wb55_soc_sync_pins(&FLIPPER_ZERO(machine)->soc);
+    board_keeps = false;
+    s->powered = true;
+    flipper_drive_pins(s);
+    wb55_soc_sync_pins(&s->soc);
 }
 
 /*

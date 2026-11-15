@@ -763,6 +763,10 @@ static void cc1101_reset_hold(Object *obj, ResetType type)
 {
     Cc1101State *s = CC1101(obj);
 
+    s->phase = 0;                       /* (a transfer under way ends) */
+    if (flipper_board_keeps()) {
+        return;         /* it goes on with what it does, until an SRES */
+    }
     cc1101_tx_end(s);
     memcpy(s->regs, cc1101_defaults, sizeof(s->regs));
     memset(s->patable, 0, sizeof(s->patable));

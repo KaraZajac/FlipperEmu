@@ -13,6 +13,16 @@
 #include "qemu/notify.h"
 #include "chardev/char-fe.h"
 
+/*
+ * Whether the reset under way is the MCU's alone (SYSRESETREQ, a watchdog,
+ * the FUS's restart, NRST: `system_reset`): then the board's chips keep
+ * what they have, as on a Flipper, where only the STM32 is reset and each
+ * chip has a reset of its own (a pin, a command), which the firmware gives
+ * at its start.  The power-on and a saved state's load reset them all.
+ * (flipper_zero.c)
+ */
+bool flipper_board_keeps(void);
+
 /* ------------------------------------------- radio links (flipper_link.c) */
 /* a line protocol on a chardev: a real radio, or a program, as an antenna */
 typedef struct FlipperLink {

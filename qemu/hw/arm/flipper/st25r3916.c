@@ -1334,8 +1334,8 @@ static void st25_reset_hold(Object *obj, ResetType type)
 {
     St25r3916State *s = ST25R3916(obj);
 
-    if (s->timer) {
-        st25_defaults(s);
+    if (s->timer && !flipper_board_keeps()) {
+        st25_defaults(s);   /* (the MCU's reset: until a SET_DEFAULT) */
     }
     s->phase = PH_CMD;
     s->prefix_b = false;
