@@ -19,9 +19,9 @@ goes on emulating.  With nothing emulated the reader says so.
 An ISO14443-4A card by a reader that asks for its ATS (`nfc --reader iso-dep`).
 A FeliCa Lite-S by a FeliCa reader without the card key (`nfc --reader
 felica`).  A Type 4 tag whose NDEF message of 910 bytes is read through
-ISO14443-4's blocks (`nfc --reader t4t`), where the firmware emulates one;
-none here does from its shell, so that reader also reads a tag that is
-played in Python.  `nfc record` writes every frame on the air and its answer
+ISO14443-4's blocks (`nfc --reader t4t`), emulated by the NFC app of the
+firmwares that know one (the dev build and the forks); and one that is
+played in Python, for the official 1.5.1 and for shorter reads.  `nfc record` writes every frame on the air and its answer
 to a file, both ways, and `nfc watch` shows them as they happen.
 Needs the firmware's NFC shell (1.4 and later); without it nothing is
 checked and the exit status is 77.  Exit status 0 = pass.
@@ -172,31 +172,58 @@ T4T_TEXT = ("FlipperEmu's long NDEF text record. " * 25)[:900]
 
 
 def t4t(b, work):
-    """An NFC Forum Type 4 tag, on the firmwares that emulate one: the NDEF
-    message read through ISO14443-4's blocks, 900 bytes in several reads.
-    The check's last part with the firmware: a shell that knows no such
-    card can end the firmware (Momentum mntm-012's does, FW-19 in
-    docs/FIRMWARE_BUGS.md), which is said and not counted."""
+    """An NFC Forum Type 4 tag, emulated by the NFC app of the firmwares
+    that know one (opened with the card's file, as from the archive): the
+    NDEF message read through ISO14443-4's blocks, 900 bytes in several
+    reads.  Their shells do not emulate one, and Momentum mntm-012's ends
+    the firmware when asked to (FW-19 in docs/FIRMWARE_BUGS.md), so the
+    shell is not asked here."""
     card = fe_nfc.sample_t4t(bytes.fromhex("04D1E2F3A4B5C6"), text=T4T_TEXT)
-    before = len(CRASH.findall(b.uart_text(every=True)))
-    with Emulated(b, work, "t4t", card) as emu:
-        if not emu.on:
-            time.sleep(1.0)
-            if len(CRASH.findall(b.uart_text(every=True))) > before:
-                print("  (this firmware's NFC shell crashes when it is asked to "
-                      "emulate a Type 4 tag's file: the firmware's own)")
-            else:
-                print("  (this firmware does not emulate a Type 4 tag: "
-                      + " ".join(emu.said.split()[-8:]) + ")")
+    path = work / "fe-emu-t4t.nfc"
+    path.write_text(card)
+    b.fe("rm", "/ext/nfc/fe-emu-t4t.nfc")
+    b.fe("push", path, "/ext/nfc")
+    code, said = b.fe("app", "NFC", "/ext/nfc/fe-emu-t4t.nfc")
+    on = False
+    for _ in range(40):                 # (the app's start, and its file)
+        try:
+            text = b.fe("status", "--json")[1]
+            on = json.loads(text[text.index("{"):])["nfc"]["radio"] == "listen"
+        except (ValueError, KeyError):
+            pass
+        if on:
+            break
+        time.sleep(0.25)
+    try:
+        if not on:
+            print("  (this firmware's NFC app does not emulate a Type 4 tag's "
+                  "file)")
             return
-        read_back(b, emu, card, "t4t",
-                  "a Type 4 tag that the firmware emulates, read by a reader "
-                  "of NFC Forum Type 4 tags (the NDEF application, the "
-                  "capability container, the NDEF file in the reads that the "
-                  "container allows): its NDEF message of 910 bytes is the "
-                  "card's", "an NDEF message of 910 bytes")
-    crash = CRASH.search(b.uart_text(every=True))
-    check("no crash in the firmware's logs after it", not crash)
+        code, text = b.fe("nfc", "--reader", "t4t", "--quiet-read")
+        where = last_read(b)
+        read = pathlib.Path(where).read_text() if where and \
+            os.path.exists(where) else ""
+        differ = same(card, read)
+        check("a Type 4 tag that the firmware's NFC app emulates, read by a "
+              "reader of NFC Forum Type 4 tags (the NDEF application, the "
+              "capability container, the NDEF file in the reads that the "
+              "container allows): its NDEF message of 910 bytes and its ATS "
+              "are the card's",
+              code == 0 and "an NDEF message of 910 bytes" in text and read
+              and not differ,
+              f"{said}\n{text}\n" + "\n".join(
+                  f"{k}: {fe_nfc.parse_nfc_text(card).get(k)} | "
+                  f"{fe_nfc.parse_nfc_text(read).get(k) if read else None}"
+                  for k in differ[:8]))
+    finally:
+        # (out by its Back button: the app that is asked to close while it
+        # emulates ends the firmware, FW-06)
+        for _ in range(8):
+            b.fe("press", "back")
+            time.sleep(0.6)
+            if "no app runs" in b.fe("app")[1]:
+                break
+        b.fe("rm", "/ext/nfc/fe-emu-t4t.nfc")
 
 
 class Loop:
@@ -268,8 +295,9 @@ class T4tCard(fe_nfc_link.IsoDep):
 
 
 def t4t_reader():
-    """No firmware here emulates a Type 4 tag in its shell, so that reader
-    reads one that is played in Python: no emulator in this part"""
+    """The official 1.5.1 emulates no Type 4 tag, so that reader also reads
+    one that is played in Python: no emulator in this part, and reads of 59
+    bytes, where the firmwares' tags allow 246"""
     uid = bytes.fromhex("04D1E2F3A4B5C6")
     card = fe_nfc.sample_t4t(uid, text=T4T_TEXT)
     message = bytes.fromhex("".join(
@@ -443,15 +471,14 @@ def main():
                 iso_dep(b, work)
                 felica(b, work)
                 record(b, work)
-            log = b.uart_text(every=True)
-            crash = CRASH.search(log)
-            check("no crash in the firmware's logs", not crash,
-                  crash and log[max(0, crash.start() - 300):crash.end() + 300])
-            if not skipped:
                 t4t(b, work)
                 t4t_reader()
             b.stop()
             b.fe("stop")
+            log = b.uart_text(every=True)
+            crash = CRASH.search(log)
+            check("no crash in the firmware's logs", not crash,
+                  crash and log[max(0, crash.start() - 300):crash.end() + 300])
     except TimeoutError:
         print("the device, when its shell stopped answering:\n"
               + b.fe("status", timeout=60)[1])

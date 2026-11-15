@@ -1598,9 +1598,10 @@ The same program has three more readers, which need no card file:
 - `iso-dep` gets the ATS of the file. What the firmware does with a command after
   it is the emulating app's business; the NFC shell's `emulate` answers none.
 - `t4t` reads the NDEF application, the capability container and the NDEF file
-  through ISO14443-4's blocks. None of the five firmwares emulates a Type 4 tag
-  from its NFC shell (and Momentum's shell crashes when asked to), so the check
-  runs this reader against a tag that is played in Python.
+  through ISO14443-4's blocks. The dev build and the forks emulate a Type 4 tag
+  from their NFC app (NFC → Saved → the card → Emulate, or `./flipperemu app NFC
+  /ext/nfc/tag.nfc`), 246 bytes a read; their shells do not (and Momentum's
+  crashes when asked to). The official 1.5.1 does not know the card.
 
 A reader starts again when the Flipper stops answering in the middle: field off
 and on, select, and the last step once more. On a busy computer the emulated CPU
@@ -1608,8 +1609,9 @@ can be too late with an answer, and a real card never is.
 
 `scripts/nfc_emulate_check.py FIRMWARE` checks emulation from the reader's side: an
 NTAG215, a MIFARE Classic Mini, 1K and 4K whose every block and key comes back, an
-ISO14443-4A card, a FeliCa Lite-S, and the record of the frames (15 checks on the
-official 1.5.1 and its dev build, Momentum, Unleashed and RogueMaster).
+ISO14443-4A card, a FeliCa Lite-S, a Type 4 tag with an NDEF message of 910 bytes
+where the firmware emulates one, and the record of the frames (15 checks on the
+official 1.5.1, 16 on its dev build, Momentum, Unleashed and RogueMaster).
 
 Not there: a reader for ISO15693 and SLIX emulation. The firmware receives those
 by itself as well, sampling a pin with a timer and the DMA, which needs three more

@@ -5536,6 +5536,23 @@ big lock, entry 92).
       and Unleashed; setup_check 48; smoke 28 and snapshot_check on the
       official 1.5.1.
 
+177. **A Type 4 tag that a firmware emulates.**
+    - Entry 170 had the reader of Type 4 tags read a tag that is played
+      in Python, since no firmware's NFC shell emulates one. The NFC app
+      does, on the dev build, Momentum, Unleashed and RogueMaster: opened
+      with the card's file (`./flipperemu app NFC /ext/nfc/tag.nfc`), it
+      listens at once.
+    - `nfc --reader t4t` at the first try on each: the NDEF application
+      selected, a capability container that names file E104 with room
+      for 2048 bytes and 246 bytes a read, and the message of 910 bytes
+      in four reads, the same as the file's; the ATS too.
+    - The check leaves the app by its Back button: asked to close while
+      it emulates, it ends the firmware (FW-06). The shell is not asked
+      for this card any more, so the check no longer meets FW-19.
+    - Checks: nfc_emulate_check 16 on the dev build, Momentum, Unleashed
+      and RogueMaster, 15 on the official 1.5.1 (whose app does not know
+      the card).
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

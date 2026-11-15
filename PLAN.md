@@ -258,10 +258,11 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       More readers ☑ (2026-11-15): `nfc --reader felica` (the chip's polling from
       the passive-target memory's FeliCa part, then a Lite-S's blocks without its
       key), `--reader iso-dep` (RATS and the ATS), `--reader t4t` (a Type 4 tag's
-      NDEF message through ISO14443-4's blocks; no firmware here emulates one from
-      its shell, so checked against a tag played in Python). A reader starts again
-      (field off and on) when the Flipper stops answering, which a busy computer
-      brings about. `scripts/nfc_emulate_check.py` 13 on five (BRINGUP_LOG 170).
+      NDEF message through ISO14443-4's blocks; the NFC apps of the dev build and
+      the forks emulate one, 2026-11-15, BRINGUP_LOG 177; a tag played in Python
+      for the official 1.5.1). A reader starts again (field off and on) when the
+      Flipper stops answering, which a busy computer brings about.
+      `scripts/nfc_emulate_check.py` 15 / 16 on five (BRINGUP_LOG 170).
       NTAG 413/424 DNA ☑ (2026-11-15): the card that the dev build and the three
       forks know by its ISO-wrapped GetVersion; `nfc ntag4xx UID`; read and saved
       by their NFC apps (nfc_check 25, 27 on the dev build, 28 on the forks).
@@ -273,9 +274,8 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       whose compare requests have the DMA sample a GPIO pin. Needed first: the
       request generator, TIM16 as a timer (it is the speaker's register file now),
       DMA requests on compare events, and the chip's demodulated signal on its
-      pin in transparent mode. Then: a Type 4 tag emulated by the forks' NFC apps
-      (not their shells); FeliCa's authentication from the reader's side; MIFARE
-      Plus SL3 (AES; Unleashed and RogueMaster try keys)
+      pin in transparent mode. Then: FeliCa's authentication from the reader's
+      side; MIFARE Plus SL3 (AES; Unleashed and RogueMaster try keys)
 - ☑ 125 kHz RFID read: COMP1 → TIM2 TI4 capture, a virtual tag in the reader's field
       (ASK/FSK/PSK, field noise), encoders ported from the firmware (`fe_rfid.py`, checked
       cycle for cycle against its emulation by `rfid_check.py`); app Read and `rfid read`
@@ -900,7 +900,7 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           `rpc_storage.c:266`); Momentum, Unleashed and RogueMaster too. Not
           reported upstream (Kara's to decide)
     - ☑ The firmware's bugs in one list (2026-11-15): `docs/FIRMWARE_BUGS.md`,
-          19 of them (FW-01 to FW-19) with firmwares, cause, how to see each and
+          20 of them (FW-01 to FW-20) with firmwares, cause, how to see each and
           whether it was reported; a new one gets the next number (BRINGUP_LOG 168)
     - ☐ A lockup seen once after three RPC runs on one device, in the crash
           handler's walk of the heap (`vPortGetHeapStats`): what crashed first is

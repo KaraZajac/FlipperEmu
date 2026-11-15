@@ -191,7 +191,8 @@ keeps its row, with the version that fixed it.
   file.
 - **To see it:** a Type 4 tag's file on the card (`scripts/fe_nfc.py --nfc-file
   --t4t 04D1E2F3A4B5C6`), then `nfc` and `emulate -f /ext/nfc/FILE.nfc` on the CLI.
-  `scripts/nfc_emulate_check.py` meets it and says so.
+- **Not affected:** Momentum's NFC app emulates the same file, and a reader reads
+  its NDEF message.
 - **Seen on:** Momentum mntm-012.
 - **Log:** entry 170.
 
