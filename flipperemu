@@ -4373,6 +4373,7 @@ def cmd_fuzz(args):
         open_cli = staticmethod(lambda: open_cli(dev))
         mon = staticmethod(ask_monitor)
         say = staticmethod(tell)
+        dir = dev.dir
 
         @staticmethod
         def news(forget=False):
@@ -7815,7 +7816,7 @@ def main():
 
     p = sub.add_parser("fuzz", help="inputs to the firmware's parsers, made "
                        "from those that reached new code, until one crashes it",
-                       usage="flipperemu fuzz subghz|ir|rpc|cli [--seconds N] "
+                       usage="flipperemu fuzz subghz|ir|rpc|cli|nfc [--seconds N] "
                              "[--runs N] [--first] [--seed N] [--out DIR] "
                              "[--seeds FILE...] [--max N] [--frequency HZ] "
                              "[--command TEMPLATE] [--ext .EXT] [--timeout S]\n"
@@ -7825,7 +7826,9 @@ def main():
                         "listens; ir: marks and spaces at the IR receiver "
                         "while `ir rx` listens; rpc: bytes into an RPC session "
                         "on the USB serial port; cli: a CLI command with the "
-                        "input in it (--command)")
+                        "input in it (--command); nfc: a card with contents of "
+                        "the fuzzer's making in the field while the NFC "
+                        "shell's `dump` reads it")
     p.add_argument("--seconds", type=float, metavar="N",
                    help="for so long (default 60, or until --runs)")
     p.add_argument("--runs", type=int, metavar="N", help="so many inputs")

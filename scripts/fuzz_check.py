@@ -91,11 +91,58 @@ def targets(b, work):
               and len(files(out / "corpus")) == kept
               and not files(out / "crashes") and ok
               and "no coverage" not in text, text + said)
+    nfc(b, work)
     first = files(work / "ir" / "corpus")[0]
     code, text = b.fe("fuzz", "ir", "--replay", first, "--out", work / "again")
     check("`fuzz ir --replay FILE`: a kept input given again, and what came "
           "of it: no crash and no hang",
           code == 0 and "1 inputs again: no crash and no hang" in text, text)
+
+
+def nfc(b, work):
+    """`fuzz nfc`: cards of the fuzzer's making, read by the NFC shell's
+    `dump`"""
+    out = work / "nfc"
+    code, text = b.fe("fuzz", "nfc", "--runs", 16, "--seed", 1, "--out", out,
+                      timeout=900)
+    if code == 2 and "no `nfc` shell" in text:
+        print("  (this firmware's CLI has no NFC shell: `fuzz nfc` says so)")
+        return
+    inputs, kept, crashes = numbers(text)
+    ok, said = b.answers()
+    # (Momentum's shell with a Type 4 tag and an EMV card, entry 158;
+    # Unleashed's `dump` with an EMV card)
+    known = ("NULL pointer dereference" in text
+             or "[dump] furi_check failed" in text)
+    check("`fuzz nfc --runs 16`: a card of each kind and cards made from "
+          f"them, held to the Flipper and dumped by its NFC shell: {kept} of "
+          f"{inputs} kept for the new code they reached; "
+          + ("no crash" if not crashes else
+             f"{crashes} crashes, of the one kind that this firmware's shell "
+             "has with a Type 4 tag or an EMV card, each found and gone on "
+             "from") + "; and the firmware's CLI answers after it",
+          inputs >= 16 and kept >= 5 and ok
+          and ((code == 0 and crashes == 0)
+               or (code == 1 and known and "of 1 kinds" in text)),
+          text[-1500:] + said)
+    # a card that is ISO14443-3B and no more: the official 1.5.1's `dump`
+    # never comes back from it (entry 156), which is a hang to the fuzzer
+    card = work / "3b.card"
+    card.write_text("# ISO14443-3B\ntype iso14443b\nuid 1a 2b 3c 4d\n"
+                    "appdata 00 12 34 e1\nprotinfo 00 80 80\napp none\n")
+    code, text = b.fe("fuzz", "nfc", "--replay", card, "--out", work / "nfc-3b",
+                      timeout=600)
+    ok, said = b.answers()
+    hung = "hang after input 1" in text
+    check("`fuzz nfc --replay` of a card that is ISO14443-3B and no more: "
+          + ("this firmware's `dump` never comes back from it: a hang, said "
+             "and kept (crashes/001-hang), and the Flipper started again"
+             if hung else "read, with no crash and no hang")
+          + "; its CLI answers after it",
+          ok and ((code == 1 and hung
+                   and (work / "nfc-3b" / "crashes" / "001-hang").is_dir())
+                  or (code == 0 and "no crash and no hang" in text)),
+          text[-800:] + said)
 
 
 def planted(b, work):

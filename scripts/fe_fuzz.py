@@ -27,6 +27,7 @@ input meets what the ones before left.  So a crash is kept with the inputs
 that came before it.
 """
 import os
+import pathlib
 import random
 import re
 import time
@@ -515,7 +516,132 @@ class Cli(Target):
             raise Lost(f"its serial port: {e}") from None
 
 
-TARGETS = {t.name: t for t in (SubGhz, Ir, Rpc, Cli)}
+class Nfc(Target):
+    """A card whose contents the fuzzer made, held to the Flipper while the
+    firmware's NFC shell reads it (`dump`).  An input is a card as the
+    emulator's card model takes one (scripts/fe_nfc.py: a line for each
+    value, its bytes in hex): what a card says of itself is the fuzzer's,
+    and the card stays one that answers by its protocol's rules.  A card
+    that the model does not take (a UID of five bytes) is no input, and
+    costs nothing."""
+    name = "nfc"
+    ext = ".card"
+    alone = True
+    PROMPT = r"\[nfc\]>: "
+    FIXED = ("type", "app", "blocksize", "slix", "ulc", "privacy",
+             "accept-all")              # (what kind of card it is: kept)
+
+    def __init__(self, env, opts):
+        super().__init__(env, opts)
+        self.timeout = opts.get("timeout") or 40.0
+        self.path = pathlib.Path(env.dir) / "fuzz-card.txt"
+        self.shell = False
+
+    def seeds(self):
+        import fe_nfc
+        made = [("ntag215", "04A1B2C3D4E5F6"), ("mfc1k", "11223344")]
+        out = []
+        for kind, uid in made:
+            try:
+                out.append((fe_nfc.blank(kind, bytes.fromhex(uid),
+                                         "https://flipperzero.one")
+                            if kind == "ntag215" else
+                            fe_nfc.blank_mfc(kind[3:], bytes.fromhex(uid))
+                            ).encode())
+            except (ValueError, KeyError):
+                pass
+        uids = {"felica": "012E4CD21A8B3C5F", "felica-standard": "0114B3C6D2F0A957",
+                "slix": "E004010812345678", "st25tb": "D0021C0123456789",
+                "iso14443b": "1A2B3C4D"}
+        for kind, (make, _) in fe_nfc.SAMPLES.items():
+            uid = bytes.fromhex(uids.get(kind, "04A1B2C3D4E5F6"))
+            out.append(fe_nfc.describe(fe_nfc.parse_nfc_text(make(uid))).encode())
+        return out
+
+    def mutate(self, data, rng, other):
+        lines = data.decode(errors="replace").splitlines()
+        spots = [i for i, line in enumerate(lines)
+                 if line and not line.startswith("#")
+                 and line.split()[0] not in self.FIXED and len(line.split()) > 1]
+        if not spots:
+            return data
+        for _ in range(rng.choice((1, 1, 1, 2, 3))):
+            i = rng.choice(spots)
+            key, *words = lines[i].split()
+            try:
+                value = bytes.fromhex("".join(words))
+            except ValueError:
+                continue
+            keep = 1 if key == "rec" else 0     # (a record's kind stays)
+            theirs = b""
+            if other:
+                # a value of another card's, of the same key if it has one
+                same = [bytes.fromhex("".join(line.split()[1:]))
+                        for line in other.decode(errors="replace").splitlines()
+                        if line.split()[:1] == [key]
+                        and all(c in "0123456789abcdefABCDEF"
+                                for c in "".join(line.split()[1:]))]
+                theirs = rng.choice(same)[keep:] if same else b""
+            new = value[:keep] + mutate_bytes(value[keep:], rng, theirs,
+                                             max(len(value) + 16, 64))
+            lines[i] = f"{key} {new.hex(' ')}".rstrip()
+        return ("\n".join(lines) + "\n").encode()
+
+    FILE = "/ext/nfc/fuzz.nfc"          # (the dump's: removed after each)
+
+    def enter(self):
+        found, _ = self.cli.watch("nfc", self.PROMPT, timeout=15, stop=False)
+        self.shell = bool(found)
+        return self.shell
+
+    def leave(self):
+        """Out of the NFC shell, to the CLI's own prompt"""
+        if self.shell:
+            self.cli.watch("exit", r">: ", timeout=5, stop=False)
+            self.shell = False
+
+    def open(self):
+        super().open()
+        self.cli.run(f"storage remove {self.FILE}", timeout=10)
+        if not self.enter():
+            raise ValueError("this firmware's CLI has no `nfc` shell with a "
+                             "`dump`: no reader to hold a card to")
+
+    def close(self):
+        try:
+            self.env.mon("qom-set /machine/nfc card none")
+        except (OSError, ConnectionError):
+            pass
+        if self.cli and self.shell:
+            try:
+                self.cli.write(b"\x03")
+                self.leave()
+            except (OSError, TimeoutError):
+                pass
+            self.shell = False
+        super().close()
+
+    def feed(self, data):
+        try:
+            self.path.write_bytes(data)
+            if self.env.mon(f"qom-set /machine/nfc card file:{self.path}").strip():
+                return                  # (no card: the model refused it)
+            found, _ = self.cli.watch(f"dump -f {self.FILE}", self.PROMPT,
+                                      timeout=self.timeout, stop=False)
+            self.env.mon("qom-set /machine/nfc card none")
+            if found:
+                # (the shell writes no file over one that is there)
+                self.leave()
+                self.cli.run(f"storage remove {self.FILE}", timeout=10)
+                found = self.enter()
+        except (OSError, TimeoutError) as e:
+            raise Lost(f"its serial port: {e}") from None
+        if not found:
+            raise Lost("the NFC shell was not done with `dump` after "
+                       f"{self.timeout:g} s")
+
+
+TARGETS = {t.name: t for t in (SubGhz, Ir, Rpc, Cli, Nfc)}
 
 
 # -------------------------------------------------------------------- engine

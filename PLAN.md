@@ -843,7 +843,13 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
     - ☐ A lockup seen once after three RPC runs on one device, in the crash
           handler's walk of the heap (`vPortGetHeapStats`): what crashed first is
           not known (the fuzzer looks once more after its target is closed now)
-    - ☐ More targets: NFC (a card's answers on the link), iButton and RFID pulses,
+    - ☑ NFC (2026-11-15): `fuzz nfc`: cards whose contents the fuzzer made (the
+          card model's descriptions, a value at a time), held to the Flipper and
+          read by the NFC shell's `dump`; about two a second. It finds Momentum's
+          shell crash at its seeds and the official 1.5.1's `dump` that never
+          returns as a hang (BRINGUP_LOG 166)
+    - ☐ More targets: a card's raw answers (frames that break the protocol's
+          rules, which the card model's cards never do), iButton and RFID pulses,
           the Sub-GHz decoders on Unleashed and RogueMaster (their CLI does not
           start the radio: through the app's Read), BLE's GATT writes
 - ☐ Upstream the sixteen QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:

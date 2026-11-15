@@ -544,7 +544,7 @@ picture of the save to the pixel and the tag, and goes on with Pause.
 | `run --coverage` | count the code that runs (a plugin in the emulator, about 2 % slower) |
 | `run --trace` | `--coverage`, and the order in which code ran: the last 65,536 blocks of it (code runs at about half its speed) |
 | `coverage trace [--before start\|fault] [--last N] [--blocks] [--json]` | of a `run --trace`: the code that ran last, a line for each run of blocks of one function; what ran before the firmware last started (how its life before ended), or before the CPU's last fault |
-| `fuzz subghz\|ir\|rpc\|cli [--seconds N] [--runs N] [--first] [--seed N] [--out DIR] [--seeds FILE...] [--command TEMPLATE]` \| `fuzz TARGET --replay FILE\|FOLDER...` | inputs to one of the firmware's parsers, made from those that reached new code, until one crashes it; a crash's inputs given again |
+| `fuzz subghz\|ir\|rpc\|cli\|nfc [--seconds N] [--runs N] [--first] [--seed N] [--out DIR] [--seeds FILE...] [--command TEMPLATE]` \| `fuzz TARGET --replay FILE\|FOLDER...` | inputs to one of the firmware's parsers, made from those that reached new code, until one crashes it; a crash's inputs given again |
 | `coverage [--elf FILE \| --app APP] [--files N] [--functions [PATTERN]] [--missed] [--lcov FILE] [--json]` \| `coverage reset` \| `coverage dump FILE` | what ran since the start or the last reset: of the firmware's functions and lines, or an app's (by its id, its .fap or its ELF); count anew; the blocks that ran, as text |
 | `gdb --serve PORT` | its gdb stub on a TCP port of this computer, for an IDE |
 | `gdb --vscode [--serve PORT]` | ... and a debug configuration for VS Code (the Cortex-Debug extension) in `.vscode/launch.json` of the folder you are in |
@@ -1476,7 +1476,8 @@ and the firmware's `dump` of it is the file again, key for key:
   `apdu -p 4a -d 00A4040C07D2760000850101` talks to them all the same. (Momentum
   mntm-012's shell does not live through its `scanner` or `dump` with either:
   "NULL pointer dereference", and the firmware starts again. Its NFC app reads
-  them, and so do the shells of Unleashed and the dev build.)
+  them. The shells of Unleashed and the dev build name the tag; Unleashed
+  unlshd-094's `dump` of the EMV card ends in "furi_check failed".)
 - **ISO14443B** (ISO14443-3B and -4B): REQB and WUPB with the ATQB (the card's PUPI,
   application data and protocol info, as the file has them), ATTRIB, HLTB, and
   ISO14443-4's blocks after it when the protocol info says so. `raw -p 14b -c -d
@@ -3278,6 +3279,7 @@ parser's checks one at a time. The targets:
 | `ir` | marks and spaces, µs | at the IR receiver while `ir rx` listens |
 | `rpc` | bytes | into an RPC session on the USB serial port: the protobuf decoder and the handlers of its messages. A message's body is changed and its length kept right, mostly |
 | `cli` | bytes | in a CLI command (`--command`): as hex (`{hex}`), as text (`{text}`), or as a file on the card that the command reads (`{file}`, `--ext .sub`) |
+| `nfc` | a card: its values as the card model takes them (`scripts/fe_nfc.py`: a line each, the bytes in hex) | held to the Flipper while the NFC shell's `dump` reads it: the readers' code for what a card says of itself. A value is changed, or taken from another card's; the card still answers by its protocol's rules. About two cards a second |
 
 `--seconds N` or `--runs N` says how long (60 s without), `--first` stops at the
 first crash, `--seed N` makes the same choices again (the seed is said at the start),

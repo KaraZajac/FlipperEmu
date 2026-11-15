@@ -5131,6 +5131,36 @@ big lock, entry 92).
       side, twice: 31, 31, 32 and 30 each time (before: one of them lost a
       step in every such run).
 
+166. **Fuzzing the NFC readers.**
+    - Five of the firmwares' bugs of these days came from cards that were
+      merely made, not from a fuzzer. `fuzz nfc` makes them: an input is a
+      card as the card model takes one (a line for each value), the seeds
+      are a card of each kind that the launcher makes up, and a new input
+      has a value of one changed or taken from another card. The card
+      model refuses what is no card (a UID of five bytes), which costs
+      nothing; what it takes is held to the Flipper, and the NFC shell's
+      `dump` reads it.
+    - The first run did 25 inputs a second, which no reader does: the
+      shell's `dump -f FILE` writes no file over one that is there, and
+      said so at once from the second input on. The file is removed after
+      each dump (out of the NFC shell, `storage remove`, in again). Then
+      about two a second.
+    - What it found in five minutes each: nothing in the official 1.5.1
+      (436 cards); Momentum's shell crash at the seeds, twice, one kind
+      (the Type 4 tag and the EMV card: entry 158). The card that is
+      ISO14443-3B and no more, given by `--replay`: "hang after input 1:
+      the NFC shell was not done with `dump` after 40 s", kept as a hang,
+      and the Flipper started again (entry 156's, found the fuzzer's way).
+    - In the check, on three firmwares at once, its seeds found one more:
+      Unleashed unlshd-094's `dump` of the EMV card ends the firmware with
+      "[CRASH][dump] furi_check failed" (its Type 4 tag dumps). And the
+      card that is ISO14443-3B and no more hangs the `dump` of Momentum
+      and Unleashed as it does the official 1.5.1's.
+    - It mutates what a card says, not how it says it: frames that break
+      a protocol's rules are another target, not there yet.
+    - Checks: fuzz_check with `fuzz nfc --runs 16` and that replay: 18 on
+      the official 1.5.1, 12 on Momentum and Unleashed.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
