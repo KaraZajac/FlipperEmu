@@ -508,20 +508,46 @@ def main():
               == ("0x20032800", "0x2003bc00", 0),
               f"{said[-300:]} {s} {ram}\n{info[-500:]}")
         stop(b)
-        code, out, err, took = fe(b, "run", "--radio-stack", "full-ext",
-                                  "--detach", *QUIET)
-        halt = until(lambda: state(b).get("halted"), 30) if code == 0 else None
-        ram = state(b).get("sram2") or {}
-        c2, o2, e2, _ = fe(b, "wait", "--timeout", 10)
-        check("`run --radio-stack full-ext`: CPU1 locks up as it starts: "
-              "the block that it shares with CPU2, and wipes, reaches into "
-              "the SRAM2a that Full extended keeps for CPU2 (from "
-              "0x20030800); `status` and `wait` say so",
-              halt and halt.get("kind") == "LOCKUP"
-              and ram.get("sram2a") == "0x20030800"
-              and ram.get("refused", 0) > 0 and c2 != 0
-              and "locked up" in o2 + e2,
-              f"{out + err} {halt} {ram} {o2 + e2}")
+        # Full extended leaves CPU1 2 KB of SRAM2a.  What the firmware does
+        # with that is its own: the stock layout's shared block does not
+        # fit, and CPU1 locks up as it starts (`wait` says so at once); a
+        # firmware built for Full extended (MoonOS) runs the stack
+        ok, said = up(b, args.timeout, "run", "--radio-stack", "full-ext")
+        if ok:
+            until(lambda: bt(b).get("up") is True, 20)
+        st = state(b)
+        halt, ram = st.get("halted"), st.get("sram2") or {}
+        s = st.get("bluetooth") or {}
+        if not ok:
+            check("`run --radio-stack full-ext`: CPU1 locks up as it "
+                  "starts: the block that it shares with CPU2, and wipes, "
+                  "reaches into the SRAM2a that Full extended keeps for CPU2 "
+                  "(from 0x20030800); `status` and `wait` say so",
+                  halt and halt.get("kind") == "LOCKUP"
+                  and ram.get("sram2a") == "0x20030800"
+                  and ram.get("refused", 0) > 0 and "locked up" in said,
+                  f"{said[-600:]} {halt} {ram}")
+        else:
+            # (whether the firmware then brings Bluetooth up is its own
+            # support of the type: official 1.5.1 has Light and Full only,
+            # and logs "Unsupported radio stack")
+            try:
+                told = "Unsupported radio stack" in b.uart.read_text(
+                    errors="replace")
+            except OSError:
+                told = False
+            check("`run --radio-stack full-ext`: the firmware is built for "
+                  "it: it runs, CPU2 runs BLE Full extended 1.20.0 (type 6), "
+                  "and the firmware touches none of the SRAM2 that the stack "
+                  "keeps for CPU2 (from 0x20030800 and 0x2003a800); "
+                  + ("it brought Bluetooth up on it" if s.get("up") else
+                     "it did not bring Bluetooth up on it"
+                     + (" (\"Unsupported radio stack\", its log says)"
+                        if told else "")),
+                  s.get("runs") == "stack" and s.get("type") == 6
+                  and (ram.get("sram2a"), ram.get("sram2b"),
+                       ram.get("refused")) == ("0x20030800", "0x2003a800", 0),
+                  f"{said[-300:]} {s} {ram}")
         stop(b)
 
         log = "\n".join(logs)
