@@ -338,21 +338,28 @@ keeps its row, with the version that fixed it.
   out. A card with ISO14443-4 on top (a Type 4 tag) answers the RATS and nothing
   after it: the listener that was told its ATS had failed is not active. It stays
   so through later emulations, until a restart.
-- **Why:** `signal_reader_start()` (`lib/signal_reader/signal_reader.c`) sets the
-  chip's interrupt pin (PA2) to `GpioModeInterruptRiseFall`, for the DMAMUX's request
-  generator. `signal_reader_stop()` only disables the pin's callback. The NFC HAL
-  then sets the pin to `GpioModeInterruptRise` again
-  (`furi_hal_nfc_iso15693_listener_transparent_mode_exit()` calls
-  `furi_hal_nfc_init_gpio_isr()`), and `furi_hal_gpio_init_ex()`
-  (`targets/f7/furi_hal/furi_hal_gpio.c`) only ever enables a trigger for an
-  interrupt mode: the falling one stays on.
+- **Why:** `signal_reader_start()` sets the chip's interrupt pin (PA2) to
+  `GpioModeInterruptRiseFall`, for the DMAMUX's request generator
+  (`lib/signal_reader/signal_reader.c:229`). `signal_reader_stop()` only disables the
+  pin's callback (`:312`). The NFC HAL then sets the pin to `GpioModeInterruptRise`
+  again (`targets/f7/furi_hal/furi_hal_nfc_iso15693.c:299` calls
+  `furi_hal_nfc_init_gpio_isr()`, `furi_hal_nfc_irq.c:19`), and
+  `furi_hal_gpio_init_ex()` only ever enables a trigger for an interrupt mode
+  (`furi_hal_gpio.c:132` to `:143`): the falling one stays on. The one place that
+  disables a trigger (`:152`) is for a pin set to a mode that is no interrupt's, and
+  only while the line's interrupt is enabled (`:147`). The NFC HAL does set the pin
+  to analog between its uses (`furi_hal_nfc_irq.c:28`), but it removes the pin's
+  callback first, which disables the line's interrupt (`furi_hal_gpio.c:242`): so
+  that never clears a trigger either, and the rising one is on from the start to
+  the restart as well.
   From then on the pin's fall interrupts as well, and the pin falls when the firmware
-  reads the chip's interrupt registers. `furi_hal_nfc_wait_event_common()`
-  (`furi_hal_nfc_event.c`) clears its thread flag before that read, so the read sets
-  it again. The next to wait is `furi_hal_nfc_iso4443a_listener_tx()`, with
-  `furi_hal_nfc_event_wait_for_specific_irq()` for the end of its transmission and
-  10 ms: that returns at once on the stale flag, reads the registers while the frame
-  is still going out, finds no TXE and says so, and the listener gets a timeout.
+  reads the chip's interrupt registers. `furi_hal_nfc_wait_event_common()` clears
+  its thread flag before that read (`furi_hal_nfc_event.c:50`, `:52`), so the read
+  sets it again. The next to wait is `furi_hal_nfc_iso4443a_listener_tx()`, for the
+  end of its transmission and 10 ms (`furi_hal_nfc_iso14443a.c:267`):
+  `furi_hal_nfc_event_wait_for_specific_irq()` returns at once on the stale flag,
+  reads the registers while the frame is still going out, finds no TXE
+  (`furi_hal_nfc_event.c:112` to `:116`), and the listener gets a timeout.
 - **To see it:** in the NFC shell, `emulate -f` a SLIX's file and Ctrl-C. Then
   emulate an ISO14443-4A card's file and read it (`./flipperemu nfc --reader
   iso-dep`): the log has the Tx error, and has none without the ISO15693 emulation
@@ -361,8 +368,9 @@ keeps its row, with the version that fixed it.
   the bit cleared by gdb, a Type 4 tag that Momentum's NFC app emulates is read
   whole again; with the bit as the firmware left it, three tries get the ATS and
   no more.
-- **To mend it:** the pin back to what it was in `signal_reader_stop()`, or a
-  `furi_hal_gpio_init_ex()` that disables the trigger it is not asked for.
+- **To mend it:** a `furi_hal_gpio_init_ex()` that disables the trigger it is not
+  asked for, or one whose clean-up for the other modes does not ask whether the
+  line's interrupt is enabled.
 - **Seen on:** all five, in the emulator. The trigger bit: official 1.5.1 and
   Momentum. The Tx error: official 1.5.1, its dev build, Unleashed, RogueMaster. The
   Type 4 tag that is not read: the dev build, Momentum, Unleashed, RogueMaster (the
