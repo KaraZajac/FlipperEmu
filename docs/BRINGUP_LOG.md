@@ -5713,6 +5713,44 @@ big lock, entry 92).
     - Checks: nfc_check 25 on the official 1.5.1, 27 on its dev build,
       28 on Momentum, 29 on Unleashed and RogueMaster.
 
+181. **A reader for the MIFARE Plus that a firmware emulates.**
+    - Opened with a Plus's file that has keys, the NFC apps of
+      Unleashed and RogueMaster emulate it ("Emulating Mifare Plus EV1
+      2K SL3"). The reader is entry 180's protocol from the other side,
+      and needs AES in Python, which has none: the block cipher both
+      ways with the S-box made from the field's inverses, CBC, CMAC;
+      FIPS 197's, SP 800-38A's and RFC 4493's examples came out at the
+      first run.
+    - So did the reader against Unleashed's emulation: the signature,
+      a key that is not the card's refused, sector 0 by its key A and
+      its four blocks decrypted to the file's, the four configuration
+      blocks by the card's master key, a block written encrypted and
+      plain and read back. 42 frames, none unanswered.
+    - GetVersion's last part has the status 90 from these listeners,
+      not a DESFire's 00: both are taken.
+    - `nfc --reader mfplus CARD.nfc`: every sector with a key of its
+      own from the file, then the card's four keys and the
+      configuration blocks. 128 blocks and 68 keys of the made-up 2K
+      card in 273 frames and 1.2 s, none unanswered, and a file equal
+      to the card's in all of its 217 keys.
+      Without a sector's keys: 124 blocks, exit status 1.
+    - The official firmware, its dev build and Momentum listen with
+      such a file too, as an ISO14443-4A card that answers nothing
+      behind its ATS. The reader says so (twice silent: no such card),
+      and the check leaves them out.
+    - **A firmware bug (FW-22).** The first try had read a block of
+      sector 2 in a session of sector 0's key, and both keys were the
+      same sixteen FF. Asked properly: in a session of sector 0's key
+      A the emulated card gives block 4 (sector 1, other keys), block
+      12 (the sector whose key is in no dictionary), block 127 and the
+      configuration blocks; in a session of the SL1 card authentication
+      key the same; and it takes a write to block 13, which sector 3's
+      own key then reads back. Unleashed and RogueMaster alike. Their
+      listener's session has the key's bytes and not its number, and
+      its read and write ask only whether there is a session.
+    - Checks: nfc_emulate_check 25 on the official 1.5.1, 26 on its
+      dev build and Momentum, 29 on Unleashed and RogueMaster.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

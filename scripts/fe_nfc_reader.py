@@ -13,6 +13,8 @@ NFC link (docs/RADIO_LINK.md, "A reader on the link").
                                                  # the key in CARD's pages
     ./flipperemu nfc --reader iso15693           # an ISO15693 card (NXP's SLIX):
                                                  # its blocks
+    ./flipperemu nfc --reader mfplus CARD.nfc    # a MIFARE Plus in security
+                                                 # level 3, with CARD's AES keys
     scripts/fe_nfc_reader.py devices/NAME/nfc.sock classic CARD.nfc -o OUT.nfc
 
 The emulator's chip model is the air: `reader on` is this reader's field
@@ -797,6 +799,365 @@ def t4t_once(link, say):
     return "\n".join(out) + "\n", length
 
 
+# --------------------------------------------------------------------- AES
+
+# AES-128 for a reader of a MIFARE Plus: the block cipher both ways (FIPS
+# 197), CBC, and CMAC (RFC 4493).  Python has none of its own.
+
+def _tables():
+    # the S-box from the field's inverses and the affine map
+    exp, log = [0] * 510, [0] * 256
+    x = 1
+    for i in range(255):
+        exp[i] = exp[i + 255] = x
+        log[x] = i
+        x ^= (x << 1) ^ (0x11B if x & 0x80 else 0)      # times 3
+        x &= 0xFF
+    sbox = [0] * 256
+    for v in range(256):
+        inv = exp[255 - log[v]] if v else 0
+        s = inv
+        for _ in range(4):
+            inv = ((inv << 1) | (inv >> 7)) & 0xFF
+            s ^= inv
+        sbox[v] = s ^ 0x63
+    inv_sbox = [0] * 256
+    for v, s in enumerate(sbox):
+        inv_sbox[s] = v
+    mul = lambda a, b: exp[log[a] + log[b]] if a and b else 0
+    return sbox, inv_sbox, mul
+
+
+SBOX, INV_SBOX, _MUL = _tables()
+
+
+def _round_keys(key):
+    words = [list(key[i:i + 4]) for i in range(0, 16, 4)]
+    rcon = 1
+    for i in range(4, 44):
+        w = list(words[i - 1])
+        if i % 4 == 0:
+            w = [SBOX[b] for b in w[1:] + w[:1]]
+            w[0] ^= rcon
+            rcon = (rcon << 1) ^ (0x11B if rcon & 0x80 else 0)
+        words.append([a ^ b for a, b in zip(words[i - 4], w)])
+    return [sum(words[r * 4:r * 4 + 4], []) for r in range(11)]
+
+
+def aes_block(key, block, decrypt=False):
+    """One block of 16 bytes under a key of 16"""
+    rk = _round_keys(key)
+    s = [b ^ k for b, k in zip(block, rk[10 if decrypt else 0])]
+    for rnd in (range(9, -1, -1) if decrypt else range(1, 11)):
+        if decrypt:
+            # rows right, bytes back, the round's key, columns back
+            s = [INV_SBOX[s[(i - 4 * (i % 4)) % 16]] for i in range(16)]
+            s = [b ^ k for b, k in zip(s, rk[rnd])]
+            if rnd:
+                s = sum(([_MUL(c[0], 14) ^ _MUL(c[1], 11) ^ _MUL(c[2], 13) ^ _MUL(c[3], 9),
+                          _MUL(c[0], 9) ^ _MUL(c[1], 14) ^ _MUL(c[2], 11) ^ _MUL(c[3], 13),
+                          _MUL(c[0], 13) ^ _MUL(c[1], 9) ^ _MUL(c[2], 14) ^ _MUL(c[3], 11),
+                          _MUL(c[0], 11) ^ _MUL(c[1], 13) ^ _MUL(c[2], 9) ^ _MUL(c[3], 14)]
+                         for c in (s[i:i + 4] for i in range(0, 16, 4))), [])
+        else:
+            s = [SBOX[s[(i + 4 * (i % 4)) % 16]] for i in range(16)]
+            if rnd < 10:
+                s = sum(([_MUL(c[0], 2) ^ _MUL(c[1], 3) ^ c[2] ^ c[3],
+                          c[0] ^ _MUL(c[1], 2) ^ _MUL(c[2], 3) ^ c[3],
+                          c[0] ^ c[1] ^ _MUL(c[2], 2) ^ _MUL(c[3], 3),
+                          _MUL(c[0], 3) ^ c[1] ^ c[2] ^ _MUL(c[3], 2)]
+                         for c in (s[i:i + 4] for i in range(0, 16, 4))), [])
+            s = [b ^ k for b, k in zip(s, rk[rnd])]
+    return bytes(s)
+
+
+def aes_cbc(key, iv, data, decrypt=False):
+    out, iv = b"", bytes(iv)
+    for i in range(0, len(data), 16):
+        block = data[i:i + 16]
+        if decrypt:
+            out += bytes(a ^ b for a, b in zip(aes_block(key, block, True), iv))
+            iv = block
+        else:
+            iv = aes_block(key, bytes(a ^ b for a, b in zip(block, iv)))
+            out += iv
+    return out
+
+
+def aes_cmac(key, data):
+    def double(b):
+        n = int.from_bytes(b, "big") << 1
+        return ((n ^ (0x87 if n >> 128 else 0)) & ((1 << 128) - 1)).to_bytes(16, "big")
+    k1 = double(aes_block(key, bytes(16)))
+    k2 = double(k1)
+    blocks = max((len(data) + 15) // 16, 1)
+    last = data[(blocks - 1) * 16:]
+    if len(last) == 16:
+        last = bytes(a ^ b for a, b in zip(last, k1))
+    else:
+        last = bytes(a ^ b for a, b in zip(last + b"\x80" + bytes(15 - len(last)), k2))
+    x = bytes(16)
+    for i in range(blocks - 1):
+        x = aes_block(key, bytes(a ^ b for a, b in zip(data[i * 16:i * 16 + 16], x)))
+    return aes_block(key, bytes(a ^ b for a, b in zip(last, x)))
+
+
+def aes_examples():
+    """The standards' own examples (what a check asks of this file's AES):
+    the name of one that does not come out, or None"""
+    h = bytes.fromhex
+    key = h("000102030405060708090a0b0c0d0e0f")       # FIPS 197, C.1
+    block = h("00112233445566778899aabbccddeeff")
+    if aes_block(key, block) != h("69c4e0d86a7b0430d8cdb78070b4c55a") or \
+            aes_block(key, aes_block(key, block), True) != block:
+        return "FIPS 197's block"
+    key = h("2b7e151628aed2a6abf7158809cf4f3c")       # SP 800-38A, F.2.1
+    plain = h("6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51")
+    cipher = aes_cbc(key, h("000102030405060708090a0b0c0d0e0f"), plain)
+    if cipher != h("7649abac8119b246cee98e9b12e9197d"
+                   "5086cb9b507219ee95db113a917678b2") or \
+            aes_cbc(key, h("000102030405060708090a0b0c0d0e0f"), cipher,
+                    True) != plain:
+        return "SP 800-38A's CBC"
+    text = plain + h("30c81c46a35ce411e5fbc1191a0a52ef"
+                     "f69f2445df4f9b17ad2b417be66c3710")
+    for n, want in ((0, "bb1d6929e95937287fa37d129b756746"),   # RFC 4493, 4
+                    (16, "070a16b46b4d4144f79bdd9dd04a287c"),
+                    (40, "dfa66747de9ae63030ca32611497c827"),
+                    (64, "51f0bebf7e3b9d92fc49741779363cfe")):
+        if aes_cmac(key, text[:n]) != h(want):
+            return f"RFC 4493's CMAC of {n} bytes"
+    return None
+
+
+# ------------------------------------------------------------- MIFARE Plus
+
+class Refused(Exception):
+    """A card's status that is not its 90"""
+
+    def __init__(self, status):
+        super().__init__(f"status {status:02X}")
+        self.status = status
+
+
+class MfPlus:
+    """A reader's session with a MIFARE Plus in security level 3, over
+    ISO14443-4: the first authentication with an AES key, and blocks read
+    and written with a MAC both ways (plain, or encrypted)"""
+
+    def __init__(self, dep):
+        self.dep = dep
+        self.ti = self.kenc = self.kmac = None
+        self.rctr = self.wctr = 0
+
+    def command(self, data, least):
+        got = self.dep.exchange(bytes(data))
+        if not got or got[0] != 0x90 or len(got) < least:
+            raise Refused(got[0] if got else 0xFF)
+        return got[1:]
+
+    def version(self):
+        """GetVersion's three parts, 28 bytes; None for a card with none.
+        (AF: more follows; the last part's status is this card's 90, or the
+        00 of the DESFire whose command it is.)"""
+        out, cmd = b"", b"\x60"
+        for _ in range(3):
+            got = self.dep.exchange(cmd)
+            if not got or got[0] not in (0xAF, 0x90, 0x00):
+                return None
+            out += got[1:]
+            if got[0] != 0xAF:
+                break
+            cmd = b"\xAF"
+        return out if len(out) == 28 else None
+
+    def signature(self):
+        """The originality signature's 56 bytes, or None"""
+        got = self.dep.exchange(b"\x3C\x00")
+        return got[1:57] if len(got) >= 57 and got[0] == 0x90 else None
+
+    def auth(self, number, key):
+        """First authentication with the key of that number (a sector's
+        two at 0x4000 + 2 * sector, the card's from 0x9000): has the card
+        this key?  Refused: the card has no key of that number."""
+        self.kmac = None
+        rndb = aes_block(key, self.command(
+            (0x70, number & 0xFF, number >> 8, 0), 17)[:16], True)
+        rnda = os.urandom(16)
+        try:
+            got = self.command(b"\x72" + aes_cbc(
+                key, bytes(16), rnda + rndb[1:] + rndb[:1]), 33)
+        except Refused:
+            return False
+        plain = aes_cbc(key, bytes(16), got[:32], True)
+        if plain[4:20] != rnda[1:] + rnda[:1]:
+            return False
+        xor = lambda a, b: bytes(p ^ q for p, q in zip(a, b))
+        self.ti = plain[:4]
+        self.kenc = aes_block(key, rnda[11:16] + rndb[11:16]
+                              + xor(rnda[4:9], rndb[4:9]) + b"\x11")
+        self.kmac = aes_block(key, rnda[7:12] + rndb[7:12]
+                              + xor(rnda[0:5], rndb[0:5]) + b"\x22")
+        self.rctr = self.wctr = 0
+        return True
+
+    def mac(self, first, counter, rest):
+        """A MAC of the session: every second byte of a CMAC"""
+        return aes_cmac(self.kmac, bytes((first, counter & 0xFF, counter >> 8))
+                        + self.ti + rest)[1::2]
+
+    def counters(self):
+        return bytes((self.rctr & 0xFF, self.rctr >> 8,
+                      self.wctr & 0xFF, self.wctr >> 8))
+
+    def read(self, block, plain=False):
+        """A block's 16 bytes (Refused: not this session's to read, or not
+        in this way)"""
+        cmd = 0x33 if plain else 0x31
+        what = bytes((block & 0xFF, block >> 8, 1))
+        got = self.command(bytes((cmd,)) + what
+                           + self.mac(cmd, self.rctr, what), 25)
+        self.rctr += 1
+        if got[16:24] != self.mac(0x90, self.rctr, what + got[:16]):
+            raise RuntimeError(f"block {block:#x}: the card's MAC is not the "
+                               "session's")
+        return got[:16] if plain else aes_cbc(
+            self.kenc, self.counters() * 3 + self.ti, got[:16], True)
+
+    def write(self, block, data, plain=False):
+        """16 bytes into a block"""
+        cmd = 0xA3 if plain else 0xA1
+        wire = bytes(data) if plain else aes_cbc(
+            self.kenc, self.ti + self.counters() * 3, bytes(data))
+        what = bytes((block & 0xFF, block >> 8)) + wire
+        got = self.command(bytes((cmd,)) + what
+                           + self.mac(cmd, self.wctr, what), 9)
+        self.wctr += 1
+        if got[:8] != self.mac(0x90, self.wctr, b""):
+            raise RuntimeError(f"block {block:#x}: the card's MAC of the "
+                               "write is not the session's")
+
+
+def mfplus_session(link):
+    """The emulated card activated and in ISO14443-4: (target, ATS, MfPlus)"""
+    for _ in range(3):
+        target = wait_target(link)
+        dep = IsoDep(link)
+        ats = dep.rats()
+        if ats:
+            return target, ats, MfPlus(dep)
+        link.off()
+        time.sleep(0.02)
+        link.on()
+        time.sleep(0.02)
+    raise RuntimeError("the card has no ATS: no MIFARE Plus in security level 3")
+
+
+def read_mfplus(link, card_text, say=lambda text: None):
+    """Read the emulated card as a MIFARE Plus in security level 3 with the
+    AES keys of a card file's text (the files of the firmwares that read
+    one so): each sector with a key of its own, the configuration blocks
+    with the card's master or configuration key, the signature.  The .nfc
+    text of what was read (?? for what no key of the file opened), and
+    (blocks read, blocks in all)."""
+    fields = fe_nfc.parse_nfc_text(card_text)
+    up = lambda b: bytes(b).hex(" ").upper()
+
+    def key(name):
+        value = fields.get(name, "")
+        data = bytes.fromhex(value.replace(" ", "")) if value and \
+            "?" not in value else b""
+        return data if len(data) == 16 else None
+
+    silent = []
+
+    def once():
+        target, ats, mfp = mfplus_session(link)
+        try:
+            version = mfp.version()
+            signature = mfp.signature()
+        except Silence:
+            # nothing behind the ATS: once more from the start, and a card
+            # that says nothing then either is no such card
+            silent.append(True)
+            if len(silent) > 1:
+                raise RuntimeError("no MIFARE Plus in security level 3: "
+                                   "nothing is answered behind its ATS") from None
+            raise
+        big = (version[5] if version else 0) >= 0x18 or \
+            fields.get("Memory Size") == "4K"
+        sectors = 40 if big else 32
+        blocks, keys, mode = {}, {}, False
+        for sector in range(sectors):
+            first = sector * 4 if sector < 32 else 128 + (sector - 32) * 16
+            own = range(first, first + (4 if sector < 32 else 16))
+            for which, letter in enumerate("AB"):
+                k = key(f"Key {letter} {sector}")
+                number = 0x4000 + 2 * sector + which
+                try:
+                    if not k or not mfp.auth(number, k):
+                        continue
+                except Refused:
+                    raise RuntimeError(
+                        "no MIFARE Plus in security level 3: its first "
+                        "authentication is not answered") from None
+                keys[number] = k
+                for block in own:
+                    if block in blocks:
+                        continue
+                    try:
+                        blocks[block] = mfp.read(block, mode)
+                    except Refused:     # (the other way, in a new session)
+                        if mfp.auth(number, k):
+                            try:
+                                blocks[block] = mfp.read(block, not mode)
+                                mode = not mode
+                            except Refused:
+                                mfp.auth(number, k)
+        config = {}
+        for name, number in fe_nfc.MFP_CARD_KEYS:
+            k = key(name)
+            try:
+                if not k or not mfp.auth(number, k):
+                    continue
+            except Refused:
+                continue
+            keys[number] = k
+            for n in range(4 if number in (0x9000, 0x9001) else 0):
+                if n not in config:
+                    try:
+                        config[n] = mfp.read(0xB000 + n)
+                    except Refused:
+                        mfp.auth(number, k)
+        return target, ats, version, sectors, signature, blocks, keys, config
+
+    target, ats, version, sectors, signature, blocks, keys, config = \
+        again(link, once)
+    total = 128 if sectors == 32 else 256
+    say(f"a card: UID {up(target[0])}, {sectors} sectors; {len(keys)} keys "
+        f"taken, {len(blocks)} of {total} blocks read")
+    unknown = " ".join(["??"] * 16)
+    show = lambda data: up(data) if data else unknown
+    kind = {0x11: "EV1", 0x22: "EV2"}.get(version[3] if version else 0)
+    out = iso4_lines("Mifare Plus", target, ats)
+    out += [f"PICC Version: {up(version or bytes(28))}",
+            f"Card Type: Mifare Plus {kind}" if kind else
+            f"Card Type: {fields.get('Card Type', 'Mifare Plus')}",
+            "Security Level: SL3", f"Memory Size: {'4K' if sectors == 40 else '2K'}",
+            "Data format version: 1"]
+    out += [f"Block {n}: {show(blocks.get(n))}" for n in range(total)]
+    for sector in range(sectors):
+        out += [f"Key {letter} {sector}: "
+                f"{show(keys.get(0x4000 + 2 * sector + which))}"
+                for which, letter in enumerate("AB")]
+    out += [f"{name}: {show(keys.get(number))}"
+            for name, number in fe_nfc.MFP_CARD_KEYS]
+    out += [f"Config Block {n}: {show(config.get(n))}" for n in range(4)]
+    if signature:
+        out.append(f"Signature: {up(signature)}")
+    return "\n".join(out) + "\n", (len(blocks), total)
+
+
 # ------------------------------------------------------------------ FeliCa
 
 def crc_f(data):
@@ -1097,7 +1458,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("sock", help="the device's NFC link (devices/NAME/nfc.sock)")
     ap.add_argument("program", choices=["classic", "ulc", "iso-dep", "t4t", "felica",
-                                        "iso15693"])
+                                        "iso15693", "mfplus"])
     ap.add_argument("card", nargs="?",
                     help="classic, ulc: the card's .nfc file, whose keys are "
                          "the reader's; felica: one with the card key, to "
@@ -1106,7 +1467,7 @@ def main():
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="print every frame")
     args = ap.parse_args()
-    if args.program in ("classic", "ulc") and not args.card:
+    if args.program in ("classic", "ulc", "mfplus") and not args.card:
         ap.error(f"{args.program} CARD.nfc: the card's file")
     link = ReaderLink(args.sock)
     if args.verbose:
@@ -1134,6 +1495,10 @@ def main():
             text, (read, total) = read_vicinity(link, say)
             done, words = read == total and total > 0, \
                 f"read {read} of {total} blocks"
+        elif args.program == "mfplus":
+            text, (read, total) = read_mfplus(
+                link, pathlib.Path(args.card).read_text(), say)
+            done, words = read == total, f"read {read} of {total} blocks"
         else:
             text, length = read_t4t(link, say)
             done, words = True, f"read an NDEF message of {length} bytes"

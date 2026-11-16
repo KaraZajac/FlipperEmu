@@ -1093,6 +1093,14 @@ sector's two keys at `0x4000 + 2 * sector` and the next, the card's at `0x9000`,
   own: their reader takes the card's MAC on every block and saves what it
   decrypted, which is the file's. Writes (`A1`, `A3`) are not in the model: no
   firmware's reader was brought to write to this card. AES is QEMU's.
+- The other way round, Unleashed and RogueMaster emulate such a card from its file,
+  and `fe_nfc_reader.py`'s `MfPlus` is the reader for it: the same protocol from the
+  other side, with AES-128, CBC and CMAC written in Python (the examples of FIPS
+  197, SP 800-38A and RFC 4493 are a check's). Reads and writes, plain and
+  encrypted, came out against the firmwares' listener at the first try, so the two
+  sides are checked against each other through two firmwares. The firmwares'
+  listener does not keep which key a session is of (FW-22); the reader does, and
+  asks a sector's blocks only of that sector's key.
 
 **ISO 7816-4** on ISO14443-4 (`app iso7816`) is a card of five kinds of record:
 an application (its name, and the FCI that SELECT answers with), a file (its ID and

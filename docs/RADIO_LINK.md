@@ -222,8 +222,10 @@ activate`, and the step again. `fe_nfc_reader.py` does (`Classic.restart`, `agai
 `scripts/fe_nfc_reader.py` has readers written this way: `ReaderLink` is the link,
 `Classic` MIFARE Classic's authentication and reads, `IsoDep` ISO14443-4's blocks
 (RATS, APDUs chained either way, waiting time extensions), `Felica` FeliCa's
-commands, `Vicinity` ISO15693's. `./flipperemu nfc --reader classic CARD.nfc`
-(`felica`, `iso-dep`, `t4t`, `iso15693`) runs them.
+commands, `Vicinity` ISO15693's, `MfPlus` a MIFARE Plus's security level 3 (the
+first authentication, reads and writes with their MACs; AES-128, CBC and CMAC are in
+the file, as DES is). `./flipperemu nfc --reader classic CARD.nfc` (`felica`,
+`iso-dep`, `t4t`, `iso15693`, `mfplus`) runs them.
 
 # Bluetooth (`ble.sock`)
 

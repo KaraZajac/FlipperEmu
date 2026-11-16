@@ -505,6 +505,99 @@ def app_back(b):
             break
 
 
+def mfplus(b, work):
+    """A MIFARE Plus in security level 3, which the NFC apps of Unleashed
+    and RogueMaster emulate from a file that has its AES keys: read by a
+    reader with those keys (first authentication, blocks with a MAC both
+    ways, the configuration blocks, the signature), by one that lacks a
+    sector's, and written to."""
+    check("the reader's AES-128 (the block both ways, CBC, CMAC): the "
+          "examples of FIPS 197, SP 800-38A and RFC 4493 come out",
+          fe_nfc_reader.aes_examples() is None, str(fe_nfc_reader.aes_examples()))
+    card = fe_nfc.sample_mfplus_sl3(bytes.fromhex("04C2D3E4F5A6B7"))
+    want = fe_nfc.parse_nfc_text(card)
+    path = work / "fe-emu-mfplus.nfc"
+    path.write_text(card)
+    b.fe("push", path, "/ext/nfc")
+    try:
+        if not app_emulates(b, "/ext/nfc/fe-emu-mfplus.nfc"):
+            print("  (this firmware's NFC app does not emulate a MIFARE Plus's "
+                  "file)")
+            return
+        code, text = b.fe("nfc", "--reader", "mfplus", path, "--quiet-read",
+                          "--verbose")
+        if "no MIFARE Plus in security level 3" in text:
+            print("  (this firmware's NFC app emulates of a MIFARE Plus's file "
+                  "the UID and the ATS, and no security level 3)")
+            return
+        where = last_read(b)
+        read = pathlib.Path(where).read_text() if where else ""
+        differ = same(card, read)
+        check("a MIFARE Plus in security level 3 that the firmware's NFC app "
+              "emulates, read by a reader with its AES keys: the first "
+              "authentication with each sector's two keys and the card's "
+              "four, 128 blocks read encrypted with a MAC each way, the "
+              "configuration blocks, the signature and the version are the "
+              f"card's ({len(want)} keys of its file)",
+              code == 0 and "128 of 128 blocks" in text and read and not differ,
+              text + "\n" + "\n".join(
+                  f"{k}: {want.get(k)} | "
+                  f"{fe_nfc.parse_nfc_text(read).get(k) if read else None}"
+                  for k in differ[:8]))
+        # a reader that lacks a sector's keys and one of the card's
+        own = fe_nfc.MFP_OWN_SECTOR
+        lacks = [f"Key A {own}", f"Key B {own}", "L3 Switch Key"]
+        fewer = work / "mfplus-fewer.nfc"
+        fewer.write_text("\n".join(
+            line for line in card.splitlines()
+            if line.split(":")[0] not in lacks) + "\n")
+        code, text = b.fe("nfc", "--reader", "mfplus", fewer, "--quiet-read",
+                          "--verbose")
+        where = last_read(b)
+        got = fe_nfc.parse_nfc_text(pathlib.Path(where).read_text()) \
+            if where else {}
+        kept = sorted(lacks + [f"Block {own * 4 + i}" for i in range(4)])
+        differ = sorted(k for k in set(want) | set(got)
+                        if (want.get(k) or "").upper() != (got.get(k) or "").upper())
+        check("a reader without one sector's keys and one of the card's "
+              "keys: exit status 1, 124 of 128 blocks; the sector's four "
+              "blocks, its keys and that key are what it does not have "
+              "(it asks for no block with another sector's key)",
+              code == 1 and "124 of 128 blocks" in text and differ == kept
+              and all(set((got.get(k) or "x").split()) == {"??"} for k in kept),
+              text + "\n" + "\n".join(
+                  f"{k}: {want.get(k)} | {got.get(k)}" for k in differ[:10]))
+        # a block written, encrypted and plain, and read back both ways
+        said = []
+        link = fe_nfc_reader.ReaderLink(b.dir / "nfc.sock")
+        try:
+            link.on()
+            mfp = fe_nfc_reader.mfplus_session(link)[2]
+            key = bytes.fromhex(want["Key A 1"].replace(" ", ""))
+            old = bytes.fromhex(want["Block 5"].replace(" ", ""))
+            new = bytes(range(0x50, 0x60))
+            said.append(mfp.auth(0x4002, key))
+            mfp.write(5, new)
+            said.append(mfp.read(5) == new)
+            said.append(mfp.read(5, plain=True) == new)
+            mfp.write(5, old, plain=True)
+            said.append(mfp.read(5) == old)
+            said.append(not mfp.auth(0x4002, bytes(16)))
+        except (fe_nfc_reader.Silence, fe_nfc_reader.Refused, RuntimeError,
+                OSError) as e:
+            said.append(f"{type(e).__name__}: {e}")
+        finally:
+            link.close()
+        check("a block of it written encrypted and read back encrypted and "
+              "plain, written plain to what it was and read back; each "
+              "write's MAC from the card is the session's; a key that is not "
+              "the sector's is not taken",
+              said == [True] * 5, str(said))
+    finally:
+        app_back(b)
+        b.fe("rm", "/ext/nfc/fe-emu-mfplus.nfc")
+
+
 def vicinity(b, work):
     """ISO15693, which the firmware emulates with no help of the chip: it
     samples the reader's signal itself (a timer, the DMA and the chip's
@@ -640,6 +733,7 @@ def main():
                 record(b, work)
                 t4t(b, work)
                 t4t_reader()
+                mfplus(b, work)
                 vicinity(b, work)       # (the last: FW-21)
             b.stop()
             b.fe("stop")

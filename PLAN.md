@@ -290,8 +290,14 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       mfplus-sl3 UID`. Unleashed's and RogueMaster's NFC apps read it with their
       dictionary and save its file, `??` where a key of no dictionary keeps it.
       nfc_check 25 / 27 / 28 / 29 / 29 (BRINGUP_LOG 180).
-      Next: a reader for the MIFARE Plus that Unleashed and RogueMaster emulate
-      (AES in Python), and with it the writes
+      A reader for the MIFARE Plus that Unleashed and RogueMaster emulate ☑
+      (2026-11-15): `nfc --reader mfplus CARD.nfc`, AES-128, CBC and CMAC in
+      Python; reads with the file's keys, a sector without its keys left
+      unread, a block written both ways. Firmware bug FW-22 found with it (the
+      emulated card gives and takes every block in a session of any key).
+      nfc_emulate_check 25 / 26 / 26 / 29 / 29 (BRINGUP_LOG 181).
+      Next: the writes to a Plus that is held to the Flipper, when a firmware's
+      reader is brought to write (the app's "Write to Initial Card")
 - ☑ 125 kHz RFID read: COMP1 → TIM2 TI4 capture, a virtual tag in the reader's field
       (ASK/FSK/PSK, field noise), encoders ported from the firmware (`fe_rfid.py`, checked
       cycle for cycle against its emulation by `rfid_check.py`); app Read and `rfid read`

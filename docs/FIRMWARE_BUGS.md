@@ -13,7 +13,8 @@ source or shows the same way on every run with nothing of the model in its path.
 - "Official" is flipperdevices' firmware. Versions tried: official 1.5.1 (others
   where named), the official dev build `3060cee9`, Momentum `mntm-012`, Unleashed
   `unlshd-094`, RogueMaster `RM1024-1347`. Source was read for official 1.5.1 only;
-  for the forks "does the same" means it behaves the same.
+  for the forks "does the same" means it behaves the same. (Where an entry names a
+  fork's own source, it says how that was read.)
 
 A new bug gets the next number and a row in the table. A bug that is fixed upstream
 keeps its row, with the version that fixed it.
@@ -43,6 +44,7 @@ keeps its row, with the version that fixed it.
 | FW-19 | The NFC shell's `emulate -f` of a Type 4 tag's file restarts the Flipper | Momentum mntm-012 | crash | no |
 | FW-20 | A serial port closed right after a write loses the last two bytes | official 1.5.1 | wrong result | no |
 | FW-21 | After an ISO15693 card was emulated, the ISO14443A listener takes its own answers for failed, and an ISO14443-4 card of the Flipper's is not activated any more | official 1.5.1 and dev, Momentum, Unleashed, RogueMaster | wrong result, until a restart | no |
+| FW-22 | An emulated MIFARE Plus (security level 3) gives every block, and takes a write to it, in a session of any one of its keys | Unleashed unlshd-094, RogueMaster RM1024-1347 | an emulated card that guards nothing | no |
 
 ## Crashes and freezes
 
@@ -378,6 +380,43 @@ keeps its row, with the version that fixed it.
   tried on a real Flipper; there the read of the registers has to be over before the
   answer is, and an ATS takes some 0.7 ms on the air.
 - **Log:** entry 179.
+
+### FW-22: an emulated MIFARE Plus gives all of itself to any one key
+
+- **What happens:** the NFC app emulates a MIFARE Plus in security level 3 from a
+  file that has its AES keys. A reader that has one of those keys, any one, gets
+  every block of the card: after a first authentication with sector 0's key A, the
+  emulated card answers reads of sector 1's blocks (which have other keys), of a
+  sector whose keys the reader does not have, of the last sector, and of the
+  configuration blocks. A session of the SL1 card authentication key gets the same.
+  It takes writes the same way: a block of the sector with the unknown key, written
+  in a session of sector 0's key, reads back changed with that sector's own key.
+- **What a card does:** a session is of the key it was made with. A sector's blocks
+  go to that sector's keys, by its access conditions, and the configuration blocks
+  to the card's master and configuration keys.
+- **Why:** the listener's session keeps the key's bytes and the session keys made
+  from them, and not the key's number: nothing later says which sector the reader
+  has shown a key for. The handlers of the reads (`31`, `33`) and of the writes
+  (`A1`, `A3`) ask whether there is a session, look the block up by the number in
+  the command, and answer. This is from Unleashed's source at `unlshd-094`
+  (`lib/nfc/protocols/mf_plus/mf_plus_listener_i.c` and `_i.h`), read through a
+  fetched summary, not line by line here: it fits what the two firmwares do. By the
+  same summary a write to a key's own number (`0x40nn`, `0x90nn`) is taken as well;
+  that was not tried.
+- **How much it matters:** the emulation is there to stand in for the card. Whoever
+  holds a reader to a Flipper that emulates someone's Plus and knows one key of it,
+  a transport key of a sector that was never used will do, reads the sectors that
+  the card itself would have kept, and can change them in the Flipper's copy.
+- **To see it:** `./flipperemu nfc mfplus-sl3 UID`'s card as a file
+  (`scripts/fe_nfc.py --nfc-file --mfplus-sl3 UID`), `./flipperemu app NFC` with
+  it, and `fe_nfc_reader.py`'s `MfPlus`: `auth(0x4000, key A of sector 0)`, then
+  `read(12)`. Sector 3 of that card has a key that is in no dictionary;
+  `./flipperemu nfc --reader mfplus` with a file that lacks it does not ask, and
+  leaves the sector unread.
+- **Seen on:** Unleashed unlshd-094 and RogueMaster RM1024-1347, in the emulator.
+  The official firmware, its dev build and Momentum emulate no security level 3.
+  Not tried on a real Flipper; nothing of the emulator's is in the decision.
+- **Log:** entry 181.
 
 ## Seen once, not explained
 

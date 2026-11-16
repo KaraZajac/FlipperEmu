@@ -6752,7 +6752,8 @@ def nfc_watch(dev, seconds):
 
 
 # readers that are programs on the link (scripts/fe_nfc_reader.py)
-NFC_READER_PROGRAMS = ("classic", "ulc", "iso-dep", "t4t", "felica", "iso15693")
+NFC_READER_PROGRAMS = ("classic", "ulc", "iso-dep", "t4t", "felica", "iso15693",
+                       "mfplus")
 
 
 def nfc_reader_program(dev, args):
@@ -6766,8 +6767,10 @@ def nfc_reader_program(dev, args):
     # a reader that has a card's keys: of what kind of card's file
     keyed = {"classic": ("Mifare Classic", "a MIFARE Classic"),
              "ulc": ("Mifare Ultralight C", "a MIFARE Ultralight C"),
-             "felica": ("FeliCa", "a FeliCa")}
-    if args.reader in ("classic", "ulc") or (args.reader == "felica" and args.card):
+             "felica": ("FeliCa", "a FeliCa"),
+             "mfplus": ("Mifare Plus", "a MIFARE Plus")}
+    if args.reader in ("classic", "ulc", "mfplus") or \
+            (args.reader == "felica" and args.card):
         kind, words = keyed[args.reader]
         if len(args.card) != 1 or not args.card[0].endswith(".nfc"):
             sys.exit(f"nfc --reader {args.reader} CARD.nfc: the card's file; its "
@@ -6782,7 +6785,8 @@ def nfc_reader_program(dev, args):
             sys.exit(f"nfc --reader {args.reader}: {args.card[0]} is not {words} "
                      f"card's file (Device type: {fields.get('Device type')})")
         who = (f"{words} reader with the key"
-               f"{'s' if args.reader == 'classic' else ''} of {args.card[0]}")
+               f"{'s' if args.reader in ('classic', 'mfplus') else ''} "
+               f"of {args.card[0]}")
     elif args.card:
         sys.exit(f"nfc --reader {args.reader} takes no card: it reads what the "
                  "Flipper emulates")
@@ -6815,6 +6819,9 @@ def nfc_reader_program(dev, args):
         elif args.reader == "iso15693":
             out, (read, total) = fe_nfc_reader.read_vicinity(link, say)
             done, words = read == total and total > 0, f"{read} of {total} blocks"
+        elif args.reader == "mfplus":
+            out, (read, total) = fe_nfc_reader.read_mfplus(link, text, say)
+            done, words = read == total, f"{read} of {total} blocks"
         else:
             out, length = fe_nfc_reader.read_t4t(link, say)
             done, words = True, f"an NDEF message of {length} bytes"
@@ -8062,7 +8069,8 @@ def main():
                         "on the air and its answer, into a text file), watch "
                         "(the same, as it happens)")
     p.add_argument("--reader", choices=("scan", "ntag", "classic", "ulc",
-                                        "iso-dep", "t4t", "felica", "iso15693"),
+                                        "iso-dep", "t4t", "felica", "iso15693",
+                                        "mfplus"),
                    help="instead: hold a virtual reader to an emulating Flipper and "
                         "print what it reads (scan: UID/ATQA/SAK; ntag: a Type 2 "
                         "tag; classic CARD.nfc: a MIFARE Classic, by a reader that "
@@ -8071,7 +8079,9 @@ def main():
                         "iso-dep: an ISO14443-4A card's ATS; t4t: a Type 4 "
                         "tag's NDEF message; felica [CARD.nfc]: a FeliCa "
                         "Lite-S's blocks, with CARD.nfc's card key or without "
-                        "one; iso15693: an ISO15693 card's blocks (NXP's SLIX)")
+                        "one; iso15693: an ISO15693 card's blocks (NXP's SLIX); "
+                        "mfplus CARD.nfc: a MIFARE Plus in security level 3, with "
+                        "CARD.nfc's AES keys")
     p.add_argument("--for", dest="seconds", type=float, metavar="SECONDS",
                    help="with `nfc watch`: for so long, then end")
     p.add_argument("--quiet-read", action="store_true",

@@ -204,7 +204,8 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
   `--reader ulc` and `--reader felica` read a MIFARE Ultralight C and a FeliCa
   Lite-S, with their keys too; `--reader iso-dep` an ISO14443-4A card's ATS,
   `--reader t4t` a Type 4 tag's NDEF message, `--reader iso15693` an ISO15693 card
-  (NXP's SLIX), which the firmware receives and answers with no help of the NFC chip.
+  (NXP's SLIX), which the firmware receives and answers with no help of the NFC chip,
+  `--reader mfplus CARD.nfc` a MIFARE Plus in security level 3 with its AES keys.
 - NFC link: `./flipperemu nfc --link iso-dep` puts a card played by a program in the
   field (an ISO14443-4A card here; any card type you write). The machine stops while it
   answers, so it can take its time, or relay to real hardware.
@@ -264,9 +265,8 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
   not modelled.
 - A real phone or computer over Bluetooth: the central is a program on the link, not a
   Bluetooth adapter.
-- NFC: of a MIFARE Plus in security level 3, the writes (the card that is held to
-  the Flipper answers the authentication and the reads); a virtual reader for the
-  MIFARE Plus that Unleashed and RogueMaster emulate; MIFARE DESFire's own
+- NFC: of a MIFARE Plus in security level 3, the writes to the card that is held
+  to the Flipper (it answers the authentication and the reads); MIFARE DESFire's own
   authentication.
 - Apps that run in place from the flash: what such a loader does is checked (code
   programmed into a free page while the firmware runs, run there, replaced, run
@@ -542,6 +542,7 @@ picture of the save to the pixel and the tag, and goes on with Pause.
 | `nfc --reader ulc CARD.nfc` \| `nfc --reader felica [CARD.nfc]` | read an emulated MIFARE Ultralight C with its key (two-key triple DES), a FeliCa Lite-S with its card key or without one |
 | `nfc --reader iso-dep` \| `nfc --reader t4t` | an emulated ISO14443-4A card's ATS, a Type 4 tag's NDEF message |
 | `nfc --reader iso15693` | an emulated ISO15693 card (NXP's SLIX): its system information, every block with its security status, a SLIX2's signature |
+| `nfc --reader mfplus CARD.nfc` | an emulated MIFARE Plus in security level 3, with the AES keys of `CARD.nfc`: its blocks, the keys that the card takes, its configuration blocks and signature |
 | `nfc record OUT.txt` \| `nfc record stop` \| `nfc watch` | every frame on the air at the NFC antenna and its answer, a line each with its time: the firmware's to a card, and a reader's to the card that the firmware emulates |
 | `nfc --link iso-dep` \| `--link script:FILE.py` \| `--link log` | a card played by a program, in the field until ^C |
 | `nfc --link pm3[:PORT]` \| `nfc DUMP.json` | real cards through a Proxmark3; a Proxmark3 dump as the card |
@@ -1607,6 +1608,7 @@ The same program has more readers:
 ./flipperemu nfc --reader iso-dep           # an ISO14443-4A card: RATS, and its ATS
 ./flipperemu nfc --reader t4t               # a Type 4 tag: its NDEF message
 ./flipperemu nfc --reader iso15693          # an ISO15693 card (NXP's SLIX): its blocks
+./flipperemu nfc --reader mfplus card.nfc   # a MIFARE Plus in security level 3, with card.nfc's AES keys
 ```
 
 - `ulc` shows the card the key of the file's pages 44 to 47 and has the card show
@@ -1636,6 +1638,18 @@ The same program has more readers:
   answer off the edges. After such an emulation the firmware's ISO14443A cards are
   out of order until a restart, on a real Flipper too by its source: FW-21 in
   [docs/FIRMWARE_BUGS.md](docs/FIRMWARE_BUGS.md).
+- `mfplus` reads the MIFARE Plus in security level 3 that Unleashed's and
+  RogueMaster's NFC apps emulate from a file with its keys (`./flipperemu app NFC
+  /ext/nfc/plus.nfc`; `scripts/fe_nfc.py --nfc-file --mfplus-sl3 UID` makes one).
+  With each sector's keys from `card.nfc` it does the first authentication (AES, in
+  Python here), reads the sector's blocks encrypted with a MAC on the command and
+  on the response, then the configuration blocks with the card's master or
+  configuration key, and the signature: 128 blocks and 68 keys of a 2K card in
+  273 frames and 1.2 s. A sector whose keys the file lacks is not read (`??`, exit
+  status 1): the reader asks for a block only with a key of its own sector, as a
+  card would have it. The firmwares' emulation would give it all the same, and
+  take a write to it: FW-22. The official firmware, its dev build and Momentum
+  emulate the UID and the ATS of such a file and no more.
 
 A reader starts again when the Flipper stops answering in the middle: field off
 and on, select, and the last step once more. On a busy computer the emulated CPU
@@ -1645,9 +1659,11 @@ can be too late with an answer, and a real card never is.
 NTAG215, a MIFARE Classic Mini, 1K and 4K whose every block and key comes back, a
 MIFARE Ultralight C and a FeliCa Lite-S with their keys and with wrong ones, an
 ISO14443-4A card, a Type 4 tag with an NDEF message of 910 bytes where the firmware
-emulates one, the record of the frames, and an NXP SLIX2 (ISO15693), also from the
-NFC app through a snapshot (24 checks on the official 1.5.1, 25 on its dev build,
-Momentum, Unleashed and RogueMaster).
+emulates one, the record of the frames, an NXP SLIX2 (ISO15693), also from the NFC
+app through a snapshot, and a MIFARE Plus in security level 3 where the firmware
+emulates one: read with its keys, read without a sector's, and written to (25
+checks on the official 1.5.1, 26 on its dev build and Momentum, 29 on Unleashed and
+RogueMaster).
 
 A snapshot keeps an emulation that the NFC app runs. One that the NFC shell's
 `emulate` runs ends at the load: the command ends with its USB session, and the
