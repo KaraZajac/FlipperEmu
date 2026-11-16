@@ -565,6 +565,37 @@ def ibutton_wave_check(mon: Monitor, devdir: pathlib.Path) -> bool:
     return bool(found)
 
 
+NFC_PROMPT = r"\[nfc\]>: "
+
+
+def nfc_shell(cli) -> bool:
+    """Into the firmware's NFC shell; False where its CLI has none"""
+    found, _ = cli.watch("nfc", NFC_PROMPT, timeout=20, stop=False)
+    if not found:
+        cli.write(b"\x03")
+    return found is not None
+
+
+def nfc_do(cli, command: str, until: str, timeout: float):
+    """A command in the NFC shell, watched until `until` or for its time:
+    (match, output).  One that is not done by then is stopped and its
+    shell's prompt awaited: a step never goes on with a shell at work
+    behind it.  (On a busy computer a command takes its time; the steps
+    after one that was left at work opened and closed the port on a shell
+    that did not answer, which is how the firmware's CLI service comes to
+    its end: FW-07.)"""
+    found, out = cli.watch(command, until, timeout=timeout, stop=False)
+    if not found:
+        cli.write(b"\x03")
+        cli.watch("", NFC_PROMPT, timeout=30, stop=False)
+    return found, out
+
+
+def nfc_leave(cli) -> None:
+    """Out of the NFC shell (^C only cancels a command of its)"""
+    cli.run("exit", timeout=30)
+
+
 def nfc_check(mon: Monitor, devdir: pathlib.Path):
     """An NTAG215 in the NFC field: `mfu info` in the NFC shell must read
     its UID and all 135 pages.  None (skip) without the NFC shell."""
@@ -578,12 +609,10 @@ def nfc_check(mon: Monitor, devdir: pathlib.Path):
         cli = FlipperCli(usb_endpoint(mon))
         try:
             cli.read_until_prompt(15)
-            found, _ = cli.watch("nfc", r"\[nfc\]>: ", timeout=8, stop=False)
-            if not found:
-                cli.write(b"\x03")
+            if not nfc_shell(cli):
                 return None
-            _, out = cli.watch("mfu info", r"\[nfc\]>: ", timeout=15, stop=False)
-            cli.run("exit", timeout=5)  # leave the NFC shell
+            _, out = nfc_do(cli, "mfu info", NFC_PROMPT, 60)
+            nfc_leave(cli)
         finally:
             cli.close()
             mon.cmd("qom-set /machine/nfc card none")
@@ -609,13 +638,11 @@ def nfc_link_check(mon: Monitor, devdir: pathlib.Path):
         cli = FlipperCli(usb_endpoint(mon))
         try:
             cli.read_until_prompt(15)
-            found, _ = cli.watch("nfc", r"\[nfc\]>: ", timeout=8, stop=False)
-            if not found:
-                cli.write(b"\x03")
+            if not nfc_shell(cli):
                 return None
-            _, out = cli.watch("apdu -p 4a -d 00CA000000", r"Rx:[^\n]*\n|\[nfc\]>: ",
-                               timeout=20, stop=False)
-            cli.run("exit", timeout=5)
+            _, out = nfc_do(cli, "apdu -p 4a -d 00CA000000",
+                            r"Rx:[^\n]*\n|" + NFC_PROMPT, 45)
+            nfc_leave(cli)
         finally:
             cli.close()
     except (OSError, TimeoutError, ConnectionError, TypeError) as e:
@@ -650,13 +677,11 @@ def nfc_pm3_check(mon: Monitor, devdir: pathlib.Path):
         cli = FlipperCli(usb_endpoint(mon))
         try:
             cli.read_until_prompt(15)
-            found, _ = cli.watch("nfc", r"\[nfc\]>: ", timeout=8, stop=False)
-            if not found:
-                cli.write(b"\x03")
+            if not nfc_shell(cli):
                 return None
-            _, out = cli.watch("apdu -p 4a -d 00CA000000", r"Rx:[^\n]*\n|\[nfc\]>: ",
-                               timeout=30, stop=False)
-            cli.run("exit", timeout=5)
+            _, out = nfc_do(cli, "apdu -p 4a -d 00CA000000",
+                            r"Rx:[^\n]*\n|" + NFC_PROMPT, 60)
+            nfc_leave(cli)
         finally:
             cli.close()
     except (OSError, TimeoutError, ConnectionError, TypeError, AttributeError) as e:
@@ -693,21 +718,19 @@ def mfc_check(mon: Monitor, devdir: pathlib.Path):
         cli = FlipperCli(usb_endpoint(mon))
         try:
             cli.read_until_prompt(15)
-            cli.run("storage mkdir /ext/nfc/.cache", timeout=5)
-            cli.run(f"storage remove /ext/nfc/.cache/{uid.hex().upper()}.keys", timeout=5)
+            cli.run("storage mkdir /ext/nfc/.cache", timeout=20)
+            cli.run(f"storage remove /ext/nfc/.cache/{uid.hex().upper()}.keys", timeout=20)
             cli.write(f"storage write_chunk /ext/nfc/.cache/{uid.hex().upper()}.keys "
                       f"{len(keys)}\r".encode())
             time.sleep(0.5)
             cli.write(keys.encode())
             cli.read_until_prompt(5)
-            found, _ = cli.watch("nfc", r"\[nfc\]>: ", timeout=8, stop=False)
-            if not found:
-                cli.write(b"\x03")
+            if not nfc_shell(cli):
                 return None
-            saved, out = cli.watch("dump", r"Dump saved to '([^']+)'", timeout=40,
-                                   stop=False)
-            cli.read_until_prompt(5)
-            cli.run("exit", timeout=5)  # leave the NFC shell (^C only cancels)
+            saved, out = nfc_do(cli, "dump", r"Dump saved to '([^']+)'", 90)
+            if saved:
+                cli.watch("", NFC_PROMPT, timeout=30, stop=False)
+            nfc_leave(cli)
             if not saved:
                 print(f"  mfc: {out.strip()[-200:]!r}")
                 return False
@@ -734,18 +757,16 @@ def nfc_emulate_check(mon: Monitor):
         cli = FlipperCli(usb_endpoint(mon))
         try:
             cli.read_until_prompt(15)
-            cli.run("storage remove /ext/nfc/emu.nfc", timeout=5)   # write_chunk appends
+            cli.run("storage remove /ext/nfc/emu.nfc", timeout=20)   # write_chunk appends
             cli.write(f"storage write_chunk /ext/nfc/emu.nfc {len(nfc)}\r".encode())
             time.sleep(0.5)
             cli.write(nfc.encode())
             cli.read_until_prompt(5)
-            found, _ = cli.watch("nfc", r"\[nfc\]>: ", timeout=8, stop=False)
-            if not found:
-                cli.write(b"\x03")
+            if not nfc_shell(cli):
                 return None
-            found, _ = cli.watch("emulate -f /ext/nfc/emu.nfc", r"Emulating",
-                                 timeout=8, stop=False)
+            found, _ = nfc_do(cli, "emulate -f /ext/nfc/emu.nfc", r"Emulating", 20)
             if not found:
+                nfc_leave(cli)
                 return False
             before = mon.cmd("qom-get /machine/nfc tx").strip().strip('"')
             mon.cmd("qom-set /machine/nfc reader ntag")
@@ -755,9 +776,8 @@ def nfc_emulate_check(mon: Monitor):
                     break
             path = mon.cmd("qom-get /machine/nfc tx").strip().strip('"')
             cli.write(b"\x03")
-            time.sleep(0.3)
-            cli.read_until_prompt(5)
-            cli.run("exit", timeout=5)
+            cli.watch("", NFC_PROMPT, timeout=30, stop=False)
+            nfc_leave(cli)
         finally:
             cli.close()
     except (OSError, TimeoutError, ConnectionError, TypeError) as e:

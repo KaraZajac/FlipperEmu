@@ -914,10 +914,23 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           loops: 27, 28, 21, 28, 21 of 28, both receptions, the T5577's write
           and the 1-Wire read in all five; the two of 21 are the firmware's
           crash (FW-07) and what comes after it (BRINGUP_LOG 185)
-    - ☐ An NFC `dump` of the shell that is not done after 40 s, beside 24 busy
-          loops, about one card in fifty of the fuzzer's (BRINGUP_LOG 184); and
-          the fuzz check's step that looks at which inputs were kept, which
-          fails now and then when all checks run side by side
+    - ☐ An NFC `dump` of the shell that never comes back, beside 24 busy loops
+          about one in forty (a MIFARE Classic 1K dumped again and again: at the
+          39th, the 120th, the 8th, the 16th, the 5th). Each time the chip's
+          interrupt pin is high, EXTI line 2 is armed for its rise and nothing is
+          pending: the firmware waits for an edge of a line that is up already.
+          Which interrupt it lost is not found. Not it: one that comes while the
+          firmware is at the registers (a hold of new interrupts until the
+          firmware had its moment changed nothing: BRINGUP_LOG 186). The smoke
+          test's steps after such a shell open and close the port on it, which
+          ends the firmware by FW-07: its two runs of 21 in five
+    - ☐ The fuzz check's step that looks at which inputs were kept fails now
+          and then when all checks run side by side
+    - ☐ Reading an emulated ISO15693 card, alone: a read with five to seven
+          requests sent again, three times in about 150 reads since BRINGUP_LOG
+          184 and in none of about 30 before it. Too few to say that it is that
+          entry's; sixty traced reads had none, and the cycle counter took out
+          nothing in them that the kernel had not counted
     - ☑ A time limit in every check (2026-11-14): past it, a FAIL, where each of its
           threads stands, its emulators stopped, exit status 124; `FLIPPEREMU_CHECK_LIMIT`
           changes them (`x2`, seconds, `0`). After a window check waited three hours in a

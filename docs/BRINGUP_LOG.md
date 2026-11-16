@@ -5892,6 +5892,48 @@ big lock, entry 92).
       steps after it.
     - Alone: 28 on the official 1.5.1 and Momentum, 27 on Unleashed.
 
+186. **The NFC shell that does not come back, and what did not mend it.**
+    - The two runs of 21 in entry 185 are the firmware's
+      `[CRASH][ISR USB_LP] furi_check failed` (FW-07), seen in the kept
+      log. Before it: "the Flipper's CLI was not done with `exit` after
+      5 s". `mfu info` had taken more than its 15 s; the test typed
+      `exit` into a shell at work, gave up, and its next steps opened
+      and closed the port on that shell, which is FW-07's second way.
+      The NFC steps stop a command that is late (Ctrl+C), wait for the
+      shell's prompt, and only then go on; and they wait longer.
+    - That does not help when the shell never comes back, and it does
+      not always. A MIFARE Classic 1K dumped again and again beside 24
+      busy loops: the 39th `dump` stood still, then in other runs the
+      120th, the 8th, the 16th, the 5th. Each time PA2, the chip's
+      interrupt pin, is high; EXTI line 2 is enabled, for the rise, and
+      not pending; three seconds later the same. The firmware waits
+      for an edge of a line that is up. With the code before entry 184
+      as well (the fuzzer's cards, one `dump` in about fifty).
+    - Tried, and out again: packets to the CLI paced by how long the
+      CPU's thread has run and not by the machine's clock (the limit
+      "whatever the CPU does" of the USB model). Six runs of the smoke
+      test beside 32 loops had the crash twice, as five had before; 60
+      bursts of 3000 characters into the port ended no firmware with
+      it or without. The crash comes the other way, by the port.
+    - Tried, and out again: new interrupts of the NFC chip kept back
+      after the firmware has read the registers, until the CPU sleeps
+      or has run 100 µs. The thought: the firmware's
+      `furi_hal_nfc_event_wait_for_specific_irq()` reads and then
+      clears its flag, and an interrupt between the two is forgotten
+      with the pin high; a few instructions on a Flipper, as long as
+      the host likes here. With the hold the `dump` stood still at the
+      16th and the 5th. It is not that, or not that alone.
+    - Looked at on the way, and nothing found: a read of an emulated
+      ISO15693 card that sends five to seven requests again, three
+      times in about 150 reads since entry 184, never in about 30
+      before. Ten reads each in turns: one such with the code after,
+      none before, which says nothing. Sixty traced reads lost no
+      frame, and the cycle counter took out seven stretches of 200 to
+      600 µs in them, each one the kernel's own count of a wait.
+    - At a load of eight busy loops entry 184 changes nothing: the
+      T5577's write 20 of 20 and `ikey read` 30 of 30, with the code
+      before and after.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
