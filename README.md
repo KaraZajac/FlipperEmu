@@ -264,12 +264,10 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
   not modelled.
 - A real phone or computer over Bluetooth: the central is a program on the link, not a
   Bluetooth adapter.
-- NFC: MIFARE Plus in security level 3 (AES, which Unleashed and RogueMaster try
-  keys for). The cards beyond ISO14443A are
-  read, not emulated: no virtual reader speaks FeliCa or ISO15693 to a Flipper that
-  emulates one. When the Flipper emulates a MIFARE Classic, the virtual reader gets as
-  far as its UID, ATQA and SAK: the Crypto1 answers go out through a bit-banged pin
-  that the model does not decode.
+- NFC: of a MIFARE Plus in security level 3, the writes (the card that is held to
+  the Flipper answers the authentication and the reads); a virtual reader for the
+  MIFARE Plus that Unleashed and RogueMaster emulate; MIFARE DESFire's own
+  authentication.
 - Apps that run in place from the flash: what such a loader does is checked (code
   programmed into a free page while the firmware runs, run there, replaced, run
   again: `scripts/xip_check.py`, 8 checks with ufbt's SDK), and `run --coverage`
@@ -538,7 +536,7 @@ picture of the save to the pixel and the tag, and goes on with Pause.
 | `ibutton FILE.ibtn` \| `ibutton ds1990 ROM` \| `ibutton cyfral DATA` \| `ibutton none` | touch an iButton key to the device (also ds1992, ds1996, ds1971, dallas, metakom) |
 | `ibutton rw1990` \| `ibutton tm2004` \| … | touch a blank the device can write; `ibutton` shows its ROM |
 | `ibutton --reader` | read the Dallas key the device emulates, ROM and memory (to `devices/NAME/ibutton-tx/`) |
-| `nfc FILE.nfc` \| `nfc ntag215 UID [URL]` \| `nfc mfc1k UID` \| `nfc ulc UID` \| `nfc desfire UID` \| `nfc mfplus UID` \| `nfc t4t UID` \| `nfc emv UID` \| `nfc iso14443b PUPI` \| `nfc st25tb UID` \| `nfc felica IDM` \| `nfc felica-standard IDM` \| `nfc slix UID` \| `nfc none` | hold an NFC card to the device: a Flipper `.nfc` file (Type 2 with Ultralight C, MIFARE Classic, ISO14443-4A, DESFire, MIFARE Plus, Type 4 tag, EMV, ISO14443-3B/-4B, ST25TB, FeliCa Lite-S and Standard, ISO15693, SLIX), or one made up for a UID |
+| `nfc FILE.nfc` \| `nfc ntag215 UID [URL]` \| `nfc mfc1k UID` \| `nfc ulc UID` \| `nfc desfire UID` \| `nfc mfplus UID` \| `nfc mfplus-sl3 UID` \| `nfc t4t UID` \| `nfc emv UID` \| `nfc iso14443b PUPI` \| `nfc st25tb UID` \| `nfc felica IDM` \| `nfc felica-standard IDM` \| `nfc slix UID` \| `nfc none` | hold an NFC card to the device: a Flipper `.nfc` file (Type 2 with Ultralight C, MIFARE Classic, ISO14443-4A, DESFire, MIFARE Plus, Type 4 tag, EMV, ISO14443-3B/-4B, ST25TB, FeliCa Lite-S and Standard, ISO15693, SLIX), or one made up for a UID |
 | `nfc --reader ntag` \| `nfc --reader scan` | hold an NFC reader to an emulating device and print what it reads (`--no-wait`: leave it there) |
 | `nfc --reader classic CARD.nfc` | read an emulated MIFARE Classic with the keys of `CARD.nfc` (`--quiet-read`: only say where the file is) |
 | `nfc --reader ulc CARD.nfc` \| `nfc --reader felica [CARD.nfc]` | read an emulated MIFARE Ultralight C with its key (two-key triple DES), a FeliCa Lite-S with its card key or without one |
@@ -1421,6 +1419,7 @@ the memory keys with random memory, compared byte for byte.
 ./flipperemu nfc ulc 04A1B2C3D4E5F6                         # a MIFARE Ultralight C, made up
 ./flipperemu nfc desfire 04A1B2C3D4E5F6                     # a MIFARE DESFire EV1, made up
 ./flipperemu nfc mfplus 04C2D3E4F5A6B7                      # a MIFARE Plus EV1 2K (SL3), made up
+./flipperemu nfc mfplus-sl3 04C2D3E4F5A6B7                  # ... with its blocks and AES keys
 ./flipperemu nfc t4t 04D1E2F3A4B5C6                         # a Type 4 tag with an NDEF URL, made up
 ./flipperemu nfc emv 04E1F2A3B4C5D6                         # an EMV card with a test number, made up
 ./flipperemu nfc iso14443b 1A2B3C4D                         # an ISO14443-4B card, made up
@@ -1470,11 +1469,21 @@ and the firmware's `dump` of it is the file again, key for key:
   shell's `apdu -p 4a -d 9060000000` talks to it in ISO 7816's wrapping. (A record
   file's contents are not in the firmware's own dump of a real card either: it asks
   for as many records as a record is long.)
-- **MIFARE Plus**, as far as the firmware reads one: an EV1 or EV2 answers
+- **MIFARE Plus**, as far as a firmware reads one: an EV1 or EV2 answers
   GetVersion (the firmware takes its first part, and knows the kind and size by it),
-  a Plus S, X or SE has none and is known by its ATS. No sector is read: the
-  official firmware reads none, and Unleashed's and RogueMaster's try keys in
-  security level 3, which the card here does not have ("??" for each block).
+  a Plus S, X or SE has none and is known by its ATS. The official firmware, its dev
+  build and Momentum read no more. Unleashed and RogueMaster read one in security
+  level 3 with the AES keys of a dictionary (`/ext/nfc/assets/mf_plus_dict.nfc`),
+  and a card whose file has its keys answers them: the first authentication (`70`,
+  `72`: the card's number and the reader's under the key, each turned by a byte),
+  a session's two keys from both numbers, blocks read plain or encrypted with a MAC
+  on the command and on the response (`31`, `33`), the configuration blocks for the
+  card's master or configuration key, the originality signature (`3C`). `nfc
+  mfplus-sl3 UID` is such a card, made up: 32 sectors with keys of the dictionary,
+  but for one sector and one of the card's four keys, whose key no dictionary has;
+  the NFC app reads the rest in 10 s (280 authentications, 128 blocks) and saves a
+  file with `??` for what that key keeps. A file's `??` is a key or a block that
+  the card gives no reader. Writes are not modelled.
 - **A card of ISO 7816-4's commands**: applications selected by name, files of bytes
   (SELECT, READ BINARY, UPDATE BINARY), records (READ RECORD), data objects (GET
   DATA), and answers that the card gives as they are. Two kinds of card are made of
@@ -1534,10 +1543,12 @@ So far: NTAG213/215/216, MIFARE Ultralight, Ultralight EV1 and Ultralight C (Typ
 2), MIFARE Classic Mini/1K/4K, ISO14443-4A, MIFARE DESFire, MIFARE Plus, NTAG 424
 DNA, Type 4 tags, EMV, ISO14443-3B and -4B, ST25TB, FeliCa Lite-S and Standard,
 ISO15693-3 and SLIX. `scripts/nfc_check.py FIRMWARE` checks the last thirteen (25
-checks on the official 1.5.1, 27 on the dev build, 28 on Momentum, Unleashed and
-RogueMaster, whose NFC apps read and save a Type 4 tag, an EMV card and an NTAG
-424 DNA; the dev build's knows the first and the last). The made-up cards as
+checks on the official 1.5.1, 27 on the dev build, 28 on Momentum, 29 on Unleashed
+and RogueMaster: the forks' NFC apps read and save a Type 4 tag, an EMV card and an
+NTAG 424 DNA, the dev build's knows the first and the last, and Unleashed's and
+RogueMaster's read a MIFARE Plus with its AES keys). The made-up cards as
 files: `scripts/fe_nfc.py --nfc-file --desfire UID` (`--ulc UID`, `--mfplus UID`,
+`--mfplus-sl3 UID`,
 `--ntag4xx UID`, `--t4t UID`, `--emv UID`, `--iso14443b PUPI`, `--st25tb UID`,
 `--felica IDM`, `--felica-standard IDM`, `--slix UID`).
 

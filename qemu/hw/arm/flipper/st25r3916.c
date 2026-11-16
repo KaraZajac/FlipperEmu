@@ -2067,8 +2067,8 @@ static int st25_card_pre_load(void *opaque)
 
 static const VMStateDescription vmstate_st25_card = {
     .name = "st25r3916/card",
-    .version_id = 5,                    /* (the card's: FeliCa's authentication) */
-    .minimum_version_id = 5,
+    .version_id = 6,                    /* (the card's: MIFARE Plus's level 3) */
+    .minimum_version_id = 6,
     .needed = st25_card_needed,
     .pre_load = st25_card_pre_load,
     .fields = (const VMStateField[]) {

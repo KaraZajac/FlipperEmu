@@ -87,6 +87,7 @@
 #include "qemu/bitops.h"
 #include "qemu/host-utils.h"
 #include "qemu/guest-random.h"
+#include "crypto/aes.h"
 #include "qapi/error.h"
 #include "migration/vmstate.h"
 #include "flipper.h"
@@ -183,6 +184,14 @@ struct NfcCard {
     uint8_t slix_pp[2];                 /* protection pointer and condition */
     uint8_t slix_rnd[2];                /* the random number last given */
     bool slix_privacy, slix_accept_all, slix_eas;
+    /* MIFARE Plus in security level 3: where its authentication is, the
+     * key's number, the card's number, and a session's transaction
+     * identifier, keys and counters of reads and of writes */
+    int mfp_auth;                       /* MFP_* */
+    uint16_t mfp_kid;
+    uint8_t mfp_rndb[16], mfp_ti[4];
+    uint8_t mfp_kenc[16], mfp_kmac[16];
+    uint16_t mfp_rctr, mfp_wctr;
 };
 #define V_LOCK_DSFID 1
 #define V_LOCK_AFI   2
@@ -1391,6 +1400,326 @@ static int iso_command(NfcCard *c, const uint8_t *in, int n, uint8_t *out)
     return iso_sw(out, 0, 0x6D00);              /* no such instruction */
 }
 
+/* ------------------------------------------- MIFARE Plus, level 3 */
+
+/*
+ * A MIFARE Plus in security level 3, as far as a reader that has its AES
+ * keys goes (the firmwares that try a dictionary of them: Unleashed,
+ * RogueMaster).  Records of the card's file: its blocks (the data blocks
+ * 0x00nn and the configuration blocks 0xB00n), its keys (a sector's two at
+ * 0x4000 + 2 * sector and the next, the card's at 0x9000 on), and its
+ * originality signature.
+ *
+ * - First authentication: 70, the key's number, a length -> 90 and the
+ *   card's number RndB under the key.  72 and the reader's RndA with RndB
+ *   turned left by a byte, in CBC under the key -> 90 and a transaction
+ *   identifier, RndA turned left and twelve bytes of capabilities, the
+ *   same way; 06 for a reader that did not have the key.
+ * - The session's keys are the key's encryptions of bytes of both numbers
+ *   (ending in 11: for the data; in 22: for the MACs).
+ * - A MAC is every second byte of an AES-CMAC, from the second on, over
+ *   the command or the status, a counter (of reads, of writes), the
+ *   identifier, and what follows.
+ * - 31 and 33 read a block (encrypted, plain) with a MAC on the command
+ *   and on the response.  3C: the signature.
+ * - Not here: the writes (A1, A3).  No firmware's reader was brought to
+ *   write to this card, and what none has checked is not in the model.
+ *
+ * A key that the file does not know is a key that no reader has: such a
+ * sector's first part is answered as any (with a number under a key made
+ * up for the moment), and its second never.
+ */
+#define REC_MFP_BLOCK 0x50      /* its number (2 bytes, the low first), 16 bytes */
+#define REC_MFP_KEY   0x51      /* its number likewise, the key */
+#define REC_MFP_SIG   0x52      /* 56 bytes */
+enum { MFP_NONE, MFP_PART1, MFP_SESSION };
+
+static void aes_ecb(const uint8_t key[16], const uint8_t *in, uint8_t *out,
+                    bool encrypt)
+{
+    AES_KEY ks;
+
+    if (encrypt) {
+        AES_set_encrypt_key(key, 128, &ks);
+        AES_encrypt(in, out, &ks);
+    } else {
+        AES_set_decrypt_key(key, 128, &ks);
+        AES_decrypt(in, out, &ks);
+    }
+}
+
+static void aes_cbc(const uint8_t key[16], const uint8_t iv0[16],
+                    const uint8_t *in, uint8_t *out, int n, bool encrypt)
+{
+    uint8_t iv[16], x[16];
+
+    memcpy(iv, iv0, 16);
+    for (int i = 0; i < n; i += 16) {
+        if (encrypt) {
+            for (int j = 0; j < 16; j++) {
+                x[j] = in[i + j] ^ iv[j];
+            }
+            aes_ecb(key, x, &out[i], true);
+            memcpy(iv, &out[i], 16);
+        } else {
+            memcpy(x, &in[i], 16);
+            aes_ecb(key, x, &out[i], false);
+            for (int j = 0; j < 16; j++) {
+                out[i + j] ^= iv[j];
+            }
+            memcpy(iv, x, 16);
+        }
+    }
+}
+
+/* RFC 4493 */
+static void cmac_double(const uint8_t in[16], uint8_t out[16])
+{
+    uint8_t carry = in[0] >> 7;
+
+    for (int j = 0; j < 16; j++) {
+        out[j] = in[j] << 1 | (j < 15 ? in[j + 1] >> 7 : 0);
+    }
+    out[15] ^= carry ? 0x87 : 0;
+}
+
+static void aes_cmac(const uint8_t key[16], const uint8_t *d, int n,
+                     uint8_t mac[16])
+{
+    uint8_t k1[16], k2[16], x[16] = { 0 }, last[16] = { 0 };
+    int blocks = MAX((n + 15) / 16, 1), rest = n - (blocks - 1) * 16;
+    bool whole = n > 0 && n % 16 == 0;
+
+    aes_ecb(key, x, k2, true);          /* (L) */
+    cmac_double(k2, k1);
+    cmac_double(k1, k2);
+    for (int i = 0; i < blocks - 1; i++) {
+        for (int j = 0; j < 16; j++) {
+            x[j] ^= d[i * 16 + j];
+        }
+        aes_ecb(key, x, x, true);
+    }
+    if (rest) {
+        memcpy(last, &d[(blocks - 1) * 16], rest);
+    }
+    if (!whole) {
+        last[rest] = 0x80;
+    }
+    for (int j = 0; j < 16; j++) {
+        x[j] ^= last[j] ^ (whole ? k1 : k2)[j];
+    }
+    aes_ecb(key, x, mac, true);
+}
+
+/* a MAC of this card: over a command or a status, a counter, the
+ * transaction's identifier and what follows */
+static void mfp_mac(NfcCard *c, uint8_t first, uint16_t ctr, const uint8_t *d,
+                    int n, uint8_t mac[8])
+{
+    uint8_t buf[7 + 64], full[16];
+
+    buf[0] = first;
+    buf[1] = ctr & 0xFF;
+    buf[2] = ctr >> 8;
+    memcpy(&buf[3], c->mfp_ti, 4);
+    if (n) {
+        memcpy(&buf[7], d, n);
+    }
+    aes_cmac(c->mfp_kmac, buf, 7 + n, full);
+    for (int i = 0; i < 8; i++) {
+        mac[i] = full[2 * i + 1];
+    }
+}
+
+/* the vector of a read's encryption: the two counters (of reads, of
+ * writes) three times, and the identifier behind them */
+static void mfp_iv(NfcCard *c, uint8_t iv[16])
+{
+    const uint8_t word[4] = { c->mfp_rctr & 0xFF, c->mfp_rctr >> 8,
+                              c->mfp_wctr & 0xFF, c->mfp_wctr >> 8 };
+
+    for (int i = 0; i < 3; i++) {
+        memcpy(&iv[4 * i], word, 4);
+    }
+    memcpy(&iv[12], c->mfp_ti, 4);
+}
+
+/* a record of this card by its type and its number: where its 16 bytes
+ * are, or -1 */
+static int mfp_rec(NfcCard *c, int type, uint16_t number)
+{
+    int at = 0, len, here;
+
+    while ((here = rec_next(c, &at, type, &len)) >= 0) {
+        if (len == 18 && (c->app[here] | c->app[here + 1] << 8) == number) {
+            return here + 2;
+        }
+    }
+    return -1;
+}
+
+static bool mfp_level3(NfcCard *c)
+{
+    int at = 0, len;
+
+    return rec_next(c, &at, REC_MFP_KEY, &len) >= 0;
+}
+
+/* how many sectors the card has: from its version's storage size (0x16:
+ * 2K, 0x18: 4K), else from the highest of its blocks */
+static int mfp_sectors(NfcCard *c)
+{
+    int at = 0, len, here, top = 0;
+
+    here = rec_next(c, &at, REC_VERSION, &len);
+    if (here >= 0 && len >= 6 && c->app[here + 5]) {
+        return c->app[here + 5] >= 0x18 ? 40 : 32;
+    }
+    at = 0;
+    while ((here = rec_next(c, &at, REC_MFP_BLOCK, &len)) >= 0) {
+        if (len == 18 && !c->app[here + 1]) {
+            top = MAX(top, c->app[here]);
+        }
+    }
+    return top >= 128 ? 40 : 32;
+}
+
+/* may the session's key read this block? */
+static bool mfp_owns(NfcCard *c, uint16_t block)
+{
+    if (block >> 8 == 0xB0) {           /* the configuration: the card's keys */
+        return c->mfp_kid == 0x9000 || c->mfp_kid == 0x9001;
+    }
+    if (block >> 8 == 0 && c->mfp_kid >> 8 == 0x40) {
+        int sector = (c->mfp_kid & 0xFF) >> 1;
+        int first = sector < 32 ? sector * 4 : 128 + (sector - 32) * 16;
+
+        return block >= first && block < first + (sector < 32 ? 4 : 16);
+    }
+    return false;
+}
+
+static int mfp_command(NfcCard *c, const uint8_t *in, int n, uint8_t *out)
+{
+    static const uint8_t zero[16];
+    uint8_t key[16], buf[32], mac[8], iv[16];
+    uint16_t block;
+    int at;
+
+    switch (in[0]) {
+    case 0x70:                          /* first authentication */
+        c->mfp_auth = MFP_NONE;
+        if (n < 4) {
+            break;
+        }
+        c->mfp_kid = in[1] | in[2] << 8;
+        at = mfp_rec(c, REC_MFP_KEY, c->mfp_kid);
+        if (at < 0 && !(c->mfp_kid >= 0x4000 &&
+                        c->mfp_kid < 0x4000 + 2 * mfp_sectors(c)) &&
+            !(c->mfp_kid >= 0x9000 && c->mfp_kid <= 0x9004)) {
+            out[0] = 0x09;              /* no such key */
+            return 1;
+        }
+        if (at >= 0) {
+            memcpy(key, &c->app[at], 16);
+        } else {
+            qemu_guest_getrandom_nofail(key, 16);
+        }
+        qemu_guest_getrandom_nofail(c->mfp_rndb, 16);
+        out[0] = 0x90;
+        aes_ecb(key, c->mfp_rndb, &out[1], true);
+        c->mfp_auth = MFP_PART1;
+        return 17;
+    case 0x72:                          /* ... its second part */
+        at = mfp_rec(c, REC_MFP_KEY, c->mfp_kid);
+        if (c->mfp_auth != MFP_PART1 || n < 33 || at < 0) {
+            c->mfp_auth = MFP_NONE;
+            out[0] = 0x06;
+            return 1;
+        }
+        memcpy(key, &c->app[at], 16);
+        aes_cbc(key, zero, &in[1], buf, 32, false);
+        if (memcmp(&buf[16], &c->mfp_rndb[1], 15) ||
+            buf[31] != c->mfp_rndb[0]) {
+            c->mfp_auth = MFP_NONE;
+            out[0] = 0x06;              /* not the key */
+            return 1;
+        }
+        {
+            uint8_t a[16], sv[16], plain[32] = { 0 };
+
+            memcpy(a, buf, 16);
+            qemu_guest_getrandom_nofail(c->mfp_ti, 4);
+            memcpy(plain, c->mfp_ti, 4);
+            memcpy(&plain[4], &a[1], 15);
+            plain[19] = a[0];
+            out[0] = 0x90;
+            aes_cbc(key, zero, plain, &out[1], 32, true);
+            memcpy(&sv[0], &a[11], 5);
+            memcpy(&sv[5], &c->mfp_rndb[11], 5);
+            for (int i = 0; i < 5; i++) {
+                sv[10 + i] = a[4 + i] ^ c->mfp_rndb[4 + i];
+            }
+            sv[15] = 0x11;
+            aes_ecb(key, sv, c->mfp_kenc, true);
+            memcpy(&sv[0], &a[7], 5);
+            memcpy(&sv[5], &c->mfp_rndb[7], 5);
+            for (int i = 0; i < 5; i++) {
+                sv[10 + i] = a[i] ^ c->mfp_rndb[i];
+            }
+            sv[15] = 0x22;
+            aes_ecb(key, sv, c->mfp_kmac, true);
+        }
+        c->mfp_rctr = c->mfp_wctr = 0;
+        c->mfp_auth = MFP_SESSION;
+        return 33;
+    case 0x78:                          /* the session's end */
+        c->mfp_auth = MFP_NONE;
+        out[0] = 0x90;
+        return 1;
+    case 0x31: case 0x33:               /* a block, with MACs both ways */
+        if (c->mfp_auth != MFP_SESSION || n != 12 || in[3] != 1) {
+            break;
+        }
+        mfp_mac(c, in[0], c->mfp_rctr, &in[1], 3, mac);
+        if (memcmp(mac, &in[4], 8)) {
+            c->mfp_auth = MFP_NONE;
+            out[0] = 0x06;
+            return 1;
+        }
+        block = in[1] | in[2] << 8;
+        at = mfp_rec(c, REC_MFP_BLOCK, block);
+        if (!mfp_owns(c, block) || at < 0) {
+            out[0] = 0x09;              /* not this key's, or not in the file */
+            return 1;
+        }
+        c->mfp_rctr++;
+        out[0] = 0x90;
+        if (in[0] == 0x31) {
+            mfp_iv(c, iv);
+            aes_cbc(c->mfp_kenc, iv, &c->app[at], &out[1], 16, true);
+        } else {
+            memcpy(&out[1], &c->app[at], 16);
+        }
+        memcpy(buf, &in[1], 3);
+        memcpy(&buf[3], &out[1], 16);
+        mfp_mac(c, 0x90, c->mfp_rctr, buf, 19, &out[17]);
+        return 25;
+    case 0x3C: {                        /* the originality signature */
+        int a = 0, len, here = rec_next(c, &a, REC_MFP_SIG, &len);
+
+        if (here < 0 || len != 56) {
+            break;
+        }
+        out[0] = 0x90;
+        memcpy(&out[1], &c->app[here], 56);
+        return 57;
+    }
+    }
+    out[0] = 0x0B;                      /* command invalid (here, now) */
+    return 1;
+}
+
 static int app_command(NfcCard *c, const uint8_t *in, int n, uint8_t *out)
 {
     if (c->app_kind == APP_DESFIRE && n >= 1) {
@@ -1408,6 +1737,9 @@ static int app_command(NfcCard *c, const uint8_t *in, int n, uint8_t *out)
             return df_command(c, in, n, out);
         }
         c->df_more = DF_NONE;
+        if (mfp_level3(c)) {            /* (a card whose file has keys) */
+            return mfp_command(c, in, n, out);
+        }
         out[0] = 0x0B;
         return 1;
     }
@@ -1543,6 +1875,7 @@ static void card_reset(NfcCard *c, int state)
     c->iso_df = c->iso_ef = -1;
     c->fl_auth = false;
     c->v_quiet = c->v_selected = false; /* (a field that went and came) */
+    c->mfp_auth = 0;
 }
 
 /* the UID bytes of cascade level `level`, with the cascade tag if needed */
@@ -2899,8 +3232,8 @@ static int card_post_load(void *opaque, int version_id)
 
 const VMStateDescription vmstate_nfc_card = {
     .name = "nfc-card",
-    .version_id = 5,                    /* (5: FeliCa Lite-S's authentication) */
-    .minimum_version_id = 5,
+    .version_id = 6,                    /* (6: MIFARE Plus's level 3) */
+    .minimum_version_id = 6,
     .post_load = card_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_INT32(kind, NfcCard),
@@ -2968,6 +3301,14 @@ const VMStateDescription vmstate_nfc_card = {
         VMSTATE_UINT8_ARRAY(b_info, NfcCard, 3),
         VMSTATE_UINT8_ARRAY(tb_otp, NfcCard, 4),
         VMSTATE_UINT8(tb_id, NfcCard),
+        VMSTATE_INT32(mfp_auth, NfcCard),
+        VMSTATE_UINT16(mfp_kid, NfcCard),
+        VMSTATE_UINT8_ARRAY(mfp_rndb, NfcCard, 16),
+        VMSTATE_UINT8_ARRAY(mfp_ti, NfcCard, 4),
+        VMSTATE_UINT8_ARRAY(mfp_kenc, NfcCard, 16),
+        VMSTATE_UINT8_ARRAY(mfp_kmac, NfcCard, 16),
+        VMSTATE_UINT16(mfp_rctr, NfcCard),
+        VMSTATE_UINT16(mfp_wctr, NfcCard),
         VMSTATE_END_OF_LIST()
     }
 };

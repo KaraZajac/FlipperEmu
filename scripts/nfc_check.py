@@ -25,6 +25,7 @@ Needs the firmware's NFC shell (1.4 and later); without it nothing is
 checked and the exit status is 77.  Exit status 0 = pass.
 """
 import argparse
+import collections
 import json
 import os
 import pathlib
@@ -189,6 +190,84 @@ def app_read(b, work, name, words, card, kind):
           code == 0 and got and not differ
           and many(card) == many(saved),
           f"{text}\n{new}\n" + "\n".join(
+              f"{k}: {want.get(k)} | {got.get(k)}" for k in differ[:12]))
+
+
+def mfplus_sl3(b, work):
+    """A MIFARE Plus in security level 3 that has its AES keys, for the
+    firmwares whose NFC app tries a dictionary of such keys (Unleashed,
+    RogueMaster): first authentication for each sector's two keys and the
+    card's four, blocks read encrypted with a MAC both ways, the
+    configuration blocks, the signature.  One sector and one of the card's
+    keys have a key that no dictionary has."""
+    card = fe_nfc.sample_mfplus_sl3(bytes.fromhex("04C2D3E4F5A6B7"))
+    path = work / "mfplus-sl3.nfc"
+    path.write_text(card)
+    air = work / "mfplus-air.txt"
+    b.fe("nfc", "record", air)
+    code, text = b.fe("nfc", path)
+    before = b.fe("ls", "/ext/nfc")[1]
+    b.fe("app", "NFC")
+    time.sleep(1.5)
+    b.fe("press", "ok")                         # Read
+    start, seen, idle = time.time(), False, 0
+    while time.time() < start + 150 and idle < 6:
+        try:
+            said = b.fe("status", "--json")[1]
+            state = json.loads(said[said.index("{"):])["nfc"]["radio"]
+        except (ValueError, KeyError):
+            state = None
+        seen = seen or state not in ("idle", None)
+        idle = idle + 1 if state == "idle" and (seen or time.time() > start + 8) \
+            else 0
+        time.sleep(0.5)
+    for key in ("right", "ok", "ok"):           # More, Save, save
+        b.fe("press", key)
+        time.sleep(1.5)
+    for _ in range(6):
+        b.fe("press", "back")
+        time.sleep(0.6)
+        b.fe("app", "--close")
+        if "no app runs" in b.fe("app")[1]:
+            break
+    b.fe("nfc", "record", "stop")
+    new = [m for m in re.findall(r"^\s*\d+\s+(\S.*\.nfc)\s*$",
+                                 b.fe("ls", "/ext/nfc")[1], re.M)
+           if m not in before]
+    out = work / "mfplus-sl3-saved.nfc"
+    if new:
+        b.fe("pull", f"/ext/nfc/{new[0]}", out)
+        b.fe("rm", f"/ext/nfc/{new[0]}")
+    b.fe("nfc", "none")
+    want = fe_nfc.parse_nfc_text(card)
+    got = fe_nfc.parse_nfc_text(out.read_text()) if out.exists() else {}
+    frames = [line.split()[4:] for line in
+              (air.read_text() if air.exists() else "").splitlines()
+              if " flipper a " in line]
+    # (an I-block's command is behind its first byte; the status likewise)
+    said = collections.Counter(
+        (f[0][2:4], f[-1][2:4] if f[-1] != "-" else "-") for f in frames
+        if f[0][:2] in ("02", "03"))
+    if not said["72", "90"]:
+        print("  (this firmware's NFC app tries no AES keys on a MIFARE Plus)")
+        return
+    own = fe_nfc.MFP_OWN_SECTOR
+    kept = sorted([f"Block {own * 4 + i}" for i in range(4)]
+                  + [f"Key A {own}", f"Key B {own}", "L3 Switch Key"])
+    differ = sorted(k for k in set(want) | set(got)
+                    if (want.get(k) or "").upper() != (got.get(k) or "").upper())
+    unknown = all(set((got.get(k) or "x").split()) == {"??"} for k in kept)
+    check("a MIFARE Plus in security level 3 with its AES keys: the NFC "
+          "app authenticates with the keys of its dictionary ("
+          f"{said['72', '90']} times; {said['72', '06']} tries with a key "
+          f"that is not the one), reads {said['31', '90']} blocks encrypted "
+          "with a MAC each way, and the file that it saves is the card's: "
+          f"{len(want) - len(kept)} keys the same, and the {len(kept)} that "
+          "a key of no dictionary keeps (a sector's blocks and keys, one of "
+          "the card's keys) unknown",
+          code == 0 and got and differ == kept and unknown
+          and said["31", "90"] == 128,
+          f"{text}\n{new}\n{dict(said)}\n" + "\n".join(
               f"{k}: {want.get(k)} | {got.get(k)}" for k in differ[:12]))
 
 
@@ -644,6 +723,7 @@ def main():
                                                                  "ATQA: 00 42")
                           .replace("Size: 2K", "Size: 4K"), "Mifare Plus",
                           may=("Data format version",))
+                mfplus_sl3(b, work)
                 # A FeliCa Lite-S with a card key: without the key the
                 # blocks that are kept for it are refused; with it (the
                 # MAC both ways) all are read, and the firmware puts the key

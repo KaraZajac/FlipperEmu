@@ -1065,6 +1065,35 @@ counts in records, the newest first, as a card does: the firmware asks for as ma
 records as a record has bytes, gets a boundary error from a card with fewer, and its
 dump has no contents for that file.
 
+**MIFARE Plus in security level 3** (`app mfplus` with records of blocks and keys)
+is the card for a reader that has its AES keys: Unleashed's and RogueMaster's NFC
+apps, which try a dictionary's 33. A record is a block or a key by its number, the
+low byte first: the data blocks `0x00nn`, the configuration blocks `0xB00n`, a
+sector's two keys at `0x4000 + 2 * sector` and the next, the card's at `0x9000`,
+`0x9001`, `0x9003` and `0x9004`; and the signature's 56 bytes.
+- First authentication: `70`, a key's number and a length, answered with `90` and
+  the card's number RndB under that key. `72` and 32 bytes in CBC under the key,
+  the reader's RndA and RndB turned left by a byte: `90` and a transaction
+  identifier of four bytes, RndA turned left, and twelve bytes of capabilities, the
+  same way. `06` for a reader that did not have the key.
+- A key that the file does not know (`??`, or a line that is not there) is a key
+  that no reader has: the first part is answered as any other, with a number under
+  a key made up for the moment, and the second never. The firmware's reader takes a
+  sector that does not answer the first part for a fault of the air and gives the
+  read up, so every sector the card has must answer it.
+- The session's keys are the key's encryptions of five bytes of each number, five
+  of the two XORed, and `11` (for the data) or `22` (for the MACs). A MAC is the odd
+  bytes of an AES-CMAC over the command or the status, a counter (of the session's
+  reads), the identifier, and the rest.
+- `31` and `33` read one block, encrypted or plain, with a MAC on the command and
+  on the response; the encryption's vector is the counters of reads and of writes
+  three times and the identifier. A block is read with a key of its own sector, a
+  configuration block with the card's master or configuration key.
+- The authentication, the MACs and the encryption are checked by the firmwares'
+  own: their reader takes the card's MAC on every block and saves what it
+  decrypted, which is the file's. Writes (`A1`, `A3`) are not in the model: no
+  firmware's reader was brought to write to this card. AES is QEMU's.
+
 **ISO 7816-4** on ISO14443-4 (`app iso7816`) is a card of five kinds of record:
 an application (its name, and the FCI that SELECT answers with), a file (its ID and
 its bytes), a record (its SFI, its number, its bytes), a data object (its tag, what
@@ -2119,7 +2148,7 @@ the header adds its own.
 - **NFC** (`st25r3916.c`, `nfc_card.c`) saves the chip as the firmware set it up, where
   it is in a frame, and the card that is held to the Flipper with all of it: what was
   written to it, its counters, its place in the activation and, for MIFARE Classic, in
-  its Crypto1 session. A talk between the firmware and the card goes on (a dictionary
+  its Crypto1 session (a MIFARE Plus's session in security level 3 likewise). A talk between the firmware and the card goes on (a dictionary
   attack finds its keys). A standing reader's field (`nfc --field on`) is saved as
   well. A virtual reader's session (`nfc --reader`) is not: that reader is gone, its
   field goes off at the first run, and the firmware's emulation waits for the next

@@ -5676,6 +5676,43 @@ big lock, entry 92).
     - Checks: nfc_emulate_check 24 on the official 1.5.1, 25 on the dev
       build, Momentum, Unleashed and RogueMaster.
 
+180. **MIFARE Plus in security level 3.**
+    - What Unleashed and RogueMaster ask of a Plus was looked at first,
+      in a record: their shell's `dump` asks for the version and no
+      more; their NFC app's Read goes on with `3C 00` (the signature)
+      and `70 00 40 00`, the first authentication for sector 0's key A,
+      and stops at the card model's "command invalid". Both have the
+      same dictionary of 33 AES keys on the card
+      (`/ext/nfc/assets/mf_plus_dict.nfc`); Momentum has none.
+    - The protocol is as Unleashed's reader has it (its source, read
+      for this: `lib/nfc/protocols/mf_plus/`): RndB under the key; RndA
+      and RndB turned left, in CBC; the identifier and RndA turned left
+      back; two session keys from bytes of both numbers; a MAC of eight
+      bytes, the odd ones of an AES-CMAC, over the command or status, a
+      counter, the identifier and the rest; a read's encryption with
+      the counters and the identifier for its vector.
+    - In the card model: records for a block and for a key by their
+      numbers, AES from QEMU's `crypto/aes.h`, CMAC by RFC 4493, the
+      session in the card's saved state (version 6). A sector whose key
+      the file does not know answers the first part all the same, with
+      a number under a key made up then, because the firmware's reader
+      gives the whole read up when a sector does not; its second part
+      is never right.
+    - It was right at the first build: the app read the made-up card in
+      10 s, 772 frames. 280 first parts, 65 second parts that were
+      taken and 215 that were not, 128 blocks read encrypted, each with
+      the firmware's check of the card's MAC, and a saved file that is
+      the card's in 210 keys of 217. The seven are the sector and the
+      one card key with a key of no dictionary: `??` in the file.
+      RogueMaster the same, frame for frame in number.
+    - Writes (`A1`, `A3`) were written with the rest and taken out
+      again: the app's "Write to Initial Card" is some menus away, and
+      nothing had checked them. Opening a saved Plus with the app
+      emulates it ("Emulating Mifare Plus EV1 2K SL3"): a reader for
+      that is next, and the writes with it.
+    - Checks: nfc_check 25 on the official 1.5.1, 27 on its dev build,
+      28 on Momentum, 29 on Unleashed and RogueMaster.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

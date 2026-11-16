@@ -284,7 +284,14 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       answer off the edges. No TIM16 for it (it stays the speaker's register
       file). Transparent mode is in a saved state now. nfc_emulate_check 24 /
       25 on five; firmware bug FW-21 found with it (BRINGUP_LOG 179).
-      Next: MIFARE Plus SL3 (AES; Unleashed and RogueMaster try keys)
+      MIFARE Plus in security level 3 ☑ (2026-11-15): a card whose file has its
+      AES keys answers the first authentication, the reads with a MAC both ways
+      (plain and encrypted), the configuration blocks and the signature; `nfc
+      mfplus-sl3 UID`. Unleashed's and RogueMaster's NFC apps read it with their
+      dictionary and save its file, `??` where a key of no dictionary keeps it.
+      nfc_check 25 / 27 / 28 / 29 / 29 (BRINGUP_LOG 180).
+      Next: a reader for the MIFARE Plus that Unleashed and RogueMaster emulate
+      (AES in Python), and with it the writes
 - ☑ 125 kHz RFID read: COMP1 → TIM2 TI4 capture, a virtual tag in the reader's field
       (ASK/FSK/PSK, field noise), encoders ported from the firmware (`fe_rfid.py`, checked
       cycle for cycle against its emulation by `rfid_check.py`); app Read and `rfid read`

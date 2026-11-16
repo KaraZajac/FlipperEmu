@@ -18,6 +18,7 @@ holds in its field (see qemu/hw/arm/flipper/nfc_card.c):
     fe_nfc.py --ulc 04A1B2C3D4E5F6          -> a MIFARE Ultralight C, its pages
                                                from 16 on behind its key
     fe_nfc.py --mfplus 04C2D3E4F5A6B7       -> a MIFARE Plus EV1 2K (SL3)
+    fe_nfc.py --mfplus-sl3 04C2D3E4F5A6B7   -> ... with its blocks and AES keys
     fe_nfc.py --ntag4xx 04B1C2D3E4F5A6      -> an NTAG 424 DNA
     fe_nfc.py --t4t 04D1E2F3A4B5C6          -> a Type 4 tag with an NDEF URL
     fe_nfc.py --emv 04E1F2A3B4C5D6          -> an EMV card with a test number
@@ -110,6 +111,11 @@ def describe_mfc(fields, atqa):
 
 
 REC_VERSION, REC_FREE, REC_APP, REC_FILE = 0x01, 0x02, 0x10, 0x20
+# a MIFARE Plus in security level 3: a block or a key by its number (the
+# low byte first) and its 16 bytes; the originality signature
+REC_MFP_BLOCK, REC_MFP_KEY, REC_MFP_SIG = 0x50, 0x51, 0x52
+MFP_CARD_KEYS = (("Card Master Key", 0x9000), ("Card Config Key", 0x9001),
+                 ("L3 Switch Key", 0x9003), ("SL1 Card Auth Key", 0x9004))
 
 
 def tlv(tag, value):
@@ -191,6 +197,39 @@ def iso7816_records(fields):
     return out
 
 
+def mfplus_records(fields):
+    """What a file has of a MIFARE Plus in security level 3 (the files of
+    Unleashed and RogueMaster, which read one with its AES keys): its
+    blocks, its sectors' keys and the card's, its configuration blocks, its
+    signature.  What the file does not know (??) is no record: the card
+    model gives a reader nothing of it, as no reader had it."""
+    out = []
+
+    def rec(kind, number, value):
+        data = hexbytes(value) if value and "?" not in value else b""
+        if len(data) == 16:
+            out.append(f"rec {kind:02x} {number & 0xFF:02x} {number >> 8:02x} "
+                       f"{data.hex(' ')}")
+
+    for key, value in fields.items():
+        hit = re.fullmatch(r"(Block|Key A|Key B|Config Block) (\d+)", key)
+        if not hit:
+            continue
+        n = int(hit[2])
+        if hit[1] == "Block" and n < 256:
+            rec(REC_MFP_BLOCK, n, value)
+        elif hit[1] == "Config Block" and n < 4:
+            rec(REC_MFP_BLOCK, 0xB000 + n, value)
+        elif hit[1].startswith("Key") and n < 40:
+            rec(REC_MFP_KEY, 0x4000 + 2 * n + (hit[1] == "Key B"), value)
+    for name, number in MFP_CARD_KEYS:
+        rec(REC_MFP_KEY, number, fields.get(name))
+    signature = fields.get("Signature", "")
+    if signature and "?" not in signature and len(hexbytes(signature)) == 56:
+        out.append(f"rec {REC_MFP_SIG:02x} {hexbytes(signature).hex(' ')}")
+    return out
+
+
 def describe_iso4(fields, atqa, desfire, plus=False):
     """An ISO14443-4A card; a MIFARE DESFire's tables as records for
     nfc_card.c: what its commands answer, taken from the dump.  A MIFARE
@@ -225,6 +264,8 @@ def describe_iso4(fields, atqa, desfire, plus=False):
             version = version[:28]
         if len(version) in ((28, 29) if ntag4 else (28,)) and any(version):
             out.append(f"rec {REC_VERSION:02x} {version.hex(' ')}")
+        if plus:
+            out += mfplus_records(fields)
         return "\n".join(out) + "\n"
     if not desfire:
         return "\n".join(out + ["app none"]) + "\n"
@@ -650,6 +691,47 @@ def sample_mfplus(uid):
         "Security Level: SL3", "Memory Size: 2K"]) + "\n"
 
 
+# AES keys that the dictionaries of Unleashed and RogueMaster have
+# (/ext/nfc/assets/mf_plus_dict.nfc), and one that they have not
+MFP_KEY_FF = bytes([0xFF] * 16)
+MFP_KEY_A0 = bytes.fromhex("A0A1A2A3A4A5A6A7A0A1A2A3A4A5A6A7")
+MFP_KEY_B0 = bytes.fromhex("B0B1B2B3B4B5B6B7B0B1B2B3B4B5B6B7")
+MFP_KEY_01 = bytes.fromhex("000102030405060708090A0B0C0D0E0F")
+MFP_KEY_OWN = bytes.fromhex("4645506C75734B65794F6620536563B3")   # (made up)
+MFP_OWN_SECTOR = 3                      # the sector that MFP_KEY_OWN keeps
+
+
+def sample_mfplus_sl3(uid):
+    """A MIFARE Plus EV1 2K in security level 3 with what a reader that has
+    its AES keys gets of it, as the .nfc file of the firmwares that read
+    one so (Unleashed, RogueMaster), made up: 32 sectors with keys of their
+    dictionary, but for one whose keys no dictionary has; the card's keys;
+    its configuration blocks; its signature"""
+    up = lambda b: bytes(b).hex(" ").upper()
+    out = sample_mfplus(uid).splitlines() + ["Data format version: 1"]
+    for block in range(128):
+        if block % 4 == 3:              # a sector's last: its conditions
+            data = bytes(6) + bytes.fromhex("FF0780") + bytes([block // 4]) \
+                + bytes(6)
+        else:
+            data = bytes((block * 7 + i * 13 + 0x21) & 0xFF for i in range(16))
+        out.append(f"Block {block}: {up(data)}")
+    for sector in range(32):
+        a, b = (MFP_KEY_OWN, MFP_KEY_OWN) if sector == MFP_OWN_SECTOR else \
+            (MFP_KEY_A0, MFP_KEY_B0) if sector % 8 == 1 else \
+            (MFP_KEY_FF, MFP_KEY_01) if sector % 8 == 2 else \
+            (MFP_KEY_FF, MFP_KEY_FF)
+        out += [f"Key A {sector}: {up(a)}", f"Key B {sector}: {up(b)}"]
+    out += [f"Card Master Key: {up(MFP_KEY_01)}",
+            f"Card Config Key: {up(MFP_KEY_FF)}",
+            f"L3 Switch Key: {up(MFP_KEY_OWN)}",
+            f"SL1 Card Auth Key: {up(bytes(16))}"]
+    out += [f"Config Block {n}: {up(bytes((0xB0 + n, i) [i % 2] for i in range(16)))}"
+            for n in range(4)]
+    out.append("Signature: " + up(bytes((0x40 + i * 3) & 0xFF for i in range(56))))
+    return "\n".join(out) + "\n"
+
+
 ULC_KEY = bytes.fromhex("49454D4B41455242214E4143554F5946")    # (made up)
 
 
@@ -1028,6 +1110,9 @@ def nfc_file(desc):
 SAMPLES = {"t4t": (sample_t4t, "a Type 4 tag with a URL (made up)"),
            "emv": (sample_emv, "an EMV card (made up: a test number)"),
            "mfplus": (sample_mfplus, "a MIFARE Plus EV1 2K, SL3 (made up)"),
+           "mfplus-sl3": (sample_mfplus_sl3, "a MIFARE Plus EV1 2K, SL3, with "
+                          "its blocks and AES keys (made up; for the "
+                          "firmwares that have a dictionary of such keys)"),
            "ntag4xx": (sample_ntag4xx, "an NTAG 424 DNA (made up)"),
            "desfire": (sample_desfire, "a MIFARE DESFire EV1 (two "
                        "applications, made up)"),
