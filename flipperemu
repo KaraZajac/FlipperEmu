@@ -1261,7 +1261,10 @@ def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
                            + (f",keep={end:#x}" if end else "")
                            + (f",trace={COV_TRACE}"
                               if getattr(args, "trace", False) else "")]
-    return cmd + list(args.qemu_args or [])
+    # (FLIPPEREMU_QEMU_ARGS: more arguments for every emulator that is
+    # started, a check's too: for a try, as `-icount shift=4`)
+    return cmd + list(args.qemu_args or []) \
+        + shlex.split(os.environ.get("FLIPPEREMU_QEMU_ARGS", ""))
 
 
 def firmware_end(dev):

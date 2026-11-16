@@ -5773,6 +5773,37 @@ big lock, entry 92).
     - Checks: nfc_check 25 on the official 1.5.1, 27 on its dev build,
       28 on Momentum, 30 on Unleashed and RogueMaster.
 
+183. **The smoke test on a busy host again, and QEMU's instruction count.**
+    - Beside 32 busy loops on 16 threads the smoke test had been 26, 25
+      and 18 of 28 (entry 171). With the timer's waits of entry 179 it
+      is 27, 26 and 26: the infrared and the SDR recording hold, and
+      the firmware's CLI did not fall over in three runs. What fails is
+      the T5577's write (each time), the 1-Wire read and a Sub-GHz
+      reception (once each): things that the firmware times with its
+      own waiting loops, which a thread off its core makes longer
+      against the host's clock.
+    - Entry 147 had left a fixed shift of QEMU's instruction-counted
+      clock untried. `-icount shift=4,align=on` (16 ns an instruction,
+      62.5 million a second, held back to the host's time when it runs
+      ahead), given to a check's emulators by a new
+      `FLIPPEREMU_QEMU_ARGS`:
+      - alone, the smoke test is 28 of 28 in 70 s, as without it; a
+        first start takes 9.0 s for 4.0;
+      - beside the 32 loops a first start takes 42 s (6.6 s with the
+        host's clock), with 4 s on the firmware's own clock at the end
+        of it: the time is right and the host is ten times late with
+        it. The smoke test waits 40 s for a start, and three runs ended
+        there;
+      - with ten times the patience (`--timeout 400`,
+        `FLIPPEREMU_CHECK_LIMIT=x10`), one run: 26 of 28 in 151 s. The
+        T5577's write, the 1-Wire read and the Sub-GHz reception pass.
+        The two that fail are the ISO-DEP card that a program on the
+        host plays over the NFC link, and the same through the
+        simulated Proxmark3; they pass alone under the same clock.
+    - So the count does what it should for the firmware's own timing,
+      and costs the start, and something at the link that was not
+      looked into. It stays an option and is not the default.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

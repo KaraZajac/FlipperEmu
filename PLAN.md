@@ -881,7 +881,20 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           write, the 1-Wire read and the infrared each fail now and then; once
           in three the firmware's CLI queue overflows (FW-07) while the NFC app
           reads and the check opens the port for its next step. Alone: 28
-          (BRINGUP_LOG 171)
+          (BRINGUP_LOG 171). After the timer's waits were mended (BRINGUP_LOG
+          179): 27, 26 and 26. The T5577's write fails each time, the 1-Wire
+          read and a Sub-GHz reception once: what the firmware times with its
+          own waiting loops against the host's clock.
+          QEMU's instruction-counted clock with a fixed shift, tried at last
+          (`-icount shift=4,align=on`; `FLIPPEREMU_QEMU_ARGS` gives it to a
+          check's emulators): alone 28 of 28 in the same 70 s. Beside 32 busy
+          loops the emulated time is right and slow to come, a first start in
+          42 s for the host clock's 7, more than the smoke test waits for one;
+          with ten times the patience 26 of 28 in 151 s, the three above among
+          the passes, and the two that fail are the cards that a program on
+          the host plays over the NFC link. Not the default: one run, a start
+          twice as long alone, and the link under it not understood
+          (BRINGUP_LOG 183)
     - ☑ A time limit in every check (2026-11-14): past it, a FAIL, where each of its
           threads stands, its emulators stopped, exit status 124; `FLIPPEREMU_CHECK_LIMIT`
           changes them (`x2`, seconds, `0`). After a window check waited three hours in a

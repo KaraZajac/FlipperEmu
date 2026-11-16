@@ -569,8 +569,10 @@ the log is also kept in `devices/NAME/uart.log`. `--audio` takes `auto` (default
 (`devices/NAME/usb.sock`), `tcp:PORT` or `none` (cable unplugged). `--lpuart` (the
 serial port on pins 15 and 16 of the header) takes `pty` (default), `tcp:PORT` or
 `none` (nothing wired). Anything after `--` is
-passed straight to QEMU, e.g. `-- -icount shift=auto` for deterministic timing, or
-`-- -d in_asm,cpu -D trace.log`.
+passed straight to QEMU, e.g. `-- -icount shift=4,align=on` for a clock that counts
+the emulated CPU's instructions (16 ns each) and not the host's time, or
+`-- -d in_asm,cpu -D trace.log`. `FLIPPEREMU_QEMU_ARGS` in the environment does the
+same for every emulator that is started, a check's too.
 
 ### The firmware log
 
