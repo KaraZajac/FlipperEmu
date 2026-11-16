@@ -212,30 +212,38 @@ def reboot_check(mon: Monitor, uart: pathlib.Path, out: pathlib.Path, timeout: f
     return dark_pixels(shot) > 500
 
 
+# What a command that listens until Ctrl+C says when its receiver is on (the
+# firmware starts the receiver, then prints this), or that it will not listen
+LISTENS = r"(?i)ctrl\s*\+\s*c|failed to start"
+HEARD_S = 15.0          # for what it heard to be printed
+
+
+def listening(cli, command: str, timeout: float = 20.0) -> str:
+    """Start a command that listens until Ctrl+C, and wait for its own word
+    that it does.  (A sleep of a second was too short on a busy computer:
+    the signal came before the receiver was on.  And too long on an idle
+    one.)  What it printed so far."""
+    _, out = cli.watch(command, LISTENS, timeout=timeout, stop=False)
+    time.sleep(0.2)
+    return out
+
+
 def ir_check(mon: Monitor) -> bool:
     """`ir rx` on the CLI, then an NEC frame into the virtual IR receiver."""
-    import select
     import fe_ir
     try:
         cli = FlipperCli(usb_endpoint(mon))
         try:
             cli.read_until_prompt(15)
-            cli.write(b"ir rx\r")
-            time.sleep(1.0)
+            listening(cli, "ir rx")
             mon.cmd("qom-set /machine/ir rx " + ",".join(map(str, fe_ir.encode("NEC", 4, 8))))
-            out, end = b"", time.time() + 3
-            while time.time() < end and b"NEC, A:0x04, C:0x08" not in out:
-                r, _, _ = select.select([cli.fd], [], [], 0.1)
-                if r:
-                    out += cli.sock.recv(4096) if cli.sock else os.read(cli.fd, 4096)
-            cli.write(b"\x03")
-            time.sleep(0.3)
+            found, _ = cli.watch("", r"NEC, A:0x04, C:0x08", timeout=HEARD_S)
         finally:
             cli.close()
     except (OSError, TimeoutError, ConnectionError, TypeError) as e:
         print(f"  ir: {e}")
         return False
-    return b"NEC, A:0x04, C:0x08" in out
+    return found is not None
 
 
 def ir_tx_check(mon: Monitor) -> bool:
@@ -246,9 +254,9 @@ def ir_tx_check(mon: Monitor) -> bool:
         cli = FlipperCli(usb_endpoint(mon))
         try:
             cli.read_until_prompt(15)
-            cli.run("ir tx NEC 04 08", timeout=10)
+            cli.run("ir tx NEC 04 08", timeout=20)
             path = ""
-            for _ in range(30):
+            for _ in range(int(HEARD_S * 10)):
                 path = mon.cmd("qom-get /machine/ir tx").strip().strip('"')
                 if path:
                     break
@@ -261,10 +269,9 @@ def ir_tx_check(mon: Monitor) -> bool:
                                             for a, b in zip(sent, want)):
                 print(f"  ir tx: {sent[:8]}... vs {want[:8]}...")
                 return False
-            cli.write(b"ir rx\r")
-            time.sleep(1.0)
+            listening(cli, "ir rx")
             mon.cmd("qom-set /machine/ir rx " + ",".join(map(str, sent)))
-            found, _ = cli.watch("", r"NEC, A:0x04, C:0x08", timeout=3)
+            found, _ = cli.watch("", r"NEC, A:0x04, C:0x08", timeout=HEARD_S)
         finally:
             cli.close()
     except (OSError, TimeoutError, ConnectionError, TypeError, ValueError) as e:
@@ -286,10 +293,11 @@ def subghz_check(mon: Monitor) -> bool:
     sig = fe_subghz.princeton(0x95D5D4)
 
     def listen(cli, command, until):
-        cli.write(command)
-        time.sleep(1.5)
+        out = listening(cli, command).encode()
+        if b"failed to start" in out:
+            return out
         mon.cmd("qom-set /machine/subghz rx @433920000," + ",".join(map(str, sig)))
-        out, end = b"", time.time() + 4
+        end = time.time() + HEARD_S
         while time.time() < end and not until(out):
             r, _, _ = select.select([cli.fd], [], [], 0.1)
             if r:
@@ -306,12 +314,12 @@ def subghz_check(mon: Monitor) -> bool:
         cli = FlipperCli(usb_endpoint(mon))
         try:
             cli.read_until_prompt(15)
-            out = listen(cli, b"subghz rx 433920000 0\r", lambda o: want in o)
+            out = listen(cli, "subghz rx 433920000 0", lambda o: want in o)
             if want in out:
                 return True
             if b"failed to start" in out:
                 cli.read_until_prompt(5)
-                return princeton_raw(listen(cli, b"subghz rx_raw 433920000\r",
+                return princeton_raw(listen(cli, "subghz rx_raw 433920000",
                                             princeton_raw))
         finally:
             cli.close()

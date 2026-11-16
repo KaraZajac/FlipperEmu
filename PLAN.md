@@ -905,10 +905,15 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           command (before: 1 of 5, with blocks of anything and one locked);
           `ikey read` of a DS1990A 23 of 24, most under a second (before: 16 of
           24). Alone nothing changes: the host takes nothing (BRINGUP_LOG 184)
-    - ☐ Reception on a busy host: beside 32 busy loops the infrared's and the
-          Sub-GHz's reception fail most runs of the smoke test, with or without
-          the above. The firmware's interrupt handlers are late for edges that
-          come by the machine's clock
+    - ☑ Reception on a busy host (2026-11-15): beside 32 busy loops the
+          infrared's and the Sub-GHz's reception failed most runs of the smoke
+          test. Not the models' doing (their edges wait for the firmware): the
+          test started `ir rx` or `subghz rx`, slept a second and sent its
+          signal, before the receiver was on. It waits for the command's own
+          "Press Ctrl+C" now, and 15 s for what was heard. Five runs beside the
+          loops: 27, 28, 21, 28, 21 of 28, both receptions, the T5577's write
+          and the 1-Wire read in all five; the two of 21 are the firmware's
+          crash (FW-07) and what comes after it (BRINGUP_LOG 185)
     - ☐ An NFC `dump` of the shell that is not done after 40 s, beside 24 busy
           loops, about one card in fifty of the fuzzer's (BRINGUP_LOG 184); and
           the fuzz check's step that looks at which inputs were kept, which

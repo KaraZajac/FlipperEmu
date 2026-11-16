@@ -5866,6 +5866,32 @@ big lock, entry 92).
       each had one such `dump`, at different cards. Not this entry's
       doing, and not explained.
 
+185. **Reception on a busy host was the smoke test's own sleep.**
+    - With entry 184 in, the smoke test beside 32 busy loops still lost
+      the infrared's reception in four runs of five and the Sub-GHz's
+      in all five. Both models hold an edge back until the firmware
+      has read the one before, and their durations are exact whatever
+      the host does: there was nothing of entry 184's kind to find.
+    - The test was. It wrote `ir rx` to the CLI, slept one second
+      (`subghz rx`: one and a half), gave the model its signal, and
+      looked three seconds for the decoded line. On a busy host the
+      command had not started its receiver in that second, and the
+      signal went to nobody.
+    - The firmware says when it listens: it starts the receiver and
+      then prints "Press Ctrl+C to abort" (`ir rx`; `subghz rx`:
+      "Press CTRL+C to stop"). The steps wait for that line, or for
+      "failed to start" (Unleashed's `subghz rx` on the internal
+      radio), then send, then wait up to 15 s. Alone the test is a
+      few seconds shorter for it (63 s).
+    - Five runs beside the 32 loops: 27, 28, 21, 28 and 21 of 28. Both
+      receptions, the T5577's write and the 1-Wire read pass in all
+      five, and two runs pass whole, which none had at this load. The
+      27 lost the capture of an infrared transmission (three seconds
+      for its file: fifteen now). The two of 21 are the firmware's
+      crash while the NFC steps run (FW-07: its CLI's queue), with the
+      steps after it.
+    - Alone: 28 on the official 1.5.1 and Momentum, 27 on Unleashed.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
