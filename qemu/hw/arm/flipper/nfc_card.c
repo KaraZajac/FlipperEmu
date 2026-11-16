@@ -1421,9 +1421,11 @@ static int iso_command(NfcCard *c, const uint8_t *in, int n, uint8_t *out)
  *   the command or the status, a counter (of reads, of writes), the
  *   identifier, and what follows.
  * - 31 and 33 read a block (encrypted, plain) with a MAC on the command
- *   and on the response.  3C: the signature.
- * - Not here: the writes (A1, A3).  No firmware's reader was brought to
- *   write to this card, and what none has checked is not in the model.
+ *   and on the response; A1 and A3 write one (the MAC on the command
+ *   covers the bytes as they are sent; the response is a status and a
+ *   MAC).  3C: the signature.
+ * - A write to a key's own number, which changes the key on a card, is
+ *   not here: no firmware's reader does it.
  *
  * A key that the file does not know is a key that no reader has: such a
  * sector's first part is answered as any (with a number under a key made
@@ -1531,17 +1533,18 @@ static void mfp_mac(NfcCard *c, uint8_t first, uint16_t ctr, const uint8_t *d,
     }
 }
 
-/* the vector of a read's encryption: the two counters (of reads, of
- * writes) three times, and the identifier behind them */
-static void mfp_iv(NfcCard *c, uint8_t iv[16])
+/* the vectors of a read's and of a write's encryption: the two counters
+ * (of reads, of writes) three times, and the identifier behind them or
+ * before */
+static void mfp_iv(NfcCard *c, bool write, uint8_t iv[16])
 {
     const uint8_t word[4] = { c->mfp_rctr & 0xFF, c->mfp_rctr >> 8,
                               c->mfp_wctr & 0xFF, c->mfp_wctr >> 8 };
 
     for (int i = 0; i < 3; i++) {
-        memcpy(&iv[4 * i], word, 4);
+        memcpy(&iv[(write ? 4 : 0) + 4 * i], word, 4);
     }
-    memcpy(&iv[12], c->mfp_ti, 4);
+    memcpy(&iv[write ? 0 : 12], c->mfp_ti, 4);
 }
 
 /* a record of this card by its type and its number: where its 16 bytes
@@ -1584,7 +1587,7 @@ static int mfp_sectors(NfcCard *c)
     return top >= 128 ? 40 : 32;
 }
 
-/* may the session's key read this block? */
+/* may the session's key read or write this block? */
 static bool mfp_owns(NfcCard *c, uint16_t block)
 {
     if (block >> 8 == 0xB0) {           /* the configuration: the card's keys */
@@ -1696,7 +1699,7 @@ static int mfp_command(NfcCard *c, const uint8_t *in, int n, uint8_t *out)
         c->mfp_rctr++;
         out[0] = 0x90;
         if (in[0] == 0x31) {
-            mfp_iv(c, iv);
+            mfp_iv(c, false, iv);
             aes_cbc(c->mfp_kenc, iv, &c->app[at], &out[1], 16, true);
         } else {
             memcpy(&out[1], &c->app[at], 16);
@@ -1705,6 +1708,32 @@ static int mfp_command(NfcCard *c, const uint8_t *in, int n, uint8_t *out)
         memcpy(&buf[3], &out[1], 16);
         mfp_mac(c, 0x90, c->mfp_rctr, buf, 19, &out[17]);
         return 25;
+    case 0xA1: case 0xA3:               /* a block written, likewise */
+        if (c->mfp_auth != MFP_SESSION || n != 27) {
+            break;
+        }
+        mfp_mac(c, in[0], c->mfp_wctr, &in[1], 18, mac);
+        if (memcmp(mac, &in[19], 8)) {
+            c->mfp_auth = MFP_NONE;
+            out[0] = 0x06;
+            return 1;
+        }
+        block = in[1] | in[2] << 8;
+        at = mfp_rec(c, REC_MFP_BLOCK, block);
+        if (!mfp_owns(c, block) || at < 0) {
+            out[0] = 0x09;
+            return 1;
+        }
+        if (in[0] == 0xA1) {
+            mfp_iv(c, true, iv);
+            aes_cbc(c->mfp_kenc, iv, &in[3], &c->app[at], 16, false);
+        } else {
+            memcpy(&c->app[at], &in[3], 16);
+        }
+        c->mfp_wctr++;
+        out[0] = 0x90;
+        mfp_mac(c, 0x90, c->mfp_wctr, NULL, 0, &out[1]);
+        return 9;
     case 0x3C: {                        /* the originality signature */
         int a = 0, len, here = rec_next(c, &a, REC_MFP_SIG, &len);
 

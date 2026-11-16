@@ -5751,6 +5751,28 @@ big lock, entry 92).
     - Checks: nfc_emulate_check 25 on the official 1.5.1, 26 on its
       dev build and Momentum, 29 on Unleashed and RogueMaster.
 
+182. **A MIFARE Plus written to: "Write to Initial Card".**
+    - Entry 180 had taken the card model's writes out for want of a
+      firmware that wrote. The way to one is NFC, Saved, the file, the
+      menu's second item, found by screenshots (the app opened with a
+      file emulates it, and Back from there leaves the app). With the
+      writes back in the model and the card of the file in the field:
+      "Successfully written!". 32 first authentications, one a sector
+      with the file's key, and 128 blocks by `A1`, each answered with
+      `90` and a MAC that the firmware took.
+    - The check writes a file of that card with five blocks changed,
+      and has the app read the card afterwards: it is the file, but for
+      the sector that no dictionary's key opens (written with its own
+      key from the file, not read back).
+    - Three things about driving the app, each a failed run: the file's
+      place in the browser is behind the folders that the firmware ships
+      (RogueMaster has one), so it is counted from a listing; a folder
+      whose name begins with a dot is not shown, and a read leaves a
+      `.cache` there; and the file takes a second or two to load before
+      its menu takes a key.
+    - Checks: nfc_check 25 on the official 1.5.1, 27 on its dev build,
+      28 on Momentum, 30 on Unleashed and RogueMaster.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

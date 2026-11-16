@@ -296,8 +296,12 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       unread, a block written both ways. Firmware bug FW-22 found with it (the
       emulated card gives and takes every block in a session of any key).
       nfc_emulate_check 25 / 26 / 26 / 29 / 29 (BRINGUP_LOG 181).
-      Next: the writes to a Plus that is held to the Flipper, when a firmware's
-      reader is brought to write (the app's "Write to Initial Card")
+      Writes to a Plus that is held to the Flipper ☑ (2026-11-15): `A1`, `A3`,
+      checked by the forks' "Write to Initial Card" (32 sessions, 128 blocks)
+      and a read of the card after it. nfc_check 25 / 27 / 28 / 30 / 30
+      (BRINGUP_LOG 182).
+      Next: MIFARE DESFire's authentication (no firmware here asks for it:
+      first what would)
 - ☑ 125 kHz RFID read: COMP1 → TIM2 TI4 capture, a virtual tag in the reader's field
       (ASK/FSK/PSK, field noise), encoders ported from the firmware (`fe_rfid.py`, checked
       cycle for cycle against its emulation by `rfid_check.py`); app Read and `rfid read`

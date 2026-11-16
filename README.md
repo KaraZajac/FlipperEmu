@@ -265,9 +265,7 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
   not modelled.
 - A real phone or computer over Bluetooth: the central is a program on the link, not a
   Bluetooth adapter.
-- NFC: of a MIFARE Plus in security level 3, the writes to the card that is held
-  to the Flipper (it answers the authentication and the reads); MIFARE DESFire's own
-  authentication.
+- NFC: MIFARE DESFire's own authentication; a MIFARE Plus's change of a key.
 - Apps that run in place from the flash: what such a loader does is checked (code
   programmed into a free page while the firmware runs, run there, replaced, run
   again: `scripts/xip_check.py`, 8 checks with ufbt's SDK), and `run --coverage`
@@ -1484,7 +1482,9 @@ and the firmware's `dump` of it is the file again, key for key:
   but for one sector and one of the card's four keys, whose key no dictionary has;
   the NFC app reads the rest in 10 s (280 authentications, 128 blocks) and saves a
   file with `??` for what that key keeps. A file's `??` is a key or a block that
-  the card gives no reader. Writes are not modelled.
+  the card gives no reader. Blocks are written the same two ways (`A1`, `A3`): the
+  app's "Write to Initial Card" (NFC → Saved → the file) puts a file's blocks on the
+  card that the file is of, a session a sector with the file's key, 128 writes.
 - **A card of ISO 7816-4's commands**: applications selected by name, files of bytes
   (SELECT, READ BINARY, UPDATE BINARY), records (READ RECORD), data objects (GET
   DATA), and answers that the card gives as they are. Two kinds of card are made of
@@ -1544,10 +1544,10 @@ So far: NTAG213/215/216, MIFARE Ultralight, Ultralight EV1 and Ultralight C (Typ
 2), MIFARE Classic Mini/1K/4K, ISO14443-4A, MIFARE DESFire, MIFARE Plus, NTAG 424
 DNA, Type 4 tags, EMV, ISO14443-3B and -4B, ST25TB, FeliCa Lite-S and Standard,
 ISO15693-3 and SLIX. `scripts/nfc_check.py FIRMWARE` checks the last thirteen (25
-checks on the official 1.5.1, 27 on the dev build, 28 on Momentum, 29 on Unleashed
+checks on the official 1.5.1, 27 on the dev build, 28 on Momentum, 30 on Unleashed
 and RogueMaster: the forks' NFC apps read and save a Type 4 tag, an EMV card and an
 NTAG 424 DNA, the dev build's knows the first and the last, and Unleashed's and
-RogueMaster's read a MIFARE Plus with its AES keys). The made-up cards as
+RogueMaster's read a MIFARE Plus with its AES keys and write to it). The made-up cards as
 files: `scripts/fe_nfc.py --nfc-file --desfire UID` (`--ulc UID`, `--mfplus UID`,
 `--mfplus-sl3 UID`,
 `--ntag4xx UID`, `--t4t UID`, `--emv UID`, `--iso14443b PUPI`, `--st25tb UID`,

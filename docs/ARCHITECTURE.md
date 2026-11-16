@@ -1089,10 +1089,17 @@ sector's two keys at `0x4000 + 2 * sector` and the next, the card's at `0x9000`,
   on the response; the encryption's vector is the counters of reads and of writes
   three times and the identifier. A block is read with a key of its own sector, a
   configuration block with the card's master or configuration key.
+- `A1` and `A3` write one block, encrypted or plain: the MAC on the command is
+  over the block's number and its bytes as they are sent, with the counter of
+  writes; the vector of the encryption has the identifier first and the counters
+  behind it; the answer is `90` and a MAC over nothing but the counter and the
+  identifier.
 - The authentication, the MACs and the encryption are checked by the firmwares'
   own: their reader takes the card's MAC on every block and saves what it
-  decrypted, which is the file's. Writes (`A1`, `A3`) are not in the model: no
-  firmware's reader was brought to write to this card. AES is QEMU's.
+  decrypted, which is the file's; their "Write to Initial Card" writes a changed
+  file's 128 blocks, and what the app then reads of the card is that file. A write
+  to a key's own number, which changes the key, is not in the model: no firmware's
+  reader does it. AES is QEMU's.
 - The other way round, Unleashed and RogueMaster emulate such a card from its file,
   and `fe_nfc_reader.py`'s `MfPlus` is the reader for it: the same protocol from the
   other side, with AES-128, CBC and CMAC written in Python (the examples of FIPS

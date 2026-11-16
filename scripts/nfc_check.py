@@ -193,25 +193,23 @@ def app_read(b, work, name, words, card, kind):
               f"{k}: {want.get(k)} | {got.get(k)}" for k in differ[:12]))
 
 
-def mfplus_sl3(b, work):
-    """A MIFARE Plus in security level 3 that has its AES keys, for the
-    firmwares whose NFC app tries a dictionary of such keys (Unleashed,
-    RogueMaster): first authentication for each sector's two keys and the
-    card's four, blocks read encrypted with a MAC both ways, the
-    configuration blocks, the signature.  One sector and one of the card's
-    keys have a key that no dictionary has."""
-    card = fe_nfc.sample_mfplus_sl3(bytes.fromhex("04C2D3E4F5A6B7"))
-    path = work / "mfplus-sl3.nfc"
-    path.write_text(card)
-    air = work / "mfplus-air.txt"
-    b.fe("nfc", "record", air)
-    code, text = b.fe("nfc", path)
-    before = b.fe("ls", "/ext/nfc")[1]
-    b.fe("app", "NFC")
-    time.sleep(1.5)
-    b.fe("press", "ok")                         # Read
+def mfplus_frames(air):
+    """A record's frames of the firmware as a reader that are a MIFARE
+    Plus's commands, counted by (command, status): an I-block's command is
+    behind its first byte, the status likewise"""
+    frames = [line.split()[4:] for line in
+              (air.read_text() if air.exists() else "").splitlines()
+              if " flipper a " in line]
+    return collections.Counter(
+        (f[0][2:4], f[-1][2:4] if f[-1] != "-" else "-") for f in frames
+        if f[0][:2] in ("02", "03"))
+
+
+def until_idle(b, limit):
+    """Until the firmware's reader is done: its field was on, and has been
+    off a while (it goes off and on between the kinds of card it tries)"""
     start, seen, idle = time.time(), False, 0
-    while time.time() < start + 150 and idle < 6:
+    while time.time() < start + limit and idle < 6:
         try:
             said = b.fe("status", "--json")[1]
             state = json.loads(said[said.index("{"):])["nfc"]["radio"]
@@ -221,42 +219,71 @@ def mfplus_sl3(b, work):
         idle = idle + 1 if state == "idle" and (seen or time.time() > start + 8) \
             else 0
         time.sleep(0.5)
-    for key in ("right", "ok", "ok"):           # More, Save, save
-        b.fe("press", key)
-        time.sleep(1.5)
+
+
+def app_out(b):
     for _ in range(6):
         b.fe("press", "back")
         time.sleep(0.6)
         b.fe("app", "--close")
         if "no app runs" in b.fe("app")[1]:
             break
+
+
+def mfplus_app_read(b, work, tag):
+    """The NFC app's Read, More, Save of the card in the field, with a
+    record: the saved file's keys, and the Plus commands counted"""
+    air = work / f"{tag}-air.txt"
+    b.fe("nfc", "record", air)
+    before = b.fe("ls", "/ext/nfc")[1]
+    b.fe("app", "NFC")
+    time.sleep(1.5)
+    b.fe("press", "ok")                         # Read
+    until_idle(b, 150)
+    for key in ("right", "ok", "ok"):           # More, Save, save
+        b.fe("press", key)
+        time.sleep(1.5)
+    app_out(b)
     b.fe("nfc", "record", "stop")
     new = [m for m in re.findall(r"^\s*\d+\s+(\S.*\.nfc)\s*$",
                                  b.fe("ls", "/ext/nfc")[1], re.M)
            if m not in before]
-    out = work / "mfplus-sl3-saved.nfc"
+    out = work / f"{tag}-saved.nfc"
     if new:
         b.fe("pull", f"/ext/nfc/{new[0]}", out)
         b.fe("rm", f"/ext/nfc/{new[0]}")
-    b.fe("nfc", "none")
-    want = fe_nfc.parse_nfc_text(card)
     got = fe_nfc.parse_nfc_text(out.read_text()) if out.exists() else {}
-    frames = [line.split()[4:] for line in
-              (air.read_text() if air.exists() else "").splitlines()
-              if " flipper a " in line]
-    # (an I-block's command is behind its first byte; the status likewise)
-    said = collections.Counter(
-        (f[0][2:4], f[-1][2:4] if f[-1] != "-" else "-") for f in frames
-        if f[0][:2] in ("02", "03"))
+    return got, mfplus_frames(air)
+
+
+def mfplus_sl3(b, work):
+    """A MIFARE Plus in security level 3 that has its AES keys, for the
+    firmwares whose NFC app tries a dictionary of such keys (Unleashed,
+    RogueMaster): first authentication for each sector's two keys and the
+    card's four, blocks read encrypted with a MAC both ways, the
+    configuration blocks, the signature.  One sector and one of the card's
+    keys have a key that no dictionary has.  Then the app's "Write to
+    Initial Card" with a file of that card whose blocks are others."""
+    card = fe_nfc.sample_mfplus_sl3(bytes.fromhex("04C2D3E4F5A6B7"))
+    path = work / "mfplus-sl3.nfc"
+    path.write_text(card)
+    code, text = b.fe("nfc", path)
+    got, said = mfplus_app_read(b, work, "mfplus")
+    want = fe_nfc.parse_nfc_text(card)
     if not said["72", "90"]:
+        b.fe("nfc", "none")
         print("  (this firmware's NFC app tries no AES keys on a MIFARE Plus)")
         return
     own = fe_nfc.MFP_OWN_SECTOR
     kept = sorted([f"Block {own * 4 + i}" for i in range(4)]
                   + [f"Key A {own}", f"Key B {own}", "L3 Switch Key"])
-    differ = sorted(k for k in set(want) | set(got)
-                    if (want.get(k) or "").upper() != (got.get(k) or "").upper())
-    unknown = all(set((got.get(k) or "x").split()) == {"??"} for k in kept)
+
+    def differ(want, got):
+        return sorted(k for k in set(want) | set(got)
+                      if (want.get(k) or "").upper() != (got.get(k) or "").upper())
+
+    unknown = lambda got: all(set((got.get(k) or "x").split()) == {"??"}
+                              for k in kept)
     check("a MIFARE Plus in security level 3 with its AES keys: the NFC "
           "app authenticates with the keys of its dictionary ("
           f"{said['72', '90']} times; {said['72', '06']} tries with a key "
@@ -265,10 +292,64 @@ def mfplus_sl3(b, work):
           f"{len(want) - len(kept)} keys the same, and the {len(kept)} that "
           "a key of no dictionary keeps (a sector's blocks and keys, one of "
           "the card's keys) unknown",
-          code == 0 and got and differ == kept and unknown
+          code == 0 and got and differ(want, got) == kept and unknown(got)
           and said["31", "90"] == 128,
-          f"{text}\n{new}\n{dict(said)}\n" + "\n".join(
-              f"{k}: {want.get(k)} | {got.get(k)}" for k in differ[:12]))
+          f"{text}\n{dict(said)}\n" + "\n".join(
+              f"{k}: {want.get(k)} | {got.get(k)}"
+              for k in differ(want, got)[:12]))
+
+    # "Write to Initial Card": the app writes a file's blocks to the card
+    # that the file is of, each sector with the file's key for it.  The way
+    # there: Saved; the file, which is the first of its folder's files, behind
+    # ".." and the folders that the app shows; the menu's second item.
+    changed = {1: "11", 2: "22", 5: "55", own * 4 + 1: "DD", 126: "7E"}
+    lines = card.splitlines()
+    for at, line in enumerate(lines):
+        hit = re.fullmatch(r"Block (\d+): .*", line)
+        if hit and int(hit[1]) in changed:
+            lines[at] = f"Block {hit[1]}: " + " ".join([changed[int(hit[1])]] * 16)
+    file = work / "000-fe-plus.nfc"
+    file.write_text("\n".join(lines) + "\n")
+    b.fe("push", file, "/ext/nfc")
+    # (not shown: the app's own `assets`, and what begins with a dot, as
+    # the `.cache` of keys that a read leaves)
+    folders = [name for name in (line.strip() for line in
+                                 b.fe("ls", "/ext/nfc")[1].splitlines())
+               if name.endswith("/") and name != "assets/"
+               and not name.startswith(".")]
+    air = work / "mfplus-write-air.txt"
+    b.fe("nfc", "record", air)
+    b.fe("app", "NFC")
+    time.sleep(2.0)
+    # (the file takes its time to load: the menu is not there at once)
+    for key, wait in (("down", 0.5), ("down", 0.5), ("ok", 1.5),
+                      *[("down", 0.5)] * (1 + len(folders)), ("ok", 4.0),
+                      ("down", 0.7), ("ok", 1.0)):
+        b.fe("press", key)
+        time.sleep(wait)
+    until_idle(b, 90)
+    app_out(b)
+    b.fe("nfc", "record", "stop")
+    b.fe("rm", "/ext/nfc/000-fe-plus.nfc")
+    wrote = mfplus_frames(air)
+    got, said = mfplus_app_read(b, work, "mfplus-written")
+    b.fe("nfc", "none")
+    want = fe_nfc.parse_nfc_text(file.read_text())
+    check("the NFC app's \"Write to Initial Card\" with a file of that card "
+          "in which five blocks are others: a session for each of the 32 "
+          f"sectors with the file's key ({wrote['72', '90']}), "
+          f"{wrote['A1', '90'] + wrote['A3', '90']} blocks written encrypted "
+          "with a MAC each way, none refused; read again by the app, the "
+          "card is the file (the sector with the key of no dictionary is "
+          "not read, and was written with its own key)",
+          wrote["72", "90"] == 32 and wrote["A1", "90"] + wrote["A3", "90"] == 128
+          and not wrote["A1", "06"] and not wrote["A1", "09"]
+          and got and differ(want, got) == kept and unknown(got)
+          and all(got.get(f"Block {n}") == " ".join([v] * 16)
+                  for n, v in changed.items() if n // 4 != own),
+          f"{dict(wrote)}\n{dict(said)}\n" + "\n".join(
+              f"{k}: {want.get(k)} | {got.get(k)}"
+              for k in differ(want, got)[:12]))
 
 
 def ulc(b, work):
