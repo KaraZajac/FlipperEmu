@@ -5,8 +5,9 @@
  * DWT: QEMU's Cortex-M PPB reads zero at 0xE0001000, but furi_delay_us()
  * busy-waits on DWT->CYCCNT (furi_hal_cortex.c) - even before the scheduler
  * starts (main(): furi_delay_ms(100) for button sampling). CYCCNT here counts
- * HCLK cycles of virtual time and follows clock changes (MSI 4 MHz at reset,
- * PLL 64 MHz after furi_hal_clock_init()).
+ * HCLK cycles of the CPU's own time (the machine's, less what the host kept
+ * the CPU's thread from a core: see dwt_steal_look) and follows clock changes
+ * (MSI 4 MHz at reset, PLL 64 MHz after furi_hal_clock_init()).
  *
  * Copyright (c) 2026, Kara Zajac
  * SPDX-License-Identifier: BSD-3-Clause
@@ -16,6 +17,7 @@
 #include "qemu/log.h"
 #include "qemu/main-loop.h"
 #include "qemu/guest-random.h"
+#include "hw/core/cpu.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
@@ -96,6 +98,132 @@ static void wb55_rng_class_init(ObjectClass *klass, const void *data)
 
 /* ------------------------------------------------------------------- DWT */
 
+/*
+ * The CPU's own time.  The machine's clock is the host's, and it goes on
+ * while the host has the emulated CPU's thread waiting for a core: a wait
+ * of the firmware's on CYCCNT (furi_delay_us) that the host interrupts ends
+ * late by as much, and what the firmware times with such waits (a T5577's
+ * bits, a 1-Wire slot) is as much too long.  A cycle counter counts what
+ * the CPU does, so that time is taken out of it, as a virtual machine's
+ * steal time is: the kernel has it for each thread (the second number of
+ * /proc/thread-self/schedstat, the time spent waiting on a run queue).
+ * Time that the CPU sleeps is not such time, and counts.
+ *
+ * It is taken out where it does harm, and looked up only there: the
+ * firmware reads CYCCNT at the start and the end of every interrupt handler
+ * and at every change of thread as well (its accounts of where the time
+ * goes), and a look is a system call.  The CPU's thread does it itself: the
+ * reads need no lock, and this must need none either.
+ * - In a wait's loop: reads that follow each other within DWT_TIGHT_NS,
+ *   from the third on.  When the loop then stands still for longer than
+ *   DWT_BREAK_NS, what the kernel's count has grown by is taken out, and
+ *   no more than the loop stood still (the count may have grown before
+ *   the wait, which is no business of this wait's).  A wait that nothing
+ *   interrupts costs no look.
+ * - Between two changes of a line that the firmware times with such a
+ *   wait: at the change itself (wb55_dwt_cpu_look) and at the first read
+ *   after it, so that the time before the wait and behind it is the
+ *   firmware's as well.  A look that is the first for a while only takes
+ *   the count: that time was not this device's.
+ */
+#define DWT_TIGHT_NS (4 * SCALE_US)
+#define DWT_BREAK_NS (10 * SCALE_US)
+#define DWT_STALE_NS (20 * SCALE_MS)
+enum { DWT_COUNT, DWT_COUNT_FRESH };
+
+/* (most: no more than this is taken out) */
+static void dwt_steal_look(WB55DwtState *s, int64_t now, int how, int64_t most)
+{
+#ifdef CONFIG_LINUX
+    bool count = how == DWT_COUNT ||
+                 (how == DWT_COUNT_FRESH && now - s->look_ns <= DWT_STALE_NS);
+    unsigned long long ran, waited;
+    char buf[80];
+    ssize_t n;
+
+    s->look_ns = now;
+    if (s->steal_fd == -2) {            /* (the first look: this thread's) */
+        s->steal_fd = open("/proc/thread-self/schedstat", O_RDONLY | O_CLOEXEC);
+        s->run_delay = -1;
+    }
+    if (s->steal_fd < 0) {
+        return;
+    }
+    n = pread(s->steal_fd, buf, sizeof(buf) - 1, 0);
+    if (n <= 0) {
+        return;
+    }
+    buf[n] = '\0';
+    if (sscanf(buf, "%llu %llu", &ran, &waited) != 2) {
+        return;
+    }
+    if (count && s->run_delay >= 0 && (int64_t)waited > s->run_delay) {
+        qatomic_set(&s->steal_ns, s->steal_ns +
+                    MIN((int64_t)waited - s->run_delay, most));
+    }
+    s->run_delay = waited;
+#endif
+}
+
+int64_t wb55_cpu_ran_ns(void)
+{
+#ifdef CONFIG_LINUX
+    struct timespec ts;
+    clockid_t id;
+
+    if (first_cpu && first_cpu->thread &&
+        !pthread_getcpuclockid(first_cpu->thread->thread, &id) &&
+        !clock_gettime(id, &ts)) {
+        return ts.tv_sec * NANOSECONDS_PER_SECOND + ts.tv_nsec;
+    }
+#endif
+    return -1;
+}
+
+bool wb55_cpu_asleep(void)
+{
+    return first_cpu && qatomic_read(&first_cpu->halted);
+}
+
+int64_t wb55_dwt_cpu_ns(WB55DwtState *s)
+{
+    return MAX(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)
+               - qatomic_read(&s->steal_ns), qatomic_read(&s->read_cpu));
+}
+
+int64_t wb55_dwt_cpu_look(WB55DwtState *s)
+{
+    if (first_cpu && qemu_cpu_is_self(first_cpu)) {
+        dwt_steal_look(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
+                       DWT_COUNT_FRESH, INT64_MAX);
+    }
+    return wb55_dwt_cpu_ns(s);
+}
+
+#define DWT_HEAD_NS (20 * SCALE_US)     /* a wait begins this soon, or is none */
+
+void wb55_dwt_mark(WB55DwtState *s, int which)
+{
+    s->span_first[which] = -1;
+    s->span_reads[which] = 0;
+}
+
+int64_t wb55_dwt_waited(WB55DwtState *s, int which, int64_t from, int64_t to,
+                        int64_t tail)
+{
+    int64_t first = s->span_first[which], last = s->read_cpu;
+    int reads = s->span_reads[which];
+
+    wb55_dwt_mark(s, which);
+    if (first < 0 || reads < 2 || last < first ||
+        first - from > DWT_HEAD_NS || to - last > tail ||
+        last - first > (int64_t)reads * DWT_TIGHT_NS) {
+        return -1;
+    }
+    return last - first;
+}
+
+/* the count at a moment of the CPU's time */
 static uint64_t dwt_cycles_at(WB55DwtState *s, int64_t when)
 {
     if (!(s->ctrl & 1)) {
@@ -106,20 +234,19 @@ static uint64_t dwt_cycles_at(WB55DwtState *s, int64_t when)
                                      NANOSECONDS_PER_SECOND);
 }
 
-static uint64_t dwt_cycles(WB55DwtState *s)
-{
-    return dwt_cycles_at(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
-}
-
+/*
+ * (when: the machine's time.  A series of stamps, an edge after an edge,
+ * goes by the steal at its start: what the firmware takes of them is the
+ * time between two, which is the edges' own then.)
+ */
 void wb55_dwt_stamp_next(WB55DwtState *s, int64_t when)
 {
-    s->stamp_ns = when;
+    if (when - s->stamp_last_ns > 10 * SCALE_MS || when < s->stamp_last_ns) {
+        s->stamp_steal = qatomic_read(&s->steal_ns);
+    }
+    s->stamp_last_ns = when;
+    s->stamp_ns = when - s->stamp_steal;
     qatomic_set(&s->stamped, true);
-}
-
-int64_t wb55_dwt_last_read(WB55DwtState *s)
-{
-    return qatomic_read(&s->read_ns);
 }
 
 /*
@@ -131,7 +258,31 @@ int64_t wb55_dwt_last_read(WB55DwtState *s)
 static uint32_t dwt_read_cyccnt(WB55DwtState *s)
 {
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t gap = now - s->read_ns;
+    int64_t cpu;
 
+    if (s->span_first[0] < 0 || s->span_first[1] < 0) {
+        /* the first read since a device's mark: the wait that it times */
+        dwt_steal_look(s, now, DWT_COUNT_FRESH, INT64_MAX);
+    }
+    if (gap < DWT_TIGHT_NS) {
+        s->tight += s->tight < 3;
+    } else {
+        if (s->tight == 3 && gap > DWT_BREAK_NS) {
+            /* a wait's loop stood still: the host's doing, as far as the
+             * kernel has such time for the thread */
+            dwt_steal_look(s, now, DWT_COUNT, gap);
+        }
+        s->tight = 0;
+    }
+    cpu = MAX(now - s->steal_ns, s->read_cpu);
+    for (int i = 0; i < WB55_DWT_SPANS; i++) {
+        if (s->span_first[i] < 0) {
+            s->span_first[i] = cpu;
+        }
+        s->span_reads[i]++;
+    }
+    qatomic_set(&s->read_cpu, cpu);
     qatomic_set(&s->read_ns, now);
     if (qatomic_read(&s->stamped)) {
         BQL_LOCK_GUARD();
@@ -140,13 +291,15 @@ static uint32_t dwt_read_cyccnt(WB55DwtState *s)
             return (uint32_t)dwt_cycles_at(s, s->stamp_ns);
         }
     }
-    return (uint32_t)dwt_cycles_at(s, now);
+    return (uint32_t)dwt_cycles_at(s, cpu);
 }
 
 static void dwt_rebase(WB55DwtState *s)
 {
-    s->base_cycles = dwt_cycles(s);
-    s->base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t cpu = wb55_dwt_cpu_ns(s);
+
+    s->base_cycles = dwt_cycles_at(s, cpu);
+    s->base_ns = cpu;
 }
 
 static void dwt_clk_cb(void *opaque, ClockEvent event)
@@ -188,7 +341,7 @@ static void wb55_dwt_write(void *opaque, hwaddr addr, uint64_t val,
         return;
     case 0x004:
         s->base_cycles = (uint32_t)val;
-        s->base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        s->base_ns = wb55_dwt_cpu_ns(s);
         return;
     }
     if (addr >= 0x020 && addr < 0x060) {
@@ -211,8 +364,12 @@ static void wb55_dwt_reset_hold(Object *obj, ResetType type)
     s->ctrl = 0;
     s->stamped = false;
     s->read_ns = 0;
+    s->read_cpu = 0;
     s->base_cycles = 0;
-    s->base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    s->base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->steal_ns;
+    for (int i = 0; i < WB55_DWT_SPANS; i++) {
+        wb55_dwt_mark(s, i);
+    }
     memset(s->comp, 0, sizeof(s->comp));
 }
 
@@ -231,12 +388,62 @@ static void wb55_dwt_init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mmio);
     s->clk = qdev_init_clock_in(DEVICE(obj), "clk", dwt_clk_cb, s,
                                 ClockPreUpdate);
+    s->steal_fd = -2;                   /* (not looked for yet) */
 }
+
+/*
+ * The time taken out of the CPU's own (base_ns is on that time): a state
+ * that was saved without it had none taken out.  The kernel's count is
+ * this process's and begins anew in the next.
+ */
+static bool dwt_steal_needed(void *opaque)
+{
+    WB55DwtState *s = opaque;
+
+    return s->steal_ns != 0;
+}
+
+static int dwt_post_load(void *opaque, int version_id)
+{
+    WB55DwtState *s = opaque;
+
+    s->read_cpu = s->read_ns - s->steal_ns;
+    s->stamp_steal = s->steal_ns;
+    for (int i = 0; i < WB55_DWT_SPANS; i++) {
+        wb55_dwt_mark(s, i);
+    }
+    return 0;
+}
+
+static int dwt_pre_load(void *opaque)
+{
+    WB55DwtState *s = opaque;
+
+    s->steal_ns = 0;
+    return 0;
+}
+
+static const VMStateDescription vmstate_wb55_dwt_steal = {
+    .name = "stm32wb55-dwt/steal",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = dwt_steal_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_INT64(steal_ns, WB55DwtState),
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 static const VMStateDescription vmstate_wb55_dwt = {
     .name = "stm32wb55-dwt",
     .version_id = 1,
     .minimum_version_id = 1,
+    .pre_load = dwt_pre_load,
+    .post_load = dwt_post_load,
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_wb55_dwt_steal,
+        NULL
+    },
     .fields = (const VMStateField[]) {
         VMSTATE_CLOCK(clk, WB55DwtState),
         VMSTATE_UINT32(ctrl, WB55DwtState),

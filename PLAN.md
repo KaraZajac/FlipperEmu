@@ -895,6 +895,24 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           the host plays over the NFC link. Not the default: one run, a start
           twice as long alone, and the link under it not understood
           (BRINGUP_LOG 183)
+    - ☑ What the firmware times with its waits, on a busy host (2026-11-15):
+          the cycle counter does not count the time that the host has the
+          emulated CPU's thread waiting for a core (the kernel's count of it
+          for the thread, taken out in a wait's loop and around a device's
+          edges), and the T5577 and the 1-Wire slave go by how long the
+          firmware waited, not by the machine's clock. Beside 32 busy loops:
+          `rfid write` to a T5577 succeeds 6 times of 6 with four block writes a
+          command (before: 1 of 5, with blocks of anything and one locked);
+          `ikey read` of a DS1990A 23 of 24, most under a second (before: 16 of
+          24). Alone nothing changes: the host takes nothing (BRINGUP_LOG 184)
+    - ☐ Reception on a busy host: beside 32 busy loops the infrared's and the
+          Sub-GHz's reception fail most runs of the smoke test, with or without
+          the above. The firmware's interrupt handlers are late for edges that
+          come by the machine's clock
+    - ☐ An NFC `dump` of the shell that is not done after 40 s, beside 24 busy
+          loops, about one card in fifty of the fuzzer's (BRINGUP_LOG 184); and
+          the fuzz check's step that looks at which inputs were kept, which
+          fails now and then when all checks run side by side
     - ☑ A time limit in every check (2026-11-14): past it, a FAIL, where each of its
           threads stands, its emulators stopped, exit status 124; `FLIPPEREMU_CHECK_LIMIT`
           changes them (`x2`, seconds, `0`). After a window check waited three hours in a

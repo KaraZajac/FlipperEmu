@@ -428,6 +428,13 @@ struct FlipperRfidState {
     T5577 *t5;
     int64_t t5_tc_ns;            /* the field clock, as last seen */
     QEMUTimer *t5_timer;         /* a command can end with the field on */
+    /* The T5577's time is the firmware's: how long its field was on or off
+     * is how long the firmware waited (flipper_rfid.c).  t5_skew: how far
+     * that time is behind the machine's; the last change of the field. */
+    struct WB55DwtState *dwt;
+    int64_t t5_skew;
+    int64_t t5_edge_ns, t5_edge_cpu;
+    int64_t t5_edge_ran;         /* how long the CPU had run then */
 };
 #define FLIPPER_RFID_READER_HZ 125000
 
@@ -469,6 +476,8 @@ struct FlipperIbuttonState {
     bool awaiting;               /* the last edge waits for the ISR's read */
     int64_t edge_t, next_t;      /* that edge and the next on the key's timeline */
     struct WB55DwtState *dwt;    /* stamps the ISR's CYCCNT read */
+    int64_t pull_ran;            /* how long the CPU had run when a hold began */
+    int64_t fall_cpu;            /* the line's fall, on the CPU's time */
     /* the Flipper emulates a key: a virtual reader, and captures */
     char *rd_prog;               /* "read" while a session runs */
     QEMUTimer *rd_timer;

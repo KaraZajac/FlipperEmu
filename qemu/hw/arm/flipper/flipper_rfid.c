@@ -205,7 +205,25 @@ static void rfid_t5_reload(FlipperRfidState *s)
     rfid_restart(s);
 }
 
-/* the field went on or off: to the T5577, a gap may be a bit */
+/*
+ * The field went on or off: to the T5577, a gap may be a bit.
+ *
+ * How long the field was on or off is the firmware's doing, with the
+ * carrier's timer stopped and started around a wait on the cycle counter
+ * (lib/lfrfid/tools/t5577.c: 24 field clocks for a 0, 56 for a 1, a gap
+ * of 18, 30 for the first).  On a busy host a wait takes longer by the
+ * machine's clock than the firmware made it, and the write after it has a
+ * lock to get: a 0 was a 1 then, a gap of 144 us one of 1.3 ms that powers
+ * the tag down, and a T5577 beside 32 busy loops got blocks of anything,
+ * one of them locked.  So the time
+ * that the T5577 goes by is the firmware's: between two changes of the
+ * field it is what the firmware waited on CYCCNT, if that is all but the
+ * whole of the time between them; else the CPU's own time (no wait: a
+ * field that is simply left on).  t5_skew is how far that time is behind
+ * the machine's.
+ */
+#define T5_SLACK_NS (2 * SCALE_MS)
+
 static void rfid_t5_field(FlipperRfidState *s, uint32_t field)
 {
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
@@ -217,23 +235,58 @@ static void rfid_t5_field(FlipperRfidState *s, uint32_t field)
     if (field) {
         s->t5_tc_ns = NANOSECONDS_PER_SECOND / field;
     }
-    if (t5577_field(s->t5, field != 0, now, s->t5_tc_ns)) {
+    if (s->dwt) {
+        int64_t cpu = wb55_dwt_cpu_look(s->dwt);
+        int64_t waited = wb55_dwt_waited(s->dwt, WB55_DWT_SPAN_RFID,
+                                         s->t5_edge_cpu, cpu, T5_SLACK_NS);
+        int64_t there = s->t5_edge_cpu >= 0 ? cpu - s->t5_edge_cpu
+                                            : now - s->t5_edge_ns;
+        int64_t was = waited >= 0 ? waited : there;
+
+        s->t5_skew += MAX((now - s->t5_edge_ns) - was, 0);
+        s->t5_edge_cpu = cpu;
+        s->t5_edge_ran = wb55_cpu_ran_ns();
+    }
+    s->t5_edge_ns = now;
+    if (t5577_field(s->t5, field != 0, now - s->t5_skew, s->t5_tc_ns)) {
         rfid_t5_reload(s);
     }
     deadline = t5577_deadline(s->t5, s->t5_tc_ns);
     if (deadline >= 0) {
-        timer_mod(s->t5_timer, deadline);
+        timer_mod(s->t5_timer, deadline + s->t5_skew);
     } else {
         timer_del(s->t5_timer);
     }
 }
 
+/*
+ * The field has been on long enough since the last gap for the command to
+ * be over.  By the machine's clock, that is: and on a busy host the
+ * firmware may be in the middle of a bit, its thread off its core for
+ * longer than this.  So the firmware must have had the time as well: the
+ * CPU's thread has run that long since the field's last change, or the CPU
+ * sleeps (and time passes for it as for the machine).
+ */
 static void rfid_t5_timer(void *opaque)
 {
     FlipperRfidState *s = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t ran = wb55_cpu_ran_ns();
 
-    if (s->t5 && t5577_poll(s->t5, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
-                            s->t5_tc_ns)) {
+    if (!s->t5) {
+        return;
+    }
+    if (s->dwt && ran >= 0 && s->t5_edge_ran >= 0 && !wb55_cpu_asleep()) {
+        int64_t over = t5577_deadline(s->t5, s->t5_tc_ns);
+        int64_t need = over < 0 ? 0 : over - (s->t5_edge_ns - s->t5_skew)
+                                      - (ran - s->t5_edge_ran);
+
+        if (need > 0) {
+            timer_mod(s->t5_timer, now + need);
+            return;
+        }
+    }
+    if (t5577_poll(s->t5, now - s->t5_skew, s->t5_tc_ns)) {
         rfid_t5_reload(s);
     }
 }
@@ -401,7 +454,7 @@ static void rfid_set_t5577(Object *obj, const char *value, Error **errp)
     g_free(s->t5);
     s->t5 = g_memdup2(&t, sizeof(t));
     s->t5->on = s->field_hz != 0;
-    s->t5->since = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    s->t5->since = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->t5_skew;
     rfid_t5_reload(s);
 }
 
@@ -661,6 +714,26 @@ static const VMStateDescription vmstate_t5577 = {
     }
 };
 
+/* the T5577's time, where it is not the machine's (rfid_t5_field) */
+static bool rfid_t5_skew_needed(void *opaque)
+{
+    FlipperRfidState *s = opaque;
+
+    return s->t5 != NULL && s->t5_skew != 0;
+}
+
+static const VMStateDescription vmstate_rfid_t5_skew = {
+    .name = "flipper-rfid/t5577-time",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = rfid_t5_skew_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_INT64(t5_skew, FlipperRfidState),
+        VMSTATE_INT64(t5_edge_ns, FlipperRfidState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static bool rfid_t5_needed(void *opaque)
 {
     FlipperRfidState *s = opaque;
@@ -713,6 +786,8 @@ static int rfid_pre_load(void *opaque)
 {
     FlipperRfidState *s = opaque;
 
+    s->t5_skew = 0;                     /* (a state without it had none) */
+    s->t5_edge_ns = 0;
     g_free(s->tag);
     s->tag = NULL;
     g_free(s->tag_str);
@@ -732,6 +807,8 @@ static int rfid_post_load(void *opaque, int version_id)
     FlipperRfidState *s = opaque;
     T5577 *t = s->t5;
 
+    s->t5_edge_cpu = -1;                /* (the CPU's time is this process's) */
+    s->t5_edge_ran = -1;
     if (s->tag_str_len) {
         s->tag_str[s->tag_str_len - 1] = 0;
     }
@@ -787,6 +864,7 @@ static const VMStateDescription vmstate_flipper_rfid = {
     },
     .subsections = (const VMStateDescription * const []) {
         &vmstate_rfid_t5577,
+        &vmstate_rfid_t5_skew,
         NULL
     }
 };

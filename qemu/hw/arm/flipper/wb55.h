@@ -652,6 +652,7 @@ struct WB55RngState {
 
 #define TYPE_WB55_DWT "stm32wb55-dwt"
 OBJECT_DECLARE_SIMPLE_TYPE(WB55DwtState, WB55_DWT)
+#define WB55_DWT_SPANS 2
 struct WB55DwtState {
     SysBusDevice parent_obj;
     MemoryRegion mmio;
@@ -663,15 +664,62 @@ struct WB55DwtState {
     bool stamped;                /* the next CYCCNT read gives stamp_ns's count */
     int64_t stamp_ns;
     int64_t read_ns;             /* when CYCCNT was last read */
+    /*
+     * The CPU's own time: the machine's, less the time that the host kept
+     * the emulated CPU's thread waiting for a core (stm32wb55_misc.c).
+     * base_ns and what CYCCNT counts are on it.
+     */
+    int64_t steal_ns;            /* that time, so far */
+    int64_t run_delay;           /* the kernel's count of it at the last look */
+    int steal_fd;                /* ... and where it is read (-1: nowhere) */
+    int tight;                   /* reads of CYCCNT close on each other: a
+                                  * wait's loop, from the third on */
+    int64_t look_ns;             /* the last look at the kernel's count */
+    int64_t read_cpu;            /* the last read of CYCCNT, on the CPU's time */
+    int64_t stamp_steal;         /* the steal that a series of stamps goes by */
+    int64_t stamp_last_ns;
+    /* what the firmware waited on CYCCNT since a device's mark: its first
+     * look after the mark, on the CPU's time (-1: none yet), and how many */
+    int64_t span_first[WB55_DWT_SPANS];
+    int span_reads[WB55_DWT_SPANS];
 };
+enum { WB55_DWT_SPAN_OW, WB55_DWT_SPAN_RFID };
+/* The CPU's own time now (the machine's, less what the host kept its thread
+ * waiting for a core).  ..._look: for a device at a change of its line
+ * that the firmware has just made (the CPU's thread is in the device's
+ * code): what the host took since the last such moment is taken out
+ * first. */
+int64_t wb55_dwt_cpu_ns(WB55DwtState *s);
+int64_t wb55_dwt_cpu_look(WB55DwtState *s);
+/*
+ * For a device that the firmware times with its waits on CYCCNT (a line
+ * held low for so long, a field off for so long).  The device marks a
+ * change of its line, and at the next asks how long the firmware waited
+ * between the two (from and to: the CPU's time at them): from its first
+ * look at CYCCNT to its last, if that was a wait that filled the time.  It
+ * began at once (the firmware reads CYCCNT in its interrupt handlers too:
+ * two looks somewhere in a low that it sleeps through are no wait), its
+ * looks followed close on each other, and it ended no longer than `tail`
+ * before the change (a write's wait for the big lock; more, and the
+ * firmware did something else after its wait).  Else -1: the device goes
+ * by the time itself.  What the host did meanwhile is not in a wait's
+ * length: not the thread off its core, not the lock.
+ */
+void wb55_dwt_mark(WB55DwtState *s, int which);
+int64_t wb55_dwt_waited(WB55DwtState *s, int which, int64_t from, int64_t to,
+                        int64_t tail);
+/* For whoever waits for the firmware from another thread (a timer): how
+ * long the CPU's thread has run so far, by the host's count for it (-1
+ * where the host cannot say), and whether the CPU sleeps.  The machine's
+ * clock says nothing of what the firmware has had time to do on a busy
+ * host; this does. */
+int64_t wb55_cpu_ran_ns(void);
+bool wb55_cpu_asleep(void);
 /* The next read of CYCCNT returns its value at virtual time "when", as if
  * the CPU read it then: an ISR that times edges in software reads the
  * edge's own time, as on silicon where it runs within a fraction of a
  * microsecond, not the emulated interrupt's latency. */
 void wb55_dwt_stamp_next(WB55DwtState *s, int64_t when);
-/* The virtual time of the last read of CYCCNT: where a busy-wait of the
- * firmware's ended, when the register write after it came late. */
-int64_t wb55_dwt_last_read(WB55DwtState *s);
 
 #define TYPE_WB55_DBGMCU "stm32wb55-dbgmcu"
 OBJECT_DECLARE_SIMPLE_TYPE(WB55DbgmcuState, WB55_DBGMCU)

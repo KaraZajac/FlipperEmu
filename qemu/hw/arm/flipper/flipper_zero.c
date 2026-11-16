@@ -2377,7 +2377,7 @@ static bool flipper_nfc_v_handled(void *opaque)
 
 static bool flipper_nfc_cpu_asleep(void *opaque)
 {
-    return qatomic_read(&first_cpu->halted);
+    return wb55_cpu_asleep();
 }
 
 /*
@@ -2387,17 +2387,7 @@ static bool flipper_nfc_cpu_asleep(void *opaque)
  */
 static int64_t flipper_nfc_cpu_ns(void *opaque)
 {
-#ifdef CONFIG_LINUX
-    struct timespec ts;
-    clockid_t id;
-
-    if (first_cpu->thread &&
-        !pthread_getcpuclockid(first_cpu->thread->thread, &id) &&
-        !clock_gettime(id, &ts)) {
-        return ts.tv_sec * NANOSECONDS_PER_SECOND + ts.tv_nsec;
-    }
-#endif
-    return -1;
+    return wb55_cpu_ran_ns();
 }
 
 /* the firmware's digital_signal is at it: TIM2's update drives the DMA */
@@ -2718,6 +2708,7 @@ static void flipper_zero_init(MachineState *machine)
     s->rfid = FLIPPER_RFID(dev);
     s->rfid->comp = &s->soc.comp;
     s->rfid->tim = &s->soc.tim2;
+    s->rfid->dwt = &s->soc.dwt;
     object_property_add_child(OBJECT(machine), "rfid", OBJECT(dev));
     qdev_realize_and_unref(dev, NULL, &error_fatal);
     notifier_list_add(&s->soc.tim2.cap_read, &s->rfid->cap_read);

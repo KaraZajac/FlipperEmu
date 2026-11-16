@@ -17,10 +17,12 @@
  * at overdrive speed).  The master busy-waits at least that long, and an
  * emulated one only ever takes longer (overdrive's 1 us low takes 2-4), so
  * the threshold sits just under the 0's time: a 1 may stretch that far.
- * The low is timed to the end of the master's wait, its last read of
- * CYCCNT, and not to the write of GPIOB after it: that write needs the big
- * lock, and when the main loop has it, the vCPU's thread sleeps 20 to 50 us
- * for it.  (CYCCNT took the lock too, at every read of the wait: a 1 in a
+ * The low is as long as the master's wait was, from its first read of
+ * CYCCNT to its last, on the CPU's own time (wb55_dwt_waited), and not as
+ * long as the line was low by the machine's clock: the write of GPIOB after
+ * the wait needs the big lock, and when the main loop has it, the vCPU's
+ * thread sleeps 20 to 50 us for it; and a host that takes the thread off
+ * its core in the middle of the wait does not make the wait longer.  (CYCCNT took the lock too, at every read of the wait: a 1 in a
  * hundred was a 0 then, a READ ROM another command, the key silent, and the
  * firmware read a ROM of FFs.  It is read without the lock now.)
  *
@@ -129,6 +131,8 @@ static const char *const blank_names[] = {
 #define OW_BIT_NS         (56 * SCALE_US)   /* a shorter low writes a 1 */
 #define OW_OD_BIT_NS      (7 * SCALE_US)
 #define OW_HOLD_MAX_NS    (1 * SCALE_MS)    /* the master never sampled */
+#define OW_TAIL_NS        (2 * SCALE_MS)    /* a wait's end to the line's rise:
+                                             * the write's lock, no more */
 #define WAVE_SETTLE_NS    (1 * SCALE_MS)    /* the contact, then the key */
 #define WAVE_READ_MAX_NS  (2 * SCALE_MS)    /* no ISR read by then: go on */
 #define WAVE_RESYNC_NS    (1 * SCALE_MS)    /* delivery behind the timeline */
@@ -408,6 +412,7 @@ static void ow_pull(FlipperIbuttonState *s, int64_t now, bool presence)
 {
     s->pulling = true;
     s->presence = presence;
+    s->pull_ran = wb55_cpu_ran_ns();
     ow_drive(s, true);
     timer_mod(s->timer, now + OW_HOLD_MAX_NS);
 }
@@ -437,6 +442,10 @@ static void ow_fall(FlipperIbuttonState *s, int64_t now)
     if (s->pulling) {
         ow_release(s);                  /* a new slot: the last one is over */
     }
+    if (s->dwt) {
+        s->fall_cpu = wb55_dwt_cpu_look(s->dwt);
+        wb55_dwt_mark(s->dwt, WB55_DWT_SPAN_OW);    /* its wait begins */
+    }
     s->fall_ns = now;
     if (ow_tx_bit(s) == 0) {
         ow_pull(s, now, false);
@@ -446,19 +455,25 @@ static void ow_fall(FlipperIbuttonState *s, int64_t now)
 static void ow_rise(FlipperIbuttonState *s, int64_t now)
 {
     int64_t low = now - s->fall_ns;
-    int64_t waited = s->dwt ? wb55_dwt_last_read(s->dwt) : 0;
-    int64_t slot = low;                 /* up to where the master's wait ended */
+    int64_t slot = low;                 /* what the master waited, low */
 
-    if (waited >= s->fall_ns && waited < now) {
-        slot = waited - s->fall_ns;
+    if (s->dwt) {
+        int64_t cpu = wb55_dwt_cpu_look(s->dwt);
+        int64_t waited = wb55_dwt_waited(s->dwt, WB55_DWT_SPAN_OW, s->fall_cpu,
+                                         cpu, OW_TAIL_NS);
+
+        slot = waited >= 0 ? waited : MIN(low, cpu - s->fall_cpu);
     }
 
-    if (low >= OW_RESET_NS || (s->od && low >= OW_OD_RESET_NS)) {
+    /* (a reset is the master waiting that long, as a bit is: a slot that
+     * a busy host stretched is none.  A low that the firmware sleeps
+     * through is no wait, and as long as it lasted.) */
+    if (slot >= OW_RESET_NS || (s->od && slot >= OW_OD_RESET_NS)) {
         if (s->pulling) {               /* that was no slot: drop the hold */
             s->pulling = s->presence = false;
             ow_drive(s, false);
         }
-        if (low >= OW_RESET_NS) {
+        if (slot >= OW_RESET_NS) {
             s->od = false;              /* a standard reset: standard speed */
         }
         ow_goto(s, OW_ROM_CMD);
@@ -489,7 +504,19 @@ static void ow_master(FlipperIbuttonState *s, bool low)
 
 static void ibtn_timer(void *opaque)
 {
-    ow_sampled(opaque);                 /* never sampled: let go anyway */
+    FlipperIbuttonState *s = opaque;
+    int64_t ran = wb55_cpu_ran_ns();
+
+    /* never sampled: let go anyway.  But a master that the host has kept
+     * from its sample has not had its time yet: the time is the CPU's own
+     * running, unless the CPU sleeps. */
+    if (s->pulling && ran >= 0 && s->pull_ran >= 0 && !wb55_cpu_asleep() &&
+        ran - s->pull_ran < OW_HOLD_MAX_NS) {
+        timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                            OW_HOLD_MAX_NS - (ran - s->pull_ran));
+        return;
+    }
+    ow_sampled(s);
 }
 
 /* ------------------------------------------ reading an emulated key */

@@ -5804,6 +5804,68 @@ big lock, entry 92).
       and costs the start, and something at the link that was not
       looked into. It stays an option and is not the default.
 
+184. **The CPU's own time: what the host steals is not counted.**
+    - The T5577's write failed in every run beside 32 busy loops. Its
+      trace under that load: the firmware's gap of 144 µs was 1.3 ms by
+      the machine's clock when the host took the emulated CPU's thread
+      off its core in the middle of the wait, and a gap of more than
+      1 ms powers the tag down; a 0 of 192 µs was a 1. The tag ended up
+      with blocks of anything, once with a block locked.
+    - A wait on CYCCNT ends when the counter has gone far enough, and
+      the counter went with the machine's clock, which is the host's.
+      The kernel knows how long each thread has waited on a run queue
+      (`/proc/thread-self/schedstat`). Taken out of the counter, a wait
+      is as long as the firmware made it: a virtual machine's steal
+      time, for one register.
+    - The first try looked the count up at every read of CYCCNT that
+      was not close on the last. The smoke test beside the loops got
+      no better and its receptions worse: the firmware reads CYCCNT at
+      the start and end of every interrupt handler and at every change
+      of thread (`furi_hal_interrupt.c`, FreeRTOS's run time counter),
+      and a look is a system call. The second took the count at the
+      start of every wait's loop: several checks were 5 to 15 % longer
+      alone, for the firmware waits often. Now a look is made only when
+      a wait's loop (three reads within 4 µs of each other) stands
+      still, and takes out what the count grew by, no more than the
+      loop stood; and around a device's edges.
+    - The devices: between two changes of the field (of the 1-Wire
+      line) the time is what the firmware waited, first read of CYCCNT
+      to last. That leaves out the lock that the write after a wait
+      has to get, as the 1-Wire slave's "last read" did before. It is
+      taken only if the wait fills the time: the interrupt handlers'
+      reads in a low that the firmware sleeps through are no wait (seen
+      before any check failed, writing this down).
+    - Two ends that the machine's clock still decided: a T5577 command
+      was over after 200 field clocks of field, which a thread off its
+      core in the middle of a bit made true; and the 1-Wire slave let
+      go of a 0 after 1 ms unsampled. Both wait until the firmware has
+      had that long: the host's count of how long the CPU's thread has
+      run, or the CPU asleep. A reset is told by the wait as well.
+    - Measured against the code before, beside 32 busy loops.
+      `rfid write`: 1 of 5 before; 6 of 6, 4 to 11 s each (1 s alone:
+      the rest is the firmware reading the tag back, which is slow
+      under load), 27 block writes for 6 commands. `ikey read`, twelve
+      at a time with each binary in turns: 14 of 24 before, most of the
+      rest at the end of their 15 s; 22 of 24, most within 4 s (an
+      earlier form of the change: 23 of 24 against 15). The smoke test
+      as a whole, five runs each in turns, with that earlier form: the
+      T5577 step fails 5 of 5 before and 1 of 5 after; the infrared's
+      and Sub-GHz's reception fail in most runs of both.
+    - With the last form of it, again in turns: `ikey read` 23 of 24,
+      most under a second (16 of 24 before); `rfid write` 6 of 6.
+    - Alone: every check as before, 1130 passes in the 29 of the
+      official 1.5.1, in 1.3 % more time than the last time (which is
+      nothing). The time taken out is in a saved state.
+    - The fuzz check failed a step in each of two such runs of all
+      checks side by side, another step each time, and passes alone
+      (20 of 20, twice). One is the step that had failed so before
+      (which inputs are kept on the way to the planted crash). The
+      other, an NFC `dump` that is not done after 40 s, was then found
+      with the code before as well: beside 24 busy loops the fuzzer's
+      16 cards take 21 to 25 s with either, and in one round of three
+      each had one such `dump`, at different cards. Not this entry's
+      doing, and not explained.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

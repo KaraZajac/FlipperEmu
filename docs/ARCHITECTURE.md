@@ -59,12 +59,39 @@ HSE 32 MHz → PLL M=2 N=8 R=2 → 64 MHz in `furi_hal_clock_init()`. HCLK drive
 SysTick and the DWT cycle counter, and refclk is HCLK/8. Every `*RDY` flag mirrors its
 enable bit, so clock bring-up never stalls.
 
-`DWT->CYCCNT` counts HCLK cycles of QEMU virtual time. It's essential because
-`furi_delay_us()` busy-waits on it, even before the scheduler starts (`main()` waits
-100 ms to sample the buttons). A read of it does not take QEMU's big lock
-(`qemu/patches/0005`; the DWT block asks for lockless I/O): with the lock, each read of a
-wait could sleep 20 to 50 µs while the main loop held it, and a 9 µs wait lasted 60. The
-block remembers when CYCCNT was last read, which is where a wait of the firmware's ended.
+`DWT->CYCCNT` counts HCLK cycles. It's essential because `furi_delay_us()` busy-waits
+on it, even before the scheduler starts (`main()` waits 100 ms to sample the buttons). A
+read of it does not take QEMU's big lock (`qemu/patches/0005`; the DWT block asks for
+lockless I/O): with the lock, each read of a wait could sleep 20 to 50 µs while the main
+loop held it, and a 9 µs wait lasted 60.
+
+**The CPU's own time.** The machine's clock is the host's, and it goes on while the host
+has the emulated CPU's thread waiting for a core. A wait on CYCCNT that the host
+interrupts ended late by as much, and what the firmware times with such waits came out
+as much too long: a T5577's bits, a 1-Wire slot. So the counter does not count that
+time, as a virtual machine does not count steal time. The kernel has it for each thread
+(`/proc/thread-self/schedstat`, the time spent waiting on a run queue); time that the
+CPU sleeps is not such time, and counts.
+- It is looked up where it matters and only there, by the CPU's thread itself: the
+  firmware reads CYCCNT at the start and end of every interrupt handler and at every
+  change of thread too (its accounts of where the time goes), and a look is a system
+  call. In a wait's loop (reads within 4 µs of each other, from the third on): when
+  the loop stands still for more than 10 µs, what the count has grown by is taken out,
+  and no more than the loop stood still. A wait that nothing interrupts costs no look.
+  And around a change of a line that a device times so (below).
+- `wb55_dwt_waited()` is for those devices: between two changes of its line, how long
+  the firmware waited on CYCCNT, from its first read to its last. Only if that was a
+  wait that filled the time: it began at once, its reads followed close on each other,
+  and it ended shortly before the change. Two reads somewhere in a low that the
+  firmware sleeps through are its interrupt handlers', and no wait; then the device
+  goes by the time that passed. A wait's length has nothing of the host in it: not the
+  thread off its core, and not the big lock that the write after the wait has to get.
+- Whoever waits for the firmware from a timer of the main loop cannot use that count
+  (it grows when the thread is back on a core). `wb55_cpu_ran_ns()` is the host's
+  count of how long the CPU's thread has run, and `wb55_cpu_asleep()` whether it
+  sleeps: "the firmware has had this long" in place of "this long has passed".
+- The time taken out is in a saved state (the base of the counter is on that time).
+- On a host with idle cores none of this does anything: nothing is taken out.
 
 Idle: FreeRTOS tickless idle arms **LPTIM1** one-shot (CMP = n-4, ARR = n-1) and executes
 WFI with PRIMASK=1. Afterwards it reads CNT and stops the timer with an RCC bus reset
@@ -863,9 +890,13 @@ an edge it writes the capture to `devices/NAME/rfid-tx/tx-NNNNN.txt`.
 
 **Writing a T5577** (`t5577.c`). `rfid t5577` puts a T5577 in the field instead of a fixed
 tag. Its downlink is the reader's field itself: `t5577_write()` pauses TIM1's outputs
-(MOE) for gaps, timed with `furi_delay_us()` on DWT->CYCCNT, which counts virtual time.
-So the gaps reach `flipper_rfid_set_drive()` with exact virtual timestamps, and the tag
-decodes them as a T5577 does:
+(MOE) for gaps, timed with `furi_delay_us()` on DWT->CYCCNT. The T5577's time is the
+firmware's: between two changes of the field it is as long as the firmware waited
+(`wb55_dwt_waited`), and a command is over when the field has been on for 200 field
+clocks and the firmware has had that long (the CPU's thread has run so long, or the CPU
+sleeps). By the machine's clock a busy host made a gap of 144 µs one of 1.3 ms, which
+powers the tag down, a 0 a 1, and ended a command in the middle of a bit. The tag
+decodes the gaps as a T5577 does:
 - a start gap after enough field powers it up and opens a command;
 - each stretch of field between two gaps is a bit (24 field clocks a 0, 56 a 1);
 - a long stretch closes the command.
@@ -919,18 +950,21 @@ not the pin level, which its own pulls would mask, with virtual times:
 - Every other low is a slot. The master writes a 1 as a 9 µs low and a 0 as 64 µs (1 and
   8 µs in overdrive). An emulated master's lows only ever stretch: overdrive's 1 µs takes
   2–4 µs. So the threshold sits just under a 0's time (56 µs, 7 µs), not at the midpoint.
-- A slot's low is timed from the master's falling edge to its last read of CYCCNT, the
-  end of its wait, and not to the write of GPIOB that ends the low. That write takes
-  QEMU's big lock, and when the main loop has it, the vCPU's thread sleeps 20 to 50 µs
-  for it: a 1 would be a 0, a READ ROM another command. (A reset is told by the time
-  that passed: a firmware may sleep through one.)
+- A slot's low is as long as the master waited on CYCCNT while the line was low
+  (`wb55_dwt_waited`), and not as long as the machine's clock says. The write of GPIOB
+  that ends the low takes QEMU's big lock, and when the main loop has it, the vCPU's
+  thread sleeps 20 to 50 µs for it; and a host that takes the thread off its core in
+  the middle of a wait does not make the wait longer. Either way a 1 would be a 0, a
+  READ ROM another command. A reset is the master waiting that long, likewise. A low
+  that the firmware sleeps through has no such wait and is as long as it lasted.
 - To send a 0, the slave pulls the line low at the master's falling edge. On silicon it
   lets go after a fixed time, well after the master samples. Here the host can preempt
   the vCPU while virtual time runs on, so the sample can land past any fixed time. So the
   slave lets go once the master has sampled: a read of GPIOB's IDR with the firmware's
   own drive of PB14 off, reported after its value is taken. The master's next falling
-  edge also ends a hold (the master gave up on a byte mid-way), and a 1 ms timer lets go
-  anyway.
+  edge also ends a hold (the master gave up on a byte mid-way), and a timer lets go
+  anyway when the master has had 1 ms and has not sampled: 1 ms of the CPU's thread
+  running, not of the machine's clock, unless the CPU sleeps.
 
 The slave answers SEARCH ROM, READ ROM, MATCH ROM, SKIP ROM and the overdrive ROM
 commands. Memory keys also answer READ MEMORY: a 2-byte address on a DS1992 or DS1996
