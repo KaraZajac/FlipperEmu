@@ -915,13 +915,19 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           and the 1-Wire read in all five; the two of 21 are the firmware's
           crash (FW-07) and what comes after it (BRINGUP_LOG 185)
     - ☐ An NFC `dump` of the shell that never comes back, beside 24 busy loops
-          about one in forty (a MIFARE Classic 1K dumped again and again: at the
-          39th, the 120th, the 8th, the 16th, the 5th). Each time the chip's
-          interrupt pin is high, EXTI line 2 is armed for its rise and nothing is
-          pending: the firmware waits for an edge of a line that is up already.
-          Which interrupt it lost is not found. Not it: one that comes while the
-          firmware is at the registers (a hold of new interrupts until the
-          firmware had its moment changed nothing: BRINGUP_LOG 186). The smoke
+          about one in forty (11 in 466 dumps of a MIFARE Classic 1K). Found:
+          it is the firmware's (FW-23). `furi_thread_flags_clear()` reads the
+          thread's flags and writes them back in two calls, and the flag that
+          the chip's interrupt handler sets between the two is gone
+          (`scripts/fw23_lost_flag.py` does it with gdb). Not mended here, and
+          not to be mended by a rule for one pin: a late firmware clears its
+          timers' flags when the chip's interrupts come, whenever that is
+          (BRINGUP_LOG 186, 187: two rules tried and taken out). What would
+          keep the firmware from being late is a machine whose clock does not
+          run while the host has the CPU's thread off its core: not the
+          cycle counter alone (BRINGUP_LOG 184) but every timer. That is
+          QEMU's `-icount` done by the host's count of the thread's running;
+          `-icount` itself was not it (BRINGUP_LOG 183). Not begun. The smoke
           test's steps after such a shell open and close the port on it, which
           ends the firmware by FW-07: its two runs of 21 in five
     - ☐ The fuzz check's step that looks at which inputs were kept fails now

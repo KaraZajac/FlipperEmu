@@ -5934,6 +5934,58 @@ big lock, entry 92).
       T5577's write 20 of 20 and `ikey read` 30 of 30, with the code
       before and after.
 
+187. **The lost interrupt is the firmware's: `furi_thread_flags_clear()` (FW-23).**
+    - A ring of the chip model's last events, read at the hang (taken
+      out again): the transmit command, TXE, RXS, RXE raised, the pin
+      up, one run of the EXTI handler, and no read of the registers
+      after it. So the handler ran and set the thread's flag, and the
+      thread never saw it.
+    - What the thread was at when that handler came, from the frame on
+      its stack: `vPortExitCritical+0xe`, from `xTaskGenericNotify+0xbe`
+      (three catches), and with the return addresses above it:
+      `furi_thread_flags_clear+0x24`, from
+      `furi_hal_nfc_wait_event_common+0xa0`, from the poller's state
+      machine. `+0x24` is the return from the first of that function's
+      two calls of the kernel: the flags are read, and not yet written
+      back without the one to clear. The handler's flag goes in
+      between, and the write puts the old value over it. gdb at the
+      hang: `NfcWorker` blocked in `xTaskGenericNotifyWait()`, its
+      flags 0.
+    - The flag being cleared is the block timer's, stale: the timer
+      had run out before the frame was sent, the sender waits for it
+      only while it runs, and the poller's first wait after the
+      command returns with it. On an idle host the firmware is at the
+      next frame before the timer (119 µs) is, and the flag is taken in
+      the sender's loop with no frame going out: with gdb's breakpoint
+      on a clear of it while a frame goes out, two dumps never came
+      there. Beside busy loops the firmware is late, and the clear
+      comes while the chip is sending.
+    - Tried against it, and out again: the chip's pin rising only when
+      the CPU sleeps or its thread has run 20 µs since the chip raised
+      the interrupt (unless the firmware's own access raised it). With
+      it the `dump` stood still at the 24th, 35th, 4th and 82nd, twice
+      with the pin up as before and twice with it down; without it, in
+      turns, at the 4th, 8th, 1st and 33rd. The traced catch with the
+      rule: the host had the CPU's thread off its core for 2.9 ms (the
+      kernel's count), the pin rose after 22 µs of its running, and the
+      handler came 39 µs of running later, in the same gap, at the
+      clear of the frame timer's flag this time. The NFC thread was
+      at that clear 216 µs of the CPU's running after the transmit
+      command: the CPU's time is not that thread's. No count of the
+      CPU's running tells when one thread of the firmware is through
+      a gap of forty instructions.
+    - `scripts/fw23_lost_flag.py` shows the bug with gdb and no load.
+      It holds the NFC thread before a frame until the block timer has
+      run out, and then between the two calls until the chip's handler
+      has run: the flags 0 as read, 0x2 after the handler, the `dump`
+      stuck, PA2 up. `--control`: the second hold left out, the `dump`
+      back. Code under a breakpoint runs slowly the first time, and
+      then the interrupt is there before the flags are read: the
+      script takes the next `dump`.
+    - The same function is in today's `dev` of the official firmware,
+      Unleashed and Momentum. FreeRTOS 10.5.1 has the clear as one
+      call (`ulTaskGenericNotifyValueClear()`).
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

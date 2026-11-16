@@ -92,6 +92,14 @@ CPU sleeps is not such time, and counts.
   sleeps: "the firmware has had this long" in place of "this long has passed".
 - The time taken out is in a saved state (the base of the counter is on that time).
 - On a host with idle cores none of this does anything: nothing is taken out.
+- What it does not do: the timers and the devices' own events still go by the
+  machine's clock. A firmware that the host has held up is late for them, and meets
+  its devices' interrupts at places where a Flipper's never come. One such place is
+  a bug of the firmware's that then shows (FW-23 in `FIRMWARE_BUGS.md`: a read of an
+  NFC card that never ends, beside 24 busy loops one `dump` in about forty). A rule
+  for the NFC chip's pin (up only when the CPU has had 20 µs of its own) did not
+  help and is not in: no count of the CPU's running says where one thread of the
+  firmware is (BRINGUP_LOG 187).
 
 Idle: FreeRTOS tickless idle arms **LPTIM1** one-shot (CMP = n-4, ARR = n-1) and executes
 WFI with PRIMASK=1. Afterwards it reads CNT and stops the timer with an RCC bus reset

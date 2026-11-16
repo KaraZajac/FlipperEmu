@@ -129,7 +129,9 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
   firmware.
 - Bugs of the firmware that the emulator's checks and its fuzzer met are kept in
   [docs/FIRMWARE_BUGS.md](docs/FIRMWARE_BUGS.md): what happens, on which firmwares,
-  why, and how to see it here.
+  why, and how to see it here. One of them needs a thread held between two
+  instructions to show: `scripts/fw23_lost_flag.py` does that with gdb (FW-23, a
+  thread flag that is lost while another is cleared).
 - Tests of an app as a script: `run --detach` starts a Flipper that runs by itself,
   `./flipperemu wait` holds the script until the firmware has logged a line or its
   screen is as in a file, and says what was there instead when that does not come.

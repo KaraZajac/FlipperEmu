@@ -45,6 +45,7 @@ keeps its row, with the version that fixed it.
 | FW-20 | A serial port closed right after a write loses the last two bytes | official 1.5.1 | wrong result | no |
 | FW-21 | After an ISO15693 card was emulated, the ISO14443A listener takes its own answers for failed, and an ISO14443-4 card of the Flipper's is not activated any more | official 1.5.1 and dev, Momentum, Unleashed, RogueMaster | wrong result, until a restart | no |
 | FW-22 | An emulated MIFARE Plus (security level 3) gives every block, and takes a write to it, in a session of any one of its keys | Unleashed unlshd-094, RogueMaster RM1024-1347 | an emulated card that guards nothing | no |
+| FW-23 | A thread flag that an interrupt sets while `furi_thread_flags_clear()` runs is lost; the NFC poller then waits for its chip for ever, and a read of a card never ends | official 1.5.1 (and today's `dev` of the official firmware, Unleashed and Momentum, by the source) | freeze, rarely | no |
 
 ## Crashes and freezes
 
@@ -198,6 +199,86 @@ keeps its row, with the version that fixed it.
   its NDEF message.
 - **Seen on:** Momentum mntm-012.
 - **Log:** entry 170.
+
+### FW-23: a thread flag set while another is cleared
+
+- **What happens:** a read of an NFC card stops and never goes on: the NFC shell's
+  `dump` does not return, Ctrl+C does not bring the shell back, and nothing is
+  logged. The thread that talks to the NFC chip (`NfcWorker`) waits for an
+  interrupt of the chip; the chip has raised it, and its pin (PA2) is up and stays
+  up.
+- **Why:** `furi_thread_flags_clear()` is two calls of the kernel
+  (`furi/core/thread.c:512` to `:539`): `xTaskNotifyAndQueryIndexed(..., 0, eNoAction,
+  &cflags)` reads the thread's flags (`:523`), and `xTaskNotifyIndexed(..., cflags &
+  ~flags, eSetValueWithOverwrite)` writes them back without the ones to clear
+  (`:528`). Each is a critical section of its own (FreeRTOS 10.5.1's
+  `xTaskGenericNotify()`); between the two, interrupts are on. A flag that
+  `furi_thread_flags_set()` sets from an interrupt handler in between (`eSetBits`,
+  `:495`) is in the thread's flags for that moment, and then the value read before
+  it is written over it.
+  The NFC poller meets it like this. Its block timer (TIM17) has run out before the
+  next frame is sent, as a rule, and then nobody takes its flag: the senders wait for
+  it only `while(furi_hal_nfc_timer_block_tx_is_running())` (`lib/nfc/nfc.c:425`,
+  `:478`, `:543`, `:590`). So the first `furi_hal_nfc_poller_wait_event()` after the
+  command to transmit (`nfc_poller_trx_state_machine()`, `:365`) returns at once with
+  that stale flag, and `furi_hal_nfc_wait_event_common()` clears it with
+  `furi_thread_flags_clear()` (`targets/f7/furi_hal/furi_hal_nfc_event.c:90`) while
+  the frame is going out. If the chip's interrupt for the end of the transmission
+  comes between the two calls, the handler's flag
+  (`FuriHalNfcEventInternalTypeIrq`, `furi_hal_nfc_irq.c:8`, `furi_hal_nfc_event.c:30`)
+  is written over. The poller then waits for it with no timeout
+  (`FURI_HAL_NFC_EVENT_WAIT_FOREVER`), the chip's pin stays up because nobody reads
+  its registers, and a pin that is up gives no second edge.
+  The clear of the interrupt's own flag before the registers are read (`:50`) can
+  lose a timer's flag the same way, and the clears at `:86` (the frame timer's
+  flag) and `:94` (the abort's) an interrupt's, as the one at `:90` does.
+  The kernel has the clear as one call: `ulTaskGenericNotifyValueClear()`
+  (`lib/FreeRTOS-Kernel/tasks.c:5234`; `ulTaskNotifyValueClearIndexed()` in
+  `task.h`).
+- **How often:** on a Flipper the gap between the two calls is a few dozen
+  instructions, and the chip's interrupt is some 0.1 ms away when the stale flag is
+  cleared. It takes something that holds the thread in just that gap for that long:
+  a thread of a higher priority, or interrupt handlers one after the other. Nobody
+  has counted that on a Flipper. In the emulator on an idle host it is not seen
+  (unless the `scanner` that stopped once was it: see the end of this file): where
+  that was looked at, the firmware was at the next frame before the block timer had
+  run out and took its flag in the sender's loop, so there was no stale flag to
+  clear while a frame went out. Beside 24 busy loops on a host of 16 threads it
+  happens in one `dump` of a MIFARE Classic 1K in about forty (11 in 466): the host
+  takes the CPU's thread away for milliseconds, the firmware is late for its
+  timers, and the chip's interrupts come whenever the thread gets to its clear.
+- **How much it matters:** `furi_thread_flags_clear()` is the firmware's only way
+  to clear a thread flag, and any flag set from an interrupt handler or another
+  thread during it is lost the same way. Official 1.5.1 calls it in 19 places: the
+  NFC HAL's seven, the NFC pollers' synchronous calls, the GUI service, Bad USB's
+  script runner, the JavaScript app's thread.
+- **To see it:** `scripts/fw23_lost_flag.py`. It dumps a card in the NFC shell with
+  gdb on the device, which holds the NFC thread twice, as something of a higher
+  priority would: before a frame until the block timer has run out, and then
+  between the two calls of the clear until the chip's interrupt handler has run.
+  The thread's flags are 0 as read, 0x2 (the interrupt's) after the handler, and
+  the dump does not return, with PA2 up. With `--control` the second hold is left
+  out, and the dump returns.
+  Under load, without gdb: the handler of the interrupt that was lost came with the
+  thread at `vPortExitCritical+0xe`, called from `xTaskGenericNotify+0xbe`, from
+  `furi_thread_flags_clear+0x24` (the return from the first call), from
+  `furi_hal_nfc_wait_event_common+0xa0` (`:90`), from
+  `nfc_poller_trx_state_machine()`. In a second catch it was `+0x92` (`:86`, the
+  frame timer's flag). Each time gdb then finds `NfcWorker` blocked in
+  `xTaskGenericNotifyWait()` with its flags at 0.
+- **To mend it:** a `furi_thread_flags_clear()` that is one critical section, or
+  the kernel's `ulTaskNotifyValueClearIndexed()`. The NFC HAL's clears of the
+  timers' flags do nothing besides: `furi_thread_flags_wait()` has cleared the
+  flags that it returns.
+- **Seen on:** official 1.5.1, in the emulator. Beside busy loops: more than a
+  dozen times with the pin up and no interrupt pending, three times with the
+  thread's flags read by gdb, twice with the place where the lost interrupt's
+  handler came. And at will with gdb. The cause is in its source. The function is
+  the same in the `dev` branches
+  of the official firmware, of Unleashed and of Momentum as they are today
+  (2026-11-16, `furi/core/thread.c`, read from GitHub); those were not run for it.
+  Not tried on a real Flipper.
+- **Log:** entry 187.
 
 ## Wrong results
 
@@ -427,7 +508,8 @@ Not in the list, because nobody knows yet whose they are:
   more runs did not bring it back (entry 154).
 - **The shell stopped answering during a MIFARE Plus `scanner`** (official 1.5.1,
   once in eight runs). `scripts/nfc_check.py` prints the device's state if it comes
-  again (entry 159).
+  again (entry 159). It may have been FW-23: that was not known then, and the
+  chip's pin was not looked at.
 - **Unleashed's and RogueMaster's `subghz tx` and `subghz rx` on the CLI** say that
   the radio "failed to start". Their Sub-GHz app transmits and receives. Their
   source was not read (entries 86 and 154).
