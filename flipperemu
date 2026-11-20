@@ -245,10 +245,25 @@ class Device:
             return True
         except BlockingIOError:         # one is, with others waiting for it
             return True
+        except ConnectionRefusedError:
+            # macOS refuses a client while the monitor is busy with another
+            # (Linux has it wait): is this run's QEMU alive?
+            return sys.platform == "darwin" and self.run_pid_alive()
         except OSError:
             return False
         finally:
             s.close()
+
+    def run_pid_alive(self):
+        """Is the QEMU of run.json still running, and is it a QEMU?"""
+        try:
+            pid = json.loads(self.run_file.read_text())["pid"]
+            os.kill(pid, 0)
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+        out = subprocess.run(["ps", "-o", "comm=", "-p", str(pid)],
+                             capture_output=True, text=True).stdout
+        return "qemu-system-arm" in out
 
     def held(self):
         """What the commands last held to it: {'nfc': label, 'rfid': ..}"""
@@ -569,7 +584,8 @@ def audio_args(args):
         if args.headless or args.print_cmd:
             return []
         have = audio_backends()
-        choice = next((b for b in ("pipewire", "pa", "alsa", "sdl") if b in have), None)
+        choice = next((b for b in ("pipewire", "pa", "alsa", "coreaudio", "sdl")
+                       if b in have), None)
         if not choice:
             print("(no speaker: this QEMU has no PipeWire/PulseAudio/ALSA/SDL audio; "
                   "install e.g. pipewire-devel and re-run scripts/setup_qemu.sh, "
@@ -600,6 +616,8 @@ def pick_window(args):
 
 
 def need_display():
+    if sys.platform == "darwin":        # a Mac's login session always has one
+        return
     if not any(os.environ.get(v) for v in ("WAYLAND_DISPLAY", "DISPLAY",
                                            "QT_QPA_PLATFORM")):
         sys.exit("no display to open a window on: `run --headless` runs without one")
@@ -1171,6 +1189,10 @@ def spi_args(specs, dev=None):
 
 def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
     """gauge: {property: value} of /machine/gauge to start with"""
+    if sys.platform == "darwin" and len(str(dev.monitor)) >= 104:
+        sys.exit(f"[{dev.name}] {dev.monitor}: too long for a socket on macOS "
+                 "(at most 103 bytes): a shorter device name, or FlipperEmu "
+                 "in a folder with a shorter path")
     machine = (f"flipper-zero,name={args.name or dev.name[:8]}"
                f",lcd-scale={args.scale or 4}"
                f",nvram={dev.nvram},enclave={dev.enclave}"
@@ -1240,7 +1262,9 @@ def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
         cmd += ["-global", f"bq27220.{prop}={value}"]
     if not args.no_sd and dev.sd.exists():
         cmd += ["-drive", f"if=sd,format=raw,file={dev.sd}"]
-    if window == "gtk":
+    if window == "gtk" and sys.platform == "darwin":
+        cmd += ["-display", "cocoa"]    # macOS: QEMU's own window is Cocoa's
+    elif window == "gtk":
         cmd += ["-display", "gtk,show-menubar=off,zoom-to-fit=off"]
     else:                               # none, or the window is ours
         cmd += ["-display", "none"]
@@ -2189,11 +2213,19 @@ def run_noted(dev, m=None):
     if not isinstance(note, dict) or not isinstance(note.get("machine"), dict):
         return None
     if m:
-        pid = struct.unpack("3i", m.s.getsockopt(
-            socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))[0]
+        pid = peer_pid(m.s)
         if note.get("pid") != pid:
             return None
     return note
+
+
+def peer_pid(sock):
+    """The process at the other end of a Unix socket (Linux: SO_PEERCRED;
+    macOS: LOCAL_PEERPID at level SOL_LOCAL, 0)"""
+    if sys.platform == "darwin":
+        return struct.unpack("i", sock.getsockopt(0, 0x002, struct.calcsize("i")))[0]
+    return struct.unpack("3i", sock.getsockopt(
+        socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))[0]
 
 
 def file_sha256(path):
@@ -2223,11 +2255,12 @@ def copy_file(src, dst):
     try:
         d = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
-            try:
-                fcntl.ioctl(d, FICLONE, s)
-                return
-            except OSError:
-                pass
+            if sys.platform.startswith("linux"):
+                try:
+                    fcntl.ioctl(d, FICLONE, s)
+                    return
+                except OSError:
+                    pass
             size, at = os.fstat(s).st_size, 0
             while at < size:
                 try:

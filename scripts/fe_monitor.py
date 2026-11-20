@@ -16,22 +16,30 @@ import sys
 import tempfile
 import time
 
+# Linux has a client wait (EAGAIN) while the listening socket's backlog is
+# full, the monitor busy with another; macOS refuses it (ECONNREFUSED).
+BUSY = (ConnectionRefusedError,) if sys.platform == "darwin" else ()
+
 KEYS = {"ok": "ret", "back": "backspace", "up": "up", "down": "down",
         "left": "left", "right": "right"}
 
 
 class Monitor:
     def __init__(self, path, timeout=5.0):
-        self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.s.settimeout(timeout)
         end = time.time() + timeout
         while True:
+            # a new socket each time: on macOS one whose connect failed
+            # cannot connect again
+            self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.s.settimeout(timeout)
             try:
                 self.s.connect(path)
                 break
-            except BlockingIOError:     # others wait for it already
+            except (BlockingIOError, *BUSY) as e:   # others wait for it already
+                self.s.close()
+                if isinstance(e, ConnectionRefusedError) and not os.path.exists(path):
+                    raise
                 if time.time() > end:
-                    self.s.close()
                     raise ConnectionError(
                         f"{path}: the monitor is busy; another client has it "
                         "(it takes one at a time)") from None
