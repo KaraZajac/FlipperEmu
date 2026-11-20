@@ -40,9 +40,12 @@ due timers through its two hooks, `-machine cpu-timers`); without it it does not
 0021 to 0024 are fixes that the machine runs without: reading the card then costs the
 host more of its time, a sixth for each of 0021 and 0022 and a tenth for 0023, and
 without 0024 an idle Flipper takes a quarter more of a host core on USB.
+0025 is for macOS alone (the change is under `__APPLE__`): without it the machine runs
+there, and a timer due in less than a millisecond fires up to a millisecond late, so the
+iButton reader reads no Cyfral or Metakom key.
 A source tree that was set up before a patch came (0006 to 0009: 2026-11-11; 0010 to
 0013: 2026-11-12; 0014 and 0015: 2026-11-14; 0016 to 0018: 2026-11-15; 0019 to 0024:
-2026-11-21) gets it from one more run of that script.
+2026-11-21; 0025: 2026-11-22) gets it from one more run of that script.
 
 How the script finds out what a tree has: it takes the patches out of a copy of the
 files they touch, the last one first, and what does not come out there is what the tree
@@ -93,6 +96,7 @@ them without a change to the check.
 | 0022 | `accel/tcg/translate-all.c`, `accel/tcg/translator.c`, `accel/tcg/internal-common.h` | a device access that was not the last instruction of its block had `cpu_io_recompile()` leave the block and run the access alone, every time the block came by (a guest polling a device in a loop paid it each time round). The place is kept and the block translated again; a block ends after an instruction at a kept place, so the access is its last |
 | 0023 | `hw/intc/armv7m_nvic.c`, `target/arm/cpu.h`, `target/arm/internals.h`, `target/arm/tcg/tlb_helper.c` | every write of a v7M MPU register flushed the whole TLB, and a guest that moves a region often paid for it in full: a Flipper's firmware sets the stack guard of the thread that it switches to at every switch (the MPU off, the region's RBAR and RASR, the MPU on), four whole flushes some 1500 times a second, and every page translated again after each. A write flushes what it changes, as `get_phys_addr_pmsav7()` looks regions up: a region written, its pages before and after; the MPU switched off with PRIVDEFENA, the pages of its enabled regions that the TLB can hold (a page or more, letting something through), and from then on the pages that the TLB is given are noted in the fill; switched on, the noted pages (more than 32: all), the unprivileged indexes where they hold anything, and with HFNMIENA set those of HardFault and NMI. Anything else, and v8M, flushes all as before |
 | 0024 | `accel/tcg/cputlb.c`, `include/exec/tlb-flags.h`, `include/hw/core/cpu.h`, `target/arm/ptw.c`, `hw/intc/armv7m_nvic.c` | a page that holds an MPU region smaller than itself was not kept at all: every access to it looked the MPU up again and wrote its TLB entry again, and a guest that guards each stack with a 32-byte region has its interrupt stack, its idle thread's and every busy thread's stack in such pages. Such a page is kept now but for the part that the small regions cover: CPUTLBEntryFull gains that part's bounds (in its padding) and the entry a slow flag of its own, `TLB_SUBPAGE`; an access that touches the part is translated anew, any other is a hit; a probe that touches it fills, and otherwise gets no host address for the page (code there is translated an instruction at a time, as before). The PMSAv7 lookup reports the part where it reported a page size of 0, counting a region with a disabled subregion at the address and enabled ones in the page, which it missed. Patch 0023's comment on what the TLB holds of an enabled region is corrected with it |
+| 0025 | `util/qemu-timer.c` | macOS has no `ppoll()`: `qemu_poll_ns()` falls back to `g_poll()` with its timeout rounded up to whole milliseconds, and every timer due sooner fires up to a millisecond late. There it now waits the whole milliseconds in `poll()` and the rest in `select()`, then polls once without waiting; a descriptor watched for a hang-up only is left out of the `select()` |
 
 **Licence:** these patches modify QEMU's own source files, which are GPL-2.0-or-later,
 so the patches are GPL-2.0-or-later too, unlike the rest of this repository (BSD-3-Clause).
