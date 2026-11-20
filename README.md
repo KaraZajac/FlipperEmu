@@ -316,6 +316,25 @@ A Flipper opens in a window. Click its buttons, or use the **arrows**; **Enter/S
 is OK and **Backspace/Esc** is Back. The firmware log streams to the terminal, and
 [the window has it too](#the-firmware-log).
 
+### On macOS
+
+Homebrew has what the build and the launcher need, and the steps are the same:
+
+```sh
+brew install ninja pkgconf glib pixman coreutils gnu-sed gpatch dtc libslirp dosfstools mtools
+scripts/setup_qemu.sh                         # QEMU with Cocoa and CoreAudio
+python3 -m venv .venv && .venv/bin/pip install PySide6 Pillow numpy
+PATH="$PWD/.venv/bin:/opt/homebrew/sbin:$PATH" ./flipperemu run -f …
+```
+
+Keep the checkout at a short path (`~/FlipperEmu`): a device's sockets are in
+`devices/NAME/`, and a Unix socket's path has at most 103 bytes on macOS. `run` says
+when a name is too long. USB/IP (`--usbip`, `scripts/usbip_attach.py`) needs Linux's
+`vhci-hcd`, so the emulated Flipper does not appear on a Mac's USB: its CLI and RPC are
+at `./flipperemu cli` and on the pty `devices/NAME/usb.tty`. Verified on macOS 27.3 on
+Apple silicon: `scripts/smoke_test.py` passes in full on the official 1.5.1 and on a
+Momentum dev build; the window opens with its sound, and `update` installs a package.
+
 ### Your own builds and other firmwares
 
 ```sh
