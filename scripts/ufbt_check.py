@@ -242,9 +242,15 @@ def fbt_checks(b, work):
           code == 0
           and f"stand-in fbt in {tree}: launch APPSRC=my_app {port}" in text,
           text)
+    tool(b, work / "fe_hello", "launch")
     code, text = fbt(b, tree, "flash_usb")
+    code2, text2 = b.fe("app")
     check("`fbt flash_usb` (the package without a radio stack): passed on, "
-          "with the port", code == 0 and f": flash_usb {port}" in text, text)
+          "with the port, and the app that ran closed first (the firmware "
+          "starts no update while one runs)",
+          code == 0 and f": flash_usb {port}" in text
+          and f'flash_usb`: "{APP}" closed' in text
+          and "no app runs" in text2, text + text2)
     code, text = fbt(b, tree, "cli", "FLIP_PORT=/dev/null")
     check("a port that is named already: passed on as it is",
           code == 0 and text.strip().endswith(": cli FLIP_PORT=/dev/null"),
