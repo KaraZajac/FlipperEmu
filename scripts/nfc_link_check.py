@@ -78,7 +78,7 @@ def apdu_through(dev, link_args, label):
                                     "sim", *link_args[1:]], stdout=subprocess.PIPE,
                                    stderr=subprocess.DEVNULL, text=True)
             procs.append(sim)
-            pty = re.search(r"on (/dev/pts/\d+)", sim.stdout.readline()).group(1)
+            pty = re.search(r"on (/dev/(?:pts/\d+|ttys\d+))", sim.stdout.readline()).group(1)
             link_args = ["pm3:" + pty]
         card = subprocess.Popen([sys.executable, str(ROOT / "scripts" / "fe_nfc_link.py"),
                                  str(ROOT / "devices" / dev / "nfc.sock"), *link_args],
