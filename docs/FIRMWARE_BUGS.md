@@ -252,7 +252,12 @@ keeps its row, with the version that fixed it.
   loops that day it happened once in 431 dumps, against 3 times in 36 in turns with
   the clock as it was (`run --host-clock`). How often it comes is the host's state
   as much as the clock: five days later, the host cooler and half as fast, it was 2
-  or 3 times in about 500 dumps with either clock.
+  or 3 times in about 500 dumps with either clock. That day's finding: the emulator
+  itself made the firmware late, on any host. An access to a device that took its
+  model long (a block of the card: a millisecond) was one instruction and as much of
+  the machine's clock, and the timers that ran out in it came after it. With that out
+  of the clock it was 3 times in 994 dumps, against 7 times in 556 in turns without
+  (BRINGUP_LOG 189).
 - **How much it matters:** `furi_thread_flags_clear()` is the firmware's only way
   to clear a thread flag, and any flag set from an interrupt handler or another
   thread during it is lost the same way. Official 1.5.1 calls it in 19 places: the

@@ -92,6 +92,15 @@ So that time is taken out of the clock, as a virtual machine does not count stea
   cycle counter. It is the hook that QEMU has for its instruction counter
   (`AccelOpsClass.get_virtual_clock`, free without `-icount`; with `-icount` this is
   off).
+- Nor is the CPU's running what its thread does in the model of a device. An access to
+  a register is one instruction of the firmware's, and some take a model long: the write
+  that starts a DMA transfer moves the block before it returns, a block of the card in
+  about a millisecond. That was the machine's time, with the big lock held: every timer
+  that ran out in it came late by as much, one for each block of the card that the
+  firmware read, on a host with nothing else to do. What one access takes beyond 20 µs
+  is taken out (`OWN_ACCESS_NS`; QEMU says how long accesses took, `tcg_mmio_ns`, which
+  is patch 0019 of ours). The many short ones, a microsecond each, stay what an access
+  takes.
 - A CPU that is awake and whose thread does not run at all for 100 ms is not waiting
   for a core, and then the clock goes on: nothing may stand still for good.
 - What was taken out is in a saved state (with the cycle counter's), and a state that
@@ -109,24 +118,35 @@ So that time is taken out of the clock, as a virtual machine does not count stea
   host that is slower itself for a while (one that throttles) is slower for the
   emulated CPU, whose thread runs all the while: only a count of instructions has
   that out (`-icount`).
+- How late the main loop is with the timers can be counted: with `-machine
+  clock-meter=on` the clock notes, at every reading, how far it is past the first
+  timer that has yet to be run, and `qom-get /machine clock-late` has the timers by
+  how late they were run (JSON). On an idle host an idle Flipper's are 20 to 100 µs
+  late, the main loop waking up, and so are all of them while the firmware reads a
+  file or an NFC card (BRINGUP_LOG 189: before long device accesses were taken out,
+  4358 of them were 0.2 to 2 ms late in the one and 376 in the other).
 - `-machine host-clock=on` (`run --host-clock`) is the clock as it was, for comparing.
 - What it takes out on an idle host: half a percent of an idle Flipper's time with the
-  cable in, and 5 to 6 % while the firmware reads its card without a pause. The CPU's
-  thread waits there too, some 18 µs at a time: for the host's read of the card's image
-  (one a block, through QEMU's pool of threads) and for the big lock while the main
-  loop has it.
+  cable in, 5 % while it reads an NFC card or answers the CLI, and more than half
+  while the firmware reads its card without a pause: each block is one long access
+  (and the CPU's thread waits there too, some 18 µs at a time, for the host's read of
+  the card's image and for the big lock while the main loop has it). Reading the card
+  costs the machine no time that way, where a Flipper's block takes the time of its
+  bits on the wire: PLAN.md has what would give it that.
 - The machine says what it does: `qom-get /machine clock` in the monitor is the clock,
-  `clock-steal` what it has left out so far and `clock-wake` what wake-ups were given
-  of it, in microseconds. A clock that takes nothing out looks like one that does as
-  long as the host is idle, and one build of this did just that (BRINGUP_LOG 188).
+  `clock-steal` what it has left out so far, `clock-device` how much of that was for
+  long device accesses and `clock-wake` what wake-ups were given of it, in
+  microseconds. A clock that takes nothing out looks like one that does as long as
+  the host is idle, and one build of this did just that (BRINGUP_LOG 188).
   `scripts/clock_check.py` makes the host take time: a busy loop on one core, the
   emulator's threads beside it on that core or apart from it on the others, in turns,
-  and the firmware summing a file of its card.
-  Beside the loop the work is as long by the machine's clock as apart from it (0.95
-  to 1.0 times, where the host's clock has 2.15 to 2.4 times), what was taken is the
-  difference of the two clocks, an idle Flipper's clock goes with the host's and its
-  wake-ups are counted, a device that is paused, saved and loaded stands at the same
-  microsecond, and with `--host-clock` the work is twice as long by both clocks.
+  and the firmware summing a file of its card. Beside the loop the work is as long by
+  the machine's clock as apart from it (0.95 to 1.0 times, where the host's clock has
+  2.15 to 2.4 times), what was taken is the difference of the two clocks, an idle
+  Flipper's clock goes with the host's and its wake-ups are counted, the blocks of
+  the file are long device accesses and no timer is half a millisecond late for
+  them, a device that is paused, saved and loaded stands at the same microsecond,
+  and with `--host-clock` the work is twice as long by both clocks.
 
 Beside 32 busy loops on a host of 16 threads, in turns with `host-clock=on`, on
 2026-11-16 (the host hot, its turbo on, and without the 60 µs yet): the smoke test 26,
@@ -139,8 +159,10 @@ interrupt comes between two of its instructions) once in 431 against 3 times in 
 and 21 against 26 and 27; `rfid write` 12 of 12 with either; `ikey read` 24 of 24
 against 14 of 24; the NFC emulation check 72 of 75 against 70; and that `dump` 3 times
 in 466 against 2 in 456: no rarer with this clock that day, and as rare with the
-host's. What is left of it is not the CPU's thread waiting for a core (PLAN.md has
-what to try). Alone every check is as before.
+host's. What was left of it was not the CPU's thread waiting for a core. A good part
+was the long device accesses of the paragraph above: with them out of the clock, in
+turns beside 24 loops, that `dump` stood still 3 times in 994 against 7 times in 556.
+Alone every check is as before.
 
 **The cycle counter's own account (with `host-clock=on` only).** Before the machine's
 clock was the CPU's, the cycle counter alone took that time out, by the kernel's count

@@ -717,9 +717,11 @@ int64_t wb55_dwt_waited(WB55DwtState *s, int which, int64_t from, int64_t to,
 int64_t wb55_cpu_ran_ns(void);
 bool wb55_cpu_asleep(void);
 bool wb55_own_clock(void);
-void wb55_own_clock_init(void);
+void wb55_own_clock_init(bool meter);
 int64_t wb55_own_clock_steal(void);
 int64_t wb55_own_clock_woke(void);
+int64_t wb55_own_clock_device(void);
+char *wb55_own_clock_late(void);
 void wb55_own_clock_loaded(int64_t steal);
 /* The next read of CYCCNT returns its value at virtual time "when", as if
  * the CPU read it then: an ISR that times edges in software reads the

@@ -213,6 +213,7 @@ struct FlipperZeroState {
     uint32_t region;
     bool legacy_sleep;
     bool host_clock;             /* the clock counts what the host takes */
+    bool clock_meter;            /* how late timers are run: counted */
     int log_level;               /* the firmware's, to start with; -1: as is */
     bool usb_cable;              /* plugged in from the start */
     QemuInputHandlerState *input;
@@ -2538,7 +2539,7 @@ static void flipper_zero_init(MachineState *machine)
     uint64_t uid64;
 
     if (!s->host_clock) {
-        wb55_own_clock_init();
+        wb55_own_clock_init(s->clock_meter);
     }
     object_initialize_child(OBJECT(machine), "soc", &s->soc, TYPE_WB55_SOC);
     soc = DEVICE(&s->soc);
@@ -2923,6 +2924,30 @@ static void flipper_get_clock_steal(Object *obj, Visitor *v, const char *name,
     visit_type_int(v, name, &us, errp);
 }
 
+static void flipper_get_clock_device(Object *obj, Visitor *v,
+                                     const char *name, void *opaque,
+                                     Error **errp)
+{
+    int64_t us = wb55_own_clock_device() / SCALE_US;
+
+    visit_type_int(v, name, &us, errp);
+}
+
+static bool flipper_get_clock_meter(Object *obj, Error **errp)
+{
+    return FLIPPER_ZERO(obj)->clock_meter;
+}
+
+static void flipper_set_clock_meter(Object *obj, bool v, Error **errp)
+{
+    FLIPPER_ZERO(obj)->clock_meter = v;
+}
+
+static char *flipper_get_clock_late(Object *obj, Error **errp)
+{
+    return wb55_own_clock_late();
+}
+
 static void flipper_get_clock_wake(Object *obj, Visitor *v, const char *name,
                                    void *opaque, Error **errp)
 {
@@ -3052,6 +3077,22 @@ static void flipper_zero_instance_init(Object *obj)
         "host had the CPU's thread wait (to read; 0 with host-clock=on)");
     object_property_add(obj, "clock-wake", "int", flipper_get_clock_wake,
                         NULL, NULL, NULL);
+    object_property_add(obj, "clock-device", "int", flipper_get_clock_device,
+                        NULL, NULL, NULL);
+    object_property_set_description(obj, "clock-device",
+        "Microseconds that the machine's clock has left out for accesses to "
+        "devices that took their models long: what each took beyond 20 (to "
+        "read; in clock-steal too; 0 with host-clock=on)");
+    object_property_add_bool(obj, "clock-meter", flipper_get_clock_meter,
+                             flipper_set_clock_meter);
+    object_property_set_description(obj, "clock-meter",
+        "Count how late the main loop runs the machine's timers (clock-late "
+        "has it; not with host-clock=on)");
+    object_property_add_str(obj, "clock-late", flipper_get_clock_late, NULL);
+    object_property_set_description(obj, "clock-late",
+        "With clock-meter=on: how many timers were run late and by how many "
+        "microseconds in all, how many were set for a time that was past, "
+        "and the late ones by how late they were (JSON)");
     object_property_set_description(obj, "clock-wake",
         "Microseconds of the machine's clock that waking up took so far: "
         "of the CPU's thread getting going after an interrupt, up to 60 "

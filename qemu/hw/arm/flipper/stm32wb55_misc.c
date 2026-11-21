@@ -25,6 +25,7 @@
 #include "migration/vmstate.h"
 #include "system/cpu-timers.h"
 #include "accel/accel-cpu-ops.h"
+#include "exec/cputlb.h"
 #include "wb55.h"
 
 /* ------------------------------------------------------------------- RNG */
@@ -222,29 +223,61 @@ bool wb55_cpu_asleep(void)
  * thread's first run, OWN_WAKE_NS are the machine's time: all of it on an
  * idle host, and no more than that beside a busy one.
  *
+ * Nor is the CPU's running what its thread does in the model of a device.
+ * An access to a register is one instruction of the firmware's, and some
+ * take the model a millisecond: the write that starts a DMA transfer moves
+ * a block of the card's, 512 bytes there and 512 back, before it returns.
+ * With that counted, the firmware had done one instruction and a
+ * millisecond was gone: the timers that ran out in it came late by as much
+ * (one in every block that the firmware read, on a host with nothing else
+ * to do), and what the firmware had begun to time before the access was
+ * over when it looked.  So what one access takes beyond OWN_ACCESS_NS is
+ * taken out as well (QEMU says how long accesses took: tcg_mmio_ns, which
+ * is a patch of ours).
+ *
  * A CPU that is awake and whose thread does not run at all for
  * OWN_STILL_NS is not waiting for a core: the machine stands still some
  * other way (a CPU in lockup), and its clock goes on, for a watchdog.
  *
+ * How late the main loop comes to the machine's timers can be counted
+ * (the machine's clock-meter=on, read as clock-late): at every reading of
+ * the clock, how far it is past the first timer that has yet to be run.
+ * That is how the paragraph before the last was found.
+ *
  * This is the clock hook that QEMU has for its instruction counter
  * (AccelOpsClass.get_virtual_clock), which is free without -icount.
  */
+#define OWN_LOOK_NS   (20 * SCALE_US)
+#define OWN_STILL_NS  (100 * SCALE_MS)
+#define OWN_WAKE_NS   (60 * SCALE_US)
+#define OWN_ACCESS_NS (20 * SCALE_US)
+
+/* (the meter's: timers by how late they were run, up to so many us) */
+static const int own_late_us[] = { 10, 20, 50, 100, 200, 500, 1000, 2000,
+                                   5000, 20000 };
+#define OWN_LATE_N 10
+
 static struct {
     QemuSpin lock;
     bool on;
     void (*interrupt)(CPUState *cpu, int mask);   /* QEMU's own, kept */
     int64_t wake;                /* a wake-up: so much of it may still pass */
     int64_t woke;                /* ... and what wake-ups were given so far */
+    int64_t mmio;                /* tcg_mmio_ns at the last look */
+    int64_t device;              /* long device accesses: taken out so far */
     int64_t host;                /* QEMU's clock at the last look */
     int64_t ran;                 /* how long the CPU's thread had run, or -1 */
     int64_t still;               /* awake and not run at all: for how long */
     int64_t steal;               /* taken out so far */
     int64_t last;                /* the last time given */
+    bool meter;                  /* the timers' lateness is counted */
+    int64_t m_first;             /* the first timer's time, or -1 */
+    int64_t m_from;              /* ... from when on it is late */
+    int64_t m_late;              /* ... and how late it is by now */
+    int64_t m_ns;                /* how late timers were run, in all */
+    uint64_t m_past;             /* timers set for a time that was past */
+    uint64_t m_count[OWN_LATE_N + 1];
 } own;
-
-#define OWN_LOOK_NS  (20 * SCALE_US)
-#define OWN_STILL_NS (100 * SCALE_MS)
-#define OWN_WAKE_NS  (60 * SCALE_US)
 
 static void own_anew(int64_t host)
 {
@@ -252,6 +285,9 @@ static void own_anew(int64_t host)
     own.ran = -1;
     own.still = 0;
     own.wake = 0;
+    own.mmio = qatomic_read(&tcg_mmio_ns);
+    own.m_first = -1;
+    own.m_late = 0;
     own.last = INT64_MIN;
 }
 
@@ -271,12 +307,23 @@ static int64_t own_host(void)
 /* a look, with the lock held: what the CPU's thread has run since the last */
 static void own_look(CPUState *cpu, int64_t host)
 {
-    int64_t ran = wb55_cpu_ran_ns();
+    int64_t ran = wb55_cpu_ran_ns(), mmio = qatomic_read(&tcg_mmio_ns);
     int64_t passed = host - own.host, did = ran - own.ran;
 
     if (ran < 0) {
         return;
     }
+    if (own.ran >= 0) {
+        /* what it ran in devices' models, access by access, for long:
+         * that was awake, however this look finds the CPU.  (An access
+         * that the host broke in on took longer than the thread ran in
+         * it: no more is taken than the thread ran.) */
+        int64_t in = MIN(mmio - own.mmio, MAX(did, 0));
+
+        own.device += in;
+        own.steal += in;
+    }
+    own.mmio = mmio;
     if (own.ran < 0 || (qatomic_read(&cpu->halted) && !cpu_has_work(cpu))) {
         own.still = 0;                  /* asleep: that time is its own too */
     } else {
@@ -293,17 +340,70 @@ static void own_look(CPUState *cpu, int64_t host)
     own.ran = ran;
 }
 
+/*
+ * The meter.  The first timer of the main loop's list: the list is asked
+ * when that is due, and the clock that it asks in turn says 0 to this
+ * thread, so that the answer is the timer's own time (-1: there is none).
+ */
+static __thread bool own_asking;
+
+static int64_t own_first_timer(void)
+{
+    int64_t at;
+
+    own_asking = true;
+    at = timerlist_deadline_ns(main_loop_tlg.tl[QEMU_CLOCK_VIRTUAL]);
+    own_asking = false;
+    return at;
+}
+
+/* with the lock held: the first timer, and the clock as it is */
+static void own_meter(int64_t first, int64_t v)
+{
+    if (first != own.m_first) {         /* that one was run, or put off */
+        if (own.m_late > 0) {
+            int i = 0;
+
+            while (i < OWN_LATE_N && own.m_late >= own_late_us[i] * SCALE_US) {
+                i++;
+            }
+            own.m_count[i]++;
+            own.m_ns += own.m_late;
+        }
+        own.m_first = first;
+        own.m_late = 0;
+        own.m_from = first;
+        if (first >= 0 && v > first) {  /* set for a time that was past */
+            own.m_from = v;
+            own.m_past++;
+        }
+    }
+    if (first >= 0 && v > own.m_from) {
+        own.m_late = v - own.m_from;
+    }
+}
+
 static int64_t own_clock(void)
 {
-    int64_t host, v;
+    int64_t host, v, first = -1;
     CPUState *cpu = first_cpu;
 
+    if (own_asking) {
+        return 0;
+    }
+    if (own.meter) {                    /* (not with the lock held) */
+        first = own_first_timer();
+    }
     qemu_spin_lock(&own.lock);
     host = own_host();
     if (cpu && cpu->thread && host - own.host >= OWN_LOOK_NS) {
         own_look(cpu, host);
     }
-    v = MAX(host - own.steal, own.last);
+    v = host - own.steal;
+    if (own.meter) {
+        own_meter(first, v);
+    }
+    v = MAX(v, own.last);
     own.last = v;
     qemu_spin_unlock(&own.lock);
     return v;
@@ -333,8 +433,8 @@ bool wb55_own_clock(void)
     return own.on;
 }
 
-/* what waking up has been given of the clock (not in a saved state) */
-int64_t wb55_own_clock_woke(void)
+/* one of the clock's counts, read with its lock (0 with the host's clock) */
+static int64_t own_count(int64_t *count)
 {
     int64_t v;
 
@@ -342,23 +442,57 @@ int64_t wb55_own_clock_woke(void)
         return 0;
     }
     qemu_spin_lock(&own.lock);
-    v = own.woke;
+    v = *count;
     qemu_spin_unlock(&own.lock);
     return v;
+}
+
+/* what waking up has been given of the clock (not in a saved state) */
+int64_t wb55_own_clock_woke(void)
+{
+    return own_count(&own.woke);
+}
+
+/* what long device accesses took, which is in what was taken out */
+int64_t wb55_own_clock_device(void)
+{
+    return own_count(&own.device);
 }
 
 /* what has been taken out of the clock: for a saved state, and from one */
 int64_t wb55_own_clock_steal(void)
 {
-    int64_t v;
+    return own_count(&own.steal);
+}
 
-    if (!own.on) {
-        return 0;
+/* the meter's counts, as JSON (the caller's to free) */
+char *wb55_own_clock_late(void)
+{
+    GString *s = g_string_new("{");
+    uint64_t n = 0;
+
+    if (own.on) {
+        qemu_spin_lock(&own.lock);
     }
-    qemu_spin_lock(&own.lock);
-    v = own.steal;
-    qemu_spin_unlock(&own.lock);
-    return v;
+    for (int i = 0; i <= OWN_LATE_N; i++) {
+        n += own.m_count[i];
+    }
+    g_string_append_printf(s, "\"metered\": %s, \"late\": %" PRIu64
+                           ", \"us\": %" PRId64 ", \"set-late\": %" PRIu64
+                           ", \"up-to-us\": [", own.meter ? "true" : "false",
+                           n, own.m_ns / SCALE_US, own.m_past);
+    for (int i = 0; i < OWN_LATE_N; i++) {
+        g_string_append_printf(s, "%s%d", i ? ", " : "", own_late_us[i]);
+    }
+    g_string_append(s, "], \"count\": [");
+    for (int i = 0; i <= OWN_LATE_N; i++) {
+        g_string_append_printf(s, "%s%" PRIu64, i ? ", " : "", own.m_count[i]);
+    }
+    g_string_append(s, "]}");
+    if (own.on) {
+        qemu_spin_unlock(&own.lock);
+    }
+    return g_string_free(s, false);
 }
 
 void wb55_own_clock_loaded(int64_t steal)
@@ -372,7 +506,8 @@ void wb55_own_clock_loaded(int64_t steal)
     qemu_spin_unlock(&own.lock);
 }
 
-void wb55_own_clock_init(void)
+/* meter: the timers' lateness is counted too (a lock more at every reading) */
+void wb55_own_clock_init(bool meter)
 {
     AccelOpsClass *ops =
         ACCEL_OPS_CLASS(object_class_by_name(ACCEL_OPS_NAME("tcg")));
@@ -383,7 +518,10 @@ void wb55_own_clock_init(void)
     qemu_spin_init(&own.lock);
     own_anew(0);                        /* (the clock begins there) */
     own.on = true;
+    own.meter = meter;
     own.interrupt = ops->handle_interrupt;
+    tcg_mmio_free_ns = OWN_ACCESS_NS;
+    tcg_mmio_timed = true;
     ops->get_virtual_clock = own_clock;
     ops->handle_interrupt = own_handle_interrupt;
 }

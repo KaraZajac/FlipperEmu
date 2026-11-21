@@ -6146,6 +6146,84 @@ big lock, entry 92).
       passes, three times with the machine's clock and three with the
       host's.
 
+189. **One access to a device is one instruction.**
+    - Entry 188's guess was a timer whose interrupt the main loop
+      brings late. Tried first as a clock that does not go past the
+      first timer that the main loop has yet to run (the timer list
+      says when that is, asked with the clock's hook answering 0).
+      On an idle host an idle Flipper was at 93.9 % of the wall
+      clock's speed with it: the main loop's own waking up, 54 µs a
+      timer. With 60 µs allowed 99.3 %. But while the firmware summed
+      a file of its card the clock stood for 2.8 s of 9, and for 1.3
+      with 150 µs allowed: on a host with nothing else to do. And
+      the hunt of entry 188 beside 24 busy loops: the `dump` stopped
+      3 times in 272 with it, 2 times in 371 without. The firmware
+      runs on while the clock stands, and the interrupt is as late in
+      instructions as before. Out.
+    - What it had shown stayed, as a meter: at every reading of the
+      clock, how far it is past the first timer not yet run (the
+      machine's `clock-meter=on`, read as `clock-late`). An idle
+      Flipper on an idle host: a thousand timers a second, nearly all
+      of them 20 to 100 µs late, which is the main loop waking up. A
+      start and a file summed, 4390 blocks of the card: 2733 timers
+      0.5 to 1 ms late, 1439 of 0.2 to 0.5 ms, 475 of 1 to 2 ms: one
+      for every block. A start and eight dumps of an NFC card: 376
+      more than 0.2 ms late.
+    - Not timers set for a time that was past: 530 in that run, 0.09 s
+      in all. And not the big lock given back and forth between the
+      CPU's thread and the main loop: with a main loop that says that
+      it waits, and every other thread letting it have the lock first
+      (a trial in QEMU's `cpus.c`), 2.82 s of lateness for 3.00. Out.
+    - The CPU's thread ran all the while and the main loop had
+      nothing to do (5 % of a core). So each access to a device
+      timed (a trial in `cputlb.c`), the run with the file summed:
+      2.25 million of under a microsecond (0.48 s in all), 191
+      thousand of 1 to 5 µs (0.43 s), 12 thousand of 5 to 20 µs, and
+      then 3672 of 50 to 100 µs, 2248 of 0.3 to 1 ms (2.05 s) and
+      2327 of more than a millisecond (2.7 s). The long ones are the
+      write that starts a DMA transfer: the model moves the block
+      before the write returns, 512 bytes there and 512 back, each a
+      read and a write through the address space (`dma_run()`). One
+      instruction of the firmware's, a millisecond of the machine's
+      clock, the big lock held, and whatever ran out in it late.
+    - So it is not the machine's time: what one access takes beyond
+      20 µs is taken out of the clock (`OWN_ACCESS_NS`; QEMU says how
+      long accesses took, `tcg_mmio_ns`, patch 0019: two readings of
+      the host's clock an access). With it, on the idle host: the
+      file summed, 1 timer more than 0.2 ms late for the 4358; the
+      NFC dumps, none for the 376; a folder listed again and again
+      over the CLI, none for 204. With all of an access taken out the
+      figures are the same and the clock slower for nothing (86 to
+      91 % of the wall clock's speed in the CLI and the NFC dumps):
+      the many short ones are what an access takes.
+    - The hunt, in turns beside 24 busy loops, eight rounds: the
+      `dump` stopped 3 times in 994 with it, 7 times in 556 without.
+      Rarer by four, and not gone: beside busy loops the main loop
+      waits for a core as the CPU's thread does, and nothing takes
+      that out (PLAN).
+    - What it costs is the wall clock where the card is read: a
+      block's millisecond was the machine's time, and is none now.
+      The file summed takes 4.6 s of the machine's clock in 9.9 of
+      the host's (it was 9.3); the NFC dumps 95 % (97), the CLI 94 %
+      (95), idle 99.5 %. On a Flipper a block takes the time of its
+      bits on the wire, which this model has never had: the transfer
+      in slices, with the main loop between them, would give it
+      (PLAN).
+    - The clock check has it: with the meter on, the file summed
+      twice, 1254 blocks: 1.3 to 1.5 s of 3 in `clock-device`, and of
+      the timers run meanwhile none more than 0.5 ms late (fewer than
+      one for twenty blocks is what it asks; without this it is one
+      for nearly every block). 18 checks.
+    - Checks: all thirty on the official 1.5.1, four side by side:
+      1151 passes, none failed. The clock check (18), the smoke test
+      and the two NFC checks on the dev build, Momentum, Unleashed and
+      RogueMaster, side by side: all pass. The setup check has the
+      nineteenth patch: 50.
+    - Beside 32 busy loops, in turns with the host's clock: the
+      smoke test 28 and 28 of 28 against 28 and 27; `rfid write` to
+      a T5577 12 of 12 with either; `ikey read` 24 of 24 against 21;
+      the NFC emulation check 49 of 50 against 50.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

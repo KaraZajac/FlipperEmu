@@ -21,6 +21,14 @@ its own, and so is what a wake-up takes of the host's time, up to 60 us of
 each (`clock-wake`), with the firmware waking a thousand times a second
 while the USB cable is in.
 
+One access to a device is one instruction, however long the device's model
+takes over it: a block of the card is read in one, in about a millisecond.
+That is not the machine's time (`clock-device`), and the machine's timers
+are not late for it: the device counts how late the main loop runs each
+(`run -- -machine clock-meter=on`, read as `clock-late`), and of those that
+it ran while the firmware read the file, few were half a millisecond late
+(without this: one for nearly every block).
+
 A snapshot keeps what was taken out: a device that is paused, saved, stopped
 and loaded stands at the same microsecond, with the same count.  Last the
 device with `run --host-clock`: nothing is taken out, and the work beside
@@ -100,6 +108,12 @@ def largest(dev):
         found += [(int(size), f"{folder}/{name}")
                   for name, size in re.findall(r"\[F\]\s+(\S+)\s+(\d+)b", said)]
     return max(found)[1] if found else None
+
+
+def late(dev):
+    """The meter's counts (the machine's clock-late, with clock-meter=on)"""
+    return json.loads(json.loads(
+        dev.mon.cmd("qom-get /machine clock-late").strip()))
 
 
 def on_cores(pid, cores):
@@ -224,6 +238,27 @@ def own_checks(b, dev):
           "60 us of each, of some hundreds a second with the cable in",
           0.002 * host <= woke <= 0.07 * host, said)
     print(f"        ({said})", flush=True)
+
+    size = re.search(r"size: (\d+)b", dev.cli.run(f"storage stat {file}"))
+    blocks = 2 * times * int(size[1]) // 512 if size else 0
+    l0, d0, h0 = late(dev), dev.prop("clock-device"), time.monotonic()
+    dev.work(file, 2 * times)
+    host = time.monotonic() - h0
+    l1, device = late(dev), (dev.prop("clock-device") - d0) / 1e6
+    counts = [a - b for a, b in zip(l1["count"], l0["count"])]
+    over = sum(counts[l1["up-to-us"].index(500) + 1:])
+    said = (f"{blocks} blocks in {host:.2f} s of the host's, {device:.2f} s "
+            f"of them in long accesses to devices; timers run late, up to "
+            f"{l1['up-to-us']} us and more: {counts}")
+    check("a block of the card is one access to a device, which takes its "
+          "model long: that is not the machine's time (`clock-device`: a "
+          "fifth of the host's time for the file, or more)",
+          l1["metered"] and blocks and device >= 0.2 * host, said)
+    check("... and the machine's timers are not late for it: of those that "
+          "the main loop ran meanwhile, fewer than one for every twenty "
+          "blocks were more than 500 us late (`clock-late`)",
+          blocks and over <= blocks / 20, said)
+    print(f"        ({said})", flush=True)
     return file, times
 
 
@@ -271,10 +306,13 @@ def host_checks(b, file, times):
     b.fe("wait", "--timeout", b.timeout)
     dev = Device(b).open()
     try:
-        check("`host-clock` is on, and no wake-up is counted",
+        check("`host-clock` is on, and no wake-up and no device access is "
+              "counted",
               dev.prop("host-clock") == "true"
-              and dev.prop("clock-wake") == 0,
-              f"{dev.prop('host-clock')} {dev.prop('clock-wake')}")
+              and dev.prop("clock-wake") == 0
+              and dev.prop("clock-device") == 0,
+              f"{dev.prop('host-clock')} {dev.prop('clock-wake')} "
+              f"{dev.prop('clock-device')}")
         sums, machine, host, beside, said = summed(turns(dev, file, times))
         check("the host's clock: beside the busy loop the work lasts longer "
               "by the machine's clock as well (1.7 times, or more), and "
@@ -306,7 +344,8 @@ def main():
     b = Bench(f"clock-{os.getpid()}", args.firmware, args.timeout)
     dev = Device(b)
     try:
-        if not check("the device starts", b.start(first=True),
+        if not check("the device starts", b.start(
+                first=True, more=["--", "-machine", "clock-meter=on"]),
                      b.uart_text()[-800:]):
             return 1
         b.fe("wait", "--timeout", args.timeout)
