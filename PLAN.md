@@ -300,8 +300,15 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       checked by the forks' "Write to Initial Card" (32 sessions, 128 blocks)
       and a read of the card after it. nfc_check 25 / 27 / 28 / 30 / 30
       (BRINGUP_LOG 182).
-      Next: MIFARE DESFire's authentication (no firmware here asks for it:
-      first what would)
+      MIFARE DESFire's authentication, and a key change on a Plus: looked for
+      what would ask for either (2026-11-21), and nothing does. The official
+      firmware's and the forks' DESFire pollers read what a card gives
+      without a key ("Auth required" where a file needs one, which the card
+      model answers so); Metroflip's DESFire cards (Opal, Clipper, myki, ITSO,
+      nol) are read the same way, and Seader leaves the keys to a SAM on the
+      header. The forks' write to a Plus writes its sectors' blocks with each
+      sector's key and changes none. A model of either would have nothing to
+      be checked against
 - ☑ 125 kHz RFID read: COMP1 → TIM2 TI4 capture, a virtual tag in the reader's field
       (ASK/FSK/PSK, field noise), encoders ported from the firmware (`fe_rfid.py`, checked
       cycle for cycle against its emulation by `rfid_check.py`); app Read and `rfid read`
