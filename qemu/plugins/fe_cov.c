@@ -70,6 +70,13 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <fcntl.h>
+#ifndef SOCK_CLOEXEC            /* macOS: no flag; FD_CLOEXEC after socket() */
+#define SOCK_CLOEXEC 0
+#define FE_SET_CLOEXEC(fd) fcntl((fd), F_SETFD, FD_CLOEXEC)
+#else
+#define FE_SET_CLOEXEC(fd) 0
+#endif
 #include <glib.h>
 
 #include <qemu-plugin.h>
@@ -508,6 +515,9 @@ static bool listen_on(const char *path)
     strcpy(sa.sun_path, path);
     unlink(path);
     listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (listener >= 0) {
+        FE_SET_CLOEXEC(listener);
+    }
     if (listener < 0 || bind(listener, (struct sockaddr *)&sa,
                              sizeof(sa)) < 0 || listen(listener, 4) < 0) {
         fprintf(stderr, "fe_cov: sock=%s: %s\n", path, g_strerror(errno));

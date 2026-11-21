@@ -87,10 +87,11 @@ def cli_session(b, folder):
     os.close(slave)
     out = b""
 
-    def pump(until, seconds):
+    def pump(until, seconds, exit=False):
         nonlocal out
         end = time.time() + seconds
-        while time.time() < end and (until is None or until not in out):
+        while time.time() < end and (until is None or until not in out) \
+                and not (exit and p.poll() is not None):
             ready, _, _ = select.select([master], [], [], 0.2)
             if ready:
                 try:
@@ -106,8 +107,11 @@ def cli_session(b, folder):
         other = b.fe("cli", "uptime", timeout=60)
         pump(None, 0.5)
         os.write(master, b"\x1d")               # Ctrl-]: the way out of it
+        # read on while it leaves: miniterm puts its terminal back with
+        # TCSAFLUSH, and on macOS that waits until what it wrote last is read
+        pump(None, 15, exit=True)
         try:
-            p.wait(15)
+            p.wait(1)
         except subprocess.TimeoutExpired:
             pass
     finally:

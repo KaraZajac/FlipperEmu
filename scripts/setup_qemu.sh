@@ -13,6 +13,17 @@
 # build/plugins.
 set -euo pipefail
 
+# macOS: the GNU tools this script uses (sha256sum, sed -i, patch's
+# --no-backup-if-mismatch) from Homebrew's gnubin folders, and Homebrew's
+# pkg-config ahead of any other (Anaconda's finds its own glib).
+if [[ "$(uname -s)" == Darwin ]]; then
+    for g in coreutils gnu-sed gpatch; do
+        export PATH="/opt/homebrew/opt/$g/libexec/gnubin:$PATH"
+    done
+    export PATH="/opt/homebrew/bin:$PATH"
+    export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:/opt/homebrew/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+fi
+
 QEMU_VERSION="${QEMU_VERSION:-11.1.3}"
 QEMU_SHA256="5a8289c7940dc77d3873c81a6c29ba3afe1446fc9d36e77fa1658cdbecb84b22"
 # QEMU release signing key (Michael Roth), used if gpg is available.
@@ -51,9 +62,16 @@ build_plugins() {
             echo ">> building $so"
             mkdir -p "$out"
             # shellcheck disable=SC2046
-            "${CC:-cc}" -shared -fPIC -O2 -Wall $(pkg-config --cflags glib-2.0) \
-                -I "$SRC/include/plugins" -o "$so.new" "$src"
-            mv "$so.new" "$so"
+            local extra=()
+            [[ "$(uname -s)" == Darwin ]] && extra=(-undefined dynamic_lookup)
+            # shellcheck disable=SC2046
+            if "${CC:-cc}" -shared -fPIC -O2 -Wall ${extra[@]+"${extra[@]}"} \
+                $(pkg-config --cflags glib-2.0) \
+                -I "$SRC/include/plugins" -o "$so.new" "$src"; then
+                mv "$so.new" "$so"
+            else
+                echo ">> (could not build $so: --coverage will not work)" >&2
+            fi
         fi
     done
 }
@@ -153,9 +171,14 @@ grep -q "source flipper/Kconfig" "$SRC/hw/arm/Kconfig" ||
 
 if [[ ! -f "$BUILD/build.ninja" ]]; then
     echo ">> configuring"
+    if [[ "$(uname -s)" == Darwin ]]; then
+        ui=(--enable-cocoa --enable-coreaudio --disable-gtk)
+    else
+        ui=(--enable-gtk)
+    fi
     (cd "$BUILD" && "$SRC/configure" \
         --target-list=arm-softmmu \
-        --enable-gtk \
+        "${ui[@]}" \
         --enable-fdt=internal \
         --enable-trace-backends=log \
         --disable-docs \

@@ -673,7 +673,7 @@ def nfc_pm3_check(mon: Monitor, devdir: pathlib.Path):
                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     card = None
     try:
-        pty = re.search(r"on (/dev/pts/\d+)", sim.stdout.readline()).group(1)
+        pty = re.search(r"on (/dev/(?:pts/\d+|ttys\d+))", sim.stdout.readline()).group(1)
         card = subprocess.Popen([sys.executable, str(ROOT / "scripts" / "fe_nfc_link.py"),
                                  str(devdir / "nfc.sock"), "pm3:" + pty],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
