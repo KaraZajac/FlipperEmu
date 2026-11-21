@@ -6390,6 +6390,46 @@ big lock, entry 92).
       and the dev build is a debug build, beside three others). Alone
       27 of 27, twice. The setup check: 53.
 
+193. **A block ends where a device access was not its last instruction.**
+    - Entry 192 left two items that are no part of the card's: 27 of
+      300 looks in `cpu_io_recompile()`, and the TLB flushed at every
+      change of thread. Since QEMU 8.2 a device access has to be the
+      last instruction of its translated block; where it is not, the
+      block is left, the state restored up to the access, and the
+      access run in a block of its own. The block stays as it is, so
+      that happens every time it comes by, and the firmware polls its
+      devices in loops (the SPI's status between the bytes of the
+      card's protocol, a timer's count).
+    - What each could give, measured first with two builds for that
+      alone: one where no device access recompiles (can_do_io always
+      on, which loses what it is for) and one that never flushes the
+      TLB at an MPU write (wrong). In turns with the build as it was:
+      ten sums of a file of the card 21 % and 17 % less of the host's
+      time; twenty NFC dumps 2 % and 0.5 % (the card's protocol paces
+      those, in the machine's time).
+    - A slip on the way: the sources were put back with `cp -p`, which
+      kept their old times, ninja did not compile them again, and the
+      build in place was the measuring one still. Caught by comparing
+      it with the build kept aside: 22 bytes apart after touching the
+      files and building again (the build id and two of the debug
+      information), the code the same.
+    - QEMU patch 0022: `cpu_io_recompile()` keeps the place, a guest
+      address, and has the block translated again; `translator_loop()`
+      ends a block after an instruction at a kept place, so the access
+      is its block's last. A table of 64K slots, one place to each: a
+      place that another one takes is learned again when it comes by.
+      Ending a block early is always allowed.
+    - In turns with the build before: ten sums of a file a sixth less
+      of the host's time (the middle of three runs 9.2, 8.8 and 8.3 s
+      against 10.4, 11.2 and 10.1), twenty NFC dumps 1.6 % less, and
+      `cpu_io_recompile()` gone from the profile. What is left of the
+      two is the TLB (PLAN).
+    - Checks: all thirty on the official 1.5.1, four side by side:
+      1159 passes, none failed. The clock check, the smoke test and
+      the two NFC checks on the dev build, Momentum, Unleashed and
+      RogueMaster, side by side: all pass. `fw23_lost_flag.py` and its
+      control: as they say. The setup check: 55.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

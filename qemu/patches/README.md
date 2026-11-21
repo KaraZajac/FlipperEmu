@@ -37,10 +37,10 @@ a device takes its model beyond 20 µs, and reads how long accesses took from
 `tcg_mmio_ns`); without it it does not build.
 0020 is needed by the machine since 2026-11-21 too (the CPU's thread runs the machine's
 due timers through its two hooks, `-machine cpu-timers`); without it it does not build.
-0021 is a fix that the machine runs without: reading the card then costs the host a sixth
-more of its time.
+0021 and 0022 are fixes that the machine runs without: reading the card then costs the
+host a sixth more of its time for each.
 A source tree that was set up before a patch came (0006 to 0009: 2026-11-11; 0010 to
-0013: 2026-11-12; 0014 and 0015: 2026-11-14; 0016 to 0018: 2026-11-15; 0019 to 0021:
+0013: 2026-11-12; 0014 and 0015: 2026-11-14; 0016 to 0018: 2026-11-15; 0019 to 0022:
 2026-11-21) gets it from one more run of that script.
 
 How the script finds out what a tree has: it takes the patches out of a copy of the
@@ -63,7 +63,7 @@ tarball beside it, applies every patch and builds, about 6 min).
 from the tarball; nothing is built): a new tree, a second and a third run, a tree from
 before each patch, a tree that lacks one patch, the damaged tree, a file that is not
 this QEMU's, and last that the tree here has every patch and nothing else in those
-files. 53 checks in about twenty seconds. A patch that is added to this folder is in
+files. 55 checks in about thirty seconds. A patch that is added to this folder is in
 them without a change to the check.
 
 | patch | QEMU file | bug |
@@ -89,6 +89,7 @@ them without a change to the check.
 | 0019 | `accel/tcg/cputlb.c`, `include/exec/cputlb.h` | nothing said how long a vCPU is in the model of a device: one access is one instruction of the guest's, and some take a model a millisecond (a write that starts a DMA transfer of a block, moved before it returns). With the virtual clock the host's, that is the guest's time, and timers that ran out in it are late. With `tcg_mmio_timed` set, `tcg_mmio_ns` is what every access under the big lock took beyond `tcg_mmio_free_ns`: for a machine that keeps a clock of the CPU's own running, to leave out. Nothing is timed for a machine that does not set it |
 | 0020 | `accel/tcg/cputlb.c`, `include/exec/cputlb.h`, `accel/tcg/tcg-accel-ops-mttcg.c`, `accel/tcg/tcg-accel-ops-rr.c` | without -icount the virtual clock's timers are the main loop's alone, and a main loop that the host keeps waiting runs them late while the vCPU runs on. Two hooks for a machine that runs them on the vCPU's thread: `tcg_mmio_before`, before every device access under the big lock (the access the last instruction of its block), and `tcg_cpu_exit_hook`, where a vCPU's thread has left cpu_exec, with the big lock (a machine's signal to that thread with an exit request gets it there). Nothing is called for a machine that does not set them |
 | 0021 | `hw/sd/sd.c` | the card asked `blk_is_inserted()` for every byte it moved and every command, and `ssi-sd` asked again through `sdbus_get_inserted()` for every byte; that is a co_wrapper, which outside a coroutine makes one and polls it to its end. The card keeps the answer: asked when it is realized, on every change of the medium (its `change_media_cb`) and before a state is loaded |
+| 0022 | `accel/tcg/translate-all.c`, `accel/tcg/translator.c`, `accel/tcg/internal-common.h` | a device access that was not the last instruction of its block had `cpu_io_recompile()` leave the block and run the access alone, every time the block came by (a guest polling a device in a loop paid it each time round). The place is kept and the block translated again; a block ends after an instruction at a kept place, so the access is its last |
 
 **Licence:** these patches modify QEMU's own source files, which are GPL-2.0-or-later,
 so the patches are GPL-2.0-or-later too, unlike the rest of this repository (BSD-3-Clause).

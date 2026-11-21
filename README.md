@@ -970,7 +970,7 @@ scripts/enclave_check.py -f FIRMWARE     # and the enclave through the firmware 
 
 And for the setup itself, `scripts/setup_check.py`: what `scripts/setup_qemu.sh` makes
 of a source tree that has all, some or none of the patches in `qemu/patches`, and
-whether the tree here has them all (53 checks in about twenty seconds; it builds nothing
+whether the tree here has them all (55 checks in about thirty seconds; it builds nothing
 and starts no emulator). A tree with a `.rej` file in it is one that the script, as it
 was until 2026-11-11, patched twice: the script says so now, and how to start over.
 After an upgrade of the system's Python (3.14 to 3.15, say), the build's meson stops

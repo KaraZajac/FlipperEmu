@@ -1,0 +1,124 @@
+From: FlipperEmu
+Subject: [PATCH] accel/tcg: a block ends where a device access was not its last instruction
+
+A device access has to be the last instruction of its translation block
+(can_do_io).  Where it is not, io_prepare() calls cpu_io_recompile(),
+which finds the block, restores the state up to the access, leaves the
+block and runs the access in a block of its own; and the block stays as
+it is, so the same happens every time it comes by.  A guest that polls a
+device in a loop (an SPI's status, a timer's count) pays for it each time
+round: on the Flipper's machine a tenth of the vCPU thread's time while
+the firmware read a file of its SD card went there.
+
+Keep the place (a table of guest addresses, one to a slot), and have the
+block translated again: translator_loop() ends a block after an
+instruction at a kept place, so the access is its block's last and needs
+no recompile.  Ending a block early is always allowed; a place that
+another one takes in the table is learned again the next time it comes
+by.
+
+On the Flipper's machine, in turns with the build before: ten sums of a
+file of its card a sixth less of the host's time (the middle of three
+runs: 9.2, 8.8 and 8.3 s against 10.4, 11.2 and 10.1).
+
+Signed-off-by: FlipperEmu
+---
+--- a/accel/tcg/internal-common.h
++++ b/accel/tcg/internal-common.h
+@@ -138,6 +138,14 @@
+ #endif /* CONFIG_USER_ONLY */
+ 
+ void tb_phys_invalidate(TranslationBlock *tb, tb_page_addr_t page_addr);
++
++/*
++ * Places of device accesses that were not the last instruction of their
++ * block (cpu_io_recompile()): a block translated with one in it ends after
++ * it.  tb_io_hint_add() is true for a place that was not known.
++ */
++bool tb_io_hint(vaddr pc);
++bool tb_io_hint_add(vaddr pc);
+ void tb_set_jmp_target(TranslationBlock *tb, int n, uintptr_t addr);
+ 
+ void tcg_get_stats(AccelState *accel, GString *buf);
+--- a/accel/tcg/translate-all.c
++++ b/accel/tcg/translate-all.c
+@@ -586,6 +586,14 @@
+     cpu_restore_state_from_tb(cpu, tb, retaddr);
+ 
+     /*
++     * Keep the place, and have the block translated again: it ends with
++     * this access then (translator_loop()), and the next time round needs
++     * no recompile.  (A block that ends there already did not come here.)
++     */
++    tb_io_hint_add(cc->get_pc(cpu));
++    tb_phys_invalidate(tb, -1);
++
++    /*
+      * Some guests must re-execute the branch when re-executing a delay
+      * slot instruction.  When this is the case, adjust icount and N
+      * to account for the re-execution of the branch.
+--- a/accel/tcg/translator.c
++++ b/accel/tcg/translator.c
+@@ -119,6 +119,40 @@
+     return translator_is_same_page(db, dest);
+ }
+ 
++/*
++ * The places where a device access was not the last instruction of its
++ * block.  io_prepare() then has the block left and the access run in one of
++ * its own (cpu_io_recompile()), each time that it comes by, which in a guest
++ * that polls a device in a loop is each time round.  Once is enough: the
++ * place is kept, the block translated again, and a block with that place in
++ * it ends after it.  A table with one place to each slot: a place that
++ * another one takes is learned again when it comes by again.
++ */
++#define TB_IO_HINT_BITS 16
++static vaddr tb_io_hints[1 << TB_IO_HINT_BITS];     /* the place + 1; 0 none */
++
++static inline vaddr *tb_io_hint_slot(vaddr pc)
++{
++    return &tb_io_hints[((pc >> 1) ^ (pc >> (TB_IO_HINT_BITS + 1))) &
++                        ((1 << TB_IO_HINT_BITS) - 1)];
++}
++
++bool tb_io_hint(vaddr pc)
++{
++    return qatomic_read(tb_io_hint_slot(pc)) == pc + 1;
++}
++
++bool tb_io_hint_add(vaddr pc)
++{
++    vaddr *slot = tb_io_hint_slot(pc);
++
++    if (qatomic_read(slot) == pc + 1) {
++        return false;
++    }
++    qatomic_set(slot, pc + 1);
++    return true;
++}
++
+ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
+                      vaddr pc, void *host_pc, const TranslatorOps *ops,
+                      DisasContextBase *db, TCGType addr_type)
+@@ -157,6 +191,8 @@
+     db->plugin_enabled = plugin_enabled;
+ 
+     while (true) {
++        vaddr insn_pc = db->pc_next;
++
+         *max_insns = ++db->num_insns;
+         ops->insn_start(db, cpu);
+         db->insn_start = tcg_last_op();
+@@ -195,6 +231,12 @@
+             break;
+         }
+ 
++        /* A device access was here, not the last instruction: now it is. */
++        if (tb_io_hint(insn_pc)) {
++            db->is_jmp = DISAS_TOO_MANY;
++            break;
++        }
++
+         /* Stop translation if the output buffer is full,
+            or we have executed all of the allowed instructions.  */
+         if (tcg_op_buf_full() || db->num_insns >= db->max_insns) {
