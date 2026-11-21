@@ -6224,6 +6224,36 @@ big lock, entry 92).
       a T5577 12 of 12 with either; `ikey read` 24 of 24 against 21;
       the NFC emulation check 49 of 50 against 50.
 
+190. **A DMA transfer in slices: tried, and out.**
+    - Entry 189 left the card's blocks costing the machine no time:
+      a file summed was 4.6 s of the machine's clock in 9.9 of the
+      host's. The thought was a transfer in slices, 64 beats in the
+      access that starts it and the rest from a timer for now, 64 at
+      a time, with the main loop's other timers between two slices and
+      the firmware asleep until the transfer's interrupt, the clock
+      going with the host's as it does for a CPU that sleeps.
+    - The file summed with it: 6.5 s of the machine's clock in 13.0
+      of the host's (50 % for the 46), 6.5 s taken out and only 0.6 of
+      them as long accesses; the host's time up by a third, for
+      sixteen turns of the main loop a block. Timers as punctual as
+      without. By those figures the firmware does not sleep through
+      so short a wait: the CPU was awake and its thread not running,
+      for as long as the slices took, which is the big lock that a
+      slice holds (not looked at further: the firmware's idle thread
+      turning, most likely). Out again.
+    - What is left is to make a block cost the host less. 300 looks
+      at the stack of the CPU's thread while the firmware summed the
+      file: 115 in `dma_run()`. Of those, 84 in the address space's
+      write for a beat, which translates the address each time; 55 in
+      the SPI's transfer and the card's behind it; 23 in
+      `blk_is_inserted()`, which QEMU's card model asks for every
+      byte. 8 more waiting for the read of the card's image from
+      QEMU's pool of threads, one a block. And 23 in
+      `cpu_io_recompile()`: a translated block is left at every
+      device access that is not its last instruction, found again and
+      the access run alone, every time it comes by (QEMU since 8.2).
+      In PLAN.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
