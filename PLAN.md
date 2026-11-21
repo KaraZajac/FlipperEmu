@@ -479,8 +479,18 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         with a radio stack refused with what does it here; `examples/hello`;
         `docs/DEVELOPING.md`; `scripts/ufbt_check.py` (BRINGUP_LOG 78), which has a
         stand-in `fbt` for what the launcher hands to a tree's own
-  - ☐ `fbt` in a firmware's tree, tried: build, `run -f` the `.elf`, `flash_usb`,
-        `launch APPSRC=`; ufbt with Momentum's and Unleashed's SDK
+  - ☑ `fbt` in a firmware's tree, tried (2026-11-20, a Momentum tree, `mntm-dev`,
+        on macOS): `./fbt` builds; `run -f build/f7-firmware-C/firmware.elf` boots it
+        with its card made from what fbt staged for it (`build/…/resources`, which
+        `run` now takes as it takes a release's resources archive); `fbt launch
+        APPSRC=` builds an example, sends it and starts it (16 s); `fbt flash_usb`
+        sends its package and the updater installs it (32 s), with the app that runs
+        closed first: the firmware starts no update while one does, and
+        selfupdate.py stops at an app that takes no request to close ("has to be
+        closed manually"); ufbt with that tree's SDK (`ufbt update --local=…sdk….zip
+        --hw-target=f7`): `create`, a build for API 87.1, `launch`.
+        `scripts/ufbt_check.py` checks the app closed before `fbt flash_usb`
+    - ☐ ufbt with Unleashed's SDK
   - ☑ `./flipperemu update PKG` (2026-11-10): an update package sent to a running
         device by the launcher itself, file by file through the CLI and then `update
         install`, without the radio stage; waited for on the USB serial port, with the
@@ -519,7 +529,14 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         server's archive of the apps' debug ELFs beside it; `gdb` finds the ELF beside
         the package the device was flashed from, and has the firmware's script look in
         both folders, the stock apps' and what was built (2026-11-10, BRINGUP_LOG 91)
-  - ☐ gdb with a firmware tree's ELF and its `.extapps`
+  - ☑ gdb with a firmware tree's ELF and its `.extapps` (2026-11-20, the same
+        Momentum tree): `gdb` in the tree finds `build/f7-firmware-C/firmware.elf`
+        by what the flash holds, with source lines for its own services, and has
+        the tree's `flipperapps.py` look in its `.extapps`; a breakpoint in a
+        running app (Snake 2.0's draw callback) is hit, with the app's debug ELF
+        loaded where the loader put it and a backtrace into the GUI service. Its
+        default build is a release one (`f7-firmware-C`, with debug info), not
+        the `-D` that DEVELOPING.md names for the official tree
   - ☑ gdb from VS Code (2026-11-11): `gdb --vscode` writes a debug configuration
         for the Cortex-Debug extension into `.vscode/launch.json` of the app's folder
         (a file that is there keeps all else, ufbt's comments too), with
