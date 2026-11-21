@@ -86,6 +86,9 @@ wrong PIN refused and the right one paired, the firmware's services and their va
 a battery level as a notification, the phone app's RPC session through the serial
 service, the ends of a connection, one central at a time on the link, a snapshot saved
 with one) passes on the same five.
+`scripts/clock_check.py` (the machine's clock, which is the emulated CPU's own time:
+the same work as long by it beside a busy loop on the emulator's core as apart from
+one) passes on the same five.
 `scripts/ufbt_check.py` (ufbt 0.2.6 building `examples/hello`, launching it there, and
 `ufbt flash_usb`) and `scripts/gdb_check.py` (gdb with the firmware's symbols, that
 app's and a stock app's, and its debug configuration for VS Code used the way that
@@ -575,6 +578,22 @@ passed straight to QEMU, e.g. `-- -icount shift=4,align=on` for a clock that cou
 the emulated CPU's instructions (16 ns each) and not the host's time, or
 `-- -d in_asm,cpu -D trace.log`. `FLIPPEREMU_QEMU_ARGS` in the environment does the
 same for every emulator that is started, a check's too.
+
+The Flipper's clock is the emulated CPU's own time. While a busy computer has the
+emulator's CPU thread waiting for a core, the clock of the machine does not go on: the
+firmware's timers do not run out behind its back, and what it times with its own waits
+is as long as on a Flipper. Beside other work the Flipper is slower against the wall
+clock for that (a script's time limits are the wall clock's), and its calendar stays
+on the computer's clock. On a computer with nothing else to do it keeps up with the
+wall clock to half a percent while it idles (a wake-up may take 60 µs of the machine's
+time, which is all it takes there), and falls 5 % behind while it reads its card
+without a pause. `run --host-clock` is the clock as it was before, which went on in
+such waits, for comparing. In the monitor `qom-get /machine clock` reads the clock,
+`clock-steal` what it has left out and `clock-wake` what wake-ups were given, in
+microseconds. `scripts/clock_check.py FIRMWARE` checks it with a busy loop on the
+emulator's core (16 checks on each of the five firmwares, in a minute or two;
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) has how it counts and what it does not
+take out).
 
 ### The firmware log
 
@@ -3352,7 +3371,9 @@ The first `-serial` is USART1 (the firmware's log, pins 13 and 14), a second one
 LPUART1 (pins 15 and 16).
 
 Machine options: `name=` (OTP device name, ≤8 chars), `lcd-scale=`, `region=` (OTP
-region), `legacy-sleep=on|off` (default off: STOP2), `nvram=`, `usb-serial=` (chardev id for the USB port;
+region), `legacy-sleep=on|off` (default off: STOP2), `host-clock=on|off` (default off: the
+machine's clock is the CPU's own time; on: the host's, which goes on while the CPU's
+thread waits for a core), `nvram=`, `usb-serial=` (chardev id for the USB port;
 plugs the cable in), `audiodev=` (the speaker's `-audiodev` id). `-global
 stm32wb55-usb.debug=on` traces the USB host.
 

@@ -894,7 +894,12 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           the passes, and the two that fail are the cards that a program on
           the host plays over the NFC link. Not the default: one run, a start
           twice as long alone, and the link under it not understood
-          (BRINGUP_LOG 183)
+          (BRINGUP_LOG 183).
+          With the machine's clock the CPU's own time (BRINGUP_LOG 188): 26,
+          27 and 26 on 2026-11-16, 28 and 21 on the 21st (27 and 28 without
+          the 60 µs for a wake-up). The 21 is an NFC shell that stands still
+          in `mfu info` (FW-23 by its looks) and the firmware's end by FW-07
+          after it: what is left to do here is in the last items below
     - ☑ What the firmware times with its waits, on a busy host (2026-11-15):
           the cycle counter does not count the time that the host has the
           emulated CPU's thread waiting for a core (the kernel's count of it
@@ -914,7 +919,7 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           loops: 27, 28, 21, 28, 21 of 28, both receptions, the T5577's write
           and the 1-Wire read in all five; the two of 21 are the firmware's
           crash (FW-07) and what comes after it (BRINGUP_LOG 185)
-    - ☐ An NFC `dump` of the shell that never comes back, beside 24 busy loops
+    - ☑ An NFC `dump` of the shell that never comes back, beside 24 busy loops
           about one in forty (11 in 466 dumps of a MIFARE Classic 1K). Found:
           it is the firmware's (FW-23). `furi_thread_flags_clear()` reads the
           thread's flags and writes them back in two calls, and the flag that
@@ -927,9 +932,56 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           run while the host has the CPU's thread off its core: not the
           cycle counter alone (BRINGUP_LOG 184) but every timer. That is
           QEMU's `-icount` done by the host's count of the thread's running;
-          `-icount` itself was not it (BRINGUP_LOG 183). Not begun. The smoke
-          test's steps after such a shell open and close the port on it, which
-          ends the firmware by FW-07: its two runs of 21 in five
+          `-icount` itself was not it (BRINGUP_LOG 183). Done, the next
+          item: on 2026-11-16 once in 431 dumps with it, against 3 times in
+          36 in turns without. (Five days later, the host cooler and slower:
+          2 or 3 in 500 with either clock. What is left is in the item after
+          the next.) The smoke test's steps after such a shell
+          opened and closed the port on it, which ends the firmware by FW-07
+          (its two runs of 21 in five): they leave the shell first now
+          (BRINGUP_LOG 186)
+    - ☑ The machine's clock is the CPU's own time (2026-11-21): QEMU's
+          virtual clock, and so every timer of the machine, leaves out the
+          time that the host has the CPU's thread off its core while the CPU
+          is awake (the hook of `-icount`'s clock, the host's count of the
+          thread's running, a look every 20 µs at most). Time that the CPU
+          sleeps counts, and 60 µs of each wake-up (an idle Flipper with the
+          cable in wakes a thousand times a second: 99.4 % of the wall
+          clock's speed on an idle host, 95 to 97 without those). The
+          calendar stays on the host's clock, what was left out is in a
+          saved state, `run --host-clock` is the clock as it was, and the
+          machine says what it left out and gave (`qom-get /machine
+          clock-steal`, `clock-wake`). `scripts/clock_check.py` makes the
+          host take time and looks: 16 checks. Beside 32 busy loops, in
+          turns with the host's clock: on the 16th the smoke test 26, 27 and
+          26 of 28 against 16, 20 and 20, `rfid write` to a T5577 18 of 18
+          against 15, `ikey read` 36 of 36 against 31; on the 21st, the host
+          at half the speed and cooler, 28 and 21 against 26 and 27, 12 of
+          12 with either, 24 of 24 against 14, and the NFC emulation check
+          72 of 75 against 70. Alone every check as before (BRINGUP_LOG 188,
+          which has the build of it that took nothing out, too)
+    - ☐ What that clock does not take out. A timer is the main loop's to
+          run, and a main loop that the host holds up is late with it while
+          the CPU runs on (`-icount` waits for it; nothing here does). The
+          `dump` that FW-23 stops still comes once in two hundred beside 24
+          loops, with any clock on a cool host (2026-11-21), and a guess is
+          the block timer's interrupt brought late, with the frame going out
+          by then. To try: a clock that does not go past the first timer
+          that the main loop has yet to run (its time is
+          `timerlist_deadline_ns()` of the main loop's list, asked with the
+          hook answering 0), the lateness taken out like the rest; in turns
+          with the clock as it is, beside the loops, and kept only if that
+          shows. A host that is slower itself is slower for the emulated
+          CPU: this one is by a factor of 2 to 2.5 when its turbo is off,
+          for half a minute when it is hot or for a day by its power
+          profile. And the checks' own limits are the wall clock's: beside
+          16 loops the RFID check's `write` (40 s) and `read` (12 s) run out
+          now and then with either clock
+    - ☐ The card's image is read a block at a time through QEMU's pool of
+          threads, and the CPU's thread waits for each (4430 times while the
+          firmware summed 2.2 MB, with 15000 waits for the main loop's lock
+          beside them: 5 to 6 % of that time, on an idle host). Not in the
+          machine's clock, but in the host's time for anything on the card
     - ☐ The fuzz check's step that looks at which inputs were kept fails now
           and then when all checks run side by side
     - ☐ Reading an emulated ISO15693 card, alone: a read with five to seven

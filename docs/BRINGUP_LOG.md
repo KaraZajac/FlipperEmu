@@ -5986,6 +5986,166 @@ big lock, entry 92).
       Unleashed and Momentum. FreeRTOS 10.5.1 has the clear as one
       call (`ulTaskGenericNotifyValueClear()`).
 
+188. **The machine's clock is the CPU's own time.**
+    - Entry 187's end: a firmware that a busy host holds up is late
+      for all its timers, and no rule for one pin mends that. What
+      would is a clock that does not run while the host has the CPU's
+      thread off its core. QEMU has a hook for the clock of its
+      instruction counter (`AccelOpsClass.get_virtual_clock`), free
+      without `-icount`: `own_clock()` in `stm32wb55_misc.c` is on it.
+      The clock is the host's less what the host took: while the CPU
+      is awake, the host's time that its thread did not run in
+      (`pthread_getcpuclockid()`, looked at every 20 µs at most).
+      Time that the CPU sleeps with nothing to do counts; a CPU awake
+      whose thread does not run for 100 ms is not waiting for a core,
+      and the clock goes on. Never back.
+    - Tried behind a variable of the environment first, the same
+      binary in turns. Beside 24 busy loops the NFC shell's `dump`
+      that never returns (FW-23): once in 431 dumps, against three
+      times in 36 (at the 26th, the 7th and the 3rd). Beside 32: the
+      smoke test 26, 27 and 26 of 28 in 141 to 217 s against 16, 20
+      and 20 in 318 to 447 s; `rfid write` to a T5577 6 of 6 three
+      times against 6, 4 and 5; `ikey read` 12 of 12 three times
+      against 12, 10 and 9.
+    - Made the default: the machine's `host-clock=on` (`run
+      --host-clock`) is the clock as it was. What was taken out is in
+      a saved state (a subsection of the cycle counter's), and a state
+      that is loaded sets the clock back, which the hook sees. The
+      cycle counter's own account of such time (entry 184) does not
+      look when the clock has it out already.
+    - The calendar would have fallen behind with every busy hour. The
+      RTC is on `QEMU_CLOCK_VIRTUAL_RT` now, which is what the virtual
+      clock was: the host's while the machine runs.
+    - Beside the loops the Flipper is slower against the wall clock,
+      and three steps of the checks counted on it: the smoke test's
+      screen after OK (looked at after 1.2 s; now for up to 14 s) and
+      its `rfid emulate` (started, slept; now it waits for the
+      command to listen), and the SDR check's bridge, started a second
+      after `subghz rx` (now when the command says that it listens).
+    - A mistake, found by the second comparison. Making it the
+      default I had the clock begin with its last look at the lowest
+      number there is, so that the first look takes the count only.
+      The time since that look is a subtraction, it wraps, and it is
+      negative for ever: no look was made at all. The machine's clock
+      was the host's again, and the cycle counter's account was off
+      as well, since "the clock has it out". Alone nothing shows: the
+      full regression passed but for one capture of the RFID check's
+      that was eight field cycles too long, and so did the RFID check
+      three times with either clock. Beside 32 loops it did: `rfid
+      write` 0, 0 and 1 of 6 against 6, 4 and 6 with `host-clock=on`,
+      `ikey read` 8, 6 and 2 of 12 against 10, 10 and 12. Worse than
+      the clock it replaced, where the first build had been better:
+      that was the way to it.
+    - So the machine says what it does: `qom-get /machine clock` and
+      `clock-steal`, the clock and what it has left out, in
+      microseconds. And `scripts/clock_check.py` makes a host that
+      takes time: a busy loop on one core, the emulator's threads
+      beside it on that core or apart from it on the others, in turns,
+      and the firmware summing a file of its card (`storage md5`, the
+      CPU at work all the while). Beside the loop a turn is 2.15
+      times as long by the host's clock and 0.95 times by the
+      machine's: 3.4 s for the 3.6 apart, in 8.4 s of the host's, 5.0 s
+      taken out, which is what the two clocks differ by. With
+      `--host-clock` twice as long by both. An idle Flipper's clock
+      goes with the host's. A device paused, saved, stopped and loaded
+      stands at the same microsecond with the same count. With the
+      mistake in, a turn beside the loop would be as long by both
+      clocks, and nothing taken out.
+    - Reading the change over for this entry, one more: the hook read
+      QEMU's clock and then took its lock. A thread that the host
+      stops between the two comes with a time before the last look's,
+      which is how a loaded state is told: the next look took the
+      count only and the clock could give an earlier time than it had
+      given. Read with the lock held now.
+    - With the CPU's thread alone on a core beside a loop (the main
+      loop elsewhere) the same work: 3.1 and 3.2 s of the machine's in
+      12 and 14 s of the host's. With the host's clock 44 s: more than
+      the share of a core makes of 3.2. The firmware does more for the
+      same work when its timers run on without it.
+    - What no such clock takes out: a host that is slower itself.
+      This one (an i9-9980HK in a laptop, at 90 to 100 degrees with
+      one core at work) has spells of it. The same work took 8 to 9 s
+      for 3 several times with nothing beside it, by either clock,
+      the CPU's thread running all the while, and a loop of Python
+      five times as long in one such spell; thirty runs in a row had
+      none. The check's first form (the work alone, then beside the
+      loop) failed on them twice, with the host's speed taken before
+      and after too. In turns, and each turn with the one after it, a
+      spell is in both. It is in every comparison under 32 busy loops
+      as well, as noise. (On 2026-11-21 the host's power profile had
+      the turbo off for the day, 2.4 GHz for 4.5: the same factor.)
+    - Seen late, on an idle host: an idle Flipper with the USB cable
+      in was at 95 to 97 % of the wall clock's speed, where the host's
+      clock has 100. The firmware wakes a thousand times a second
+      there, and each time its thread has to get going: 30 µs with
+      the host's cores awake, 40 to 75 with the host saving power.
+      That was taken out like any wait. (Without the cable, some
+      fifty wake-ups a second: 99.9 %.)
+    - So waking up takes time here as on a Flipper: of the wait
+      between the interrupt that wakes a sleeping CPU and its thread's
+      first run, 60 µs are the machine's time (`OWN_WAKE_NS`, and
+      `qom-get /machine clock-wake` for what that has come to). Idle
+      with the cable in: 99.4 % (with 40 µs 98.4; with 80 or 100 no
+      more than with 60). For that there is a look where the
+      interrupt is raised, before it is pending (the accelerator's
+      `handle_interrupt`, wrapped): what was before it was sleep, what
+      comes after it is a wake-up. The same allowance as the first
+      60 µs after the interrupt, however the thread runs in them: the
+      same figures, and out again.
+    - That look was written for something that was not there: a sleep
+      that a look after the interrupt takes for a wait. A timer's
+      interrupt has a look before it, the main loop reads the clock
+      before it runs a timer; and a button's has too, as it turned
+      out: an idle Flipper with no cable and Back pressed every 30 to
+      400 ms lost 0.03 s in 6.
+    - What is still taken out on an idle host: half a percent of an
+      idle Flipper's time with the cable in, and 5 to 6 % while the
+      firmware sums a file of the card, with any allowance: the CPU
+      does not sleep in that. Its thread gave up its core 19255 times
+      in 6.6 s, 18 µs each: 4430 times for the host's read of the
+      card's image (one a block, through QEMU's pool of threads), the
+      rest for the big lock that the main loop had, which ran 17160
+      times in that time.
+    - Beside the loops again on 2026-11-21, three clocks in turns
+      (with the allowance, without it, the host's), the host slower
+      and cooler than on the 16th. The smoke test: 28 and 21 of 28,
+      27 and 28, 26 and 27. `rfid write` to a T5577: 12 of 12 with
+      each. `ikey read`: 24 of 24, 24 of 24, 14 of 24. The NFC
+      emulation check: 72, 73 and 70 of 75. The `dump` that never
+      returns: 3 in 466 dumps, 2 in 542, 2 in 456. So the allowance
+      costs nothing that shows. And FW-23 came as often with the
+      host's clock that day as with the machine's, once in two
+      hundred dumps, where the 16th had once in twelve for it (and
+      once in forty before that): how often a busy host brings it out
+      is the host's state more than the clock. The smoke test's 21
+      was an NFC shell that stood still at its first card (`mfu
+      info`; FW-23 by its looks, not looked at) and the CLI's end
+      after it. What is left of them is not the thread waiting for a
+      core. To try: the block timer's interrupt, which the main loop
+      brings late while the CPU runs on, with the frame going out by
+      then.
+    - The UART check failed once in a regression: it took the port's
+      state at the first sign of the link, which is at 9600 baud for
+      the 30 ms that the module needs to ask for its own rate. It
+      waits for that rate now.
+    - The window check failed once the same way a check does that
+      does not wait for what it means: at the level `error` the
+      firmware logs nothing when it starts, the log's mark of a new
+      start comes with the first line after one, and without the mark
+      the check took for new what was logged in the second before the
+      start, an animation chosen just then. It takes nothing for new
+      when there is no mark.
+    - Checks, the build as it is: all thirty on the official 1.5.1,
+      four side by side, 1146 passes and that step of the window
+      check's. The clock check, the smoke test and the two NFC checks
+      on the dev build, Momentum, Unleashed and RogueMaster, side by
+      side: all pass but Unleashed's NFC check, 28 of 30: the NFC
+      app's Read of an Ultralight C stood still in its search for the
+      key, and the app ended by `furi_check` when the check closed it
+      (FW-06). FW-23 by its looks, not looked at: alone the check
+      passes, three times with the machine's clock and three with the
+      host's.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

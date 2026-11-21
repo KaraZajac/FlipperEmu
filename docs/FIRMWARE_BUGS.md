@@ -247,6 +247,12 @@ keeps its row, with the version that fixed it.
   happens in one `dump` of a MIFARE Classic 1K in about forty (11 in 466): the host
   takes the CPU's thread away for milliseconds, the firmware is late for its
   timers, and the chip's interrupts come whenever the thread gets to its clear.
+  That was with the machine's clock going on in those milliseconds. Since
+  2026-11-16 it is the CPU's own time, which leaves them out, and beside the same
+  loops that day it happened once in 431 dumps, against 3 times in 36 in turns with
+  the clock as it was (`run --host-clock`). How often it comes is the host's state
+  as much as the clock: five days later, the host cooler and half as fast, it was 2
+  or 3 times in about 500 dumps with either clock.
 - **How much it matters:** `furi_thread_flags_clear()` is the firmware's only way
   to clear a thread flag, and any flag set from an interrupt handler or another
   thread during it is lost the same way. Official 1.5.1 calls it in 19 places: the

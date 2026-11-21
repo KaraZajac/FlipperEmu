@@ -456,9 +456,11 @@ def module_checks(b):
           and "waits for a call again" in out, f"{code}\n{out}{err}")
     p = b.bg("expansion", "--for", 5)
     usart, end = {}, time.time() + 10
+    # (the link begins at 9600 baud, for the 30 ms that the module needs to
+    # ask for its own rate: that is not yet what is looked for)
     while time.time() < end and p.poll() is None:
         usart = port_state(b, "USART1")
-        if usart.get("hears") not in ("edge", None):
+        if usart.get("hears") in ("irq", "dma") and usart.get("baud") == 115200:
             break
         time.sleep(0.1)
     said = ended(p, 30)

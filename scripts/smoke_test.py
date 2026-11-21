@@ -380,7 +380,10 @@ def rfid_emulate_check(mon: Monitor, devdir: pathlib.Path) -> bool:
         cli = FlipperCli(usb_endpoint(mon))
         try:
             cli.read_until_prompt(15)
-            cli.watch("rfid emulate H10301 010203", r"NEVER", timeout=1.2)
+            listening(cli, "rfid emulate H10301 010203")
+            time.sleep(1.2)
+            cli.write(b"\x03")
+            cli.read_until_prompt(HEARD_S)
             path = ""
             for _ in range(50):         # written once the field is quiet
                 path = mon.cmd("qom-get /machine/rfid tx").strip().strip('"')
@@ -401,7 +404,8 @@ def rfid_emulate_check(mon: Monitor, devdir: pathlib.Path) -> bool:
             # Should read the first time (BRINGUP_LOG, entry 30). If not,
             # read again as a person holding the card would, and say so.
             for attempt in (1, 2):
-                found, out = cli.watch("rfid read", r"H10301 010203", timeout=12)
+                found, out = cli.watch("rfid read", r"H10301 010203",
+                                       timeout=HEARD_S)
                 if found:
                     if attempt > 1:
                         print("  rfid emulate: read back on the second try")
@@ -926,9 +930,12 @@ def main() -> int:
             desk = out / "desktop.png"
             mon.screenshot(str(desk))
             mon.press("ok")
-            time.sleep(1.2)
             menu = out / "menu.png"
-            mon.screenshot(str(menu))
+            for _ in range(12):         # (a busy computer: the Flipper is slow)
+                time.sleep(1.2)
+                mon.screenshot(str(menu))
+                if desk.read_bytes() != menu.read_bytes():
+                    break
             d1, d2 = dark_pixels(desk), dark_pixels(menu)
             results.append((f"lcd: desktop drawn ({d1} dark px)", d1 > 500))
             results.append(("input: OK changed the screen",

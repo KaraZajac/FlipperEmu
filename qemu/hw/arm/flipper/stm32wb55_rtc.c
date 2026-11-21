@@ -59,6 +59,8 @@ static bool rtc_in_init(WB55RtcState *s)
     return s->isr_flags & ISR_INIT;
 }
 
+#define RTC_CLOCK QEMU_CLOCK_VIRTUAL_RT
+
 static int64_t rtc_now_s(WB55RtcState *s, int64_t *frac_ns)
 {
     if (rtc_in_init(s)) {
@@ -67,7 +69,7 @@ static int64_t rtc_now_s(WB55RtcState *s, int64_t *frac_ns)
         }
         return s->base_s;
     }
-    int64_t el = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->base_ns;
+    int64_t el = qemu_clock_get_ns(RTC_CLOCK) - s->base_ns;
     if (frac_ns) {
         *frac_ns = el % NANOSECONDS_PER_SECOND;
     }
@@ -77,16 +79,19 @@ static int64_t rtc_now_s(WB55RtcState *s, int64_t *frac_ns)
 static void rtc_set_calendar(WB55RtcState *s, int64_t secs)
 {
     s->base_s = secs;
-    s->base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    s->base_ns = qemu_clock_get_ns(RTC_CLOCK);
 }
 
 /*
- * The calendar and the host's clock.  The calendar counts the machine's own
- * time; from one run to the next (and into a saved state) goes how far it
- * is from the host's clock, in whole seconds.  The part of a second is the
- * host's whenever the calendar is set from it: so a distance that is read
- * and set again stays what it was, and a Flipper does not lose half a second
- * with every start.
+ * The calendar and the host's clock.  The calendar counts the machine's
+ * time: RTC_CLOCK, the host's clock while the machine runs.  Not the CPU's
+ * own time, which every other timer has (stm32wb55_misc.c): a crystal does
+ * not slow down beside a busy host, and a calendar that fell behind with
+ * every busy hour would be of no use.  From one run to the next (and into
+ * a saved state) goes how far it is from the host's clock, in whole
+ * seconds.  The part of a second is the host's whenever the calendar is set
+ * from it: so a distance that is read and set again stays what it was, and
+ * a Flipper does not lose half a second with every start.
  */
 static int64_t rtc_host_ns(void)
 {
@@ -211,7 +216,7 @@ static int64_t wut_period_ns(WB55RtcState *s)
 
 static void rtc_schedule(WB55RtcState *s)
 {
-    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t now = qemu_clock_get_ns(RTC_CLOCK);
     int64_t next = INT64_MAX;
 
     if ((s->cr & (CR_ALRAE | CR_ALRBE)) && !rtc_in_init(s)) {
@@ -233,7 +238,7 @@ static void rtc_schedule(WB55RtcState *s)
 static void rtc_tick(void *opaque)
 {
     WB55RtcState *s = opaque;
-    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t now = qemu_clock_get_ns(RTC_CLOCK);
     int64_t secs = rtc_now_s(s, NULL);
 
     if (secs != s->last_alarm_s) {
@@ -326,7 +331,7 @@ static void wb55_rtc_write(void *opaque, hwaddr addr, uint64_t val64,
         uint32_t old = s->cr;
         s->cr = val & 0x01FFFFFF;
         if ((val & CR_WUTE) && !(old & CR_WUTE)) {
-            s->wut_next_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+            s->wut_next_ns = qemu_clock_get_ns(RTC_CLOCK) +
                              wut_period_ns(s);
         } else if (!(val & CR_WUTE)) {
             s->wut_next_ns = 0;
@@ -344,7 +349,7 @@ static void wb55_rtc_write(void *opaque, hwaddr addr, uint64_t val64,
                        (s->isr_flags & val & ISR_W0C);
         s->isr_flags = (s->isr_flags & ~ISR_INIT) | (val & ISR_INIT);
         if (was_init && !(val & ISR_INIT)) {
-            s->base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+            s->base_ns = qemu_clock_get_ns(RTC_CLOCK);
         }
         rtc_update_irq(s);
         rtc_schedule(s);
@@ -468,7 +473,7 @@ static void wb55_rtc_init(Object *obj)
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->alarm_irq);
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->wakeup_irq);
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->tamp_irq);
-    s->tick = timer_new_ns(QEMU_CLOCK_VIRTUAL, rtc_tick, s);
+    s->tick = timer_new_ns(RTC_CLOCK, rtc_tick, s);
 }
 
 static const Property wb55_rtc_props[] = {

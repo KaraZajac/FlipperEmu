@@ -65,13 +65,88 @@ read of it does not take QEMU's big lock (`qemu/patches/0005`; the DWT block ask
 lockless I/O): with the lock, each read of a wait could sleep 20 to 50 µs while the main
 loop held it, and a 9 µs wait lasted 60.
 
-**The CPU's own time.** The machine's clock is the host's, and it goes on while the host
-has the emulated CPU's thread waiting for a core. A wait on CYCCNT that the host
-interrupts ended late by as much, and what the firmware times with such waits came out
-as much too long: a T5577's bits, a 1-Wire slot. So the counter does not count that
-time, as a virtual machine does not count steal time. The kernel has it for each thread
-(`/proc/thread-self/schedstat`, the time spent waiting on a run queue); time that the
-CPU sleeps is not such time, and counts.
+**The machine's clock is the CPU's own time.** QEMU's virtual clock is the host's, and
+it goes on while the host has the emulated CPU's thread waiting for a core. Every timer
+of the machine went on with it. A firmware that was held up for some milliseconds found
+its timers run out and its devices' interrupts all there at once, at places where a
+Flipper's never come, and what it timed with its own waits came out as much too long.
+So that time is taken out of the clock, as a virtual machine does not count steal time
+(`stm32wb55_misc.c`, `own_clock()`):
+- While the CPU is awake the clock goes on by what its thread has run (the host's
+  count for the thread, `pthread_getcpuclockid()`); while it sleeps with nothing to do,
+  by the host's clock. Asleep with an interrupt pending is awake: the wait for a core
+  to wake up on is the host's too.
+- But for what waking up takes anywhere: of the wait between the interrupt that wakes
+  a sleeping CPU and its thread's first run, 60 µs are the machine's time
+  (`OWN_WAKE_NS`). On an idle host that is all of it (30 µs with the host's cores
+  awake, 40 to 75 with the host saving power), and a Flipper that wakes a thousand
+  times a second, as it does idle with the USB cable in, keeps up with the wall clock:
+  99.4 % of its speed, where it was 95 to 97 % with all of that wait taken out. Beside
+  a busy host a wake-up is 60 µs late at most. For this there is a look where the
+  interrupt is raised, before it is pending (the accelerator's `handle_interrupt`,
+  wrapped): what was before it was sleep.
+- A look is a system call, so there is one every 20 µs at most. Between two looks the
+  clock goes by the host's, and it never goes back: a wait for a core that begins
+  right after a look lets up to 20 µs through.
+- It is every timer's clock: TIM1 to TIM17, LPTIM, SysTick, the chips' own events, the
+  cycle counter. It is the hook that QEMU has for its instruction counter
+  (`AccelOpsClass.get_virtual_clock`, free without `-icount`; with `-icount` this is
+  off).
+- A CPU that is awake and whose thread does not run at all for 100 ms is not waiting
+  for a core, and then the clock goes on: nothing may stand still for good.
+- What was taken out is in a saved state (with the cycle counter's), and a state that
+  is loaded sets the clock as it was, which is back.
+- What goes by the host's clock still: the calendar (the RTC is on QEMU's
+  `QEMU_CLOCK_VIRTUAL_RT`, the host's clock while the machine runs: a crystal does not
+  slow down beside a busy host, and the Flipper's date would fall behind with every
+  busy hour), the panel's and the recordings' housekeeping, the patience with a
+  program at the other end of a link. And everything outside: beside busy loops the
+  Flipper is slower against the wall clock (the smoke test beside 32 of them, on 16
+  threads: about three minutes for one), and a script's time limits are the wall
+  clock's.
+- What it does not do: a timer is run by the main loop, and a main loop that the host
+  holds up is late with it while the CPU runs on. That was so before as well. And a
+  host that is slower itself for a while (one that throttles) is slower for the
+  emulated CPU, whose thread runs all the while: only a count of instructions has
+  that out (`-icount`).
+- `-machine host-clock=on` (`run --host-clock`) is the clock as it was, for comparing.
+- What it takes out on an idle host: half a percent of an idle Flipper's time with the
+  cable in, and 5 to 6 % while the firmware reads its card without a pause. The CPU's
+  thread waits there too, some 18 µs at a time: for the host's read of the card's image
+  (one a block, through QEMU's pool of threads) and for the big lock while the main
+  loop has it.
+- The machine says what it does: `qom-get /machine clock` in the monitor is the clock,
+  `clock-steal` what it has left out so far and `clock-wake` what wake-ups were given
+  of it, in microseconds. A clock that takes nothing out looks like one that does as
+  long as the host is idle, and one build of this did just that (BRINGUP_LOG 188).
+  `scripts/clock_check.py` makes the host take time: a busy loop on one core, the
+  emulator's threads beside it on that core or apart from it on the others, in turns,
+  and the firmware summing a file of its card.
+  Beside the loop the work is as long by the machine's clock as apart from it (0.95
+  to 1.0 times, where the host's clock has 2.15 to 2.4 times), what was taken is the
+  difference of the two clocks, an idle Flipper's clock goes with the host's and its
+  wake-ups are counted, a device that is paused, saved and loaded stands at the same
+  microsecond, and with `--host-clock` the work is twice as long by both clocks.
+
+Beside 32 busy loops on a host of 16 threads, in turns with `host-clock=on`, on
+2026-11-16 (the host hot, its turbo on, and without the 60 µs yet): the smoke test 26,
+27 and 26 of 28 against 16, 20 and 20 (what failed with the new clock were fixed sleeps
+of the test's, since replaced by waits); `rfid write` to a T5577 18 of 18 against 15 of
+18; `ikey read` 36 of 36 against 31 of 36. Beside 24: the NFC shell's `dump` that stands
+still for good (FW-23 in `FIRMWARE_BUGS.md`, a flag that the firmware loses when an
+interrupt comes between two of its instructions) once in 431 against 3 times in 36. On
+2026-11-21 (the host cooler and at half the speed, its turbo off): the smoke test 28
+and 21 against 26 and 27; `rfid write` 12 of 12 with either; `ikey read` 24 of 24
+against 14 of 24; the NFC emulation check 72 of 75 against 70; and that `dump` 3 times
+in 466 against 2 in 456: no rarer with this clock that day, and as rare with the
+host's. What is left of it is not the CPU's thread waiting for a core (PLAN.md has
+what to try). Alone every check is as before.
+
+**The cycle counter's own account (with `host-clock=on` only).** Before the machine's
+clock was the CPU's, the cycle counter alone took that time out, by the kernel's count
+of what the thread waited on a run queue (`/proc/thread-self/schedstat`). With the
+machine's clock the CPU's own there is nothing left for it to take out, and it does not
+look. The rest of this is as it was:
 - It is looked up where it matters and only there, by the CPU's thread itself: the
   firmware reads CYCCNT at the start and end of every interrupt handler and at every
   change of thread too (its accounts of where the time goes), and a look is a system
@@ -79,27 +154,19 @@ CPU sleeps is not such time, and counts.
   the loop stands still for more than 10 µs, what the count has grown by is taken out,
   and no more than the loop stood still. A wait that nothing interrupts costs no look.
   And around a change of a line that a device times so (below).
-- `wb55_dwt_waited()` is for those devices: between two changes of its line, how long
-  the firmware waited on CYCCNT, from its first read to its last. Only if that was a
-  wait that filled the time: it began at once, its reads followed close on each other,
-  and it ended shortly before the change. Two reads somewhere in a low that the
-  firmware sleeps through are its interrupt handlers', and no wait; then the device
-  goes by the time that passed. A wait's length has nothing of the host in it: not the
-  thread off its core, and not the big lock that the write after the wait has to get.
-- Whoever waits for the firmware from a timer of the main loop cannot use that count
-  (it grows when the thread is back on a core). `wb55_cpu_ran_ns()` is the host's
-  count of how long the CPU's thread has run, and `wb55_cpu_asleep()` whether it
-  sleeps: "the firmware has had this long" in place of "this long has passed".
+- `wb55_dwt_waited()` is for those devices, with either clock: between two changes of
+  its line, how long the firmware waited on CYCCNT, from its first read to its last.
+  Only if that was a wait that filled the time: it began at once, its reads followed
+  close on each other, and it ended shortly before the change. Two reads somewhere in
+  a low that the firmware sleeps through are its interrupt handlers', and no wait;
+  then the device goes by the time that passed. A wait's length has nothing of the
+  host in it: not the thread off its core, and not the big lock that the write after
+  the wait has to get.
+- Whoever waits for the firmware from a timer of the main loop can ask
+  `wb55_cpu_ran_ns()`, the host's count of how long the CPU's thread has run, and
+  `wb55_cpu_asleep()`, whether it sleeps: "the firmware has had this long" in place
+  of "this long has passed".
 - The time taken out is in a saved state (the base of the counter is on that time).
-- On a host with idle cores none of this does anything: nothing is taken out.
-- What it does not do: the timers and the devices' own events still go by the
-  machine's clock. A firmware that the host has held up is late for them, and meets
-  its devices' interrupts at places where a Flipper's never come. One such place is
-  a bug of the firmware's that then shows (FW-23 in `FIRMWARE_BUGS.md`: a read of an
-  NFC card that never ends, beside 24 busy loops one `dump` in about forty). A rule
-  for the NFC chip's pin (up only when the CPU has had 20 µs of its own) did not
-  help and is not in: no count of the CPU's running says where one thread of the
-  firmware is (BRINGUP_LOG 187).
 
 Idle: FreeRTOS tickless idle arms **LPTIM1** one-shot (CMP = n-4, ARR = n-1) and executes
 WFI with PRIMASK=1. Afterwards it reads CNT and stops the timer with an RCC bus reset

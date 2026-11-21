@@ -1603,8 +1603,12 @@ class Driver:
                  and self.until(lambda: usb().startswith("0483:"), self.timeout))
         self.settle()
         self.spin(2)
+        # (the mark comes with the first line after a start, whose time is
+        # back at nothing: with no line after it there is no mark, and what
+        # is new in the log then is from before the start, an animation
+        # chosen in that second)
         text, mark = w.fwlog.shown_text(), "it started again"
-        new = text.split(mark)[-1] if mark in text[had:] else text[had:]
+        new = text.split(mark)[-1] if mark in text[had:] else ""
         check("firmware log: its level set to error: it starts again, and "
               "logs errors only",
               again and level() == "error"

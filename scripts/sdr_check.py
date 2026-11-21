@@ -223,10 +223,18 @@ def listen_for_key(mon, start, seconds):
         cli.read_until_prompt(15)
         for command in (b"subghz rx 433920000 0\r", b"subghz rx_raw 433920000\r"):
             cli.write(command)
-            time.sleep(1.0)
+            # (its own word that it listens: a second was too short on a
+            # busy computer, where the Flipper is slower than the recording)
+            out, end = b"", time.time() + 20
+            while time.time() < end and not re.search(
+                    rb"(?i)ctrl\s*\+\s*c|failed to start", out):
+                r, _, _ = select.select([cli.fd], [], [], 0.1)
+                if r:
+                    out += cli.sock.recv(4096) if cli.sock else os.read(cli.fd, 4096)
+            time.sleep(0.3)
             if proc is None:
                 proc = start()
-            out, end = b"", time.time() + seconds
+            end = time.time() + seconds
             while time.time() < end:
                 r, _, _ = select.select([cli.fd], [], [], 0.1)
                 if r:

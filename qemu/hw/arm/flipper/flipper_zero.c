@@ -47,6 +47,7 @@
  */
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include "qapi/visitor.h"
 #include "qemu/error-report.h"
 #include "qemu/cutils.h"
 #include "hw/core/boards.h"
@@ -211,6 +212,7 @@ struct FlipperZeroState {
     uint32_t scale;
     uint32_t region;
     bool legacy_sleep;
+    bool host_clock;             /* the clock counts what the host takes */
     int log_level;               /* the firmware's, to start with; -1: as is */
     bool usb_cable;              /* plugged in from the start */
     QemuInputHandlerState *input;
@@ -2535,6 +2537,9 @@ static void flipper_zero_init(MachineState *machine)
     DriveInfo *dinfo;
     uint64_t uid64;
 
+    if (!s->host_clock) {
+        wb55_own_clock_init();
+    }
     object_initialize_child(OBJECT(machine), "soc", &s->soc, TYPE_WB55_SOC);
     soc = DEVICE(&s->soc);
     uid64 = g_str_hash(s->name ? s->name : "Qemu") | 0x0011223300000000ull;
@@ -2892,6 +2897,40 @@ static void flipper_set_legacy(Object *obj, bool v, Error **errp)
     FLIPPER_ZERO(obj)->legacy_sleep = v;
 }
 
+static bool flipper_get_host_clock(Object *obj, Error **errp)
+{
+    return FLIPPER_ZERO(obj)->host_clock;
+}
+
+static void flipper_set_host_clock(Object *obj, bool v, Error **errp)
+{
+    FLIPPER_ZERO(obj)->host_clock = v;
+}
+
+static void flipper_get_clock(Object *obj, Visitor *v, const char *name,
+                              void *opaque, Error **errp)
+{
+    int64_t us = qemu_clock_get_us(QEMU_CLOCK_VIRTUAL);
+
+    visit_type_int(v, name, &us, errp);
+}
+
+static void flipper_get_clock_steal(Object *obj, Visitor *v, const char *name,
+                                    void *opaque, Error **errp)
+{
+    int64_t us = wb55_own_clock_steal() / SCALE_US;
+
+    visit_type_int(v, name, &us, errp);
+}
+
+static void flipper_get_clock_wake(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
+{
+    int64_t us = wb55_own_clock_woke() / SCALE_US;
+
+    visit_type_int(v, name, &us, errp);
+}
+
 /*
  * The firmware keeps its log level in the low four bits of RTC backup
  * register 1 (Settings > System > Log Level writes it there) and reads it
@@ -2996,6 +3035,27 @@ static void flipper_zero_instance_init(Object *obj)
                                    OBJ_PROP_FLAG_READWRITE);
     object_property_add_bool(obj, "legacy-sleep", flipper_get_legacy,
                              flipper_set_legacy);
+    object_property_add_bool(obj, "host-clock", flipper_get_host_clock,
+                             flipper_set_host_clock);
+    object_property_set_description(obj, "host-clock",
+        "The machine's clock is the host's alone: the time that the host "
+        "has the CPU's thread wait for a core counts (as before the clock "
+        "was the CPU's own; for comparing)");
+    object_property_add(obj, "clock", "int", flipper_get_clock,
+                        NULL, NULL, NULL);
+    object_property_set_description(obj, "clock",
+        "Microseconds of the machine's clock so far (to read)");
+    object_property_add(obj, "clock-steal", "int", flipper_get_clock_steal,
+                        NULL, NULL, NULL);
+    object_property_set_description(obj, "clock-steal",
+        "Microseconds that the machine's clock has left out so far: the "
+        "host had the CPU's thread wait (to read; 0 with host-clock=on)");
+    object_property_add(obj, "clock-wake", "int", flipper_get_clock_wake,
+                        NULL, NULL, NULL);
+    object_property_set_description(obj, "clock-wake",
+        "Microseconds of the machine's clock that waking up took so far: "
+        "of the CPU's thread getting going after an interrupt, up to 60 "
+        "each time (to read; 0 with host-clock=on)");
     object_property_add_str(obj, "log-level", flipper_get_log_level,
                             flipper_set_log_level);
     object_property_set_description(obj, "log-level",

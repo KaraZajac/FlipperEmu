@@ -23,6 +23,8 @@
 #include "hw/core/qdev-properties.h"
 #include "qemu/bitops.h"
 #include "migration/vmstate.h"
+#include "system/cpu-timers.h"
+#include "accel/accel-cpu-ops.h"
 #include "wb55.h"
 
 /* ------------------------------------------------------------------- RNG */
@@ -141,6 +143,9 @@ static void dwt_steal_look(WB55DwtState *s, int64_t now, int how, int64_t most)
     char buf[80];
     ssize_t n;
 
+    if (wb55_own_clock()) {             /* the clock has it out already */
+        return;
+    }
     s->look_ns = now;
     if (s->steal_fd == -2) {            /* (the first look: this thread's) */
         s->steal_fd = open("/proc/thread-self/schedstat", O_RDONLY | O_CLOEXEC);
@@ -183,6 +188,204 @@ int64_t wb55_cpu_ran_ns(void)
 bool wb55_cpu_asleep(void)
 {
     return first_cpu && qatomic_read(&first_cpu->halted);
+}
+
+/*
+ * The machine's clock is the CPU's own time.
+ *
+ * QEMU's virtual clock is the host's, and it goes on while the host has the
+ * CPU's thread waiting for a core.  Every timer of the machine went on with
+ * it, and a firmware that was held up for milliseconds found them all run
+ * out at once: its interrupts came at places where a Flipper's never do
+ * (FW-23 of docs/FIRMWARE_BUGS.md showed that way, one read of an NFC card
+ * in forty beside 24 busy loops), and what it timed came out too long.
+ *
+ * So that time is taken out of the clock, as a virtual machine does not
+ * count steal time: the clock goes on by what the CPU's thread has run
+ * (the host's count for the thread) while the CPU is awake, and by the
+ * host's clock while it sleeps with nothing to do.  A look is a system
+ * call, so there is one every OWN_LOOK_NS at most; between two looks the
+ * clock goes by the host's, and never back.
+ *
+ * Asleep or awake is how a look finds the CPU, for all the time since the
+ * look before it.  So there is a look when an interrupt wakes the CPU,
+ * before the interrupt is there (own_handle_interrupt): one that came
+ * after it would take the sleep for a wait.  Where the CPU goes to sleep
+ * there is none of its own: the firmware reads a timer or sets one just
+ * before it does.
+ *
+ * Waking up takes time, on a Flipper and here: the CPU's thread has to get
+ * going, 30 to 75 us on a host with nothing else to do.  With all of that
+ * taken out, a Flipper that wakes a thousand times a second (idle, with
+ * the USB cable in) was 3 to 5 % behind the wall clock on an idle host.
+ * So of the wait between the interrupt that wakes a sleeping CPU and its
+ * thread's first run, OWN_WAKE_NS are the machine's time: all of it on an
+ * idle host, and no more than that beside a busy one.
+ *
+ * A CPU that is awake and whose thread does not run at all for
+ * OWN_STILL_NS is not waiting for a core: the machine stands still some
+ * other way (a CPU in lockup), and its clock goes on, for a watchdog.
+ *
+ * This is the clock hook that QEMU has for its instruction counter
+ * (AccelOpsClass.get_virtual_clock), which is free without -icount.
+ */
+static struct {
+    QemuSpin lock;
+    bool on;
+    void (*interrupt)(CPUState *cpu, int mask);   /* QEMU's own, kept */
+    int64_t wake;                /* a wake-up: so much of it may still pass */
+    int64_t woke;                /* ... and what wake-ups were given so far */
+    int64_t host;                /* QEMU's clock at the last look */
+    int64_t ran;                 /* how long the CPU's thread had run, or -1 */
+    int64_t still;               /* awake and not run at all: for how long */
+    int64_t steal;               /* taken out so far */
+    int64_t last;                /* the last time given */
+} own;
+
+#define OWN_LOOK_NS  (20 * SCALE_US)
+#define OWN_STILL_NS (100 * SCALE_MS)
+#define OWN_WAKE_NS  (60 * SCALE_US)
+
+static void own_anew(int64_t host)
+{
+    own.host = host;
+    own.ran = -1;
+    own.still = 0;
+    own.wake = 0;
+    own.last = INT64_MIN;
+}
+
+/* QEMU's clock, with the lock held: read there, since a thread that the
+ * host stops between the two would come with a time before the last
+ * look's, which is how a loaded state is told */
+static int64_t own_host(void)
+{
+    int64_t host = cpu_get_clock();
+
+    if (host < own.host) {              /* set back: a state was loaded */
+        own_anew(host);
+    }
+    return host;
+}
+
+/* a look, with the lock held: what the CPU's thread has run since the last */
+static void own_look(CPUState *cpu, int64_t host)
+{
+    int64_t ran = wb55_cpu_ran_ns();
+    int64_t passed = host - own.host, did = ran - own.ran;
+
+    if (ran < 0) {
+        return;
+    }
+    if (own.ran < 0 || (qatomic_read(&cpu->halted) && !cpu_has_work(cpu))) {
+        own.still = 0;                  /* asleep: that time is its own too */
+    } else {
+        int64_t lost = MAX(passed - did, 0), free = MIN(lost, own.wake);
+
+        own.wake = did > 0 ? 0 : own.wake - free;
+        own.woke += free;
+        own.still = did > 0 ? 0 : own.still + passed;
+        if (own.still < OWN_STILL_NS) {
+            own.steal += lost - free;
+        }
+    }
+    own.host = host;
+    own.ran = ran;
+}
+
+static int64_t own_clock(void)
+{
+    int64_t host, v;
+    CPUState *cpu = first_cpu;
+
+    qemu_spin_lock(&own.lock);
+    host = own_host();
+    if (cpu && cpu->thread && host - own.host >= OWN_LOOK_NS) {
+        own_look(cpu, host);
+    }
+    v = MAX(host - own.steal, own.last);
+    own.last = v;
+    qemu_spin_unlock(&own.lock);
+    return v;
+}
+
+/*
+ * An interrupt for a CPU that sleeps: it has slept until now, and from now
+ * on it wakes up.  The look that says so, while it still sleeps, and what
+ * the wake-up may take.  (A timer's interrupt has had a look just before
+ * it, the main loop reads the clock before it runs a timer; another's may
+ * come with none.)
+ */
+static void own_handle_interrupt(CPUState *cpu, int mask)
+{
+    if (cpu == first_cpu && cpu->thread &&
+        qatomic_read(&cpu->halted) && !cpu_has_work(cpu)) {
+        qemu_spin_lock(&own.lock);
+        own_look(cpu, own_host());
+        own.wake = OWN_WAKE_NS;
+        qemu_spin_unlock(&own.lock);
+    }
+    own.interrupt(cpu, mask);
+}
+
+bool wb55_own_clock(void)
+{
+    return own.on;
+}
+
+/* what waking up has been given of the clock (not in a saved state) */
+int64_t wb55_own_clock_woke(void)
+{
+    int64_t v;
+
+    if (!own.on) {
+        return 0;
+    }
+    qemu_spin_lock(&own.lock);
+    v = own.woke;
+    qemu_spin_unlock(&own.lock);
+    return v;
+}
+
+/* what has been taken out of the clock: for a saved state, and from one */
+int64_t wb55_own_clock_steal(void)
+{
+    int64_t v;
+
+    if (!own.on) {
+        return 0;
+    }
+    qemu_spin_lock(&own.lock);
+    v = own.steal;
+    qemu_spin_unlock(&own.lock);
+    return v;
+}
+
+void wb55_own_clock_loaded(int64_t steal)
+{
+    if (!own.on) {
+        return;
+    }
+    qemu_spin_lock(&own.lock);
+    own.steal = steal;
+    own_anew(cpu_get_clock());
+    qemu_spin_unlock(&own.lock);
+}
+
+void wb55_own_clock_init(void)
+{
+    AccelOpsClass *ops =
+        ACCEL_OPS_CLASS(object_class_by_name(ACCEL_OPS_NAME("tcg")));
+
+    if (ops->get_virtual_clock) {       /* -icount: QEMU's own such clock */
+        return;
+    }
+    qemu_spin_init(&own.lock);
+    own_anew(0);                        /* (the clock begins there) */
+    own.on = true;
+    own.interrupt = ops->handle_interrupt;
+    ops->get_virtual_clock = own_clock;
+    ops->handle_interrupt = own_handle_interrupt;
 }
 
 int64_t wb55_dwt_cpu_ns(WB55DwtState *s)
@@ -420,8 +623,46 @@ static int dwt_pre_load(void *opaque)
     WB55DwtState *s = opaque;
 
     s->steal_ns = 0;
+    s->own_steal = 0;
+    wb55_own_clock_loaded(0);           /* (a state that has none) */
     return 0;
 }
+
+static int dwt_pre_save(void *opaque)
+{
+    WB55DwtState *s = opaque;
+
+    s->own_steal = wb55_own_clock_steal();
+    return 0;
+}
+
+static bool dwt_own_needed(void *opaque)
+{
+    WB55DwtState *s = opaque;
+
+    return s->own_steal != 0;
+}
+
+static int dwt_own_post_load(void *opaque, int version_id)
+{
+    WB55DwtState *s = opaque;
+
+    wb55_own_clock_loaded(s->own_steal);
+    return 0;
+}
+
+/* what the machine's clock has had taken out (the machine's, kept here) */
+static const VMStateDescription vmstate_wb55_dwt_own = {
+    .name = "stm32wb55-dwt/own-clock",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = dwt_own_needed,
+    .post_load = dwt_own_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_INT64(own_steal, WB55DwtState),
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 static const VMStateDescription vmstate_wb55_dwt_steal = {
     .name = "stm32wb55-dwt/steal",
@@ -439,9 +680,11 @@ static const VMStateDescription vmstate_wb55_dwt = {
     .version_id = 1,
     .minimum_version_id = 1,
     .pre_load = dwt_pre_load,
+    .pre_save = dwt_pre_save,
     .post_load = dwt_post_load,
     .subsections = (const VMStateDescription * const []) {
         &vmstate_wb55_dwt_steal,
+        &vmstate_wb55_dwt_own,
         NULL
     },
     .fields = (const VMStateField[]) {

@@ -1178,6 +1178,8 @@ def qemu_cmd(dev: Device, args, window="gtk", gauge=None):
                f",radio={dev.radio_state}")
     if args.legacy_sleep:
         machine += ",legacy-sleep=on"
+    if getattr(args, "host_clock", False):
+        machine += ",host-clock=on"
     if getattr(args, "radio_stack", None):
         stack_kind(args.radio_stack)    # (a kind that there is)
         machine += f",radio-stack={args.radio_stack}"
@@ -2148,7 +2150,7 @@ def cmd_continue(args):
 # or a start's alone: a battery's charge, a log level)
 MACHINE_ARGS = ("usb", "usbip", "usbip_host", "serial", "lpuart", "i2c",
                 "spi", "no_sd", "name", "legacy_sleep", "radio_stack",
-                "qemu_args")
+                "host_clock", "qemu_args")
 RUN_DEFAULTS = {}               # `run` with nothing said (main() has them)
 SNAP_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 SNAP_ASIDE = ".before-load"     # the device's own files, while one is loaded
@@ -7510,6 +7512,13 @@ def main():
     p.add_argument("--legacy-sleep", action="store_true",
                    help="new device starts with Sleep Method = Legacy (light sleep "
                         "only) instead of the firmware's default STOP2")
+    p.add_argument("--host-clock", action="store_true",
+                   help="the Flipper's clock is this computer's alone.  As it is, "
+                        "the time that a busy computer keeps the emulated CPU "
+                        "from running is not counted: the Flipper is slower "
+                        "then, and right in itself.  With this it keeps to the "
+                        "wall clock, and its timers run out on a firmware that "
+                        "was held up (for comparing)")
     p.add_argument("--radio-stack", metavar="VERSION",
                    help="the wireless stack that CPU2 runs, as a Flipper from the "
                         "factory: 1.20.0 (BLE Light, the update packages' stack), "
