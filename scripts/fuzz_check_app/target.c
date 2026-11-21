@@ -19,18 +19,32 @@
 //
 // Signal 101 writes a word to the address that is its argument: with 0, a
 // fault of the CPU's (the firmware keeps the first megabyte from everyone),
-// for the place that the emulator notes of one.
+// for the place that the emulator notes of one.  Signal 102 calls itself
+// until the stack of the thread that runs it is used up: the firmware keeps
+// 32 bytes at the end of each thread's stack read-only (its MPU's region,
+// set at every change of thread), and the push that reaches them faults.
 #include <furi.h>
 
 #define TAG "FeFuzzCheck"
 #define SIGNAL_INPUT 100
 #define SIGNAL_WRITE 101
+#define SIGNAL_DEEPER 102
 
 typedef struct {
     FuriSemaphore* leave;
     // (volatile: each check stays code of its own, with its count kept)
     volatile uint32_t inputs, first, second;
 } Target;
+
+// (a frame of 16 bytes: a push of each reaches the 32 bytes at the end)
+static volatile uint32_t target_depth;
+
+static uint32_t target_deeper(uint32_t n) {
+    volatile uint32_t here = n;
+    target_depth = n;
+    if(n > 1000000) return n;
+    return target_deeper(n + 1) + here; // (no tail call)
+}
 
 static bool target_signal(uint32_t signal, void* arg, void* context) {
     Target* target = context;
@@ -41,6 +55,10 @@ static bool target_signal(uint32_t signal, void* arg, void* context) {
     if(signal == SIGNAL_WRITE) {
         volatile uint32_t* where = arg;
         *where = 1;
+        return true;
+    }
+    if(signal == SIGNAL_DEEPER) {
+        target_deeper(0);
         return true;
     }
     if(signal != SIGNAL_INPUT) return false;

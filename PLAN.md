@@ -1005,15 +1005,14 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           0021). Ten sums of a file of the card: a sixth less of the host's time
           (BRINGUP_LOG 192). A block takes no time of the machine's (BRINGUP_LOG 189
           and 190: the transfer in slices was tried and taken out)
-    - ☐ The TLB at every change of thread: the firmware sets its stack guard (the MPU
-          off, a region written, the MPU on) and QEMU flushes the whole TLB at each of
-          the four writes, after which every page is translated again: about a tenth
-          of the CPU's thread in any work (BRINGUP_LOG 192). Without those flushes
-          (wrong, for measuring only) card reads took 17 % less of the host's time
-          (BRINGUP_LOG 193). A region's write only changes its own area (old and new),
-          and none while the MPU is off; the MPU's off and on only the areas of the
-          enabled regions for privileged code with PRIVDEFENA, but the firmware's NULL
-          guard is 1 MB, which QEMU's range flush takes whole
+    - ☑ The TLB at every change of thread (2026-11-21): the firmware sets its stack
+          guard (the MPU off, a region written, the MPU on), and QEMU flushed the whole
+          TLB at each of the four writes. Now a write flushes what it changes: a
+          region's pages; with the MPU off, the pages that the TLB is given are noted
+          in the fill and go when it is switched on, a few at every change of thread
+          (QEMU patch 0023, v7M). Card reads a tenth less of the host's time, NFC
+          dumps a little less; the fuzz check tests the stack guard now (signal 102:
+          the firmware reports the overflow), fuzz_check 21 / 14 (BRINGUP_LOG 194)
     - ☑ `cpu_io_recompile()` (2026-11-21): QEMU left a translated block at every device
           access that was not its last instruction and ran the access alone, every time
           it came by. Now a block ends after an instruction where that happened once

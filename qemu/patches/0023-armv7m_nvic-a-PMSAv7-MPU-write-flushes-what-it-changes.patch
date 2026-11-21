@@ -1,0 +1,338 @@
+From: FlipperEmu
+Subject: [PATCH] armv7m_nvic: a PMSAv7 MPU write flushes what it changes
+
+Every write of a v7M MPU register flushed the whole TLB.  A guest that
+moves a region often pays for it in full: the Flipper's firmware sets the
+stack guard of the thread that it switches to at every switch (MPU_CTRL
+0, the region's RBAR and RASR, MPU_CTRL on with PRIVDEFENA), four whole
+flushes at some 1500 switches a second, and every page translated again
+after each.
+
+What a write changes, as get_phys_addr_pmsav7() looks regions up:
+
+- a region's RBAR or RASR written with another value changes the lookups
+  in its area before and after it (a region is asked for its own area
+  only): with the MPU on, those pages are flushed; with it off, they are
+  noted, and flushed when it is switched on;
+- the MPU switched on or off (with it off its other bits do nothing),
+  with PRIVDEFENA where it is on: a privileged access that no region
+  takes gets the default memory map either way, so the privileged
+  indexes change only in the enabled regions' areas; an unprivileged
+  access is a background fault with it on, so those indexes go whole
+  where they hold anything.  Of an enabled region the TLB holds something
+  usable only where the region is a page or more and lets something
+  through: a smaller one has every access to its page looked up again,
+  and one that lets nothing through has no entries.  So when the MPU is
+  switched off the pages of such regions go, and from then on the pages
+  that the TLB is given are noted (arm_cpu_tlb_fill_align()); when it is
+  switched on, the noted pages go (more than 32 noted: all).  With
+  HFNMIENA clear the indexes of HardFault and NMI see the MPU off while
+  it is on, and may hold pages of any region: switched on with HFNMIENA
+  set, they go whole as well;
+- anything else (PRIVDEFENA or HFNMIENA changed while it is on, v8M)
+  flushes the whole TLB as before.
+
+The noting is CPU state that is not migrated: a loaded state flushes all
+when the MPU is next switched on.
+
+Signed-off-by: FlipperEmu
+---
+--- a/hw/intc/armv7m_nvic.c
++++ b/hw/intc/armv7m_nvic.c
+@@ -22,6 +22,8 @@
+ #include "system/runstate.h"
+ #include "target/arm/cpu.h"
+ #include "target/arm/cpu-features.h"
++#include "target/arm/internals.h"
++#include "exec/target_page.h"
+ #include "exec/cputlb.h"
+ #include "exec/memop.h"
+ #include "qemu/log.h"
+@@ -1678,6 +1680,162 @@
+     }
+ }
+ 
++/*
++ * PMSAv7 (v7M): what an MPU write changes, flushed, and little more.  The
++ * firmware of a Flipper sets the stack guard of the thread that it switches
++ * to at every switch (MPU_CTRL 0, the region's RBAR and RASR, MPU_CTRL on),
++ * and the whole TLB flushed at each write had every page translated again
++ * after every switch.  What changes, by get_phys_addr_pmsav7():
++ * - A region whose RBAR or RASR is written with another value changes the
++ *   lookups in its area before and after (a region is asked for its own
++ *   area only).  With the MPU on, those pages go; with it off, they are
++ *   noted, and go when it is switched on.
++ * - The MPU switched on or off (with it off, its other bits do nothing),
++ *   with PRIVDEFENA where it is on: a privileged access that no region
++ *   takes gets the default memory map either way, so the privileged
++ *   indexes change only in the enabled regions' areas; an unprivileged
++ *   access is a background fault with it on, and those indexes go whole
++ *   (where they hold anything).  Of an enabled region, the TLB holds
++ *   something usable only where the region is a page or more and lets
++ *   something through: a smaller one has every access to its page looked
++ *   up again, and one that lets nothing through has no entries.  So:
++ *   switched off, the pages of such regions go, and from then on the pages
++ *   that the TLB is given are noted (arm_v7m_mpu_note_page()); switched on,
++ *   the noted pages go.  More than can be noted: all.  With HFNMIENA
++ *   clear, the indexes of HardFault and NMI see it off while it is on,
++ *   and may hold pages of any region: switched on with HFNMIENA set, they
++ *   go whole as well (where they hold anything).
++ * Anything else, and v8M, flushes the whole TLB as before.
++ */
++#define V7M_USER_IDXMAP (ARMMMUIdxBit_MUser | ARMMMUIdxBit_MUserNegPri | \
++                         ARMMMUIdxBit_MSUser | ARMMMUIdxBit_MSUserNegPri)
++#define V7M_NEGPRI_IDXMAP (ARMMMUIdxBit_MPrivNegPri | ARMMMUIdxBit_MSPrivNegPri)
++#define V7M_MPU_PAGES_MOST 16           /* an area of more pages: all go */
++
++/* region n's area as a lookup uses it (enabled, its base aligned), or 0 */
++static void v7m_mpu_area(CPUARMState *env, int n, vaddr *base, vaddr *len)
++{
++    uint32_t rsize = extract32(env->pmsav7.drsr[n], 1, 5);
++    uint64_t size;
++
++    *base = env->pmsav7.drbar[n];
++    *len = 0;
++    if (!(env->pmsav7.drsr[n] & 1) || !rsize) {
++        return;
++    }
++    size = 1ull << (rsize + 1);
++    if (*base & (size - 1)) {
++        return;
++    }
++    *len = size;
++}
++
++/* an area's pages: gone now (false: too many, it all went), or noted */
++static bool v7m_mpu_area_pages(ARMCPU *cpu, vaddr base, vaddr len, bool now)
++{
++    if (!len) {
++        return true;
++    }
++    if (len > V7M_MPU_PAGES_MOST * TARGET_PAGE_SIZE) {
++        if (now) {
++            tlb_flush(CPU(cpu));
++        } else {
++            cpu->env.v7m.mpu_pages = ARRAY_SIZE(cpu->env.v7m.mpu_page) + 1;
++        }
++        return false;
++    }
++    for (vaddr a = base & TARGET_PAGE_MASK; a < base + len;
++         a += TARGET_PAGE_SIZE) {
++        if (now) {
++            tlb_flush_page_by_mmuidx(CPU(cpu), a, 0xffff);
++        } else {
++            arm_v7m_mpu_note_page(&cpu->env, a);
++        }
++    }
++    return true;
++}
++
++/* some indexes whole, where they hold anything */
++static void v7m_mpu_flush_idx(ARMCPU *cpu, uint16_t idxmap)
++{
++    idxmap &= CPU(cpu)->neg.tlb.c.dirty;
++    if (idxmap) {
++        tlb_flush_by_mmuidx(CPU(cpu), idxmap);
++    }
++}
++
++/* region n written: its area as it was, and its registers now */
++static void v7m_mpu_region_written(ARMCPU *cpu, bool secure, int n,
++                                   vaddr base0, vaddr len0)
++{
++    CPUARMState *env = &cpu->env;
++    bool on = env->v7m.mpu_ctrl[secure] & R_V7M_MPU_CTRL_ENABLE_MASK;
++    vaddr base1, len1;
++
++    if (!on && !env->v7m.mpu_noting) {
++        return;           /* off, and all goes when it is switched on */
++    }
++    v7m_mpu_area(env, n, &base1, &len1);
++    if (v7m_mpu_area_pages(cpu, base0, len0, on)) {
++        v7m_mpu_area_pages(cpu, base1, len1, on);
++    }
++}
++
++static void v7m_mpu_ctrl_written(ARMCPU *cpu, uint32_t old, uint32_t new)
++{
++    const uint32_t on = R_V7M_MPU_CTRL_ENABLE_MASK;
++    CPUARMState *env = &cpu->env;
++    uint32_t enabled;
++
++    if (!(old & on) && !(new & on)) {
++        return;                         /* off is off */
++    }
++    if ((old & on) && (new & on)) {
++        if (old != new) {
++            tlb_flush(CPU(cpu));
++        }
++        return;
++    }
++    enabled = (old & on) ? old : new;   /* the side where it is on */
++    if (new & on) {
++        /* switched on: what the TLB was given while it was off */
++        if (!(enabled & R_V7M_MPU_CTRL_PRIVDEFENA_MASK) ||
++            !env->v7m.mpu_noting ||
++            env->v7m.mpu_pages > ARRAY_SIZE(env->v7m.mpu_page)) {
++            tlb_flush(CPU(cpu));
++        } else {
++            for (int i = 0; i < env->v7m.mpu_pages; i++) {
++                tlb_flush_page_by_mmuidx(CPU(cpu), env->v7m.mpu_page[i],
++                                         0xffff);
++            }
++            v7m_mpu_flush_idx(cpu, V7M_USER_IDXMAP |
++                              (new & R_V7M_MPU_CTRL_HFNMIENA_MASK ?
++                               V7M_NEGPRI_IDXMAP : 0));
++        }
++        env->v7m.mpu_noting = false;
++        env->v7m.mpu_pages = 0;
++        return;
++    }
++    /* switched off: the usable entries of the enabled regions */
++    env->v7m.mpu_noting = true;
++    env->v7m.mpu_pages = 0;
++    if (!(enabled & R_V7M_MPU_CTRL_PRIVDEFENA_MASK)) {
++        tlb_flush(CPU(cpu));
++        return;
++    }
++    for (int n = 0; n < cpu->pmsav7_dregion; n++) {
++        vaddr base, len;
++
++        v7m_mpu_area(env, n, &base, &len);
++        if (len >= TARGET_PAGE_SIZE &&
++            extract32(env->pmsav7.dracr[n], 8, 3) != 0 &&
++            !v7m_mpu_area_pages(cpu, base, len, true)) {
++            return;                     /* (it all went) */
++        }
++    }
++    v7m_mpu_flush_idx(cpu, V7M_USER_IDXMAP);
++}
++
+ static void nvic_writel(NVICState *s, uint32_t offset, uint32_t value,
+                         MemTxAttrs attrs)
+ {
+@@ -1981,12 +2139,21 @@
+             qemu_log_mask(LOG_GUEST_ERROR, "MPU_CTRL: HFNMIENA and !ENABLE is "
+                           "UNPREDICTABLE\n");
+         }
++    {
++        uint32_t old = cpu->env.v7m.mpu_ctrl[attrs.secure];
++
+         cpu->env.v7m.mpu_ctrl[attrs.secure]
+             = value & (R_V7M_MPU_CTRL_ENABLE_MASK |
+                        R_V7M_MPU_CTRL_HFNMIENA_MASK |
+                        R_V7M_MPU_CTRL_PRIVDEFENA_MASK);
+-        tlb_flush(CPU(cpu));
++        if (arm_feature(&cpu->env, ARM_FEATURE_V8)) {
++            tlb_flush(CPU(cpu));
++        } else {
++            v7m_mpu_ctrl_written(cpu, old,
++                                 cpu->env.v7m.mpu_ctrl[attrs.secure]);
++        }
+         break;
++    }
+     case 0xd98: /* MPU_RNR */
+         if (value >= cpu->pmsav7_dregion) {
+             qemu_log_mask(LOG_GUEST_ERROR, "MPU region out of range %"
+@@ -2043,8 +2210,13 @@
+             return;
+         }
+ 
+-        cpu->env.pmsav7.drbar[region] = value & ~0x1f;
+-        tlb_flush(CPU(cpu));
++        if (cpu->env.pmsav7.drbar[region] != (value & ~0x1f)) {
++            vaddr base0, len0;
++
++            v7m_mpu_area(&cpu->env, region, &base0, &len0);
++            cpu->env.pmsav7.drbar[region] = value & ~0x1f;
++            v7m_mpu_region_written(cpu, attrs.secure, region, base0, len0);
++        }
+         break;
+     }
+     case 0xda0: /* MPU_RASR (v7M), MPU_RLAR (v8M) */
+@@ -2077,9 +2249,15 @@
+             return;
+         }
+ 
+-        cpu->env.pmsav7.drsr[region] = value & 0xff3f;
+-        cpu->env.pmsav7.dracr[region] = (value >> 16) & 0x173f;
+-        tlb_flush(CPU(cpu));
++        if (cpu->env.pmsav7.drsr[region] != (value & 0xff3f) ||
++            cpu->env.pmsav7.dracr[region] != ((value >> 16) & 0x173f)) {
++            vaddr base0, len0;
++
++            v7m_mpu_area(&cpu->env, region, &base0, &len0);
++            cpu->env.pmsav7.drsr[region] = value & 0xff3f;
++            cpu->env.pmsav7.dracr[region] = (value >> 16) & 0x173f;
++            v7m_mpu_region_written(cpu, attrs.secure, region, base0, len0);
++        }
+         break;
+     }
+     case 0xdc0: /* MPU_MAIR0 */
+--- a/target/arm/cpu.h
++++ b/target/arm/cpu.h
+@@ -623,6 +623,15 @@
+         uint32_t bfar; /* BusFault Address */
+         uint32_t sfar; /* Secure Fault Address Register */
+         unsigned mpu_ctrl[M_REG_NUM_BANKS]; /* MPU_CTRL */
++        /*
++         * PMSAv7 (armv7m_nvic.c): while the MPU is off, the pages that the
++         * TLB was given, and those of regions written meanwhile, to be
++         * flushed when it is switched on again; more than mpu_page holds:
++         * all go.  (Not in a saved state: a loaded one flushes all.)
++         */
++        bool mpu_noting;
++        uint8_t mpu_pages;
++        uint32_t mpu_page[32];
+         int exception;
+         uint32_t primask[M_REG_NUM_BANKS];
+         uint32_t faultmask[M_REG_NUM_BANKS];
+--- a/target/arm/internals.h
++++ b/target/arm/internals.h
+@@ -1041,6 +1041,25 @@
+ /* Return the MMU index for a v7M CPU in the specified security state */
+ ARMMMUIdx arm_v7m_mmu_idx_for_secstate(CPUARMState *env, bool secstate);
+ 
++/* PMSAv7: a page that the TLB was given while the MPU is off (see cpu.h) */
++static inline void arm_v7m_mpu_note_page(CPUARMState *env, uint32_t page)
++{
++    int n = env->v7m.mpu_pages;
++
++    if (n > ARRAY_SIZE(env->v7m.mpu_page)) {
++        return;                         /* (too many already: all go) */
++    }
++    for (int i = 0; i < n; i++) {
++        if (env->v7m.mpu_page[i] == page) {
++            return;
++        }
++    }
++    if (n < ARRAY_SIZE(env->v7m.mpu_page)) {
++        env->v7m.mpu_page[n] = page;
++    }
++    env->v7m.mpu_pages = n + 1;
++}
++
+ /*
+  * Return true if the stage 1 translation regime is using LPAE
+  * format page tables
+--- a/target/arm/tcg/tlb_helper.c
++++ b/target/arm/tcg/tlb_helper.c
+@@ -10,6 +10,7 @@
+ #include "helper.h"
+ #include "accel/tcg/cpu-loop.h"
+ #include "internals.h"
++#include "exec/target_page.h"
+ #include "cpu-features.h"
+ #include "hw/intc/armv7m_nvic.h"
+ 
+@@ -391,6 +392,10 @@
+                              &res, fi)) {
+         res.f.extra.arm.pte_attrs = res.cacheattrs.attrs;
+         res.f.extra.arm.shareability = res.cacheattrs.shareability;
++        if (unlikely(cpu->env.v7m.mpu_noting) &&
++            res.f.lg_page_size >= TARGET_PAGE_BITS) {
++            arm_v7m_mpu_note_page(&cpu->env, address & TARGET_PAGE_MASK);
++        }
+         *out = res.f;
+         return true;
+     }

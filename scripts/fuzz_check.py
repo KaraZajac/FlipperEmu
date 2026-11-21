@@ -20,7 +20,10 @@ inputs it kept on the way (one that passed the first check, one that
 passed two); the crash's folder has the input and the firmware's report,
 and given again it crashes again.  The app's other signal writes to
 address 0: the crash's report and `status` have the place of the CPU's
-fault, as the emulator noted it.  Exit status 0 = pass.
+fault, as the emulator noted it.  A third one calls itself until its
+thread's stack is used up: the firmware's guard at the end of the stack (a
+region of its MPU, set at every change of thread) takes the push, and the
+firmware reports a stack overflow.  Exit status 0 = pass.
 """
 import argparse
 import os
@@ -297,6 +300,16 @@ def planted(b, work):
           and "the CPU's last fault (1 since the emulator started): a "
           "MemManage fault at 0x200" in row and "it touched 0x00000000" in row,
           text + report[:600] + row)
+    # a stack used up: the MPU's guard at its end
+    ok, text2 = launch()
+    code, text = b.fe("fuzz", "cli", "--command", "loader signal 102 {hex}",
+                      "--replay", zero, "--out", work / "deeper")
+    b.fe("wait", "--timeout", 120)
+    check("the app's stack used up (signal 102): the guard at the end of its "
+          "thread's stack (the MPU's region, set at every change of thread) "
+          "takes the push, and the firmware reports a stack overflow",
+          ok and code == 1 and "possibly stack overflow" in text,
+          text2[-400:] + text)
     return True
 
 

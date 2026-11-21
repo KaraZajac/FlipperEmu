@@ -970,7 +970,7 @@ scripts/enclave_check.py -f FIRMWARE     # and the enclave through the firmware 
 
 And for the setup itself, `scripts/setup_check.py`: what `scripts/setup_qemu.sh` makes
 of a source tree that has all, some or none of the patches in `qemu/patches`, and
-whether the tree here has them all (55 checks in about thirty seconds; it builds nothing
+whether the tree here has them all (57 checks in about thirty seconds; it builds nothing
 and starts no emulator). A tree with a `.rej` file in it is one that the script, as it
 was until 2026-11-11, patched twice: the script says so now, and how to start over.
 After an upgrade of the system's Python (3.14 to 3.15, say), the build's meson stops
@@ -3575,7 +3575,7 @@ cd scripts/fuzz_check_app && ../../flipperemu ufbt launch
 
 Its three checks of the input's bytes fall one after another, each kept input a step
 (`80000000`, `807f0065`, then `807f1065`). `scripts/fuzz_check.py FIRMWARE` checks
-all of it (20 checks on the official 1.5.1 with ufbt's SDK, 14 on the others). It is
+all of it (21 checks on the official 1.5.1 with ufbt's SDK, 14 on the others). It is
 no AFL: an input takes the time that it takes on a Flipper (a signal its length on the
 air: 8 to 10 a second; an RPC message 15 to 20; a CLI command a hundred and more),
 and nothing is reset between two.
@@ -3602,7 +3602,10 @@ qemu/patches/          fixes to upstream QEMU (SysTick, SD over SPI, open-drain 
                        the UART's reception, a byte that no receiver took, an
                        EEPROM's file that ends within a sector, a Winbond flash's
                        older IDs, an imprecise BusFault, Lockup, where the last
-                       fault was)
+                       fault was, a UART's baud rate on both ends, the time a
+                       vCPU is in a device's model, timers on the vCPU's
+                       thread, the card's medium kept, a block that ends at a
+                       device access, an MPU write that flushes what it changes)
 scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_monitor.py,
                        fe_cli.py, fe_files.py (files on the card), fe_apps.py
                        (apps and the loader), fe_expansion.py (an expansion

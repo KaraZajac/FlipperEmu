@@ -260,6 +260,13 @@ change. QEMU's page flush and its dirty tracking pass over entries that carry th
 invalid flag, so an entry that is kept needs a flag of its own, which the slow path
 and every probe have to know (BRINGUP_LOG 129).
 
+The firmware also sets the guard of the thread that it switches to at every switch
+(`furi_hal_mpu_set_stack_protection()`: the MPU off, the region written, the MPU on),
+and QEMU flushed its whole TLB at each of those writes, so every page was translated
+again after every switch. QEMU patch 0023 flushes what a write changes: a region's
+pages, and the pages that the TLB was given while the MPU was off (noted in the fill),
+a few at each switch. Card reads take a tenth less of the host's time (BRINGUP_LOG 194).
+
 A firmware that does not reach its WFI takes a whole host core: nothing counts
 instructions, and an emulated CPU that is awake runs as fast as the host lets it. One
 case is the firmware's own. While a CLI command runs (`log` with nothing to print, a

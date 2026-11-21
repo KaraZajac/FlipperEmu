@@ -6430,6 +6430,66 @@ big lock, entry 92).
       RogueMaster, side by side: all pass. `fw23_lost_flag.py` and its
       control: as they say. The setup check: 55.
 
+194. **An MPU write flushes what it changes.**
+    - At every change of thread the firmware sets the stack guard of
+      the thread that it switches to (`furi_hal_mpu_set_stack_
+      protection()`: `MPU->CTRL = 0`, the region's RBAR and RASR, the
+      MPU on with PRIVDEFENA), and QEMU flushed the whole TLB at each of
+      the four writes. QEMU's own count (`info jit`) for ten sums of a
+      file: 52080 flushes, about 1500 changes of thread a second. A
+      build without them (wrong, for measuring only) had taken 17 % off
+      the sums (entry 193).
+    - What a write changes, by `get_phys_addr_pmsav7()`: a region is
+      asked for its own area only, so a region written changes the
+      lookups in its area before and after, and none while the MPU is
+      off. The MPU on or off: with PRIVDEFENA where it is on, a
+      privileged access that no region takes gets the default map
+      either way, so for the privileged indexes only the enabled
+      regions' areas change; unprivileged ones are a background fault
+      with it on, so those indexes go whole (the firmware never uses
+      them, and an index that holds nothing is left alone).
+    - The first form flushed those areas, and since the firmware's NULL
+      guard is 1 MB, which QEMU's range flush takes whole, it looked at
+      the entries that the TLB held instead, and at the jump cache's.
+      It took `MPU->CTRL = 0` for a change of PRIVDEFENA too (that
+      clears it along with ENABLE; with the MPU off its other bits do
+      nothing) and flushed whole there: QEMU's count, half the flushes
+      left. With that put right it was slower than the build before:
+      twenty NFC dumps 16.4 s for 12.9. Two looks over the TLB and the
+      4096 entries of the jump cache at each change of thread cost more
+      than the flushes; and QEMU sizes its TLB anew only at a flush.
+    - The form that stays: of an enabled region the TLB holds something
+      usable only where the region is a page or more and lets something
+      through. A smaller one has every access to its page looked up
+      again (QEMU caches no part of a page), and one that lets nothing
+      through has no entries. So, switched off, the pages of such
+      regions go (the firmware has none: its guards are 32 bytes, its
+      NULL guard lets nothing through), and from then on the pages that
+      the TLB is given are noted, in the fill
+      (`arm_v7m_mpu_note_page()`), with the pages of regions written
+      meanwhile; switched on, the noted pages go, a few at every change
+      of thread. More than 32: all. QEMU patch 0023, v7M only.
+    - The fuzz check has a test of the guard that this is about now:
+      its app's signal 102 calls itself until its thread's stack is
+      used up, the push that reaches the 32 bytes of the guard faults,
+      and the firmware reports a stack overflow. It passes with the
+      build before, with each form, and with this; the NULL guard's
+      test (signal 101) as well.
+    - The indexes of HardFault and NMI: with HFNMIENA clear they see the
+      MPU off while it is on, so they may hold pages of any region; the
+      MPU switched on with HFNMIENA set, they go whole too. The firmware
+      leaves HFNMIENA clear.
+    - Ten sums of a file, in turns with the build before, six turns of
+      three each: a median of 8.1 s of the host's for 9.0, a tenth less,
+      and less in five turns of six (the host moves by a quarter from
+      one run to the next). Twenty NFC dumps: 12.8 s for 12.9, less in
+      all six. QEMU's count: no index flushed whole. What is left of
+      entry 193's 17 %: the few pages at each change of thread, and the
+      pages that hold a guard, which no form of this makes cheaper.
+    - The 30 checks side by side: all pass. Momentum, Unleashed and
+      RogueMaster, side by side: all pass. The fuzz check: 21 on the
+      official 1.5.1 with ufbt's SDK. The setup check: 57.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
