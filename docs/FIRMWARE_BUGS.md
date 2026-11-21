@@ -46,6 +46,7 @@ keeps its row, with the version that fixed it.
 | FW-21 | After an ISO15693 card was emulated, the ISO14443A listener takes its own answers for failed, and an ISO14443-4 card of the Flipper's is not activated any more | official 1.5.1 and dev, Momentum, Unleashed, RogueMaster | wrong result, until a restart | no |
 | FW-22 | An emulated MIFARE Plus (security level 3) gives every block, and takes a write to it, in a session of any one of its keys | Unleashed unlshd-094, RogueMaster RM1024-1347 | an emulated card that guards nothing | no |
 | FW-23 | A thread flag that an interrupt sets while `furi_thread_flags_clear()` runs is lost; the NFC poller then waits for its chip for ever, and a read of a card never ends | official 1.5.1 (and today's `dev` of the official firmware, Unleashed and Momentum, by the source) | freeze, rarely | no |
+| FW-24 | The forks' Mass Storage app tells a computer one block less in READ FORMAT CAPACITIES than its drive has, and decides PREVENT ALLOW MEDIUM REMOVAL by the command's control byte | Momentum mntm-012, Unleashed unlshd-094, RogueMaster RM1024-1347 (the app they ship) | wrong answer, harmless | no |
 
 ## Crashes and freezes
 
@@ -515,6 +516,30 @@ keeps its row, with the version that fixed it.
   The official firmware, its dev build and Momentum emulate no security level 3.
   Not tried on a real Flipper; nothing of the emulator's is in the decision.
 - **Log:** entry 181.
+
+### FW-24: the forks' Mass Storage app, two answers to a computer
+
+- **What happens:** the Mass Storage app (`apps/USB/mass_storage.fap`, from Momentum's
+  apps, which all three forks ship) makes a USB drive of an image on the card, and
+  answers two of the SCSI commands that a computer gives a drive wrongly:
+  - READ FORMAT CAPACITIES says the drive has one block less than it has: 1023 for
+    an image of 1024 blocks, where READ CAPACITY says 1024 (as the last block's
+    address, 1023, which is that command's way).
+  - PREVENT ALLOW MEDIUM REMOVAL is decided by the command's last byte, its control
+    byte, and not by the "prevent" bits of byte 4: a computer that asks to lock the
+    medium is told that it is locked, and an ALLOW whose control byte is not 0 is
+    refused. The app means to refuse a lock (it answers "not prevent").
+- **Why:** `helpers/mass_storage_scsi.c`: READ FORMAT CAPACITIES puts `n_blocks - 1`
+  where the number of blocks goes, as READ CAPACITY does; PREVENT reads
+  `bool prevent = cmd[5]`. (Read in Momentum-Apps at the commit that mntm-012 has, on
+  GitHub.)
+- **Harm:** little. A computer takes the drive's size from READ CAPACITY; READ
+  FORMAT CAPACITIES is asked when a medium is to be formatted, which would be offered
+  512 bytes less. A lock that is said to hold holds nothing: Back on the Flipper takes
+  the drive away at any time.
+- **Seen on:** Momentum mntm-012, Unleashed unlshd-094 and RogueMaster RM1024-1347,
+  the commands sent with `scripts/fe_msc.py`'s `Drive.command()`.
+- **Log:** entry 195.
 
 ## Seen once, not explained
 

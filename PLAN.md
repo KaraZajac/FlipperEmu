@@ -119,7 +119,21 @@ qFlipper / lab.flipper.net / `ufbt launch` only run over USB CDC.
       bridge on channel 1 carries bytes both ways with the CLI on the first port
       (official 1.1.2). The firmwares from 1.3 on undo the dual mode themselves.
       `scripts/usb_dual_check.py` 7 / 3 (BRINGUP_LOG 162)
-- ☐ Stretch: mass storage
+- ☑ Mass storage (2026-11-21): the forks' Mass Storage app makes a USB drive of an image
+      on the card, and `scripts/fe_msc.py` is its host in user space over USB/IP (GET MAX
+      LUN, SCSI in Bulk-Only Transport, a stall cleared and a skipped data phase taken as
+      usb-storage takes them): `info`, `read`, `write`, `eject`. The machine needed no
+      change: its bulk URBs carry it. Eject sends the app back to its list of images
+      when one was chosen there. `scripts/msc_check.py` 18 on Momentum, Unleashed and
+      RogueMaster (BRINGUP_LOG 195). Firmware bug FW-24 found with it (two harmless
+      answers of the app's)
+    - ☐ A block of 512 bytes takes about 3 ms (100 to 150 KiB a second), the card less
+          than half of it: a bulk packet goes when the firmware has caught up with the
+          last one, and a CPU that sleeps between two is found so by a timer of the main
+          loop, which wakes, and then woken for the interrupt. The CLI's and RPC's
+          transfers pay the same (`push` and `pull` through the firmware, qFlipper)
+    - ☐ The kernel's usb-storage on the drive (`sudo scripts/usbip_attach.py`): needs
+          root, not tried
 
 The double-buffer question from the notes was settled by what libusb_stm32 requires:
 `ep_write()` only accepts a double-buffered IN endpoint whose STAT_TX reads NAK (so STAT_TX

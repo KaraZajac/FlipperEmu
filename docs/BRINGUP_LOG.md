@@ -6490,6 +6490,60 @@ big lock, entry 92).
       RogueMaster, side by side: all pass. The fuzz check: 21 on the
       official 1.5.1 with ufbt's SDK. The setup check: 57.
 
+195. **The Flipper as a USB drive.**
+    - Momentum, Unleashed and RogueMaster ship a Mass Storage app
+      (`apps/USB/mass_storage.fap`, from Momentum's apps) that makes a
+      USB drive of an image file on the card. Opened with an image's
+      path it is that drive at once; opened without one, a menu (choose
+      an image in `/ext/apps_data/mass_storage`, or create one). Its
+      function: `0483:5720`, one interface of class 8 (SCSI, Bulk-Only
+      Transport), bulk endpoints 1 out and 2 in of 64 bytes, single
+      buffered, an 8-byte EP0, the image's name as the serial string.
+      A thread of its own sends each packet and waits for it to go.
+    - The machine needed nothing: its USB/IP server's bulk URBs carry
+      it, and `status` already named the function ("mass storage").
+      The host is a new USB/IP client in user space,
+      `scripts/fe_msc.py`, as `fe_u2f.py` is U2F's: descriptors, SET_
+      CONFIGURATION, GET MAX LUN (a stall: one LUN), then a CBW, data
+      and a CSW for each command; a stall cleared with CLEAR_FEATURE, a
+      wrong CSW answered with the reset recovery, and a CSW that comes
+      in the data's place taken as usb-storage takes it (the data phase
+      skipped). `info`, `read`, `write`, `eject`. The first try read
+      the image back whole.
+    - What the app answers: TEST UNIT READY, REQUEST SENSE, INQUIRY
+      (and its page 0x80), READ FORMAT CAPACITIES, READ CAPACITY(10),
+      MODE SENSE(6), READ(10), WRITE(10), PREVENT ALLOW MEDIUM REMOVAL,
+      START STOP UNIT. Anything else: refused, sense 5/20 (illegal
+      request, invalid command). A read past the last block: refused
+      with its CSW in the data's place, and no sense. Two answers are
+      wrong, harmlessly: firmware bug FW-24 (READ FORMAT CAPACITIES one
+      block short; PREVENT decided by the control byte), the same on
+      all three forks.
+    - Eject (START STOP UNIT): with the image chosen in the app's list,
+      the app goes back to that list and the port to the serial port,
+      as with a PC; opened with a path it has nowhere to go and stays a
+      drive (the scene it would go back to is not on its stack).
+    - Speed: 100 to 150 KiB a second, reading or writing, which the
+      app's own description calls "very slow". A block takes about
+      3 ms whatever a command's size (from 64 to 127 blocks a command,
+      2.97 ms a block), and the card less than half of it: the firmware
+      sums the same image through its CLI at 310 KiB a second, MD5
+      included. The rest is the USB model's pacing (entries 36 and 74):
+      a bulk packet goes when the firmware has caught up with the last,
+      the CPU asleep in WFI. A timer of the main loop finds it so, and
+      the CPU is woken for the packet's interrupt: two of the host's
+      threads woken for every packet. Left as it is for now (PLAN: the
+      CLI's and RPC's transfers pay the same).
+    - `scripts/msc_check.py`: at the desktop no drive; an image of 1024
+      random blocks onto the card, the app opened with it; the drive's
+      interface, INQUIRY, TEST UNIT READY, READ CAPACITY; every block
+      read is the image's; 64 blocks written and read back, their
+      neighbours as they were; the refused command and its sense; the
+      read past the end; an eject that leaves the drive; the same from
+      the command line; Back, and the image on the card is what was
+      written. 18 checks in under a minute on Momentum, Unleashed and
+      RogueMaster; on the official 1.5.1 3, the app skipped.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

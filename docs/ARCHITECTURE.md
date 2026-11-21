@@ -732,7 +732,9 @@ Host sequence, as a PC does it:
    - **HID** (Bad USB, USB remote): poll the interrupt endpoint every bInterval and decode
      Flipper's report IDs (1 keyboard, 2 mouse, 3 consumer) or boot keyboards. Output is
      text in a US layout: combos as `<CTRL c>`, Alt+Numpad decoded like Windows does.
-   - Anything else is enumerated and configured, but not bridged.
+   - Anything else is enumerated and configured, but not bridged. A mass storage
+     function (the forks' Mass Storage app) is named so in `status`; its host is a USB/IP
+     client (`scripts/fe_msc.py`, below).
 4. On DPPU low (mode change, reinit), or `attached=false`, the host forgets the device.
    With `attached=false` the device sees a suspend, and VBUS drops at the charger.
 
@@ -805,10 +807,15 @@ handed to the PC's kernel instead of the built-in class drivers:
   disagree on them.
 - When the firmware drops off the bus, the socket closes, so the PC sees an unplug. When
   the client disconnects, the device gets a fresh reset back on the built-in host.
-- Two clients in user space play the kernel's part, with no root: `scripts/fe_usbip.py`
-  for the serial port, and `scripts/fe_u2f.py` for the firmware's U2F token (a HID
-  device: its report descriptor over control URBs, 64-byte reports on an interrupt
-  endpoint each way).
+- Three clients in user space play the kernel's part, with no root: `scripts/fe_usbip.py`
+  for the serial port, `scripts/fe_u2f.py` for the firmware's U2F token (a HID device:
+  its report descriptor over control URBs, 64-byte reports on an interrupt endpoint each
+  way), and `scripts/fe_msc.py` for the forks' Mass Storage app (a USB drive: SCSI
+  commands in Bulk-Only Transport's wrappers on a bulk endpoint each way; a command that
+  fails before its data sends its status in the data's place, which the client takes as
+  usb-storage does). The drive's speed is the pacing's: a packet goes when the firmware
+  has caught up with the last, and the app's thread sends one at a time, so a block of
+  512 bytes takes about 3 ms (`scripts/msc_check.py` reads 100 to 150 KiB a second).
 
 ## Resets and the OTA updater
 

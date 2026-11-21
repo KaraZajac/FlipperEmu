@@ -150,6 +150,9 @@ tries of three (open, see PLAN.md). The files, app and window checks were run on
   PC and shows what the Flipper types.
 - USB/IP: `--usbip` exports the USB device so this PC's kernel can attach it as a real
   Flipper (`0483:5740`, `/dev/ttyACM*`), for qFlipper, lab.flipper.net and other tools.
+  The forks' Mass Storage app makes a USB drive of an image on the card, which
+  `scripts/fe_msc.py` reads and writes with no root
+  ([Mass Storage](#mass-storage-the-flipper-as-a-usb-drive-usbip)).
 - Over-the-air updates through the firmware's own updater (`run --update`): /int backup,
   updater in RAM, flash write and verify, resources and splash, then a normal boot.
   `update` does it on a device that runs: the card is out of its slot for the moment
@@ -520,7 +523,7 @@ picture of the save to the pixel and the tag, and goes on with Pause.
 | `reset` | reboot it, as holding Left + Back does |
 | `pause` \| `continue` | time stands still on it (screen, timers, radios), and goes on from there |
 | `snapshot save [NAME]` \| `snapshot load [NAME]` \| `snapshot` \| `snapshot rm NAME` | a running device as it stands, kept with its card and what is on its header; a stopped device started at that moment again (`--paused`: standing still there); the list; remove one |
-| `run --usbip [PORT]` | export the USB device over USB/IP (then `sudo scripts/usbip_attach.py`, or `scripts/fe_u2f.py` for U2F with no root) |
+| `run --usbip [PORT]` | export the USB device over USB/IP (then `sudo scripts/usbip_attach.py`; with no root, `scripts/fe_u2f.py` for U2F, `scripts/fe_msc.py` for a USB drive) |
 | `cli ["CMD" …]` | the device's CLI over USB: interactive, or run commands and print their output |
 | `ls [-R] [PATH]` | what is on the SD card (`/ext` when no path is given); `-R`: and in every folder under it |
 | `push [-f] [--card] LOCAL… [REMOTE]` \| `pull [-f] REMOTE… [LOCAL]` | copy files and folders to the card, and from it (`--card`: a running device's card is out of its slot for the write, which is quick for megabytes) |
@@ -1083,6 +1086,67 @@ matters.
 card with it (the key pair is the one the device's key gives for that application, the
 counter file has the last count): 39 checks in a minute, on the official 1.5.1 and its
 dev build, Momentum, Unleashed and RogueMaster.
+
+### Mass Storage: the Flipper as a USB drive (USB/IP)
+
+```sh
+./flipperemu run --usbip                  # the USB device on 127.0.0.1:3240, as above
+./flipperemu push --card disk.img /ext/apps_data/mass_storage/disk.img
+./flipperemu app /ext/apps/USB/mass_storage.fap /ext/apps_data/mass_storage/disk.img
+scripts/fe_msc.py                         # what the drive says it is
+scripts/fe_msc.py read copy.img           # its blocks, into a file
+scripts/fe_msc.py write disk.img          # a file's blocks, onto it
+./flipperemu press back                   # the app lets go of the image
+```
+
+Momentum, Unleashed and RogueMaster ship a Mass Storage app (`apps/USB/mass_storage.fap`)
+that makes a USB drive of an image file on the card: a computer reads and writes the
+image's blocks, and partitions, formats and mounts it as it would any drive. Opened with
+an image's path, the app is that drive at once; opened without one, it shows its menu
+(an image from `/ext/apps_data/mass_storage` to choose, or a new one to create). The
+official firmware has no such app on its card.
+
+`scripts/fe_msc.py` is a host for it in user space, as `fe_u2f.py` is for U2F: a USB/IP
+client that plays the kernel's usb-storage, so it needs no root and plugs nothing into
+this PC. It takes the drive as a PC does: the mass storage interface, GET MAX LUN, then
+SCSI commands in the wrappers of Bulk-Only Transport on the two bulk endpoints, with a
+stalled endpoint cleared, or the drive reset, as usb-storage does.
+
+```console
+$ scripts/fe_msc.py
+USB 0483:5720 "Flipper Devices Inc." "mine" serial "disk": a mass storage device, SCSI in Bulk-Only Transport on endpoints 2 in and 1 out (64 bytes), 1 LUN
+a removable disk: "Flipper" "Mass Storage" revision "0001", serial number "0"
+1024 blocks of 512 bytes (512 KiB), ready
+$ scripts/fe_msc.py read copy.img
+read 1024 blocks of 512 bytes (512 KiB) from block 0 in 3.6 s (144 KiB/s)
+```
+
+- **`read [FILE]` and `write [FILE]`** take `--lba N`, the first block, and `read` takes
+  `--count N`; with no file, they use standard output and input. A write is padded with
+  zeros to whole blocks. `--chunk N` is how many blocks one command moves (128).
+- **`eject`** sends what a PC's "eject" sends (START STOP UNIT). The app then goes back
+  to its list of images, and the port to the serial port, when the image was chosen
+  there; opened with an image's path, it has no list to go back to and stays a drive.
+- **It is slow, as the app says of itself** ("a (very slow) USB mass storage device"):
+  100 to 150 KiB a second here, reading or writing. Its thread sends each 64-byte packet
+  alone and waits for it to go. Here a block of 512 bytes, eight packets, takes about
+  3 ms, the card less than half of that: the emulator's host gives a packet only when
+  the firmware has caught up with the last one, and the bus alone would take 0.4 ms.
+- **The tool comes and goes**, as `fe_u2f.py` does: between its calls the emulator's own
+  host has the port, and to the firmware each call is a cable pulled and plugged in
+  again. The app takes that in its stride.
+- **The image on the card** has the writes; once the app has let go of it (Back),
+  `./flipperemu pull` copies it to this PC, where `mdir -i`, `fsck` or a loop mount
+  can look inside.
+
+With root, the kernel can have the drive itself: `sudo scripts/usbip_attach.py` (as
+above) plugs it into this PC, usb-storage binds it, and it is a disk (`/dev/sdX`) to
+partition, format and mount. That needs root and is yours to try.
+
+`scripts/msc_check.py FIRMWARE` checks all of it: 18 checks in under a minute on
+Momentum, Unleashed and RogueMaster (on the official firmware it skips the app, which
+is not there). The app answers two commands of a computer's wrongly, harmlessly:
+[FW-24](docs/FIRMWARE_BUGS.md).
 
 ### Updating like qFlipper does
 
@@ -3617,7 +3681,8 @@ scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_moni
                        the plugin's counts against an ELF), fe_fuzz.py (the
                        fuzzer and its targets), fe_record.py (the
                        screen as a GIF), fe_usbip.py, fe_u2f.py (a U2F host
-                       over USB/IP), usbip_attach.py, fe_gui.py (the window: fe_gui_view.py,
+                       over USB/IP), fe_msc.py (a USB drive's host over
+                       USB/IP), usbip_attach.py, fe_gui.py (the window: fe_gui_view.py,
                        fe_gui_link.py, fe_gui_widgets.py, fe_gui_ble.py), smoke_test.py,
                        *_check.py
 devices/ firmware/ build/ third_party/    generated, git-ignored
