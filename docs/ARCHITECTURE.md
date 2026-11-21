@@ -113,18 +113,43 @@ So that time is taken out of the clock, as a virtual machine does not count stea
   Flipper is slower against the wall clock (the smoke test beside 32 of them, on 16
   threads: about three minutes for one), and a script's time limits are the wall
   clock's.
-- What it does not do: a timer is run by the main loop, and a main loop that the host
-  holds up is late with it while the CPU runs on. That was so before as well. And a
-  host that is slower itself for a while (one that throttles) is slower for the
-  emulated CPU, whose thread runs all the while: only a count of instructions has
-  that out (`-icount`).
-- How late the main loop is with the timers can be counted: with `-machine
-  clock-meter=on` the clock notes, at every reading, how far it is past the first
-  timer that has yet to be run, and `qom-get /machine clock-late` has the timers by
-  how late they were run (JSON). On an idle host an idle Flipper's are 20 to 100 µs
-  late, the main loop waking up, and so are all of them while the firmware reads a
-  file or an NFC card (BRINGUP_LOG 189: before long device accesses were taken out,
-  4358 of them were 0.2 to 2 ms late in the one and 376 in the other).
+- The machine's timers are the main loop's to run, and beside busy loops the main loop
+  waits for a core as the CPU's thread does, while the CPU runs on: in eight reads of
+  an NFC card beside 24 busy loops, 600 timers ran half a millisecond late or more,
+  and their interrupts came wherever the firmware was by then. So the CPU's thread
+  runs the timers that are due itself (the machine's `cpu-timers`, on by default,
+  BRINGUP_LOG 191):
+  - before each of its device accesses, with the big lock that the access takes
+    anyway and the access the last instruction of its translated block (QEMU's
+    `tcg_mmio_before`, patch 0020 of ours): as if the main loop had run the timer just
+    before;
+  - where it runs without any (FreeRTOS's idle task turns, reading RAM, while its next
+    wake-up is fewer than four ticks away): a signal to the CPU's thread alone, from a
+    host timer set 20 µs after the first machine timer's time, sends it out of its
+    translated code, and on its way out (QEMU's `tcg_cpu_exit_hook`, same patch, with
+    the big lock) it runs the due timers and sets the signal for the next. The signal
+    comes when that thread runs, however long the main loop waits. It is set at those
+    two places and by whoever wakes the CPU, and while the CPU sleeps there is none;
+  - while the CPU sleeps, nothing but the main loop can run a timer, and the firmware
+    runs nothing on: the clock waits for the main loop from 100 µs after a timer's
+    time until it has run it (on an idle host the main loop is there sooner).
+
+  Beside the 24 busy loops: 3 timers half a millisecond late in eight reads, against
+  628 with `-machine cpu-timers=off`; the NFC `dump` that FW-23 stops: none in 1200
+  against 6 in about 1900. On an idle host nothing changes (an idle Flipper at 99.2 %
+  of the wall clock's speed either way). `clock-late` has how often the CPU's thread
+  ran timers (`cpu-ran`), the signals (`signals`) and how long the clock waited
+  asleep (`asleep-held-us`).
+- What it does not do: a host that is slower itself for a while (one that throttles) is
+  slower for the emulated CPU, whose thread runs all the while: only a count of
+  instructions has that out (`-icount`).
+- How late the timers are run can be counted: with `-machine clock-meter=on` the clock
+  notes, at every reading, how far it is past the first timer that has yet to be run,
+  and `qom-get /machine clock-late` has the timers by how late they were run (JSON).
+  On an idle host an idle Flipper's are 20 to 100 µs late, the main loop waking up,
+  and nearly all of them are less while the firmware reads a file or an NFC card
+  (BRINGUP_LOG 189: before long device accesses were taken out, 4358 of them were 0.2
+  to 2 ms late in the one and 376 in the other).
 - `-machine host-clock=on` (`run --host-clock`) is the clock as it was, for comparing.
 - What it takes out on an idle host: half a percent of an idle Flipper's time with the
   cable in, 5 % while it reads an NFC card or answers the CLI, and more than half
@@ -162,6 +187,7 @@ in 466 against 2 in 456: no rarer with this clock that day, and as rare with the
 host's. What was left of it was not the CPU's thread waiting for a core. A good part
 was the long device accesses of the paragraph above: with them out of the clock, in
 turns beside 24 loops, that `dump` stood still 3 times in 994 against 7 times in 556.
+The rest was the main loop's lateness, which `cpu-timers` takes out: none in 1200.
 Alone every check is as before.
 
 **The cycle counter's own account (with `host-clock=on` only).** Before the machine's

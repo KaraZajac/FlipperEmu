@@ -214,6 +214,7 @@ struct FlipperZeroState {
     bool legacy_sleep;
     bool host_clock;             /* the clock counts what the host takes */
     bool clock_meter;            /* how late timers are run: counted */
+    bool cpu_timers;             /* the CPU's thread runs due timers */
     int log_level;               /* the firmware's, to start with; -1: as is */
     bool usb_cable;              /* plugged in from the start */
     QemuInputHandlerState *input;
@@ -2539,7 +2540,7 @@ static void flipper_zero_init(MachineState *machine)
     uint64_t uid64;
 
     if (!s->host_clock) {
-        wb55_own_clock_init(s->clock_meter);
+        wb55_own_clock_init(s->clock_meter, s->cpu_timers);
     }
     object_initialize_child(OBJECT(machine), "soc", &s->soc, TYPE_WB55_SOC);
     soc = DEVICE(&s->soc);
@@ -2943,6 +2944,16 @@ static void flipper_set_clock_meter(Object *obj, bool v, Error **errp)
     FLIPPER_ZERO(obj)->clock_meter = v;
 }
 
+static bool flipper_get_cpu_timers(Object *obj, Error **errp)
+{
+    return FLIPPER_ZERO(obj)->cpu_timers;
+}
+
+static void flipper_set_cpu_timers(Object *obj, bool v, Error **errp)
+{
+    FLIPPER_ZERO(obj)->cpu_timers = v;
+}
+
 static char *flipper_get_clock_late(Object *obj, Error **errp)
 {
     return wb55_own_clock_late();
@@ -3054,6 +3065,7 @@ static void flipper_zero_instance_init(Object *obj)
     s->log_level = -1;
     s->usb_cable = true;
     s->sd_in = true;
+    s->cpu_timers = true;
     object_property_add_uint32_ptr(obj, "lcd-scale", &s->scale,
                                    OBJ_PROP_FLAG_READWRITE);
     object_property_add_uint32_ptr(obj, "region", &s->region,
@@ -3088,6 +3100,14 @@ static void flipper_zero_instance_init(Object *obj)
     object_property_set_description(obj, "clock-meter",
         "Count how late the main loop runs the machine's timers (clock-late "
         "has it; not with host-clock=on)");
+    object_property_add_bool(obj, "cpu-timers", flipper_get_cpu_timers,
+                             flipper_set_cpu_timers);
+    object_property_set_description(obj, "cpu-timers",
+        "The CPU's thread runs the machine's timers that are due (before its "
+        "device accesses, and sent out of its code by a signal where it "
+        "runs without any), and asleep the clock waits for the main loop: "
+        "the timers are on time beside a busy host too.  Off: the main loop "
+        "alone runs them (not with host-clock=on)");
     object_property_add_str(obj, "clock-late", flipper_get_clock_late, NULL);
     object_property_set_description(obj, "clock-late",
         "With clock-meter=on: how many timers were run late and by how many "

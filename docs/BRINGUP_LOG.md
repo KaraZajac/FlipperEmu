@@ -6254,6 +6254,99 @@ big lock, entry 92).
       the access run alone, every time it comes by (QEMU since 8.2).
       In PLAN.
 
+191. **The CPU's thread runs the timers that are due.**
+    - Entries 188 and 189 left the `dump` that FW-23 stops at 3 in 994
+      beside 24 busy loops, and the meter (entry 189) showed why it
+      was not gone: in eight dumps of an NFC card beside the loops, 560
+      to 670 timers ran half a millisecond late or more, where an idle
+      host has none. The timers are the main loop's, and beside busy
+      loops the main loop waits for a core as the CPU's thread does,
+      while the CPU runs on.
+    - The plan in PLAN was the CPU's thread waiting at its next device
+      access while a timer is overdue. Better: it runs the timer itself
+      there. It takes the big lock for the access anyway, the access is
+      the last instruction of its block (QEMU makes it so), and a timer
+      run there is as if the main loop had run it just before. A hook
+      in `cputlb.c` before each locked access (QEMU patch 0020). Beside
+      the loops, 289 and 274 timers half a millisecond late for 624 and
+      565; the `dump` in 600 without a stop, against once in 492 in
+      turns, and 150 dumps in 205 s for 238.
+    - What was left, found with an instrument (out again): for each
+      timer half a millisecond late, which device's, whether the CPU
+      slept, how long since its last device access, which thread ran
+      it, and where the firmware was (the CPU's thread asked for its PC
+      at its next block's boundary, symbolised with the ELF). Nearly
+      all of them SysTick (QEMU's `ptimer`), the CPU awake, its last
+      device access a millisecond and more before, the firmware in its
+      idle task: `prvIdleTask`, `prvGetExpectedIdleTime`. FreeRTOS does
+      not sleep while the next wake-up is fewer than four ticks away
+      (`configEXPECTED_IDLE_TIME_BEFORE_SLEEP 4`): the idle task turns,
+      reading RAM, and waits for the tick that the main loop brings.
+    - Ruled out on the way: busy waits on the cycle counter (timers run
+      at its reads as well: 238 and 246 late, against 227 and 239), and
+      timers due while the CPU sleeps (the clock waiting then: 1 to 4 ms
+      in eight dumps).
+    - So a signal. A POSIX timer on the host's clock, its signal to the
+      CPU's thread alone (`SIGEV_THREAD_ID`, a real-time signal), set
+      20 µs after the first timer's time; the handler does what TCG's
+      own kick does (an exit request), and where the thread has left
+      its translated code a second hook (`tcg_cpu_exit_hook`, in the
+      threads' loops, with the big lock) runs the due timers and sets
+      the signal for the next. The signal comes when that thread runs,
+      however long the main loop waits. 125 and 91 late.
+    - The instrument found two mistakes in it. It was set at device
+      accesses and exits only: a CPU that the main loop woke ran its
+      tick's handler and then the idle task with no signal set; now
+      whoever wakes the CPU sets it, and while the CPU sleeps there is
+      none (which also took the useless signals out of an idle
+      Flipper's: 759 in 8 s for 8046, and its clock at 99.3 % of the
+      wall clock's speed again, where it had dropped to 98.6). And a
+      signal that went off before its timer was due in the machine's
+      time (beside busy loops the host's time runs ahead of it) was not
+      set again, since its first timer was the same: now it is, after
+      every time it has gone off.
+    - The last few came while the CPU slept: nothing but the main loop
+      can run a timer then, and the firmware runs nothing on, so the
+      clock waits for the main loop from 100 µs after a timer's time
+      (on an idle host the main loop is there within 50 to 65 µs, and
+      it costs nothing: 1 ms in 8 s). 4 and 3 late, then 1 and 1.
+    - The three are the machine's `cpu-timers` (on by default; off for
+      comparing). Beside 24 busy loops, eight dumps: 3 timers half a
+      millisecond late, against 628 with it off; the lateness as an
+      idle host's. On an idle host as before: idle 99.1 to 99.2 % of
+      the wall clock's speed with it on and off in turns, three times;
+      the CLI's timers mostly under 20 µs late where they were 20 to
+      100. The hunt: 600 dumps without a stop, against twice in 409 in
+      turns, 150 dumps in 192 s for 238. With this and with the
+      device-access part alone, 1200 dumps without a stop, against 6
+      in about 1900 with the clock before it that day.
+    - `scripts/clock_check.py` has it: beside its busy loop none of
+      3870 timers half a millisecond late with it, and with
+      `-machine cpu-timers=off` 480 of 3001. 21 checks.
+    - `scripts/fw23_lost_flag.py` was unreliable on the machine's clock
+      since entry 188, with `cpu-timers` on or off: its control failed
+      two runs in three, the demonstration about one in two. Under gdb
+      the code near the breakpoints runs slowly, and by the time the
+      thread is between the two calls the chip's frame end is often
+      due: its interrupt is taken there as soon as the machine goes on,
+      which is the bug in the control too. The control now has gdb
+      leave before the flags are read. The demonstration takes a frame
+      whose block timer has run out already as it is (nothing to
+      hold), and skips frames where no block timer runs, where the
+      chip's flag is stale as well, or where the wait that returns the
+      timer's flag has taken the chip's frame end too (a frame with no
+      answer has no interrupt left to come). Control 3 of 3, the
+      demonstration 5 of 6.
+    - A slip of mine: a hunt's script edited while bash ran it. bash
+      reads the rest of a script from the byte where it stopped, so the
+      lines after the running loop would have been other ones. Put
+      back as it was before the loop ended; new modes go into a copy.
+    - Checks: all thirty on the official 1.5.1, four side by side:
+      1155 passes, none failed. The clock check (21), the smoke test and
+      the two NFC checks on the dev build, Momentum, Unleashed and
+      RogueMaster, side by side: all pass. The setup check has the
+      twentieth patch: 51.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

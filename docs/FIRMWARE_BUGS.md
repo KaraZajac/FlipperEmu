@@ -257,7 +257,11 @@ keeps its row, with the version that fixed it.
   model long (a block of the card: a millisecond) was one instruction and as much of
   the machine's clock, and the timers that ran out in it came after it. With that out
   of the clock it was 3 times in 994 dumps, against 7 times in 556 in turns without
-  (BRINGUP_LOG 189).
+  (BRINGUP_LOG 189). The rest was the emulator's main loop, which the host kept
+  waiting while the firmware ran on: its timers came late, and their interrupts
+  wherever the firmware was. Since the CPU's thread runs the timers that are due
+  (BRINGUP_LOG 191), it has not come in 1200 dumps beside 24 busy loops, against 6
+  in about 1900 before; `run -- -machine cpu-timers=off` brings it back.
 - **How much it matters:** `furi_thread_flags_clear()` is the firmware's only way
   to clear a thread flag, and any flag set from an interrupt handler or another
   thread during it is lost the same way. Official 1.5.1 calls it in 19 places: the
@@ -268,8 +272,10 @@ keeps its row, with the version that fixed it.
   priority would: before a frame until the block timer has run out, and then
   between the two calls of the clear until the chip's interrupt handler has run.
   The thread's flags are 0 as read, 0x2 (the interrupt's) after the handler, and
-  the dump does not return, with PA2 up. With `--control` the second hold is left
-  out, and the dump returns.
+  the dump does not return, with PA2 up. With `--control` gdb leaves before the
+  flags are read, and the dump returns. (Under gdb the code near its breakpoints
+  runs slowly, and the script takes the frames that show the bug cleanly: see its
+  description. The demonstration does what it says in about five runs of six.)
   Under load, without gdb: the handler of the interrupt that was lost came with the
   thread at `vPortExitCritical+0xe`, called from `xTaskGenericNotify+0xbe`, from
   `furi_thread_flags_clear+0x24` (the return from the first call), from

@@ -595,15 +595,24 @@ one was for every block. So the Flipper falls behind the wall clock while it rea
 card (by more than half while it does nothing else), and by some 5 % while it reads an
 NFC card or answers the CLI.
 
+The machine's timers are on that clock's time beside other work as well. The
+emulator's main loop runs them, and a busy computer keeps it waiting as it keeps the
+CPU's thread, while the CPU runs on: so the CPU's thread runs the ones that are due
+itself (before its device accesses, and sent out of its code by a signal where it runs
+without any), and while the CPU sleeps the clock waits for the main loop. Beside 24
+busy loops the timers come as on time as on an idle computer, where hundreds came half
+a millisecond late or more in a few seconds of NFC work (and the firmware's FW-23 with
+them). `-machine cpu-timers=off` leaves them to the main loop, for comparing.
+
 `run --host-clock` is the clock as it was before, which went on in all of that, for
 comparing. In the monitor `qom-get /machine clock` reads the clock, `clock-steal` what
 it has left out, `clock-device` how much of that was for long device accesses and
 `clock-wake` what wake-ups were given, in microseconds; with `run -- -machine
-clock-meter=on`, `clock-late` has how late the emulator ran the machine's timers.
-`scripts/clock_check.py FIRMWARE` checks it with a busy loop on the emulator's core
-(18 checks on each of the five firmwares, in a minute or two;
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) has how it counts and what it does not
-take out).
+clock-meter=on`, `clock-late` has how late the machine's timers were run, how often
+the CPU's thread ran them and its signals. `scripts/clock_check.py FIRMWARE` checks it
+with a busy loop on the emulator's core (21 checks on each of the five firmwares, in
+about two minutes; [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) has how it counts and
+what it does not take out).
 
 ### The firmware log
 
@@ -961,7 +970,7 @@ scripts/enclave_check.py -f FIRMWARE     # and the enclave through the firmware 
 
 And for the setup itself, `scripts/setup_check.py`: what `scripts/setup_qemu.sh` makes
 of a source tree that has all, some or none of the patches in `qemu/patches`, and
-whether the tree here has them all (50 checks in about twenty seconds; it builds nothing
+whether the tree here has them all (51 checks in about twenty seconds; it builds nothing
 and starts no emulator). A tree with a `.rej` file in it is one that the script, as it
 was until 2026-11-11, patched twice: the script says so now, and how to start over.
 After an upgrade of the system's Python (3.14 to 3.15, say), the build's meson stops
@@ -3383,8 +3392,10 @@ LPUART1 (pins 15 and 16).
 Machine options: `name=` (OTP device name, ≤8 chars), `lcd-scale=`, `region=` (OTP
 region), `legacy-sleep=on|off` (default off: STOP2), `host-clock=on|off` (default off: the
 machine's clock is the CPU's own time; on: the host's, which goes on while the CPU's
-thread waits for a core), `clock-meter=on|off` (default off; on: how late timers are
-run is counted, for `clock-late`), `nvram=`, `usb-serial=` (chardev id for the USB port;
+thread waits for a core), `cpu-timers=on|off` (default on: the CPU's thread runs the
+machine's timers that are due; off: the main loop alone), `clock-meter=on|off` (default
+off; on: how late timers are run is counted, for `clock-late`), `nvram=`, `usb-serial=`
+(chardev id for the USB port;
 plugs the cable in), `audiodev=` (the speaker's `-audiodev` id). `-global
 stm32wb55-usb.debug=on` traces the USB host.
 

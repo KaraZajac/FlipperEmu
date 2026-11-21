@@ -14,7 +14,12 @@ longer by the host's clock, as long as apart from it by the machine's
 (`qom-get /machine clock`), and what was taken is in `clock-steal`, which is
 what the two clocks differ by.  (In turns, and each turn with the one
 after it: a host that is slower itself for a while, as one that throttles,
-is slower for the emulated CPU too, and no clock has that out.)
+is slower for the emulated CPU too, and no clock has that out.)  The
+machine's timers are on time beside the loop as well, where the main loop
+waits for its turn on the core: the CPU's thread runs those that are due
+(the machine's `cpu-timers`), and the meter (`run -- -machine
+clock-meter=on`, read as `clock-late`) has few of them half a millisecond
+late.
 
 An idle Flipper's clock goes with the host's: time that the CPU sleeps is
 its own, and so is what a wake-up takes of the host's time, up to 60 us of
@@ -24,15 +29,15 @@ while the USB cable is in.
 One access to a device is one instruction, however long the device's model
 takes over it: a block of the card is read in one, in about a millisecond.
 That is not the machine's time (`clock-device`), and the machine's timers
-are not late for it: the device counts how late the main loop runs each
-(`run -- -machine clock-meter=on`, read as `clock-late`), and of those that
-it ran while the firmware read the file, few were half a millisecond late
-(without this: one for nearly every block).
+are not late for it: of those run while the firmware read the file, few
+were half a millisecond late (without this: one for nearly every block).
 
 A snapshot keeps what was taken out: a device that is paused, saved, stopped
-and loaded stands at the same microsecond, with the same count.  Last the
+and loaded stands at the same microsecond, with the same count.  Then the
 device with `run --host-clock`: nothing is taken out, and the work beside
-the busy loop lasts longer by the machine's clock too.
+the busy loop lasts longer by the machine's clock too.  Last with
+`-machine cpu-timers=off`, where the main loop alone runs the timers:
+beside the loop one in twenty or more comes half a millisecond late.
 
 Linux only (the kernel's count of a thread's time, and threads put on a
 core), and a host with two cores or more: otherwise nothing is checked and
@@ -91,13 +96,20 @@ class Device:
 
     def work(self, file, times):
         """The file summed so often: (seconds by the machine's clock, by
-        the host's, seconds taken out, the sums)"""
+        the host's, seconds taken out, the sums, the meter's counts meanwhile
+        (late: how many timers were run late by how much, as clock-late's
+        count has them; ran: how often the CPU's thread ran timers))"""
         c0, s0, h0 = self.prop("clock"), self.prop("clock-steal"), time.monotonic()
+        l0 = late(self)
         sums = {self.cli.run(f"storage md5 {file}", timeout=240).strip()
                 for _ in range(times)}
         host = time.monotonic() - h0
+        l1 = late(self)
+        meter = {"late": [x - y for x, y in zip(l1["count"], l0["count"])],
+                 "ran": l1.get("cpu-ran", 0) - l0.get("cpu-ran", 0),
+                 "up-to-us": l1["up-to-us"]}
         return ((self.prop("clock") - c0) / 1e6, host,
-                (self.prop("clock-steal") - s0) / 1e6, sums)
+                (self.prop("clock-steal") - s0) / 1e6, sums, meter)
 
 
 def largest(dev):
@@ -192,6 +204,20 @@ def summed(got):
     return sums, machine, host, beside, said
 
 
+def lateness(got):
+    """Of such turns, the timers run during the turns beside the loop: (how
+    many were run, how many of them more than half a millisecond late, how
+    often the CPU's thread ran some), and that in words"""
+    counts = [sum(col) for col in zip(*(b[4]["late"] for a, b in got))]
+    edges = got[0][1][4]["up-to-us"]
+    over = sum(counts[edges.index(500) + 1:])
+    ran = sum(b[4]["ran"] for a, b in got)
+    said = (f"beside the loop {sum(counts)} timers run, {over} of them more "
+            f"than 0.5 ms late, the CPU's thread ran some {ran} times; up to "
+            f"{edges} us and more: {counts}")
+    return sum(counts), over, ran, said
+
+
 def one_sum(sums):
     return len(sums) == 1 and re.fullmatch(r"[0-9a-f]{32}", next(iter(sums)))
 
@@ -210,7 +236,8 @@ def own_checks(b, dev):
         return None
     once = dev.work(file, 1)[0]
     times = max(1, min(20, math.ceil(TURN_S / max(once, 0.01))))
-    sums, machine, host, beside, said = summed(turns(dev, file, times))
+    got = turns(dev, file, times)
+    sums, machine, host, beside, said = summed(got)
     check(f"{file} summed {2 * TURNS * times} times, in turns apart from a "
           "busy loop and beside it on its core: the same sum each time",
           one_sum(sums), sums)
@@ -222,6 +249,14 @@ def own_checks(b, dev):
           "time, or more), and is what the two clocks differ by",
           beside[2] >= 0.25 * beside[1]
           and abs(beside[1] - beside[0] - beside[2]) <= 0.3, said)
+    print(f"        ({said})", flush=True)
+    run, over, ran, said = lateness(got)
+    check("... and the machine's timers are on time beside the loop as "
+          "well: the CPU's thread runs those that are due, and of those run "
+          "during the turns beside it, fewer than one in fifty is more than "
+          "half a millisecond late (`clock-late`)",
+          dev.prop("cpu-timers") == "true" and ran > 0 and run > 0
+          and over * 50 < run, said)
     print(f"        ({said})", flush=True)
 
     c0, w0, h0 = dev.prop("clock"), dev.prop("clock-wake"), time.monotonic()
@@ -254,9 +289,9 @@ def own_checks(b, dev):
           "model long: that is not the machine's time (`clock-device`: a "
           "fifth of the host's time for the file, or more)",
           l1["metered"] and blocks and device >= 0.2 * host, said)
-    check("... and the machine's timers are not late for it: of those that "
-          "the main loop ran meanwhile, fewer than one for every twenty "
-          "blocks were more than 500 us late (`clock-late`)",
+    check("... and the machine's timers are not late for it: of those run "
+          "meanwhile, fewer than one for every twenty blocks were more than "
+          "500 us late (`clock-late`)",
           blocks and over <= blocks / 20, said)
     print(f"        ({said})", flush=True)
     return file, times
@@ -323,6 +358,30 @@ def host_checks(b, file, times):
         print(f"        ({said})", flush=True)
     finally:
         dev.shut()
+        b.stop()
+
+
+def off_checks(b, file, times):
+    """The same device with `-machine cpu-timers=off`: the main loop alone
+    runs the timers"""
+    if not check("the device starts with `-machine cpu-timers=off`",
+                 b.start(more=["--", "-machine",
+                               "cpu-timers=off,clock-meter=on"]),
+                 b.uart_text()[-800:]):
+        return
+    b.fe("wait", "--timeout", b.timeout)
+    dev = Device(b).open()
+    try:
+        got = turns(dev, file, times)
+        run, over, ran, said = lateness(got)
+        check("with `cpu-timers=off` the main loop alone runs the timers, "
+              "and beside the loop more of them are late: one in twenty or "
+              "more by more than half a millisecond",
+              dev.prop("cpu-timers") == "false" and ran == 0 and run > 0
+              and over * 20 >= run, said)
+        print(f"        ({said})", flush=True)
+    finally:
+        dev.shut()
 
 
 def main():
@@ -353,6 +412,7 @@ def main():
         work = own_checks(b, dev)
         if work and snapshot_checks(b, dev, args.timeout):
             host_checks(b, *work)
+            off_checks(b, *work)
         log = b.uart_text(every=True)
         crash = CRASH.search(log)
         check("no crash in the firmware's log", not crash,

@@ -21,7 +21,9 @@ in use, with everything else running.
 - Before a frame is sent (the anticollision, 0.1 ms after the ATQA), until
   the block timer has run out.  Nobody takes its flag then: the sender
   waits for it only while the timer runs.  (In the emulator on an idle host
-  the firmware is there before the timer is; beside busy loops it is not.)
+  the firmware is there before the timer is; beside busy loops it is not,
+  nor under gdb, whose breakpoints make the code near them slow: then the
+  flag is stale already and there is nothing to hold.)
 - The frame goes out, and the poller's first wait returns with that stale
   flag.  furi_hal_nfc_wait_event_common() clears it; gdb goes on to the
   instruction after the first of the two calls in furi_thread_flags_clear()
@@ -33,8 +35,11 @@ value over it, the dump does not return, and the chip's pin (PA2) stays up.
 the flags are read, nothing is lost and the next dump is taken: code under a
 breakpoint runs slowly the first time.)
 
---control: the first hold and the same stops, the second hold left out: the
-dump returns.
+--control: the first hold, the stop where the timer's flag is to be cleared,
+and gdb gone before the flags are read: the dump returns.  (Not the same stop
+between the two calls without the hold: under gdb the way there is slow, the
+chip's interrupt is often due by then, and taken in the gap as soon as the
+machine goes on, which is the bug again.)
 
 Exit status 0: what is described happened (the flag lost and the dump
 stuck; with --control: the dump back).  1: it did not.
@@ -99,26 +104,58 @@ while 1
   continue
   set $nfc = instance
   delete
-  fw23_hold furi_hal_nfc_timer_irq_callback
-  printf "fw23: %%s held before a frame until the block timer had run out: flags %%#x, and nobody waits for them\n", pxCurrentTCB->pcTaskName, ((TCB_t *) pxCurrentTCB)->ulNotifiedValue[1]
+  if (((TCB_t *) pxCurrentTCB)->ulNotifiedValue[1] & FuriHalNfcEventInternalTypeTimerBlockTxExpired) == 0
+    if (furi_hal_nfc_timers[FuriHalNfcTimerBlockTx].timer->CR1 & 1) == 0
+      printf "fw23: (before this frame no block timer runs, and none has run out: the next frame)\n"
+      loop_continue
+    end
+    fw23_hold furi_hal_nfc_timer_irq_callback
+    printf "fw23: %%s held before a frame until the block timer had run out: flags %%#x, and nobody waits for them\n", pxCurrentTCB->pcTaskName, ((TCB_t *) pxCurrentTCB)->ulNotifiedValue[1]
+  else
+    if (((TCB_t *) pxCurrentTCB)->ulNotifiedValue[1] & FuriHalNfcEventInternalTypeIrq) != 0
+      printf "fw23: (at this frame the chip's flag is stale as well: the next frame)\n"
+      loop_continue
+    end
+    printf "fw23: %%s comes to a frame after the block timer has run out: flags %%#x, and nobody waits for them\n", pxCurrentTCB->pcTaskName, ((TCB_t *) pxCurrentTCB)->ulNotifiedValue[1]
+  end
   break *&furi_thread_flags_clear if $r0 == FuriHalNfcEventInternalTypeTimerBlockTxExpired && $nfc->comm_state == NfcCommStateWaitTxEnd
   continue
   delete
+%(between)s
+end
+"""
+
+# the demonstration: to the place between the two calls, and held there.
+# (Unless the wait that returned the timer's flag had the chip's interrupt
+# too and took its frame end: under gdb the way there is slow, and a frame
+# with no answer then has no interrupt left to come.)
+BETWEEN = r"""  up
+  set $ev = event
+  down
+  if ($ev & FuriHalNfcEventTxEnd) != 0
+    printf "fw23: (the chip's frame end was taken in the same wait, and the frame may get no answer: nothing to hold for; the next frame)\n"
+    loop_continue
+  end
   tbreak *$after
   continue
-  printf "fw23: the frame is going out, and %%s clears the timer's flag; between the two calls: the flags as read %%#x\n", pxCurrentTCB->pcTaskName, cflags
+  printf "fw23: the frame is going out, and %s clears the timer's flag; between the two calls: the flags as read %#x\n", pxCurrentTCB->pcTaskName, cflags
   if (cflags & FuriHalNfcEventInternalTypeIrq) == 0
-    %(hold)s
+    fw23_hold furi_hal_nfc_int_callback
+    printf "fw23: held there until the handler of the chip's interrupt had run: back in %s, the flags as they are %#x\n", pxCurrentTCB->pcTaskName, ((TCB_t *) pxCurrentTCB)->ulNotifiedValue[1]
     detach
     quit
   end
   printf "fw23: (the chip's interrupt was there before the read: nothing to lose; once more)\n"
-end
+"""
+# the control: gdb leaves before the flags are read, and the clear runs at
+# its own speed (the breakpoints gone).  (Not a stop between the two calls:
+# under gdb the way there is slow, the chip's interrupt is often due by
+# then, and taken there at once when the machine goes on.)
+CONTROL = r"""  printf "fw23: the frame is going out, and %s is to clear the timer's flag; not held: gdb leaves before the flags are read\n", pxCurrentTCB->pcTaskName
+  detach
+  quit
 """
 
-HOLD = r"""fw23_hold furi_hal_nfc_int_callback
-    printf "fw23: held there until the handler of the chip's interrupt had run: back in %s, the flags as they are %#x\n", pxCurrentTCB->pcTaskName, ((TCB_t *) pxCurrentTCB)->ulNotifiedValue[1]"""
-CONTROL = r"""printf "fw23: not held there\n" """
 TRIES = 6
 
 
@@ -153,7 +190,7 @@ def main():
         script = work / "fw23.gdb"
         ready = work / "ready"          # gdb is on the device and lets it run
         script.write_text(GDB % {"ready": ready,
-                                 "hold": CONTROL if args.control else HOLD})
+                                 "between": CONTROL if args.control else BETWEEN})
         mon = Monitor(str(b.dir / "monitor.sock"))
         cli = FlipperCli(usb_endpoint(mon))
         mon.close()                     # (`./flipperemu gdb` asks it for the stub)
@@ -193,7 +230,7 @@ def main():
                   f"({took:.0f} s); the chip's interrupt pin is "
                   f"{'up' if high else 'down'}")
             if args.control:
-                return 0 if "fw23: not held there" in notes and found else 1
+                return 0 if any("not held" in n for n in notes) and found else 1
             m = re.search(r"back in \w+, the flags as they are (0x[0-9a-f]+|0)",
                           said)
             lost = bool(m and int(m.group(1), 16) & 2)   # ...TypeIrq

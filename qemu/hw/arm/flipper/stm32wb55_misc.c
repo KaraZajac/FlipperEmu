@@ -15,6 +15,7 @@
 #include "qemu/osdep.h"
 #include "qemu/atomic.h"
 #include "qemu/log.h"
+#include "qemu/error-report.h"
 #include "qemu/main-loop.h"
 #include "qemu/guest-random.h"
 #include "hw/core/cpu.h"
@@ -242,15 +243,40 @@ bool wb55_cpu_asleep(void)
  * How late the main loop comes to the machine's timers can be counted
  * (the machine's clock-meter=on, read as clock-late): at every reading of
  * the clock, how far it is past the first timer that has yet to be run.
- * That is how the paragraph before the last was found.
+ * That is how the paragraph before the last was found, and the next.
+ *
+ * The timers are the main loop's to run, and beside busy loops the main
+ * loop waits for a core as the CPU's thread does, while the CPU runs on:
+ * hundreds of timers came half a millisecond late or more in eight reads
+ * of an NFC card beside 24 busy loops, and their interrupts at any place
+ * of the firmware's (FW-23 came that way).  So the CPU's thread runs the
+ * timers that are due itself (the machine's cpu-timers, on by default):
+ * - before each of its device accesses, with the big lock that the access
+ *   takes anyway and the access the last instruction of its block (QEMU's
+ *   tcg_mmio_before, a patch of ours);
+ * - where it runs without any (the firmware's idle task turns while its
+ *   next tick is fewer than four away): a signal to the CPU's thread
+ *   OWN_SIG_GRACE_NS after the first timer's time sends it out of its
+ *   translated code, and on its way out (QEMU's tcg_cpu_exit_hook, with
+ *   the big lock) it runs them.  The signal comes when that thread runs,
+ *   however long the main loop waits.  The CPU's thread sets it at each of
+ *   those looks, whoever wakes the CPU sets it then, and while the CPU
+ *   sleeps there is none;
+ * - while the CPU sleeps, nothing but the main loop can run a timer, and
+ *   the firmware runs nothing on: the clock waits for the main loop from
+ *   OWN_HOLD_NS after a timer's time until it has run it.
+ * Beside 24 busy loops: one timer half a millisecond late in eight reads of
+ * an NFC card, where there were six hundred.
  *
  * This is the clock hook that QEMU has for its instruction counter
  * (AccelOpsClass.get_virtual_clock), which is free without -icount.
  */
-#define OWN_LOOK_NS   (20 * SCALE_US)
-#define OWN_STILL_NS  (100 * SCALE_MS)
-#define OWN_WAKE_NS   (60 * SCALE_US)
-#define OWN_ACCESS_NS (20 * SCALE_US)
+#define OWN_LOOK_NS      (20 * SCALE_US)
+#define OWN_STILL_NS     (100 * SCALE_MS)
+#define OWN_WAKE_NS      (60 * SCALE_US)
+#define OWN_ACCESS_NS    (20 * SCALE_US)
+#define OWN_SIG_GRACE_NS (20 * SCALE_US)
+#define OWN_HOLD_NS      (100 * SCALE_US)
 
 /* (the meter's: timers by how late they were run, up to so many us) */
 static const int own_late_us[] = { 10, 20, 50, 100, 200, 500, 1000, 2000,
@@ -260,6 +286,7 @@ static const int own_late_us[] = { 10, 20, 50, 100, 200, 500, 1000, 2000,
 static struct {
     QemuSpin lock;
     bool on;
+    bool cpu_timers;             /* the CPU's thread runs due timers */
     void (*interrupt)(CPUState *cpu, int mask);   /* QEMU's own, kept */
     int64_t wake;                /* a wake-up: so much of it may still pass */
     int64_t woke;                /* ... and what wake-ups were given so far */
@@ -270,6 +297,16 @@ static struct {
     int64_t still;               /* awake and not run at all: for how long */
     int64_t steal;               /* taken out so far */
     int64_t last;                /* the last time given */
+    int64_t held;                /* asleep, waited for the main loop so far */
+    bool sig_tried;              /* the signal: set up (on the CPU's thread) */
+    bool sig_on;                 /* ... and it can be sent */
+#ifdef CONFIG_LINUX
+    timer_t sig_timer;           /* ... by this host timer */
+#endif
+    int64_t armed;               /* the first timer it is set for */
+    bool fired;                  /* ... and it has gone off since */
+    uint32_t signals;            /* it went off so often */
+    uint64_t cpu_ran;            /* the CPU's thread ran timers so often */
     bool meter;                  /* the timers' lateness is counted */
     int64_t m_first;             /* the first timer's time, or -1 */
     int64_t m_from;              /* ... from when on it is late */
@@ -341,9 +378,9 @@ static void own_look(CPUState *cpu, int64_t host)
 }
 
 /*
- * The meter.  The first timer of the main loop's list: the list is asked
- * when that is due, and the clock that it asks in turn says 0 to this
- * thread, so that the answer is the timer's own time (-1: there is none).
+ * The first timer of the main loop's list: the list is asked when that is
+ * due, and the clock that it asks in turn says 0 to this thread, so that
+ * the answer is the timer's own time (-1: there is none).
  */
 static __thread bool own_asking;
 
@@ -357,7 +394,7 @@ static int64_t own_first_timer(void)
     return at;
 }
 
-/* with the lock held: the first timer, and the clock as it is */
+/* the meter, with the lock held: the first timer, and the clock as it is */
 static void own_meter(int64_t first, int64_t v)
 {
     if (first != own.m_first) {         /* that one was run, or put off */
@@ -387,12 +424,15 @@ static int64_t own_clock(void)
 {
     int64_t host, v, first = -1;
     CPUState *cpu = first_cpu;
+    bool asleep;
 
     if (own_asking) {
         return 0;
     }
-    if (own.meter) {                    /* (not with the lock held) */
-        first = own_first_timer();
+    asleep = cpu && cpu->thread && qatomic_read(&cpu->halted) &&
+             !cpu_has_work(cpu);
+    if (own.meter || (own.cpu_timers && asleep)) {
+        first = own_first_timer();      /* (not with the lock held) */
     }
     qemu_spin_lock(&own.lock);
     host = own_host();
@@ -400,6 +440,17 @@ static int64_t own_clock(void)
         own_look(cpu, host);
     }
     v = host - own.steal;
+    if (own.cpu_timers && asleep && first >= 0) {
+        /* asleep, the CPU runs nothing on: the clock waits for the main
+         * loop to run a timer that is due */
+        int64_t to = MAX(first + OWN_HOLD_NS, own.last);
+
+        if (v > to) {
+            own.steal += v - to;
+            own.held += v - to;
+            v = to;
+        }
+    }
     if (own.meter) {
         own_meter(first, v);
     }
@@ -409,23 +460,129 @@ static int64_t own_clock(void)
     return v;
 }
 
+/* in the CPU's thread, wherever it is: out of its translated code */
+static void own_sig_handler(int sig)
+{
+    CPUState *cpu = first_cpu;
+
+    qatomic_set(&own.fired, true);
+    qatomic_inc(&own.signals);
+    if (cpu && !qatomic_read(&cpu->halted)) {
+        /* what TCG's own kick does (tcg_kick_vcpu_thread()) */
+        qatomic_store_release(&cpu->exit_request, true);
+        qatomic_store_release(&cpu->neg.icount_decr.u16.high, -1);
+    }
+}
+
+/* on the CPU's thread, once: the signal, and the host's timer that sends
+ * it to that thread */
+static void own_sig_setup(void)
+{
+#ifdef CONFIG_LINUX
+    struct sigaction sa = { .sa_handler = own_sig_handler,
+                            .sa_flags = SA_RESTART };
+    struct sigevent sev = { .sigev_notify = SIGEV_THREAD_ID };
+    int sig = SIGRTMIN + 7;
+    sigset_t set;
+
+    own.sig_tried = true;
+    sigemptyset(&sa.sa_mask);
+    sev.sigev_signo = sig;
+    sev._sigev_un._tid = qemu_get_thread_id();  /* (sigev_notify_thread_id) */
+    if (sigaction(sig, &sa, NULL) ||
+        timer_create(CLOCK_MONOTONIC, &sev, &own.sig_timer)) {
+        warn_report("flipper-zero: no signal for the CPU's timers (%s): "
+                    "where the firmware runs without a device access, the "
+                    "main loop runs them", strerror(errno));
+        return;
+    }
+    sigemptyset(&set);
+    sigaddset(&set, sig);
+    pthread_sigmask(SIG_UNBLOCK, &set, NULL);
+    own.armed = INT64_MIN;
+    own.sig_on = true;
+#else
+    own.sig_tried = true;
+#endif
+}
+
+/* the signal for this first timer, or none (-1); on the CPU's thread, or
+ * with the big lock while that thread sleeps */
+static void own_arm(int64_t first, int64_t now)
+{
+#ifdef CONFIG_LINUX
+    struct itimerspec its = { 0 };
+    struct timespec ts;
+    int64_t at;
+
+    if (!own.sig_on ||
+        (first == own.armed && !qatomic_xchg(&own.fired, false))) {
+        return;                         /* (set for it, and not gone off) */
+    }
+    qatomic_set(&own.fired, false);
+    own.armed = first;
+    if (first >= 0) {
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        at = ts.tv_sec * NANOSECONDS_PER_SECOND + ts.tv_nsec +
+             MAX(first - now, 0) + OWN_SIG_GRACE_NS;
+        its.it_value.tv_sec = at / NANOSECONDS_PER_SECOND;
+        its.it_value.tv_nsec = at % NANOSECONDS_PER_SECOND;
+    }
+    timer_settime(own.sig_timer, TIMER_ABSTIME, &its, NULL);
+#endif
+}
+
+/*
+ * On the CPU's thread, with the big lock (before a device access, or on its
+ * way out of its translated code): the timers that are due run, and the
+ * signal is set for the next one, or for none while the CPU goes to sleep.
+ */
+static void own_cpu_timers(CPUState *cpu)
+{
+    int64_t first, now;
+
+    if (!own.sig_tried) {
+        own_sig_setup();
+    }
+    first = own_first_timer();
+    now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    if (first >= 0 && first <= now) {
+        if (qemu_clock_run_timers(QEMU_CLOCK_VIRTUAL)) {
+            own.cpu_ran++;
+        }
+        first = own_first_timer();
+        now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    }
+    if (qatomic_read(&cpu->halted) && !cpu_has_work(cpu)) {
+        own_arm(-1, now);               /* asleep: whoever wakes it sets it */
+    } else {
+        own_arm(first, now);
+    }
+}
+
 /*
  * An interrupt for a CPU that sleeps: it has slept until now, and from now
  * on it wakes up.  The look that says so, while it still sleeps, and what
  * the wake-up may take.  (A timer's interrupt has had a look just before
  * it, the main loop reads the clock before it runs a timer; another's may
- * come with none.)
+ * come with none.)  Then the signal for the first timer, for the CPU that
+ * runs again.
  */
 static void own_handle_interrupt(CPUState *cpu, int mask)
 {
-    if (cpu == first_cpu && cpu->thread &&
-        qatomic_read(&cpu->halted) && !cpu_has_work(cpu)) {
+    bool waking = cpu == first_cpu && cpu->thread &&
+                  qatomic_read(&cpu->halted) && !cpu_has_work(cpu);
+
+    if (waking) {
         qemu_spin_lock(&own.lock);
         own_look(cpu, own_host());
         own.wake = OWN_WAKE_NS;
         qemu_spin_unlock(&own.lock);
     }
     own.interrupt(cpu, mask);
+    if (waking && own.cpu_timers) {
+        own_arm(own_first_timer(), qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    }
 }
 
 bool wb55_own_clock(void)
@@ -465,7 +622,7 @@ int64_t wb55_own_clock_steal(void)
     return own_count(&own.steal);
 }
 
-/* the meter's counts, as JSON (the caller's to free) */
+/* the meter's counts, and the CPU's timers', as JSON (the caller's to free) */
 char *wb55_own_clock_late(void)
 {
     GString *s = g_string_new("{");
@@ -479,8 +636,11 @@ char *wb55_own_clock_late(void)
     }
     g_string_append_printf(s, "\"metered\": %s, \"late\": %" PRIu64
                            ", \"us\": %" PRId64 ", \"set-late\": %" PRIu64
+                           ", \"cpu-ran\": %" PRIu64 ", \"signals\": %u"
+                           ", \"asleep-held-us\": %" PRId64
                            ", \"up-to-us\": [", own.meter ? "true" : "false",
-                           n, own.m_ns / SCALE_US, own.m_past);
+                           n, own.m_ns / SCALE_US, own.m_past, own.cpu_ran,
+                           qatomic_read(&own.signals), own.held / SCALE_US);
     for (int i = 0; i < OWN_LATE_N; i++) {
         g_string_append_printf(s, "%s%d", i ? ", " : "", own_late_us[i]);
     }
@@ -504,10 +664,14 @@ void wb55_own_clock_loaded(int64_t steal)
     own.steal = steal;
     own_anew(cpu_get_clock());
     qemu_spin_unlock(&own.lock);
+    own.armed = INT64_MIN;              /* (set again at the CPU's next look) */
 }
 
-/* meter: the timers' lateness is counted too (a lock more at every reading) */
-void wb55_own_clock_init(bool meter)
+/*
+ * meter: the timers' lateness is counted too (a lock more at every reading);
+ * cpu_timers: the CPU's thread runs due timers (see above)
+ */
+void wb55_own_clock_init(bool meter, bool cpu_timers)
 {
     AccelOpsClass *ops =
         ACCEL_OPS_CLASS(object_class_by_name(ACCEL_OPS_NAME("tcg")));
@@ -519,9 +683,15 @@ void wb55_own_clock_init(bool meter)
     own_anew(0);                        /* (the clock begins there) */
     own.on = true;
     own.meter = meter;
+    own.cpu_timers = cpu_timers;
+    own.armed = INT64_MIN;
     own.interrupt = ops->handle_interrupt;
     tcg_mmio_free_ns = OWN_ACCESS_NS;
     tcg_mmio_timed = true;
+    if (cpu_timers) {
+        tcg_mmio_before = own_cpu_timers;
+        tcg_cpu_exit_hook = own_cpu_timers;
+    }
     ops->get_virtual_clock = own_clock;
     ops->handle_interrupt = own_handle_interrupt;
 }

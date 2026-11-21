@@ -935,8 +935,9 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           `-icount` itself was not it (BRINGUP_LOG 183). Done, the next
           item: on 2026-11-16 once in 431 dumps with it, against 3 times in
           36 in turns without. (Five days later, the host cooler and slower:
-          2 or 3 in 500 with either clock. What was left is in the items
-          after the next.) The smoke test's steps after such a shell
+          2 or 3 in 500 with either clock. The rest went with the long
+          device accesses and the CPU's timers, the items after the next:
+          none in 1200.) The smoke test's steps after such a shell
           opened and closed the port on it, which ends the firmware by FW-07
           (its two runs of 21 in five): they leave the shell first now
           (BRINGUP_LOG 186)
@@ -975,19 +976,28 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           stands at the first timer not yet run (the firmware runs on, and the
           `dump` stops as often), and the main loop first at the big lock (the
           same lateness) (BRINGUP_LOG 189)
-    - ☐ What that clock still does not take out. A timer is the main loop's
-          to run, and beside busy loops the main loop waits for a core as the
-          CPU's thread does, with the CPU running on (`-icount` waits for it;
-          nothing here does): the `dump` above still stops once in three
-          hundred. To try: the CPU's thread waits at its next device access
-          while a timer is more than some 60 µs overdue (the meter has the
-          first timer's time), which is the machine's time standing still.
-          A host that is slower itself is slower for the emulated CPU: this
-          one is by a factor of 2 to 2.5 when its turbo is off, for half a
-          minute when it is hot or for a day by its power profile. And the
-          checks' own limits are the wall clock's: beside 16 loops the RFID
-          check's `write` (40 s) and `read` (12 s) run out now and then with
-          either clock
+    - ☑ The CPU's thread runs the timers that are due (2026-11-21). Beside busy
+          loops the main loop waits for a core as the CPU's thread does, while the
+          CPU runs on: 560 to 670 timers half a millisecond late in eight NFC dumps
+          beside 24 loops, and the `dump` that FW-23 stops 3 times in 994. Now the
+          CPU's thread runs due timers before its device accesses (QEMU patch 0020's
+          `tcg_mmio_before`), and where it runs without any (FreeRTOS's idle task
+          turning while its next wake-up is under four ticks away) a signal to that
+          thread sends it out of its code 20 µs after the first timer's time, to run
+          them on its way out (`tcg_cpu_exit_hook`); asleep, the clock waits for the
+          main loop. 3 late against 628, the `dump` none in 1200 against 6 in 1900;
+          an idle host as before. `-machine cpu-timers=off` for comparing;
+          `scripts/clock_check.py` 21 (BRINGUP_LOG 191)
+    - ☐ What that clock does not take out: a host that is slower itself is slower
+          for the emulated CPU. This one is by a factor of 2 to 2.5 when its turbo
+          is off, for half a minute when it is hot or for a day by its power
+          profile. And the checks' own limits are the wall clock's: beside 16 loops
+          the RFID check's `write` (40 s) and `read` (12 s) run out now and then
+          with either clock
+    - ☐ `scripts/fw23_lost_flag.py`'s demonstration fails about one run in six
+          on the machine's clock (the dump stuck with gdb holding the thread
+          between the two calls, the chip's pin up, and no word from gdb that the
+          handler came). Its control is 3 of 3 since BRINGUP_LOG 191
     - ☐ Reading the card costs the machine no time now, and the host a
           millisecond a block: a file summed is 4.6 s of the machine's clock in
           9.9 of the host's. A Flipper's block takes the time of its bits on
@@ -1092,7 +1102,7 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           the link is one), iButton and RFID pulses,
           the Sub-GHz decoders on Unleashed and RogueMaster (their CLI does not
           start the radio: through the app's Read), BLE's GATT writes
-- ☐ Upstream the nineteen QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:
+- ☐ Upstream the twenty QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:
       register reads without the big lock under TCG, 2026-11-10; 0006 to 0009: a
       chardev's log file, the UART's reception, a byte no receiver took, an EEPROM's
       file, 2026-11-11; 0010 to 0013: Winbond's read-ID commands, the load of a saved
@@ -1101,7 +1111,8 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       BusFault, a Lockup that stops the processor, 2026-11-14; 0016: where the last
       fault was, 0017: a UART's transmission at the baud rate, and 0018: a baud
       rate for the line's other end, 2026-11-15; 0019: how long a vCPU is in a
-      device's model, 2026-11-21); consider upstreaming the machine
+      device's model, 0020: hooks to run a machine's timers on the vCPU's thread,
+      2026-11-21); consider upstreaming the machine
 
 ## Non-goals (for now)
 - Running ST's radio stack on an emulated CPU2 (closed, encrypted binary)

@@ -1,0 +1,158 @@
+From: FlipperEmu
+Subject: [PATCH] accel/tcg: hooks for a machine that runs its timers on the vCPU's thread
+
+Without -icount the timers of the virtual clock are the main loop's to
+run.  On a busy host the main loop waits for a core as a vCPU's thread
+does, while the vCPU runs on: a timer that is due is run when the main
+loop gets its turn, milliseconds late, and its interrupt comes at
+whatever instruction the guest is at by then.  A machine whose virtual
+clock is the vCPU's own running time (the Flipper's, on the hook that
+-icount's clock has) wants its timers on that time: run by the vCPU's
+thread, which is the one that runs.
+
+Give it two places to do that, both with the big lock held:
+
+- tcg_mmio_before: called before every device access under the big lock,
+  with the access the last instruction of its translation block (as
+  io_prepare() leaves it).  A due timer run there is as if the main loop
+  had run it just before the access.
+
+- tcg_cpu_exit_hook: called when a vCPU's thread has left cpu_exec (an
+  exit request, a halt), in the multi-threaded and the round-robin loop,
+  before it waits or goes on.  A machine that asks the thread to leave
+  (an exit request, as tcg_kick_vcpu_thread() makes one, from a signal
+  that it sends to that thread when its first timer is due) runs its
+  timers there, also where the guest runs without a device access.
+
+Nothing is called for a machine that does not set them.
+
+On the Flipper's machine, beside 24 busy loops on a host of 16 threads:
+timers run half a millisecond late or more in eight reads of an NFC card,
+1 where there were 600.
+
+Signed-off-by: FlipperEmu
+---
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -1994,6 +1994,27 @@
+         __attribute__((cleanup(tcg_mmio_timed_end), unused))            \
+         = tcg_mmio_timed ? get_clock() : 0
+ 
++/*
++ * Something for the machine to do before a device access, with the big lock
++ * held and the access the last instruction of its translation block: run
++ * the timers of its virtual clock that are due, say, which a main loop that
++ * the host keeps waiting would run late.  (Timed with the access.)
++ */
++void (*tcg_mmio_before)(CPUState *cpu);
++
++/*
++ * Something for the machine to do when a vCPU's thread has left cpu_exec
++ * (an exit request, a halt), with the big lock held, before it goes on.
++ */
++void (*tcg_cpu_exit_hook)(CPUState *cpu);
++
++#define TCG_MMIO_BEFORE(cpu)                                            \
++    do {                                                                \
++        if (tcg_mmio_before) {                                          \
++            tcg_mmio_before(cpu);                                       \
++        }                                                               \
++    } while (0)
++
+ static uint64_t do_ld_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,
+                                uint64_t ret_be, vaddr addr, int size,
+                                int mmu_idx, MMUAccessType type, uintptr_t ra)
+@@ -2014,6 +2035,7 @@
+     }
+     BQL_LOCK_GUARD();
+     TCG_MMIO_TIMED();
++    TCG_MMIO_BEFORE(cpu);
+     return int_ld_mmio_beN(cpu, full, ret_be, addr, size, mmu_idx,
+                            type, ra, mr, mr_offset);
+ }
+@@ -2034,6 +2056,7 @@
+ 
+     BQL_LOCK_GUARD();
+     TCG_MMIO_TIMED();
++    TCG_MMIO_BEFORE(cpu);
+     a = int_ld_mmio_beN(cpu, full, ret_be, addr, size - 8, mmu_idx,
+                         MMU_DATA_LOAD, ra, mr, mr_offset);
+     b = int_ld_mmio_beN(cpu, full, ret_be, addr + size - 8, 8, mmu_idx,
+@@ -2530,6 +2553,7 @@
+ 
+     BQL_LOCK_GUARD();
+     TCG_MMIO_TIMED();
++    TCG_MMIO_BEFORE(cpu);
+     return int_st_mmio_leN(cpu, full, val_le, addr, size, mmu_idx,
+                            ra, mr, mr_offset);
+ }
+@@ -2549,6 +2573,7 @@
+ 
+     BQL_LOCK_GUARD();
+     TCG_MMIO_TIMED();
++    TCG_MMIO_BEFORE(cpu);
+     int_st_mmio_leN(cpu, full, int128_getlo(val_le), addr, 8,
+                     mmu_idx, ra, mr, mr_offset);
+     return int_st_mmio_leN(cpu, full, int128_gethi(val_le), addr + 8,
+--- a/include/exec/cputlb.h
++++ b/include/exec/cputlb.h
+@@ -102,6 +102,19 @@
+ extern int64_t tcg_mmio_free_ns;
+ extern int64_t tcg_mmio_ns;
+ 
++/*
++ * tcg_mmio_before: when it is set, called before every device access under
++ * the big lock, with the lock held and the access the last instruction of
++ * its translation block (a machine that runs its due timers there, say).
++ */
++extern void (*tcg_mmio_before)(CPUState *cpu);
++
++/*
++ * tcg_cpu_exit_hook: when it is set, called when a vCPU's thread has left
++ * cpu_exec, with the big lock held, before it waits or goes on.
++ */
++extern void (*tcg_cpu_exit_hook)(CPUState *cpu);
++
+ /**
+  * tlb_flush_page:
+  * @cpu: CPU whose TLB should be flushed
+--- a/accel/tcg/tcg-accel-ops-mttcg.c
++++ b/accel/tcg/tcg-accel-ops-mttcg.c
+@@ -36,6 +36,7 @@
+ #include "tcg/startup.h"
+ #include "tcg-accel-ops.h"
+ #include "tcg-accel-ops-mttcg.h"
++#include "exec/cputlb.h"
+ 
+ typedef struct MttcgForceRcuNotifier {
+     Notifier notifier;
+@@ -94,6 +95,9 @@
+             bql_unlock();
+             r = tcg_cpu_exec(cpu);
+             bql_lock();
++            if (tcg_cpu_exit_hook) {
++                tcg_cpu_exit_hook(cpu);
++            }
+             switch (r) {
+             case EXCP_DEBUG:
+                 cpu_handle_guest_debug(cpu);
+--- a/accel/tcg/tcg-accel-ops-rr.c
++++ b/accel/tcg/tcg-accel-ops-rr.c
+@@ -36,6 +36,7 @@
+ #include "tcg/startup.h"
+ #include "tcg-accel-ops.h"
+ #include "tcg-accel-ops-rr.h"
++#include "exec/cputlb.h"
+ #include "tcg-accel-ops-icount.h"
+ 
+ /* Kick all RR vCPUs */
+@@ -288,6 +289,9 @@
+                     icount_process_data(cpu);
+                 }
+                 bql_lock();
++                if (tcg_cpu_exit_hook) {
++                    tcg_cpu_exit_hook(cpu);
++                }
+ 
+                 if (r == EXCP_DEBUG) {
+                     cpu_handle_guest_debug(cpu);
