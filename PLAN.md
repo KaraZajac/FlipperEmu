@@ -998,23 +998,25 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           on the machine's clock (the dump stuck with gdb holding the thread
           between the two calls, the chip's pin up, and no word from gdb that the
           handler came). Its control is 3 of 3 since BRINGUP_LOG 191
-    - ☐ Reading the card costs the machine no time now, and the host a
-          millisecond a block: a file summed is 4.6 s of the machine's clock in
-          9.9 of the host's. A Flipper's block takes the time of its bits on
-          the wire. Tried, and out: the transfer in slices of 64 beats, the
-          main loop between them. The CPU does not sleep through so short a
-          wait, and its thread waited for each slice instead: the clock at
-          50 % for the 46, and the file took 13.0 s of the host's for the 9.9
-          (BRINGUP_LOG 190). What would help
-          is a block that costs the host less. Where the CPU's thread is
-          while the file is summed, 300 looks at its stack: in `dma_run()`
-          115, of them 84 in the address space's write for a beat (its
-          translation of the address each time), 55 in the SPI's transfer
-          and the card's, 23 in `blk_is_inserted()`, which QEMU's card asks
-          for every byte; 8 waiting for the pool's read of the image; and
-          23 in `cpu_io_recompile()`: QEMU leaves a translated block at
-          every device access that is not the block's last instruction,
-          finds the block again and runs the access alone, each time
+    - ☑ A block of the card cheaper for the host (2026-11-21): the DMA model looks
+          each side of a channel up once for a transfer (a `MemoryRegionCache`), and
+          QEMU's SD card keeps whether a medium is in, where it asked the block layer
+          (a coroutine made and polled each time) for every byte, twice (QEMU patch
+          0021). Ten sums of a file of the card: a sixth less of the host's time
+          (BRINGUP_LOG 192). A block takes no time of the machine's (BRINGUP_LOG 189
+          and 190: the transfer in slices was tried and taken out)
+    - ☐ The TLB at every change of thread: the firmware sets its stack guard (the MPU
+          off, a region written, the MPU on) and QEMU flushes the whole TLB at each of
+          the four writes, after which every page is translated again: about a tenth
+          of the CPU's thread in any work (BRINGUP_LOG 192). A region's write only
+          changes its own area (old and new); the MPU's off and on only the areas of
+          the enabled regions for privileged code with PRIVDEFENA, but the firmware's
+          NULL guard is 1 MB, which QEMU's range flush takes whole
+    - ☐ `cpu_io_recompile()`: QEMU leaves a translated block at every device access
+          that is not its last instruction and runs the access alone, every time it
+          comes by (9 % of the CPU's thread while the card is read). A block could end
+          after an instruction that did that once (a set of such places, the block
+          translated again)
     - ☐ The fuzz check's step that looks at which inputs were kept fails now
           and then when all checks run side by side
     - ☐ Reading an emulated ISO15693 card, alone: a read with five to seven

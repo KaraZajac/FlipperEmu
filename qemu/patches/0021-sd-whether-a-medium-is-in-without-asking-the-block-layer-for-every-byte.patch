@@ -1,0 +1,96 @@
+From: FlipperEmu
+Subject: [PATCH] sd: whether a medium is in, without asking the block layer for every byte
+
+sd_read_data() and sd_write_data() ask blk_is_inserted() for every byte
+that they move, sd_do_command() for every command, and ssi-sd asks
+sdbus_get_inserted() for every byte, which the card's get_inserted()
+answers the same way.  blk_is_inserted() is a co_wrapper: called outside
+a coroutine it makes a coroutine, enters it and polls it to its end.
+Over SPI every byte of a block is a call of its own: on the Flipper's
+machine one tenth of the vCPU thread's time while the firmware read a
+file of its card went there.
+
+The card keeps the answer instead: asked when it is realized, again on
+every change of the medium (the change_media_cb that it has already), and
+before a state is loaded; get_inserted() and the three checks use it.  A
+medium cannot come or go any other way while the card is there.
+
+Signed-off-by: FlipperEmu
+---
+--- a/hw/sd/sd.c
++++ b/hw/sd/sd.c
+@@ -143,6 +143,9 @@
+ struct SDState {
+     DeviceState parent_obj;
+ 
++    /* a medium is in: as blk_is_inserted() said when that changed */
++    bool media;
++
+     /* SD Memory Card Registers */
+     uint32_t ocr;
+     uint8_t scr[8];
+@@ -960,7 +963,7 @@
+ 
+ static bool sd_get_inserted(SDState *sd)
+ {
+-    return sd->blk && blk_is_inserted(sd->blk);
++    return sd->blk && sd->media;
+ }
+ 
+ static bool sd_get_readonly(SDState *sd)
+@@ -973,9 +976,11 @@
+     SDState *sd = opaque;
+     DeviceState *dev = DEVICE(sd);
+     SDBus *sdbus;
+-    bool inserted = sd_get_inserted(sd);
++    bool inserted = sd->blk && blk_is_inserted(sd->blk);
+     bool readonly = sd_get_readonly(sd);
+ 
++    sd->media = inserted;
++
+     if (inserted) {
+         trace_sdcard_inserted(readonly);
+         sd_reset(dev);
+@@ -1064,6 +1069,7 @@
+ {
+     SDState *sd = opaque;
+ 
++    sd->media = sd->blk && blk_is_inserted(sd->blk);
+     /* If the OCR state is not included (prior versions, or not
+      * needed), then the OCR must be set as powered up. If the OCR state
+      * is included, this will be replaced by the state restore.
+@@ -2503,7 +2509,7 @@
+     sd_rsp_type_t rtype;
+     int rsplen;
+ 
+-    if (!sd->blk || !blk_is_inserted(sd->blk)) {
++    if (!sd->blk || !sd->media) {
+         return 0;
+     }
+ 
+@@ -2675,7 +2681,7 @@
+     int i;
+     const uint8_t *value = buf;
+ 
+-    if (!sd->blk || !blk_is_inserted(sd->blk)) {
++    if (!sd->blk || !sd->media) {
+         return length;
+     }
+ 
+@@ -2823,7 +2829,7 @@
+     uint32_t io_len;
+     uint8_t *value = buf;
+ 
+-    if (!sd->blk || !blk_is_inserted(sd->blk)) {
++    if (!sd->blk || !sd->media) {
+         memset(buf, dummy_byte, length);
+         return length;
+     }
+@@ -3161,6 +3167,7 @@
+             return;
+         }
+         blk_set_dev_ops(sd->blk, &sd_block_ops, sd);
++        sd->media = blk_is_inserted(sd->blk);
+     }
+     if (!QEMU_IS_ALIGNED(sd->boot_part_size, 128 * KiB) ||
+         sd->boot_part_size > 255 * 128 * KiB) {

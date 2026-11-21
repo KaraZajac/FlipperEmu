@@ -78,6 +78,83 @@ static unsigned dma_size(uint32_t field)
     return 1u << (field & 3);           /* 0: byte, 1: half, 2: word */
 }
 
+/*
+ * A channel's two sides, each looked up once for a transfer: the address
+ * space's translation of every beat was the most of what a block of the
+ * card cost the host (BRINGUP_LOG 192).  Memory that is RAM is a pointer
+ * then, and what is written there is marked as written (code in it is
+ * translated again); a register goes to its device as before.  A side that
+ * one region does not hold whole goes the old way, as does a channel whose
+ * CCR is written with other sizes or directions while it is enabled.
+ */
+#define CCR_CACHED (CCR_EN | CCR_DIR | CCR_PINC | CCR_MINC | (0xF << 8) | \
+                    CCR_MEM2MEM)
+
+static void dma_uncache(WB55DmaChannel *ch)
+{
+    if (ch->cached) {
+        address_space_cache_destroy(&ch->mcache);
+        address_space_cache_destroy(&ch->pcache);
+        address_space_cache_init_empty(&ch->mcache);
+        address_space_cache_init_empty(&ch->pcache);
+        ch->cached = 0;
+    }
+}
+
+static void dma_cache(WB55DmaChannel *ch)
+{
+    unsigned psize = dma_size(ch->ccr >> 8), msize = dma_size(ch->ccr >> 10);
+    hwaddr mlen = (ch->ccr & CCR_MINC) ? (hwaddr)ch->reload * msize : msize;
+    hwaddr plen = (ch->ccr & CCR_PINC) ? (hwaddr)ch->reload * psize : psize;
+    bool to_periph = ch->ccr & CCR_DIR;
+
+    dma_uncache(ch);
+    if (!(ch->ccr & CCR_EN) || !ch->reload) {
+        return;
+    }
+    if (address_space_cache_init(&ch->mcache, &address_space_memory, ch->cmar,
+                                 mlen, !to_periph) < (int64_t)mlen ||
+        address_space_cache_init(&ch->pcache, &address_space_memory, ch->cpar,
+                                 plen, to_periph) < (int64_t)plen) {
+        address_space_cache_destroy(&ch->mcache);
+        address_space_cache_destroy(&ch->pcache);
+        address_space_cache_init_empty(&ch->mcache);
+        address_space_cache_init_empty(&ch->pcache);
+        return;
+    }
+    ch->cached = ch->ccr & CCR_CACHED;
+}
+
+/* a beat through the channel's caches */
+static MemTxResult dma_beat_cached(WB55DmaChannel *ch, unsigned psize,
+                                   unsigned msize)
+{
+    hwaddr poff = (ch->ccr & CCR_PINC) ? (hwaddr)ch->pidx * psize : 0;
+    hwaddr moff = (ch->ccr & CCR_MINC) ? (hwaddr)ch->midx * msize : 0;
+    MemoryRegionCache *from = &ch->pcache, *to = &ch->mcache;
+    hwaddr foff = poff, toff = moff;
+    unsigned fsize = psize, tsize = msize;
+    uint32_t data = 0;
+    MemTxResult r;
+
+    if (ch->ccr & CCR_DIR) {            /* memory -> peripheral */
+        from = &ch->mcache;
+        to = &ch->pcache;
+        foff = moff;
+        toff = poff;
+        fsize = msize;
+        tsize = psize;
+    }
+    r = address_space_read_cached(from, foff, &data, fsize);
+    if (r == MEMTX_OK) {
+        r = address_space_write_cached(to, toff, &data, tsize);
+        if (to->ptr) {
+            address_space_cache_invalidate(to, toff, tsize);
+        }
+    }
+    return r;
+}
+
 static bool dma_beat(WB55DmaState *s, int c)
 {
     WB55DmaChannel *ch = &s->ch[c];
@@ -87,7 +164,12 @@ static bool dma_beat(WB55DmaState *s, int c)
     uint32_t data = 0;
     MemTxResult r;
 
-    if (ch->ccr & CCR_DIR) {            /* memory -> peripheral */
+    if (ch->cached && ch->cached != (ch->ccr & CCR_CACHED)) {
+        dma_uncache(ch);                /* (rewritten while enabled) */
+    }
+    if (ch->cached) {
+        r = dma_beat_cached(ch, psize, msize);
+    } else if (ch->ccr & CCR_DIR) {     /* memory -> peripheral */
         r = address_space_read(&address_space_memory, ma,
                                MEMTXATTRS_UNSPECIFIED, &data, msize);
         if (r == MEMTX_OK) {
@@ -349,10 +431,12 @@ static void dma_write(WB55DmaState *s, int ctrl, hwaddr addr, uint32_t val)
         ch->ccr = val & 0x7FFF;
         if (!(val & CCR_EN)) {
             s->latched &= ~(1u << c);
+            dma_uncache(ch);
         }
         if (enabling) {
             ch->pidx = ch->midx = 0;
             ch->reload = ch->cndtr;
+            dma_cache(ch);
         }
         dma_update_irq(s, c);
         if (enabling) {
@@ -445,7 +529,11 @@ static void wb55_dma_reset_hold(Object *obj, ResetType type)
 {
     WB55DmaState *s = WB55_DMA(obj);
 
-    memset(s->ch, 0, sizeof(s->ch));
+    for (int c = 0; c < 14; c++) {
+        dma_uncache(&s->ch[c]);
+        s->ch[c].ccr = s->ch[c].cndtr = s->ch[c].cpar = s->ch[c].cmar = 0;
+        s->ch[c].reload = s->ch[c].pidx = s->ch[c].midx = 0;
+    }
     memset(s->isr, 0, sizeof(s->isr));
     memset(s->muxccr, 0, sizeof(s->muxccr));
     s->in_service = s->dirty = false;
@@ -471,6 +559,22 @@ static void wb55_dma_init(Object *obj)
         sysbus_init_irq(sbd, &s->irq[c]);
     }
     qdev_init_gpio_in_named(DEVICE(obj), dma_request, "request", 64);
+    for (int c = 0; c < 14; c++) {
+        address_space_cache_init_empty(&s->ch[c].mcache);
+        address_space_cache_init_empty(&s->ch[c].pcache);
+    }
+}
+
+/* (a state loaded: its enabled channels looked up again) */
+static int dma_post_load(void *opaque, int version_id)
+{
+    WB55DmaState *s = opaque;
+
+    for (int c = 0; c < 14; c++) {
+        dma_uncache(&s->ch[c]);
+        dma_cache(&s->ch[c]);
+    }
+    return 0;
 }
 
 static const VMStateDescription vmstate_wb55_dma_channel = {
@@ -494,6 +598,7 @@ static const VMStateDescription vmstate_wb55_dma = {
     .name = "stm32wb55-dma",
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = dma_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_STRUCT_ARRAY(ch, WB55DmaState, 14, 0, vmstate_wb55_dma_channel,
                              WB55DmaChannel),

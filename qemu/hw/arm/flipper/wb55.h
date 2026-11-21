@@ -12,6 +12,7 @@
 #define HW_ARM_FLIPPER_WB55_H
 
 #include "hw/core/sysbus.h"
+#include "system/memory_cached.h"
 #include "hw/core/clock.h"
 #include "hw/ssi/ssi.h"
 #include "hw/i2c/i2c.h"
@@ -595,6 +596,11 @@ typedef struct WB55DmaChannel {
     uint32_t ccr, cndtr, cpar, cmar;
     uint32_t reload;             /* CNDTR value programmed (circular) */
     uint32_t pidx, midx;         /* transfer progress */
+    /* the memory side and the peripheral side, each looked up once while
+     * the channel is enabled (not in a saved state: looked up again) */
+    MemoryRegionCache mcache, pcache;
+    uint32_t cached;             /* CCR's bits that they were looked up for,
+                                  * with CCR_EN; 0: none */
 } WB55DmaChannel;
 struct WB55DmaState {
     SysBusDevice parent_obj;

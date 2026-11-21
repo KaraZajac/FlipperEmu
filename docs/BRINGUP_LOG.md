@@ -6347,6 +6347,49 @@ big lock, entry 92).
       RogueMaster, side by side: all pass. The setup check has the
       twentieth patch: 51.
 
+192. **A block of the card cheaper for the host.**
+    - Entry 190's profile, 300 looks at the CPU's thread while the
+      firmware summed a file: 115 in the DMA model's loop, 84 of them in
+      the address space's write for a beat; 23 in `blk_is_inserted()`;
+      23 in `cpu_io_recompile()`.
+    - The DMA model now looks each side of a channel up once for a
+      transfer (QEMU's `MemoryRegionCache`, set up when the channel is
+      enabled): RAM is a pointer then, and each write is marked as
+      written (code in RAM is translated again); a register goes to its
+      device through the cached section, without the translation. A
+      channel whose CCR is written with other sizes or directions while
+      it is enabled, or whose side one region does not hold whole, goes
+      the old way; a loaded state's channels are looked up again.
+    - `blk_is_inserted()` is a co_wrapper in QEMU 11: called outside a
+      coroutine it makes one, enters it and polls it to its end. QEMU's
+      SD card asked it for every byte it moved, and its SPI adapter
+      asked again through `sdbus_get_inserted()` for every byte (the
+      first try left that one, and it still had 27 looks). QEMU patch
+      0021: the card keeps the answer, asked when it is realized, on
+      every change of the medium, and before a state is loaded.
+    - Ten sums of a file of 321 KB, three times, in turns with the
+      build before: 10.8, 10.8 and 10.2 s (the middle of each three)
+      against 12.9, 12.8 and 12.9: a sixth less of the host's time.
+      The profile after it: 68 looks in the DMA model's loop for the
+      115, none in `blk_is_inserted()`.
+    - What is left is not the card's: `cpu_io_recompile()` 27 (QEMU
+      leaves a translated block at each device access that is not its
+      last instruction and runs the access alone, each time), and the
+      TLB. At every change of thread the firmware sets its stack guard
+      (`furi_hal_mpu_set_stack_protection()`: the MPU off, a region
+      written, the MPU on), and QEMU flushes the whole TLB at each of
+      those four writes; then every page is translated again: 27 looks
+      in `tlb_fill_align()` and 7 in the flush, about a tenth of the
+      CPU's thread in any work. In PLAN.
+    - Checks: all thirty on the official 1.5.1, four side by side:
+      1157 passes, none failed. The clock check, the smoke test and
+      the two NFC checks on the dev build, Momentum, Unleashed and
+      RogueMaster, side by side: all pass but the dev build's NFC
+      check, 25 of 28: three reads with the NFC app that saved no file
+      (the check presses the app's buttons a second and a half apart,
+      and the dev build is a debug build, beside three others). Alone
+      27 of 27, twice. The setup check: 53.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
