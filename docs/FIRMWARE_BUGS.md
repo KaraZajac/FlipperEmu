@@ -45,7 +45,7 @@ keeps its row, with the version that fixed it.
 | FW-20 | A serial port closed right after a write loses the last two bytes | official 1.5.1 | wrong result | no |
 | FW-21 | After an ISO15693 card was emulated, the ISO14443A listener takes its own answers for failed, and an ISO14443-4 card of the Flipper's is not activated any more | official 1.5.1 and dev, Momentum, Unleashed, RogueMaster | wrong result, until a restart | no |
 | FW-22 | An emulated MIFARE Plus (security level 3) gives every block, and takes a write to it, in a session of any one of its keys | Unleashed unlshd-094, RogueMaster RM1024-1347 | an emulated card that guards nothing | no |
-| FW-23 | A thread flag that an interrupt sets while `furi_thread_flags_clear()` runs is lost; the NFC poller then waits for its chip for ever, and a read of a card never ends | official 1.5.1 (and today's `dev` of the official firmware, Unleashed and Momentum, by the source) | freeze, rarely | no |
+| FW-23 | A thread flag that an interrupt sets while `furi_thread_flags_clear()` runs is lost; the NFC poller then waits for its chip for ever, and a read of a card never ends | official 1.5.1 (and today's `dev` of the official firmware, by the source); seen on Momentum, Unleashed and RogueMaster too (their NFC app's read of an Ultralight C) | freeze, rarely | no |
 | FW-24 | The forks' Mass Storage app tells a computer one block less in READ FORMAT CAPACITIES than its drive has, and decides PREVENT ALLOW MEDIUM REMOVAL by the command's control byte | Momentum mntm-012, Unleashed unlshd-094, RogueMaster RM1024-1347 (the app they ship) | wrong answer, harmless | no |
 
 ## Crashes and freezes
