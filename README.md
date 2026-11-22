@@ -978,7 +978,7 @@ scripts/enclave_check.py -f FIRMWARE     # and the enclave through the firmware 
 
 And for the setup itself, `scripts/setup_check.py`: what `scripts/setup_qemu.sh` makes
 of a source tree that has all, some or none of the patches in `qemu/patches`, and
-whether the tree here has them all (57 checks in about thirty seconds; it builds nothing
+whether the tree here has them all (58 checks in about thirty seconds; it builds nothing
 and starts no emulator). A tree with a `.rej` file in it is one that the script, as it
 was until 2026-11-11, patched twice: the script says so now, and how to start over.
 After an upgrade of the system's Python (3.14 to 3.15, say), the build's meson stops
@@ -1133,10 +1133,10 @@ read 1024 blocks of 512 bytes (512 KiB) from block 0 in 3.6 s (144 KiB/s)
   to its list of images, and the port to the serial port, when the image was chosen
   there; opened with an image's path, it has no list to go back to and stays a drive.
 - **It is slow, as the app says of itself** ("a (very slow) USB mass storage device"):
-  100 to 150 KiB a second here, reading or writing. Its thread sends each 64-byte packet
-  alone and waits for it to go. Here a block of 512 bytes, eight packets, takes about
-  3 ms, the card less than half of that: the emulator's host gives a packet only when
-  the firmware has caught up with the last one, and the bus alone would take 0.4 ms.
+  about 200 KiB a second here, reading or writing, a block of 512 bytes in some 2.5 ms.
+  Its thread sends each 64-byte packet alone and waits for it to go, and the emulator's
+  host gives a packet only when the firmware has caught up with the last one; the bus
+  alone would take 0.4 ms a block.
 - **The tool comes and goes**, as `fe_u2f.py` does: between its calls the emulator's own
   host has the port, and to the firmware each call is a cable pulled and plugged in
   again. The app takes that in its stride.
@@ -3676,7 +3676,8 @@ qemu/patches/          fixes to upstream QEMU (SysTick, SD over SPI, open-drain 
                        fault was, a UART's baud rate on both ends, the time a
                        vCPU is in a device's model, timers on the vCPU's
                        thread, the card's medium kept, a block that ends at a
-                       device access, an MPU write that flushes what it changes)
+                       device access, an MPU write that flushes what it changes,
+                       a page kept but for a small MPU region)
 scripts/               setup_qemu.sh, fetch_firmware.py, make_sdcard.py, fe_monitor.py,
                        fe_cli.py, fe_files.py (files on the card), fe_apps.py
                        (apps and the loader), fe_expansion.py (an expansion

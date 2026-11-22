@@ -37,10 +37,11 @@ a device takes its model beyond 20 µs, and reads how long accesses took from
 `tcg_mmio_ns`); without it it does not build.
 0020 is needed by the machine since 2026-11-21 too (the CPU's thread runs the machine's
 due timers through its two hooks, `-machine cpu-timers`); without it it does not build.
-0021 to 0023 are fixes that the machine runs without: reading the card then costs the
-host more of its time, a sixth for each of 0021 and 0022 and a tenth for 0023.
+0021 to 0024 are fixes that the machine runs without: reading the card then costs the
+host more of its time, a sixth for each of 0021 and 0022 and a tenth for 0023, and
+without 0024 an idle Flipper takes a quarter more of a host core on USB.
 A source tree that was set up before a patch came (0006 to 0009: 2026-11-11; 0010 to
-0013: 2026-11-12; 0014 and 0015: 2026-11-14; 0016 to 0018: 2026-11-15; 0019 to 0023:
+0013: 2026-11-12; 0014 and 0015: 2026-11-14; 0016 to 0018: 2026-11-15; 0019 to 0024:
 2026-11-21) gets it from one more run of that script.
 
 How the script finds out what a tree has: it takes the patches out of a copy of the
@@ -63,7 +64,7 @@ tarball beside it, applies every patch and builds, about 6 min).
 from the tarball; nothing is built): a new tree, a second and a third run, a tree from
 before each patch, a tree that lacks one patch, the damaged tree, a file that is not
 this QEMU's, and last that the tree here has every patch and nothing else in those
-files. 57 checks in about thirty seconds. A patch that is added to this folder is in
+files. 58 checks in about thirty seconds. A patch that is added to this folder is in
 them without a change to the check.
 
 | patch | QEMU file | bug |
@@ -91,6 +92,7 @@ them without a change to the check.
 | 0021 | `hw/sd/sd.c` | the card asked `blk_is_inserted()` for every byte it moved and every command, and `ssi-sd` asked again through `sdbus_get_inserted()` for every byte; that is a co_wrapper, which outside a coroutine makes one and polls it to its end. The card keeps the answer: asked when it is realized, on every change of the medium (its `change_media_cb`) and before a state is loaded |
 | 0022 | `accel/tcg/translate-all.c`, `accel/tcg/translator.c`, `accel/tcg/internal-common.h` | a device access that was not the last instruction of its block had `cpu_io_recompile()` leave the block and run the access alone, every time the block came by (a guest polling a device in a loop paid it each time round). The place is kept and the block translated again; a block ends after an instruction at a kept place, so the access is its last |
 | 0023 | `hw/intc/armv7m_nvic.c`, `target/arm/cpu.h`, `target/arm/internals.h`, `target/arm/tcg/tlb_helper.c` | every write of a v7M MPU register flushed the whole TLB, and a guest that moves a region often paid for it in full: a Flipper's firmware sets the stack guard of the thread that it switches to at every switch (the MPU off, the region's RBAR and RASR, the MPU on), four whole flushes some 1500 times a second, and every page translated again after each. A write flushes what it changes, as `get_phys_addr_pmsav7()` looks regions up: a region written, its pages before and after; the MPU switched off with PRIVDEFENA, the pages of its enabled regions that the TLB can hold (a page or more, letting something through), and from then on the pages that the TLB is given are noted in the fill; switched on, the noted pages (more than 32: all), the unprivileged indexes where they hold anything, and with HFNMIENA set those of HardFault and NMI. Anything else, and v8M, flushes all as before |
+| 0024 | `accel/tcg/cputlb.c`, `include/exec/tlb-flags.h`, `include/hw/core/cpu.h`, `target/arm/ptw.c`, `hw/intc/armv7m_nvic.c` | a page that holds an MPU region smaller than itself was not kept at all: every access to it looked the MPU up again and wrote its TLB entry again, and a guest that guards each stack with a 32-byte region has its interrupt stack, its idle thread's and every busy thread's stack in such pages. Such a page is kept now but for the part that the small regions cover: CPUTLBEntryFull gains that part's bounds (in its padding) and the entry a slow flag of its own, `TLB_SUBPAGE`; an access that touches the part is translated anew, any other is a hit; a probe that touches it fills, and otherwise gets no host address for the page (code there is translated an instruction at a time, as before). The PMSAv7 lookup reports the part where it reported a page size of 0, counting a region with a disabled subregion at the address and enabled ones in the page, which it missed. Patch 0023's comment on what the TLB holds of an enabled region is corrected with it |
 
 **Licence:** these patches modify QEMU's own source files, which are GPL-2.0-or-later,
 so the patches are GPL-2.0-or-later too, unlike the rest of this repository (BSD-3-Clause).

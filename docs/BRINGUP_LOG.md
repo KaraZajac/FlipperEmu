@@ -6574,6 +6574,63 @@ big lock, entry 92).
       stack's guard (entry 197), a tenth waiting for the big lock at
       device accesses, an eighth in the card's DMA.
 
+197. **A page with a stack's guard, kept but for the guard.**
+    - The profile of entry 196: a third of the CPU's thread in refills.
+      QEMU kept no page that holds an MPU region smaller than itself
+      (entries 94 and 129): the firmware's 32-byte stack guards put the
+      interrupt stack, the idle task's and a busy thread's stack in such
+      pages, and every access there walked the MPU and wrote its TLB
+      entry again. A build that keeps such pages and ignores the small
+      regions (wrong: no guards; for measuring only): the drive 30 %
+      faster.
+    - QEMU patch 0024 keeps such a page but for the part that the small
+      regions cover. CPUTLBEntryFull gains that part's bounds (in its
+      tail padding: it does not grow), and the entry a slow flag of its
+      own, TLB_SUBPAGE (entry 129 found the invalid flag unusable for
+      this: page flushes and the dirty tracking pass over entries that
+      carry it). Every access takes the slow path; one that touches the
+      part is translated anew, as on a miss, and any other is a hit with
+      no lookup. A probe that touches the part fills, and otherwise gets
+      no host address for the page, so code there is translated an
+      instruction at a time as before; an atomic access that touches it
+      goes serial. The MPU's lookup reports the span of the regions that
+      overlap the page and that it looked at before the one it matched
+      (or all, with no match), where it reported a page size of 0. A
+      region that holds the address in a disabled subregion and has
+      other subregions in the page counts too, which QEMU missed: an
+      entry for the whole page could let an access through to an enabled
+      subregion.
+    - Patch 0023's flushes when the MPU is switched off rest on what the
+      TLB holds of an enabled region. Such a page's rest is the default
+      map's, which holds with the MPU off too, or a larger region's,
+      whose pages go then: still right. Its comment says so now (with
+      patch 0024).
+    - The guards: the fuzz check's write to address 0 (signal 101) and
+      its stack used up (signal 102), as before.
+    - In turns with the build before: the drive's reads a seventh to a
+      quarter faster, its writes a tenth; ten card sums 2 to 5 %
+      faster, twenty NFC dumps 1 %. Two idle Flippers side by side, the
+      build before and this, over the same windows (on this host the
+      frequency follows the load, so a single device's percentages from
+      two runs do not compare): 13.5 and 10.7 % of a host core on USB,
+      4.7 and 4.2 % off it.
+    - Found on the way: since 05:26 that day every binary had carried a
+      trial's code (the main loop first at the big lock), taken out by
+      restoring its files with their old times, which ninja took for
+      unchanged. Patch 0024's change to `cpu.h` brought it out: the
+      rebuilt `cpus.c` lost the trial's function, and the link pulled
+      the stub that defines it, with the big lock's others. Inert with
+      its switch off, which nothing had set since: what the checks of
+      that day ran is what the commits have. Built clean since.
+    - The 31 checks side by side: all pass (1181). Momentum, Unleashed,
+      RogueMaster and the dev build, side by side, twice: all pass but
+      once RogueMaster's NFC check (28 of 30), whose Ultralight C read
+      by the app stood still with no key tried for 58 s (as FW-23's do)
+      until the check closed the app with the loader, which crashed it
+      as FW-06 does; that check passed three times alone afterwards and
+      in the second round. The fuzz check: 21, its guards as before. The
+      setup check: 58.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

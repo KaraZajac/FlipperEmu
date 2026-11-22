@@ -255,18 +255,24 @@ a second and draws its desktop.
 
 Each tick wakes QEMU's main loop (SysTick's timer runs there) and the vCPU's thread:
 190 µs of host CPU together, 130 of them the vCPU's. Over a third of the vCPU's waking
-time is one slow path. The firmware guards every stack with a 32-byte MPU region,
-QEMU's pages are 1 KiB on an M-profile CPU with an MPU, and a page that holds a region
-smaller than itself is never cached: every access to it asks the MPU model again and
-writes its TLB entry again (`TLB_INVALID_MASK` in `tlb_set_page_full()`). The main stack
+time was one slow path. The firmware guards every stack with a 32-byte MPU region,
+QEMU's pages are 1 KiB on an M-profile CPU with an MPU, and QEMU kept no page that
+holds a region smaller than itself: every access to it asked the MPU model again and
+wrote its TLB entry again (`TLB_INVALID_MASK` in `tlb_set_page_full()`). The main stack
 is 1 KiB and exactly such a page (`_stack_size` and `_stack_end` in the firmware's
-linker script), and the idle task's 512 bytes lie in their guard's page: every stack
-access of an interrupt handler and of the idle task goes that way (BRINGUP_LOG 94).
-With the MPU switched off the same Flipper takes 19 % of a core, so 5 or 6 points are
-the most that a cache for parts of a page can give an idle one. It is not a small
-change. QEMU's page flush and its dirty tracking pass over entries that carry the
-invalid flag, so an entry that is kept needs a flag of its own, which the slow path
-and every probe have to know (BRINGUP_LOG 129).
+linker script), the idle task's 512 bytes lie in their guard's page, and so does a busy
+thread's stack: every stack access of an interrupt handler, of the idle task and of
+such a thread went that way (BRINGUP_LOG 94).
+
+QEMU patch 0024 keeps such a page but for the region. Its entry carries a flag of its
+own (`TLB_SUBPAGE`), not the invalid flag that `tlb_flush_page()` and the dirty
+tracking pass over (BRINGUP_LOG 129): every access takes the slow path, which
+translates one that touches the region's part of the page anew and lets any other
+through with no lookup. A probe gets no host address for such a page, so code there is
+still translated an instruction at a time. Two idle Flippers side by side, the build
+before and this: 13.5 and 10.7 % of a host core on USB, 4.7 and 4.2 % off it. A host
+reading the Mass Storage app's drive a seventh to a quarter faster; card sums and NFC
+work a few percent (BRINGUP_LOG 197).
 
 The firmware also sets the guard of the thread that it switches to at every switch
 (`furi_hal_mpu_set_stack_protection()`: the MPU off, the region written, the MPU on),
@@ -823,7 +829,8 @@ handed to the PC's kernel instead of the built-in class drivers:
   fails before its data sends its status in the data's place, which the client takes as
   usb-storage does). The drive's speed is the pacing's: a packet goes when the firmware
   has caught up with the last, and the app's thread sends one at a time, so a block of
-  512 bytes takes about 3 ms (`scripts/msc_check.py` reads 100 to 150 KiB a second).
+  512 bytes takes about 2.5 ms (`scripts/msc_check.py` reads about 200 KiB a second;
+  BRINGUP_LOG 196 and 197).
 
 ## Resets and the OTA updater
 

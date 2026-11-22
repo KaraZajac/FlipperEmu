@@ -127,11 +127,12 @@ qFlipper / lab.flipper.net / `ufbt launch` only run over USB CDC.
       when one was chosen there. `scripts/msc_check.py` 18 on Momentum, Unleashed and
       RogueMaster (BRINGUP_LOG 195). Firmware bug FW-24 found with it (two harmless
       answers of the app's)
-    - ☐ A block of 512 bytes takes about 3 ms (100 to 150 KiB a second), the card less
-          than half of it: a bulk packet goes when the firmware has caught up with the
-          last one, and a CPU that sleeps between two is found so by a timer of the main
-          loop, which wakes, and then woken for the interrupt. The CLI's and RPC's
-          transfers pay the same (`push` and `pull` through the firmware, qFlipper)
+    - ☑ A block of 512 bytes took about 3 ms (100 to 150 KiB a second) (2026-11-21):
+          the CPU's thread stays awake through the host's timer between two packets
+          (`cpu-nap`), the packet memory is RAM, and a page that holds a stack's guard is
+          kept (QEMU patch 0024): about 200 KiB a second, and with the nap twice as fast
+          as without it while the host was busy (BRINGUP_LOG 196, 197). What is left is
+          the firmware's own turnaround of a packet, emulated
     - ☐ The kernel's usb-storage on the drive (`sudo scripts/usbip_attach.py`): needs
           root, not tried
 
@@ -180,19 +181,14 @@ NAK when DTOG_RX == SW_BUF only shows on the bus). See docs/ARCHITECTURE.md.
 - ☑ Battery/USB power (2026-11-10): `./flipperemu battery`, `usb plug|unplug|charger`
       and the window; SYSDWN under 3.15 V, so a flat battery switches the Flipper off
 - ☑ STOP2 deep sleep (CPU2 performs the SHCI clock switch); now the default, 1–2 % host CPU idle
-  - ☐ Today an idle 1.5.1 takes 5 % of a host core off USB (it draws its desktop) and a
-        quarter on USB: 1000 ticks a second, 190 µs of host CPU each. Over a third of
-        the emulated CPU's waking time there is QEMU's slow path for pages that hold an
-        MPU region smaller than themselves: the firmware's 32-byte stack guards put the
-        whole main stack and the idle task's stack in such pages, so every stack access
-        of every interrupt handler takes it. A cache for parts of a page in QEMU's TLB
-        would make every handler faster, which matters where microseconds do
-        (BRINGUP_LOG 94). Looked at again on 2026-11-12, and not changed: for an idle
-        Flipper that cache is worth 5 or 6 of the 24 points at most (19 % with the MPU
-        switched off), and there is no shortcut to it. An entry that is kept for such
-        a page must not carry QEMU's invalid flag, since `tlb_flush_page()` and the
-        dirty tracking pass over entries that do: it needs a state of its own, which
-        the slow path and every probe have to know (BRINGUP_LOG 129)
+  - ☑ Pages that hold an MPU region smaller than themselves (2026-11-21): QEMU kept
+        none, so every stack access of every interrupt handler, of the idle task and of
+        a busy thread walked the MPU and wrote a TLB entry again (the firmware's 32-byte
+        stack guards; BRINGUP_LOG 94, 129). QEMU patch 0024 keeps such a page but for
+        the region, with a slow-path flag of its own (`TLB_SUBPAGE`): two idle Flippers
+        side by side, 10.7 % of a host core on USB where the build before took 13.5,
+        4.2 off it for 4.7; a host reading the Mass Storage app's drive a seventh to a
+        quarter faster; card sums and NFC work a few percent (BRINGUP_LOG 197)
   - ☑ Explained, and nothing to change (2026-11-12): a CLI command that waits takes a
         whole host core (a script in `delay()`, the firmware's `log` command with
         nothing to print). It is the firmware's own. The shell waits for a command's

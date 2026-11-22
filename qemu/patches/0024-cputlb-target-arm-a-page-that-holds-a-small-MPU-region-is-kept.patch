@@ -1,0 +1,279 @@
+From: FlipperEmu
+Subject: [PATCH] cputlb, target/arm: a page that holds a small MPU region is
+ kept but for that region
+
+An MPU region smaller than a target page (1 KiB on M-profile) made every
+access to its page look the MPU up again and write its TLB entry again:
+get_phys_addr_pmsav7() reported a page size of 0 for any address of a page
+that such a region overlaps, and tlb_set_page_full() set TLB_INVALID_MASK
+for it.  A guest that guards each thread's stack with a 32-byte region
+(the Flipper Zero's firmware) has its interrupt stack, its idle thread's
+and every busy thread's stack in such pages, and in a host's reads of a
+USB drive that the guest emulates, a third of the vCPU thread's time went
+to those refills.
+
+Such a page is kept now but for the part that the small regions cover:
+- CPUTLBEntryFull gains sub_lo and sub_hi, the part [sub_lo, sub_hi) of
+  the page that the translation is not for (in its tail padding: the
+  struct does not grow).  A target sets them with a full page size.
+- tlb_set_page_full() gives such an entry TLB_SUBPAGE, a new slow flag:
+  every access takes the slow path, and mmu_lookup1() translates one that
+  touches the part anew, as on a miss (where a small region's own lookup
+  gives the one-access entry that it gave before); any other access is a
+  hit, with no lookup.
+- probe_access_internal() fills for a probe that touches the part, and
+  otherwise returns the flag with the entry, so that no host address is
+  given for all of the page (code in such a page is translated as before,
+  an instruction at a time); atomic_mmu_lookup() goes serial for an access
+  that touches it.
+- get_phys_addr_pmsav7() reports the span of the regions that overlap the
+  page and that it looked at before the one that matched (or all, with no
+  match) as that part, where it reported a page size of 0.  A region that
+  holds the address in a disabled subregion and has other subregions in
+  the page counts too (it did not before: an entry for the whole page
+  could let an access through to an enabled subregion).  A span of the
+  whole page is a page size of 0, as before.
+- armv7m_nvic.c: what patch 0023 says the TLB holds of an enabled region
+  (on which its flushes at the MPU's off and on rest) says so now: the
+  page of a smaller region is kept but for it, and the rest of it is the
+  default map's, which holds with the MPU off too, or a larger region's,
+  whose pages go.
+
+Signed-off-by: FlipperEmu
+---
+--- a/include/hw/core/cpu.h
++++ b/include/hw/core/cpu.h
+@@ -268,6 +268,14 @@
+             bool guarded;
+         } arm;
+     } extra;
++
++    /*
++     * @sub_lo, @sub_hi: the part [sub_lo, sub_hi) of the page, from its
++     * start, that this translation is not for (an MPU region smaller than
++     * a page lies there): an access to it is translated anew.  Both 0:
++     * none.  Only with @lg_page_size of a page or more.
++     */
++    uint16_t sub_lo, sub_hi;
+ };
+ 
+ /*
+--- a/include/exec/tlb-flags.h
++++ b/include/exec/tlb-flags.h
+@@ -53,10 +53,12 @@
+ #define TLB_DISCARD_WRITE    (1 << 3)
+ /* Set if TLB entry is an IO callback.  */
+ #define TLB_MMIO             (1 << 4)
++/* Set if a part of the page is translated apart (CPUTLBEntryFull.sub_lo). */
++#define TLB_SUBPAGE          (1 << 5)
+ 
+ #define TLB_SLOW_FLAGS_MASK \
+     (TLB_BSWAP | TLB_WATCHPOINT | TLB_CHECK_ALIGNED | \
+-     TLB_DISCARD_WRITE | TLB_MMIO)
++     TLB_DISCARD_WRITE | TLB_MMIO | TLB_SUBPAGE)
+ 
+ /*
+  * Flags stored in CPUTLBEntry.addr_idx[x].
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -1061,6 +1061,9 @@
+     if (full->lg_page_size < TARGET_PAGE_BITS) {
+         /* Repeat the MMU check and TLB fill on every access.  */
+         read_flags |= TLB_INVALID_MASK;
++    } else if (full->sub_hi > full->sub_lo) {
++        /* A part of the page is translated apart: see tlb_sub_hit().  */
++        read_flags |= TLB_SUBPAGE;
+     }
+ 
+     is_ram = memory_region_is_ram(section->mr);
+@@ -1358,6 +1361,20 @@
+     }
+ }
+ 
++/*
++ * An entry with TLB_SUBPAGE is for its page but [sub_lo, sub_hi), which an
++ * MPU region smaller than the page has (a stack's guard): an access that
++ * touches that part is translated anew, as on a miss, and the rest of the
++ * page is a hit.  Before, such a page was not kept at all: every access to
++ * it walked the MPU and wrote its entry again.
++ */
++static inline bool tlb_sub_hit(CPUTLBEntryFull *full, vaddr addr, int size)
++{
++    vaddr off = addr & ~TARGET_PAGE_MASK;
++
++    return off < full->sub_hi && off + MAX(size, 1) > full->sub_lo;
++}
++
+ static int probe_access_internal(CPUState *cpu, vaddr addr,
+                                  int fault_size, MMUAccessType access_type,
+                                  int mmu_idx, bool nonfault,
+@@ -1398,6 +1415,23 @@
+ 
+     *pfull = full = &cpu->neg.tlb.d[mmu_idx].fulltlb[index];
+     flags |= full->slow_flags[access_type];
++    if (unlikely(flags & TLB_SUBPAGE) &&
++        tlb_sub_hit(full, addr, fault_size)) {
++        /* the part that is translated apart: as on a miss */
++        if (!tlb_fill_align(cpu, addr, access_type, mmu_idx,
++                            0, fault_size, nonfault, retaddr)) {
++            *phost = NULL;
++            *pfull = NULL;
++            return TLB_INVALID_MASK;
++        }
++        index = tlb_index(cpu, mmu_idx, addr);
++        entry = tlb_entry(cpu, mmu_idx, addr);
++        flags = TLB_FLAGS_MASK & ~(TLB_FORCE_SLOW | TLB_INVALID_MASK) &
++                tlb_read_idx(entry, access_type);
++        *pfull = full = &cpu->neg.tlb.d[mmu_idx].fulltlb[index];
++        flags |= full->slow_flags[access_type];
++    }
++    /* (TLB_SUBPAGE stays: the host address is not for all of the page) */
+     if (check_mem_cbs && cpu_plugin_mem_cbs_enabled(cpu)) {
+         flags |= TLB_FORCE_SLOW;
+     }
+@@ -1662,6 +1696,21 @@
+     flags = tlb_addr & (TLB_FLAGS_MASK & ~TLB_FORCE_SLOW);
+     flags |= full->slow_flags[access_type];
+ 
++    if (unlikely(flags & TLB_SUBPAGE)) {
++        if (tlb_sub_hit(full, addr, data->size)) {
++            tlb_fill_align(cpu, addr, access_type, mmu_idx,
++                           memop, data->size, false, ra);
++            maybe_resized = true;
++            index = tlb_index(cpu, mmu_idx, addr);
++            entry = tlb_entry(cpu, mmu_idx, addr);
++            tlb_addr = tlb_read_idx(entry, access_type) & ~TLB_INVALID_MASK;
++            full = &cpu->neg.tlb.d[mmu_idx].fulltlb[index];
++            flags = tlb_addr & (TLB_FLAGS_MASK & ~TLB_FORCE_SLOW);
++            flags |= full->slow_flags[access_type];
++        }
++        flags &= ~TLB_SUBPAGE;          /* (this access is the entry's) */
++    }
++
+     if (likely(!maybe_resized)) {
+         /* Alignment has not been checked by tlb_fill_align. */
+         int a_bits = memop_tlb_alignment_bits(memop, flags & TLB_CHECK_ALIGNED);
+@@ -1867,6 +1916,14 @@
+     tlb_addr |= full->slow_flags[MMU_DATA_STORE];
+     tlb_addr |= full->slow_flags[MMU_DATA_LOAD];
+ 
++    /* The part of the page that is translated apart: serially, then */
++    if (unlikely(tlb_addr & TLB_SUBPAGE)) {
++        if (tlb_sub_hit(full, addr, size)) {
++            goto stop_the_world;
++        }
++        tlb_addr &= ~TLB_SUBPAGE;
++    }
++
+     /* Notice an IO access or a needs-MMU-lookup access */
+     if (unlikely(tlb_addr & (TLB_MMIO | TLB_DISCARD_WRITE))) {
+         /* There's really nothing that can be done to
+--- a/target/arm/ptw.c
++++ b/target/arm/ptw.c
+@@ -2714,6 +2714,23 @@
+     return regime_sctlr(env, mmu_idx) & SCTLR_BR;
+ }
+ 
++/*
++ * A region that covers a part of the page of a lookup: that part is
++ * translated apart, [*lo, *hi) of the page, the span of all such.
++ */
++static void pmsav7_part(uint32_t base, uint32_t rmask, uint32_t page,
++                        uint32_t *lo, uint32_t *hi)
++{
++    uint64_t from = MAX((uint64_t)base, page);
++    uint64_t to = MIN((uint64_t)base + rmask + 1,
++                      (uint64_t)page + TARGET_PAGE_SIZE);
++
++    if (from < to) {
++        *lo = MIN(*lo, from - page);
++        *hi = MAX(*hi, to - page);
++    }
++}
++
+ static bool get_phys_addr_pmsav7(CPUARMState *env,
+                                  S1Translate *ptw,
+                                  uint32_t address,
+@@ -2726,10 +2743,13 @@
+     ARMMMUIdx mmu_idx = ptw->in_mmu_idx;
+     bool is_user = regime_is_user(mmu_idx);
+     bool secure = arm_space_is_secure(ptw->in_space);
++    uint32_t page = address & TARGET_PAGE_MASK;
++    uint32_t part_lo = TARGET_PAGE_SIZE, part_hi = 0;
+ 
+     result->f.phys_addr = address;
+     result->f.lg_page_size = TARGET_PAGE_BITS;
+     result->f.prot = 0;
++    result->f.sub_lo = result->f.sub_hi = 0;
+ 
+     if (regime_translation_disabled(env, mmu_idx, ptw->in_space) ||
+         m_is_ppb_region(env, address)) {
+@@ -2774,17 +2794,12 @@
+                 /*
+                  * Address not in this region. We must check whether the
+                  * region covers addresses in the same page as our address.
+-                 * In that case we must not report a size that covers the
+-                 * whole page for a subsequent hit against a different MPU
+-                 * region or the background region, because it would result in
+-                 * incorrect TLB hits for subsequent accesses to addresses that
+-                 * are in this MPU region.
++                 * That part of the page must not be covered by what we
++                 * report for this address (a subsequent access there may
++                 * hit this region): it is translated apart, and the rest
++                 * of the page may be cached (sub_lo, sub_hi).
+                  */
+-                if (ranges_overlap(base, rmask,
+-                                   address & TARGET_PAGE_MASK,
+-                                   TARGET_PAGE_SIZE)) {
+-                    result->f.lg_page_size = 0;
+-                }
++                pmsav7_part(base, rmask, page, &part_lo, &part_hi);
+                 continue;
+             }
+ 
+@@ -2818,6 +2833,10 @@
+                 }
+             }
+             if (srdis) {
++                if (rsize < TARGET_PAGE_BITS) {
++                    /* its other subregions in this page: apart too */
++                    pmsav7_part(base, rmask, page, &part_lo, &part_hi);
++                }
+                 continue;
+             }
+             if (rsize < TARGET_PAGE_BITS) {
+@@ -2825,6 +2844,14 @@
+             }
+             break;
+         }
++        if (result->f.lg_page_size == TARGET_PAGE_BITS && part_lo < part_hi) {
++            if (part_lo == 0 && part_hi == TARGET_PAGE_SIZE) {
++                result->f.lg_page_size = 0;     /* (nothing left to keep) */
++            } else {
++                result->f.sub_lo = part_lo;
++                result->f.sub_hi = part_hi;
++            }
++        }
+ 
+         if (n == -1) { /* no hits */
+             if (!pmsav7_use_background_region(cpu, mmu_idx, secure, is_user)) {
+--- a/hw/intc/armv7m_nvic.c
++++ b/hw/intc/armv7m_nvic.c
+@@ -1696,10 +1696,13 @@
+  *   indexes change only in the enabled regions' areas; an unprivileged
+  *   access is a background fault with it on, and those indexes go whole
+  *   (where they hold anything).  Of an enabled region, the TLB holds
+- *   something usable only where the region is a page or more and lets
+- *   something through: a smaller one has every access to its page looked
+- *   up again, and one that lets nothing through has no entries.  So:
+- *   switched off, the pages of such regions go, and from then on the pages
++ *   something of the region's only where it is a page or more and lets
++ *   something through: one that lets nothing through has no entries, and
++ *   the page of a smaller one is kept but for it (TLB_SUBPAGE), the rest
++ *   of the page being what a lookup there gives, the default map (which
++ *   holds with the MPU off too) or a larger region's.  So: switched off,
++ *   the pages of the regions of a page or more that let something through
++ *   go, and from then on the pages
+  *   that the TLB is given are noted (arm_v7m_mpu_note_page()); switched on,
+  *   the noted pages go.  More than can be noted: all.  With HFNMIENA
+  *   clear, the indexes of HardFault and NMI see it off while it is on,
