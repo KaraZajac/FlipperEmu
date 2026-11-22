@@ -352,6 +352,28 @@ def mfplus_sl3(b, work):
               for k in differ(want, got)[:12]))
 
 
+def fw23_sign(b):
+    """FW-23's sign (docs/FIRMWARE_BUGS.md) on a device whose NFC read
+    stands still: the chip's interrupt pin (PA2) up, its edge taken (EXTI
+    line 2 not pending) and nothing pending at the NVIC (EXTI2).  A handler
+    ran and its flag was lost; the chip waits for its registers to be read
+    with its pin up, which gives no second edge."""
+    def word(m, addr):
+        found = re.search(r":\s*(0x[0-9a-fA-F]+)", m.cmd(f"xp /1wx {addr:#x}"))
+        return int(found.group(1), 16) if found else None
+    try:
+        m = Monitor(str(b.dir / "monitor.sock"))
+    except OSError:
+        return False
+    try:
+        idr, pr1, ispr = [word(m, a) for a in (0x48000010, 0x5800080C,
+                                               0xE000E200)]
+    finally:
+        m.close()
+    return (None not in (idr, pr1, ispr) and bool(idr >> 2 & 1)
+            and not pr1 >> 2 & 1 and not ispr >> 8 & 1)
+
+
 def ulc(b, work):
     """A MIFARE Ultralight C whose pages from 16 on want its key"""
     uid = bytes.fromhex("04A1B2C3D4E5F6")
@@ -379,15 +401,31 @@ def ulc(b, work):
           f"{got.get('NTAG/Ultralight type')} {got.get('Page 16')}")
     # (the shell's `dump -k KEY` of the official 1.5.1 tries another key than
     # the one it is given: the app's Read has the dictionary's keys right)
-    seen = b.uart_text().count("Auth success")
-    code, text = b.fe("app", "NFC")
-    time.sleep(1.5)
-    b.fe("press", "ok")
-    ok = False
-    end = time.time() + 60
-    while time.time() < end and not ok:
-        ok = b.uart_text().count("Auth success") > seen
-        time.sleep(0.5)
+    def app_read():
+        seen = b.uart_text().count("Auth success")
+        code, text = b.fe("app", "NFC")
+        time.sleep(1.5)
+        b.fe("press", "ok")
+        end = time.time() + 60
+        while time.time() < end:
+            if b.uart_text().count("Auth success") > seen:
+                return True, text
+            time.sleep(0.5)
+        return False, text
+
+    ok, text = app_read()
+    if not ok and fw23_sign(b):
+        # FW-23, the firmware's: its NFC thread lost the chip's interrupt
+        # and waits for ever (the forks' read of this card meets it now and
+        # then on a busy computer).  Closing the app now would crash it
+        # (FW-06): the Flipper is reset as Left + Back does, and read again.
+        print("        (the read stood still with FW-23's sign: PA2 up, its "
+              "edge taken, the chip's interrupts unread; reset, and read "
+              "again)", flush=True)
+        b.fe("reset")
+        b.fe("wait", "--timeout", 120)
+        b.fe("nfc", "ulc", uid.hex())
+        ok, text = app_read()
     failed = b.uart_text().count("Auth failed")
     b.fe("app", "--close")
     check("the NFC app's Read of it: the firmware tries its dictionary's "

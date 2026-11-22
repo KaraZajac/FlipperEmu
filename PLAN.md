@@ -1073,6 +1073,12 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           running time. Beside 32 busy loops on 16 threads: seven ISO15693 reads, all
           whole, six of them with no frame lost, where none of four was read
           (BRINGUP_LOG 179)
+    - ☐ FW-23 in the forks' NFC app read of an Ultralight C on a busy computer
+          (2026-11-22): with six emulators side by side, one of Momentum's reads in
+          14 to 45 stands still; the official 1.5.1's none in 240. The firmware's
+          race; the emulator's clock tried twice, side by side, without it going
+          (BRINGUP_LOG 199). The NFC check knows its sign, resets and reads again.
+          What would remove it: a clock that counts instructions
     - ☑ The NFC emulation check beside 32 busy loops (2026-11-21): 25 of 25 in six
           runs, with the build before BRINGUP_LOG 196 and after 198. It had been 22
           or 23 of 24, another check each time (an Ultralight C's read, a MIFARE

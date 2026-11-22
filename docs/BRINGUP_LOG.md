@@ -6695,6 +6695,42 @@ big lock, entry 92).
       round's idle clocks (79 to 86 % of the host's), 21 each again
       on a quiet host, and the UART check 86.
 
+199. **The forks' Ultralight C read that stood still.**
+    - The forks' NFC app read of an Ultralight C with its dictionary had
+      stood still once in about ninety reads, and the NFC check's close
+      of the stuck app had crashed the firmware (entries 197 and 198). A
+      catcher, six devices reading in a loop and the first read that
+      stood still left as it was: five of six within ten reads
+      (Unleashed, Momentum, RogueMaster); the official 1.5.1, none in
+      240 reads under the same load.
+    - Each one, read from the monitor (`xp` of the registers) and from
+      the QEMU process (gdb, the chip model's state): PA2 up, its rising
+      edge taken (EXTI line 2 not pending, nothing at the NVIC); the chip
+      idle with its interrupts for the end of the transmission, the
+      start and the end of the answer pending, unread. The frame: the
+      first authentication's (18 bits), or the WUPA that wakes the card
+      after two refused keys (7 bits). FW-23's sign: the handler ran, its
+      flag was lost in a clear, and the pin stays up with no second edge.
+      (A pulse of the chip's pin, called from gdb, ended that QEMU: a
+      device's code called so runs without the big lock, and QEMU
+      asserts it.)
+    - Tried in the emulator, side by side with the build before (three
+      Momentum devices on each, rounds of 40 reads): the main loop
+      looking at the CPU's thread at each reading of the clock, and the
+      CPU's thread on its way out of its code (between two looks the
+      clock went by the host's for up to 20 us, and a timer could come
+      before the CPU had): 6 stood still in 118 reads, 4 in 104 without:
+      out. All of a device access out of the clock (the firmware's way
+      from the command to send to the clear is the chip's SPI, an access
+      a byte): 2 in 192, 4 in 176 without; not enough for a clock that
+      goes slower than the wall's in such work (entry 190): out.
+    - So the check: `nfc_check.py`'s Ultralight C step, a read that stands
+      still with FW-23's sign has the Flipper reset (Left + Back) and
+      read once more, and the check says so. On six stalled Momentum
+      devices: the sign each time, the read after the reset taken each
+      time, no crash; and no sign on a device that reads. The NFC check
+      on the official 1.5.1 and the three forks: 25, 28, 30, 30.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

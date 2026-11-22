@@ -263,6 +263,23 @@ keeps its row, with the version that fixed it.
   wherever the firmware was. Since the CPU's thread runs the timers that are due
   (BRINGUP_LOG 191), it has not come in 1200 dumps beside 24 busy loops, against 6
   in about 1900 before; `run -- -machine cpu-timers=off` brings it back.
+  On 2026-11-22 it came where nobody had looked: the forks' NFC app reading an
+  Ultralight C with its dictionary (Momentum, Unleashed, RogueMaster), at a frame
+  after the dictionary was loaded or a refused key logged (the authentication's, or
+  the WUPA that wakes the card again). Six emulators side by side, each reading in a
+  loop: one of Momentum's reads in 25 to 45 stood still on a calm day, one in 14 on a
+  busier one, each with the sign (PA2 up, its edge taken, the chip's interrupts for
+  the end of the transmission and for the answer unread); the official 1.5.1's, none
+  in 240. In the regression's checks, about once in thirty runs of the forks'. Two
+  changes of the emulator's clock were tried against it, side by side with the build
+  before, and neither took it away: the main loop looking at the CPU's thread at each
+  reading (6 in 118 reads, 4 in 104 without), and all of a device access taken out
+  of the clock (2 in 192, 4 in 176 without). What is left is how the emulated
+  firmware's time runs against the chip's on a busy host, which only a clock that
+  counts instructions would make a Flipper's. `scripts/nfc_check.py` knows the sign:
+  a read that stands still with it has the Flipper reset (as Left + Back does) and
+  read once more, and says so, where closing the app on the stuck read crashed the
+  firmware as FW-06 does (BRINGUP_LOG 199).
 - **How much it matters:** `furi_thread_flags_clear()` is the firmware's only way
   to clear a thread flag, and any flag set from an interrupt handler or another
   thread during it is lost the same way. Official 1.5.1 calls it in 19 places: the
