@@ -186,6 +186,10 @@ struct Cc1101State {
     int64_t live_queued_us, live_next_ns;
     QEMUTimer *live_timer;
     bool live_playing, live_carrier;
+    bool live_file;              /* the air is a recording: time waits for it */
+    bool live_held;              /* ... and does now (wb55_own_clock_hold) */
+    QEMUBH *live_stop;           /* ... and the machine stops, from the main loop */
+    bool live_paused;            /* ... and has */
     float *spec;                 /* the bridge's spectrum: dBm per bin */
     int spec_n;
     double spec_f0, spec_step;   /* bin 0's frequency, the bin spacing (Hz) */
@@ -293,6 +297,7 @@ struct St25r3916State {
     QEMUTimer *link_timeout;     /* host time: no answer by then is silence */
     QEMUBH *link_stop;           /* stops the machine, outside the timers */
     bool link_paused;            /* the machine stopped while it answers */
+    bool link_held;              /* ... and its time, at once */
     bool link_late;              /* warned about a slow answer */
 };
 /* ISO14443A helpers (st25r3916.c): CRC_A, bytes <-> air bits with parity */

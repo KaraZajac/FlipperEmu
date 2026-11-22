@@ -301,6 +301,7 @@ static struct {
     bool on;
     bool cpu_timers;             /* the CPU's thread runs due timers */
     bool nap;                    /* ... and stays awake through a short sleep */
+    int frozen;                  /* devices that hold time still (own_hold) */
     uint64_t naps;               /* ... so often */
     void (*interrupt)(CPUState *cpu, int mask);   /* QEMU's own, kept */
     int64_t wake;                /* a wake-up: so much of it may still pass */
@@ -455,6 +456,9 @@ static int64_t own_clock(void)
         own_look(cpu, host);
     }
     v = host - own.steal;
+    if (own.frozen) {
+        v = own.last;                   /* (wb55_own_clock_hold()) */
+    }
     if (own.cpu_timers && asleep && first >= 0) {
         /* asleep, the CPU runs nothing on: the clock waits for the main
          * loop to run a timer that is due */
@@ -660,10 +664,23 @@ int64_t wb55_own_clock_device(void)
     return own_count(&own.device);
 }
 
-/* what has been taken out of the clock: for a saved state, and from one */
+/*
+ * What has been taken out of the clock, as it stands: for a saved state, and
+ * from one.  The clock never goes back, so where it has stood still for a
+ * moment it took out less than was counted, and a state saved with the
+ * count was loaded a few microseconds before its save.  So: what it gives.
+ */
 int64_t wb55_own_clock_steal(void)
 {
-    return own_count(&own.steal);
+    int64_t v;
+
+    if (!own.on) {
+        return 0;
+    }
+    qemu_spin_lock(&own.lock);
+    v = MIN(own.steal, own_host() - own.last);
+    qemu_spin_unlock(&own.lock);
+    return v;
 }
 
 /* the meter's counts, and the CPU's timers', as JSON (the caller's to free) */
@@ -701,6 +718,31 @@ char *wb55_own_clock_late(void)
     return g_string_free(s, false);
 }
 
+/*
+ * Time stands still for a device that waits for something outside the
+ * machine, which would take its time in any world (a card on the NFC link,
+ * played by a program; a recording on the radio link, its bridge late): the
+ * clock gives what it gave last until the device
+ * lets go, however long the host takes and whatever the CPU runs
+ * meanwhile, and goes on from there.  Held at once, by whichever thread
+ * asks: stopping the machine waits for the main loop, and on a busy host
+ * the firmware's own waits ran out first.  Not in a saved state (a load
+ * lets go).  With the host's clock, nothing.
+ */
+void wb55_own_clock_hold(bool hold)
+{
+    if (!own.on) {
+        return;
+    }
+    qemu_spin_lock(&own.lock);
+    if (hold) {
+        own.frozen++;
+    } else if (own.frozen && !--own.frozen) {
+        own.steal = own_host() - own.last;  /* (what passed: taken out) */
+    }
+    qemu_spin_unlock(&own.lock);
+}
+
 /* cpu-nap, set while the machine runs too (with the big lock) */
 void wb55_own_clock_nap(bool nap)
 {
@@ -714,6 +756,7 @@ void wb55_own_clock_loaded(int64_t steal)
     }
     qemu_spin_lock(&own.lock);
     own.steal = steal;
+    own.frozen = 0;
     own_anew(cpu_get_clock());
     qemu_spin_unlock(&own.lock);
     own.armed = INT64_MIN;              /* (set again at the CPU's next look) */

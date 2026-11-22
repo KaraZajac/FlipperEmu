@@ -79,6 +79,19 @@ delay, long silences are shortened to make it up. If the timeline runs dry, the 
 goes low until more arrives.
 
 ```
+air file
+air end
+```
+
+`air file` says that the timeline is a recording, not live air: where it runs dry
+(its bridge late on a busy computer), the machine's time stands still and the machine
+stops until more comes, and its long silences are kept whole, so a recording plays
+exactly whatever the host's load. `air end` says that the recording is over: the rest
+plays, then the line goes low as a live air's does. `air live` goes back to live air,
+which is also what a new connection starts with. When the bridge leaves, what it sent
+plays out.
+
+```
 spectrum 433400000 4000.000 -131.2 -130.8 -129.9 ... -74.1 ... -131.0
 ```
 
@@ -149,7 +162,9 @@ encrypted answers. `answer 16 4400` is an ATQA; `answer 24 04da17` a SAK with it
 ### Time
 
 Each poll stops the machine, and with it the virtual clock, until the answer or silence
-comes: `vm_stop` from a bottom half, then `vm_start`. However long the program takes,
+comes: `vm_stop` from a bottom half, then `vm_start`. The machine's clock stands still
+at once, from the poll on, since the bottom half waits for the main loop, which on a
+busy computer comes late. However long the program takes,
 over a socket or USB to a real reader, the firmware sees the answer within its frame
 waiting time. After a second with no answer, it gets silence and a warning, once.
 

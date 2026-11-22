@@ -12,7 +12,8 @@ SOURCE is where the IQ samples come from:
                                server; default 127.0.0.1:1234). It can run on
                                another machine.
     hackrf[:SERIAL]            a HackRF One, through libhackrf
-    FILE.cu8|.cs8|.cs16|.cf32  an IQ recording, played in real time. rtl_sdr
+    FILE.cu8|.cs8|.cs16|.cf32  an IQ recording, played as the air was (the
+                               emulator waits for it, if need be). rtl_sdr
                                writes cu8, hackrf_transfer cs8. --center and
                                --rate say how it was made, unless its name
                                does (rtl_433's style: name_433.92M_250k.cu8).
@@ -50,6 +51,7 @@ np = None                       # numpy: loaded when a bridge runs (load_numpy),
 
 SPEC_EVERY_S = 0.05             # the band's power, this often
 FOLLOW_AFTER_S = 0.5            # tuned off the band this long: retune
+FILE_LEAD_S = 0.25              # a file's air goes this far ahead of the clock
 EDGE_FRACTION = 0.45            # of the sample rate either side: usable band
 
 
@@ -246,7 +248,9 @@ class HackRF(Source):
 
 class IqStream(Source):
     """An IQ recording, or IQ on stdin: cu8 (rtl_sdr), cs8 (hackrf_transfer),
-    cs16 or cf32.  A file plays in real time, looping with --loop."""
+    cs16 or cf32.  A file plays in real time (a little ahead of it: the
+    emulator waits where it runs dry, so a busy host does not break it up),
+    looping with --loop."""
     FORMATS = {"cu8": ("uint8", 127.4, 128.0), "cs8": ("int8", 0.0, 128.0),
                "cs16": ("int16", 0.0, 32768.0), "cf32": ("float32", 0.0, 1.0)}
 
@@ -277,9 +281,10 @@ class IqStream(Source):
         a = np.frombuffer(data, self.dtype).astype(np.float32)
         x = ((a[0::2] - self.off) + 1j * (a[1::2] - self.off)) / self.scale
         if not self.stdin:                      # as fast as the air would be
-            if self.t0 is None:
-                self.t0 = time.monotonic()
-            ahead = self.t0 + self.sent / self.rate - time.monotonic()
+            if self.t0 is None:                 # (and a little ahead of it:
+                self.t0 = time.monotonic()      # the emulator waits for a
+            ahead = (self.t0 + self.sent / self.rate - time.monotonic()  # file)
+                     - FILE_LEAD_S)
             if ahead > 0:
                 time.sleep(ahead)
         self.sent += len(x)
@@ -575,6 +580,9 @@ class Bridge:
         self.nfft = 1 << max(12, math.ceil(math.log2(src.rate * 0.016)))
         self.stats = {"edges": 0, "t": time.monotonic()}
         self.send(f"hello fe_sdr: {src.name}, {src.rate / 1e6:g} MS/s\n")
+        self.recording = isinstance(src, IqStream) and not src.stdin
+        if self.recording:                      # not the air's time: the
+            self.send("air file\n")             # emulator waits for it
 
     def send(self, line):
         self.link.sendall(line.encode())
@@ -670,6 +678,8 @@ class Bridge:
         while True:
             x = self.src.read(self.block)
             if x is None:
+                if self.recording:              # the rest plays, then the
+                    self.send("air end\n")      # line goes low
                 return 0                        # the recording ended
             self.poll_link()
             if self.src.skip:

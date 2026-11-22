@@ -1369,7 +1369,8 @@ antenna:
   GDO0.
 - It streams the result to GDO0 as a continuous timeline, which the model plays through a
   60 ms jitter buffer. The firmware's own drivers capture it as they would the real chip's
-  output.
+  output. A recording plays exactly even on a busy computer: where its bridge falls
+  behind, the emulated Flipper waits for it.
 - It sends the band's power every 50 ms. The firmware's RSSI reads come from it at
   whatever frequency and bandwidth it asks for, so the Frequency Analyzer finds real
   transmitters, Read RAW shows their RSSI, and hopping stops where there is a signal.

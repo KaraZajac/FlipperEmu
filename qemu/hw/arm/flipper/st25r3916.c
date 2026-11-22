@@ -67,6 +67,7 @@
 #include "hw/core/qdev-properties-system.h"
 #include "migration/vmstate.h"
 #include "flipper.h"
+#include "wb55.h"
 
 #define REG_IO_CONF1      0x00
 #define REG_OP_CONTROL    0x02
@@ -443,9 +444,14 @@ static void st25_fifo_clear(St25r3916State *s)
     s->fifo_lb = 0;
 }
 
+static void st25_link_resume(St25r3916State *s);
+
 static void st25_stop(St25r3916State *s)
 {
     timer_del(s->timer);
+    if (s->stage == STAGE_LINK) {
+        st25_link_resume(s);            /* (no answer wanted any more) */
+    }
     s->stage = STAGE_IDLE;
 }
 
@@ -658,8 +664,16 @@ static void st25_link_poll(St25r3916State *s)
     s->stage = STAGE_LINK;
     timer_mod(s->link_timeout,
               qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + LINK_ANSWER_MS);
-    /* not from here: this runs in a virtual-clock timer, and stopping the
-     * machine waits for that clock's timers to finish, this one included */
+    /* Its time stands still at once (this may run on the CPU's thread,
+     * which runs on), and the machine stops when the main loop comes to
+     * it: not from here, since this runs in a virtual-clock timer, and
+     * stopping the machine waits for that clock's timers to finish, this
+     * one included.  On a busy host the main loop came late, and the
+     * firmware's own wait for the answer ran out before. */
+    if (!s->link_held) {
+        s->link_held = true;
+        wb55_own_clock_hold(true);
+    }
     qemu_bh_schedule(s->link_stop);
 }
 
@@ -676,6 +690,10 @@ static void st25_link_stop(void *opaque)
 static void st25_link_resume(St25r3916State *s)
 {
     timer_del(s->link_timeout);
+    if (s->link_held) {
+        s->link_held = false;
+        wb55_own_clock_hold(false);
+    }
     if (s->link_paused) {
         s->link_paused = false;
         flipper_vm_release();       /* (a pause that came meanwhile stays) */
@@ -2164,6 +2182,10 @@ static int st25_post_load(void *opaque, int version_id)
 
 void st25r3916_loaded(St25r3916State *s)
 {
+    if (s->link_held) {                 /* (the load let go, or this does) */
+        s->link_held = false;
+        wb55_own_clock_hold(false);
+    }
     if (s->stage == STAGE_LINK) {       /* asked in the saved machine's time */
         st25_silence(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     }
@@ -2232,6 +2254,10 @@ static void st25_reset_hold(Object *obj, ResetType type)
 
     if (s->timer && !flipper_board_keeps()) {
         st25_defaults(s);   /* (the MCU's reset: until a SET_DEFAULT) */
+    }
+    if (s->stage == STAGE_LINK) {
+        st25_link_resume(s);            /* (the card's answer is not wanted) */
+        s->stage = STAGE_IDLE;
     }
     s->phase = PH_CMD;
     s->prefix_b = false;

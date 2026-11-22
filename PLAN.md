@@ -893,8 +893,12 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
             refused before anything stops. `scripts/gui_check.py` 79 (80 with an SPI
             script; BRINGUP_LOG 144)
 - ☐ Checks that hold on a busy computer (Kara, 2026-11-13)
-    - ☐ The smoke test with twice as many busy loops as threads beside it
-          (2026-11-15): 26, 25 and 18 of 28. The SDR recording, the T5577's
+    - ☑ The smoke test with twice as many busy loops as threads beside it
+          (2026-11-21): 28 and 28 of 28 beside 32 busy loops, where the build
+          before had 26 and 26, the two cards that a program plays on the NFC
+          link: their poll holds the machine's clock at once now, and a
+          recording on the radio link is played exactly (BRINGUP_LOG 198).
+          The way there, from 2026-11-15: 26, 25 and 18 of 28. The SDR recording, the T5577's
           write, the 1-Wire read and the infrared each fail now and then; once
           in three the firmware's CLI queue overflows (FW-07) while the NFC app
           reads and the check opens the port for its next step. Alone: 28
@@ -1069,11 +1073,12 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           running time. Beside 32 busy loops on 16 threads: seven ISO15693 reads, all
           whole, six of them with no frame lost, where none of four was read
           (BRINGUP_LOG 179)
-    - ☐ The NFC emulation check beside 32 busy loops: 22 or 23 of 24, another check
-          each time (an Ultralight C's read, a MIFARE Classic's with wrong keys): a
-          frame that the firmware does not answer. It passes at the regression's load.
-          Tried and not kept: the reader's patience and its gap after an answer by
-          the CPU's own time (BRINGUP_LOG 179)
+    - ☑ The NFC emulation check beside 32 busy loops (2026-11-21): 25 of 25 in six
+          runs, with the build before BRINGUP_LOG 196 and after 198. It had been 22
+          or 23 of 24, another check each time (an Ultralight C's read, a MIFARE
+          Classic's with wrong keys): a frame that the firmware did not answer.
+          Tried and not kept then: the reader's patience and its gap after an
+          answer by the CPU's own time (BRINGUP_LOG 179)
 - ☑ Coverage of the firmware or of an app (2026-11-14): `run --coverage` loads a TCG
       plugin of our own (`qemu/plugins/fe_cov.c`: a counter to each translated block,
       added to inline, about 2 % slower; the bytes of blocks in RAM kept),

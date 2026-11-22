@@ -2143,6 +2143,9 @@ The other end answers with two things:
   queues it in a ring and plays it 60 ms behind arrival, so chunks join up. Each edge
   goes through the same TIM2 capture pacing as the one-shot air's, with its exact
   timestamp. A backlog is made up in long silences; a dry queue drops the line low.
+  A recording (`air file`) is played exactly instead: a dry queue holds the machine's
+  clock and stops the machine until more comes, as the NFC link does, and silences stay
+  whole. What a bridge sent plays out after it leaves (BRINGUP_LOG 198).
 - **The band's power**, as dBm per bin. RSSI is the sum over the bins inside the chip's
   current channel, so the firmware's reads are answered at once for any frequency and
   bandwidth. That matters because the Frequency Analyzer spends 2 ms per frequency, and
@@ -2197,6 +2200,15 @@ every answer at its usual 40 µs. The stop has to come from a bottom half. The p
 made inside a virtual-clock timer, and `vm_stop` there deadlocks: `pause_all_vcpus`
 waits for that clock's running timers to finish, the caller among them, while the vCPU
 waits for the BQL.
+
+The bottom half runs when the main loop comes to it, and the CPU's thread runs on
+meanwhile: it may have made the poll itself, since it runs due timers (`cpu-timers`). On
+a busy computer the main loop came milliseconds late, and the firmware's own wait for the
+answer ran out first: beside 32 busy loops no APDU got through. So the poll also holds
+the machine's clock at once (`wb55_own_clock_hold()`), from whichever thread: the clock
+gives what it gave last until the answer, silence, or the end of the wait. The stop
+still follows, since time that stands still while the CPU runs has every timer's wait
+come round again and again (BRINGUP_LOG 198).
 
 `fe_nfc_link.py` has the card's layers: ISO14443-3A activation over 4, 7 or 10-byte UIDs
 (REQA/WUPA, anticollision and select per cascade level, HLTA), and ISO-DEP (RATS/ATS,

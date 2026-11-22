@@ -260,9 +260,49 @@ static uint32_t cc1101_dev_hz(Cc1101State *s)
 }
 
 /* the bridge's air stops: nothing queued, the line low */
+/*
+ * A recording's bridge is late: the machine's time stands still at once
+ * (this runs in a virtual-clock timer, maybe on the CPU's thread), and the
+ * machine stops when the main loop comes to it, as for a card on the NFC
+ * link.  Time that stands still while the machine runs has every timer's
+ * wait come round again and again, and the bridge it waits for gets less
+ * of the host for it.
+ */
+static void cc1101_live_wait(Cc1101State *s)
+{
+    if (!s->live_held) {
+        s->live_held = true;
+        wb55_own_clock_hold(true);
+        qemu_bh_schedule(s->live_stop);
+    }
+}
+
+static void cc1101_live_stop_bh(void *opaque)
+{
+    Cc1101State *s = opaque;
+
+    if (s->live_held && !s->live_paused) {
+        s->live_paused = flipper_vm_hold();
+    }
+}
+
+/* the bridge's air goes on: so does the machine */
+static void cc1101_live_go(Cc1101State *s)
+{
+    if (s->live_held) {
+        s->live_held = false;
+        wb55_own_clock_hold(false);
+    }
+    if (s->live_paused) {
+        s->live_paused = false;
+        flipper_vm_release();
+    }
+}
+
 static void cc1101_live_stop(Cc1101State *s)
 {
     timer_del(s->live_timer);
+    cc1101_live_go(s);
     s->live_rd = s->live_wr = 0;
     s->live_queued_us = 0;
     s->live_playing = false;
@@ -317,6 +357,9 @@ static void cc1101_link_check(Cc1101State *s)
  * so the bridge's chunks join up; an edge waits for the firmware's capture
  * read as the one-shot air's do, keeping its timestamp.  A backlog (the
  * firmware fell behind, or the bridge sent a burst) is made up in silence.
+ * A recording ("air file") is not on the air's time: where it runs dry
+ * (its bridge late on a busy host) the machine's time stands still until
+ * more comes, and its silences stay whole, so that it plays exactly.
  */
 static void cc1101_live_edge(void *opaque)
 {
@@ -331,6 +374,10 @@ static void cc1101_live_edge(void *opaque)
         timer_mod(s->live_timer, now + 20 * SCALE_US);
         return;
     }
+    if (s->live_rd == s->live_wr && s->live_file) {
+        cc1101_live_wait(s);            /* a recording: time waits for it */
+        return;                         /* (cc1101_link_rx goes on) */
+    }
     if (s->live_rd == s->live_wr) {     /* ran dry: the bridge is late */
         s->live_playing = false;
         if (s->live_carrier) {
@@ -342,7 +389,8 @@ static void cc1101_live_edge(void *opaque)
     d = s->live[s->live_rd++ & (LIVE_MAX - 1)];
     us = ABS(d);
     s->live_queued_us -= us;
-    if (d < 0 && us > 20000 && s->live_queued_us > 2 * LIVE_DELAY_NS / 1000) {
+    if (!s->live_file && d < 0 && us > 20000 &&
+        s->live_queued_us > 2 * LIVE_DELAY_NS / 1000) {
         us -= MIN(us - 10000, s->live_queued_us - LIVE_DELAY_NS / 1000);
     }
     s->live_carrier = d > 0;
@@ -375,7 +423,10 @@ static void cc1101_link_rx(Cc1101State *s, const char *p)
         s->live[s->live_wr++ & (LIVE_MAX - 1)] = v;
         s->live_queued_us += ABS(v);
     }
-    if (!s->live_playing && s->live_rd != s->live_wr) {
+    if (s->live_held && s->live_rd != s->live_wr) {
+        cc1101_live_go(s);              /* on from where time stood */
+        timer_mod(s->live_timer, s->live_next_ns);
+    } else if (!s->live_playing && s->live_rd != s->live_wr) {
         s->live_playing = true;
         s->live_next_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + LIVE_DELAY_NS;
         timer_mod(s->live_timer, s->live_next_ns);
@@ -422,6 +473,14 @@ static void cc1101_link_line(void *opaque, char *line)
         cc1101_link_rx(s, line + 3);
     } else if (g_str_has_prefix(line, "spectrum ")) {
         cc1101_link_spectrum(s, line + 9);
+    } else if (!strcmp(line, "air file")) {
+        s->live_file = true;            /* a recording: time waits for it */
+    } else if (!strcmp(line, "air live") || !strcmp(line, "air end")) {
+        s->live_file = false;           /* the rest plays, then the line */
+        if (s->live_held) {             /* goes low, as a live air's does */
+            cc1101_live_go(s);
+            timer_mod(s->live_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+        }
     }
 }
 
@@ -429,11 +488,19 @@ static void cc1101_link_opened(void *opaque, bool open)
 {
     Cc1101State *s = opaque;
 
+    s->live_file = false;               /* (a new bridge says what it has) */
     if (open) {
+        cc1101_live_stop(s);            /* (what one before left: gone) */
         flipper_link_send(&s->lk, "hello flipperemu subghz 1\n");
         cc1101_link_announce(s);
     } else {
-        cc1101_live_stop(s);
+        /* what it sent plays out (a recording's end is often still to
+         * come: the bridge reads ahead, and the machine may be behind),
+         * and then the line goes low; nothing more is waited for */
+        if (s->live_held) {
+            cc1101_live_go(s);
+            timer_mod(s->live_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+        }
         s->spec_n = 0;
     }
 }
@@ -723,6 +790,7 @@ static void cc1101_realize(SSIPeripheral *d, Error **errp)
     s->live_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, cc1101_live_edge, s);
     s->link_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, cc1101_link_announce, s);
     s->live = g_new0(int32_t, LIVE_MAX);
+    s->live_stop = qemu_bh_new(cc1101_live_stop_bh, s);
     flipper_link_init(&s->lk, &s->link, "Sub-GHz", cc1101_link_line,
                       cc1101_link_opened, s);
 }

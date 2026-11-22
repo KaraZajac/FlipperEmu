@@ -6631,6 +6631,70 @@ big lock, entry 92).
       in the second round. The fuzz check: 21, its guards as before. The
       setup check: 58.
 
+198. **A card and a recording from programs, on a busy computer.**
+    - Beside 32 busy loops (Kara's "checks that hold on a busy
+      computer"), the build before entries 196 and 197 and the build
+      after, in turns, twice each: the NFC emulation check whole every
+      time (25), where it had been 22 or 23 of 24; the smoke test 26 of
+      28 every time, the same two missing: the cards that a program
+      plays on the NFC link (`apdu` got no answer).
+    - The shell's `apdu` returned in 0.3 s with no answer, the program
+      up and connected, and no "no answer in 1000 ms" in the log. A
+      link card's poll stops the machine from a bottom half (a virtual
+      timer cannot), and the CPU's thread, which may have made the poll
+      itself since it runs due timers (entry 191), runs on until the main
+      loop comes to that bottom half. On a busy computer the main loop
+      came milliseconds late, the CPU slept meanwhile, and its time,
+      asleep the host's, ran the firmware's own wait for the answer out.
+      Now the poll holds the machine's clock at once, from whichever
+      thread (`wb55_own_clock_hold()`: the clock gives what it gave last
+      until the device lets go, and goes on from there); the stop still
+      follows. Every way out of the wait lets go: the answer, silence,
+      the second's limit, the link closed, the chip stopped or reset,
+      a saved state loaded. Beside 32 busy loops: 6 of 6 answered, where
+      none had.
+    - The next under that load was the smoke test's recording played to
+      the CC1101 by the SDR bridge (3 of 4). The bridge plays a file in
+      the host's time, demodulating 2 MS/s with numpy as it goes; the
+      model plays what came 60 ms behind and drops the line where it runs
+      dry. Now the bridge says `air file` (and `air end`), and a
+      recording is played exactly: where it runs dry the machine's clock
+      holds and the machine stops, as for the NFC link, and its silences
+      are not shortened to make up a backlog. The first try failed all
+      six: a hold alone, with the machine running on, had every timer's
+      wait come round again and again and took the host from the very
+      bridge it waited for (the stop added); and with the silences kept
+      whole the machine was behind at the file's end, and a bridge that
+      leaves had its queue dropped, keys and all (what a bridge sent
+      plays out now, and a new one clears what an old one left). Then:
+      6 of 6 beside 32 busy loops; the holds did not even come, the
+      machine being the slower.
+    - A round of the four firmwares found a snapshot loaded 3 us before
+      its save (Unleashed's clock check: 22565786 saved, 22565783
+      loaded, the same steal). The clock never goes back: where its
+      steal grew just before the stop, it had stood still at its last
+      value and taken out less than was counted, and the saved state had
+      the count. What is saved, and shown as `clock-steal`, is what the
+      clock took out now (the count, or the host's time less the last
+      value given, the smaller). The clock check on three firmwares since:
+      21 each.
+    - That round also had the forks' NFC app read of an Ultralight C
+      stand still once more (Momentum's; RogueMaster's in entry 197),
+      and the check's `app --close` crash it as FW-06 does. 90 such
+      reads with the build before entry 196 and 90 with this one, the
+      three forks side by side: one stood still with each, both
+      Unleashed's. The firmware's, as entry 197 had it, and no more
+      often for these changes. And the files check's card pulled out in
+      a push had `ls` say "the SD card gave an error" where it says
+      "no card" (the firmware's word, by when it noticed): once in
+      eleven regressions today, not again.
+    - Beside 32 busy loops now: the smoke test 28 of 28 twice, the NFC
+      emulation check 25 of 25 twice. The 31 checks side by side:
+      all pass, but in one round at a load of 8 the UART check's line
+      speed (1.26 s for 1.00); the four firmwares: all pass, but that
+      round's idle clocks (79 to 86 % of the host's), 21 each again
+      on a quiet host, and the UART check 86.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
