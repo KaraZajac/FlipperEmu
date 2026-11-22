@@ -215,6 +215,7 @@ struct FlipperZeroState {
     bool host_clock;             /* the clock counts what the host takes */
     bool clock_meter;            /* how late timers are run: counted */
     bool cpu_timers;             /* the CPU's thread runs due timers */
+    bool cpu_nap;                /* ... and stays awake through a short sleep */
     int log_level;               /* the firmware's, to start with; -1: as is */
     bool usb_cable;              /* plugged in from the start */
     QemuInputHandlerState *input;
@@ -2540,7 +2541,7 @@ static void flipper_zero_init(MachineState *machine)
     uint64_t uid64;
 
     if (!s->host_clock) {
-        wb55_own_clock_init(s->clock_meter, s->cpu_timers);
+        wb55_own_clock_init(s->clock_meter, s->cpu_timers, s->cpu_nap);
     }
     object_initialize_child(OBJECT(machine), "soc", &s->soc, TYPE_WB55_SOC);
     soc = DEVICE(&s->soc);
@@ -2954,6 +2955,17 @@ static void flipper_set_cpu_timers(Object *obj, bool v, Error **errp)
     FLIPPER_ZERO(obj)->cpu_timers = v;
 }
 
+static bool flipper_get_cpu_nap(Object *obj, Error **errp)
+{
+    return FLIPPER_ZERO(obj)->cpu_nap;
+}
+
+static void flipper_set_cpu_nap(Object *obj, bool v, Error **errp)
+{
+    FLIPPER_ZERO(obj)->cpu_nap = v;
+    wb55_own_clock_nap(v);              /* (also while it runs) */
+}
+
 static char *flipper_get_clock_late(Object *obj, Error **errp)
 {
     return wb55_own_clock_late();
@@ -3066,6 +3078,7 @@ static void flipper_zero_instance_init(Object *obj)
     s->usb_cable = true;
     s->sd_in = true;
     s->cpu_timers = true;
+    s->cpu_nap = true;
     object_property_add_uint32_ptr(obj, "lcd-scale", &s->scale,
                                    OBJ_PROP_FLAG_READWRITE);
     object_property_add_uint32_ptr(obj, "region", &s->region,
@@ -3108,6 +3121,15 @@ static void flipper_zero_instance_init(Object *obj)
         "runs without any), and asleep the clock waits for the main loop: "
         "the timers are on time beside a busy host too.  Off: the main loop "
         "alone runs them (not with host-clock=on)");
+    object_property_add_bool(obj, "cpu-nap", flipper_get_cpu_nap,
+                             flipper_set_cpu_nap);
+    object_property_set_description(obj, "cpu-nap",
+        "With cpu-timers: a sleep of the CPU that a timer ends within 100 us "
+        "its thread stays awake through, and runs the timer itself, so that "
+        "no thread of the host sleeps and wakes for it (a USB packet, which "
+        "comes when the firmware sleeps, took two such wake-ups).  Off: the "
+        "thread sleeps, and the main loop runs the timer.  Can be set while "
+        "the machine runs");
     object_property_add_str(obj, "clock-late", flipper_get_clock_late, NULL);
     object_property_set_description(obj, "clock-late",
         "With clock-meter=on: how many timers were run late and by how many "

@@ -132,14 +132,22 @@ So that time is taken out of the clock, as a virtual machine does not count stea
     two places and by whoever wakes the CPU, and while the CPU sleeps there is none;
   - while the CPU sleeps, nothing but the main loop can run a timer, and the firmware
     runs nothing on: the clock waits for the main loop from 100 µs after a timer's
-    time until it has run it (on an idle host the main loop is there sooner).
+    time until it has run it (on an idle host the main loop is there sooner);
+  - but a sleep that a timer ends within 100 µs the CPU's thread stays awake through
+    (the machine's `cpu-nap`, on by default): without the big lock, turning until the
+    timer's time, and then it runs the timer itself, and an interrupt that the timer
+    raises finds the thread awake. On a host that saves power a thread that sleeps
+    takes 40 to 75 µs to come back, and a USB packet, which the host gives when the
+    firmware sleeps, woke two (the main loop for the USB host's timer, then the CPU's
+    thread for its interrupt). Asleep, the clock is the host's meanwhile, as it would
+    have been (BRINGUP_LOG 196).
 
   Beside the 24 busy loops: 3 timers half a millisecond late in eight reads, against
   628 with `-machine cpu-timers=off`; the NFC `dump` that FW-23 stops: none in 1200
   against 6 in about 1900. On an idle host nothing changes (an idle Flipper at 99.2 %
   of the wall clock's speed either way). `clock-late` has how often the CPU's thread
-  ran timers (`cpu-ran`), the signals (`signals`) and how long the clock waited
-  asleep (`asleep-held-us`).
+  ran timers (`cpu-ran`), the signals (`signals`), the sleeps it stayed awake through
+  (`naps`) and how long the clock waited asleep (`asleep-held-us`).
 - What it does not do: a host that is slower itself for a while (one that throttles) is
   slower for the emulated CPU, whose thread runs all the while: only a count of
   instructions has that out (`-icount`).

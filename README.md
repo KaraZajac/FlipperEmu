@@ -605,7 +605,12 @@ itself (before its device accesses, and sent out of its code by a signal where i
 without any), and while the CPU sleeps the clock waits for the main loop. Beside 24
 busy loops the timers come as on time as on an idle computer, where hundreds came half
 a millisecond late or more in a few seconds of NFC work (and the firmware's FW-23 with
-them). `-machine cpu-timers=off` leaves them to the main loop, for comparing.
+them). `-machine cpu-timers=off` leaves them to the main loop, for comparing. A sleep of
+the CPU that a timer ends within 100 µs its thread stays awake through, and runs the
+timer itself (`cpu-nap`): a USB packet comes when the firmware sleeps, and otherwise
+two of the host's threads would sleep and wake for each, which a busy computer makes
+slower still. `-machine cpu-nap=off`, or `qom-set /machine cpu-nap false` in the
+monitor while it runs, leaves such sleeps to the host.
 
 `run --host-clock` is the clock as it was before, which went on in all of that, for
 comparing. In the monitor `qom-get /machine clock` reads the clock, `clock-steal` what
@@ -3457,7 +3462,9 @@ Machine options: `name=` (OTP device name, ≤8 chars), `lcd-scale=`, `region=` 
 region), `legacy-sleep=on|off` (default off: STOP2), `host-clock=on|off` (default off: the
 machine's clock is the CPU's own time; on: the host's, which goes on while the CPU's
 thread waits for a core), `cpu-timers=on|off` (default on: the CPU's thread runs the
-machine's timers that are due; off: the main loop alone), `clock-meter=on|off` (default
+machine's timers that are due; off: the main loop alone), `cpu-nap=on|off` (default on:
+with cpu-timers, the CPU's thread stays awake through a sleep that a timer ends within
+100 µs and runs it; off: the thread sleeps), `clock-meter=on|off` (default
 off; on: how late timers are run is counted, for `clock-late`), `nvram=`, `usb-serial=`
 (chardev id for the USB port;
 plugs the cable in), `audiodev=` (the speaker's `-audiodev` id). `-global

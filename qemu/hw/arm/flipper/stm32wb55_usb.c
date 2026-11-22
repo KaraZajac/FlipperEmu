@@ -498,31 +498,6 @@ static const MemoryRegionOps usb_ops = {
     .impl.max_access_size = 4,
 };
 
-static uint64_t pma_read(void *opaque, hwaddr addr, unsigned size)
-{
-    WB55UsbState *s = opaque;
-
-    return ldn_le_p(&s->pma[addr], size);
-}
-
-static void pma_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
-{
-    WB55UsbState *s = opaque;
-
-    stn_le_p(&s->pma[addr], size, val);
-}
-
-static const MemoryRegionOps pma_ops = {
-    .read = pma_read,
-    .write = pma_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid.min_access_size = 1,
-    .valid.max_access_size = 8,     /* ep_deconfig() clears an entry with STRD */
-    .valid.unaligned = false,
-    .impl.min_access_size = 1,
-    .impl.max_access_size = 4,
-};
-
 /* ========================================================== the USB bus */
 
 /* Is the device answering tokens sent to the host's current address? */
@@ -2216,10 +2191,7 @@ static void usb_init(Object *obj)
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
 
     memory_region_init_io(&s->mmio, obj, &usb_ops, s, "stm32wb55-usb", 0x400);
-    memory_region_init_io(&s->pma_mmio, obj, &pma_ops, s, "stm32wb55-usb-pma",
-                          sizeof(s->pma));
     sysbus_init_mmio(sbd, &s->mmio);
-    sysbus_init_mmio(sbd, &s->pma_mmio);
     sysbus_init_irq(sbd, &s->irq_lp);
     sysbus_init_irq(sbd, &s->irq_hp);
     for (int i = 0; i < 2; i++) {
@@ -2244,6 +2216,21 @@ static void usb_realize(DeviceState *dev, Error **errp)
 {
     WB55UsbState *s = WB55_USB(dev);
 
+    /*
+     * The packet memory is RAM: the firmware copies each packet in and out
+     * of it 16 bits at a time, and through a device's region each of those
+     * was an access by the slow path.  The model reads and writes a buffer
+     * only while the bus has it, which the endpoint registers hand over
+     * (device accesses, under the big lock).  Not migrated as RAM: the
+     * device's state carries it, as before.
+     */
+    if (!memory_region_init_ram_flags_nomigrate(&s->pma_mmio, OBJECT(dev),
+                                                "stm32wb55-usb-pma",
+                                                WB55_USB_PMA, 0, errp)) {
+        return;
+    }
+    s->pma = memory_region_get_ram_ptr(&s->pma_mmio);
+    sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->pma_mmio);
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, host_timer, s);
     for (int i = 0; i < 2; i++) {
         qemu_chr_fe_set_handlers(&s->port[i].chr, usb_chr_can_receive,
@@ -2353,7 +2340,7 @@ static const VMStateDescription vmstate_wb55_usb = {
         VMSTATE_UINT16(btable, WB55UsbState),
         VMSTATE_UINT16(lpmcsr, WB55UsbState),
         VMSTATE_UINT16(bcdr, WB55UsbState),
-        VMSTATE_UINT8_ARRAY(pma, WB55UsbState, 1024),
+        VMSTATE_BUFFER_POINTER_UNSAFE(pma, WB55UsbState, 0, WB55_USB_PMA),
         VMSTATE_INT64(frame_base_ns, WB55UsbState),
         VMSTATE_INT64_ARRAY(ep_armed, WB55UsbState, 8),
         VMSTATE_INT64_ARRAY(ep_done, WB55UsbState, 8),

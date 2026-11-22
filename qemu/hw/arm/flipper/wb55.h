@@ -723,7 +723,8 @@ int64_t wb55_dwt_waited(WB55DwtState *s, int which, int64_t from, int64_t to,
 int64_t wb55_cpu_ran_ns(void);
 bool wb55_cpu_asleep(void);
 bool wb55_own_clock(void);
-void wb55_own_clock_init(bool meter, bool cpu_timers);
+void wb55_own_clock_init(bool meter, bool cpu_timers, bool nap);
+void wb55_own_clock_nap(bool nap);
 int64_t wb55_own_clock_steal(void);
 int64_t wb55_own_clock_woke(void);
 int64_t wb55_own_clock_device(void);
@@ -937,17 +938,19 @@ typedef struct WB55UsbPort {
     guint watch;
 } WB55UsbPort;
 
+#define WB55_USB_PMA 1024
+
 struct WB55UsbState {
     SysBusDevice parent_obj;
     MemoryRegion mmio;           /* registers  @0x40006800 */
-    MemoryRegion pma_mmio;       /* packet RAM @0x40006C00 */
+    MemoryRegion pma_mmio;       /* packet RAM @0x40006C00 (RAM) */
     qemu_irq irq_lp, irq_hp;
 
     /* device controller */
     uint16_t epr[8];
     uint16_t epr_seen[8];        /* CTR bits the CPU saw at its last read */
     uint16_t cntr, istr, istr_seen, daddr, btable, lpmcsr, bcdr;
-    uint8_t pma[1024];
+    uint8_t *pma;                /* ... its WB55_USB_PMA bytes */
     int64_t frame_base_ns;
     int64_t ep_armed[8];         /* the CPU last (re)armed EPn, or it last moved data */
     int64_t ep_done[8];          /* EPn's last transaction, until the CPU re-arms it */

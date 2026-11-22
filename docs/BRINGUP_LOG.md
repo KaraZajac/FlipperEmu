@@ -6544,6 +6544,36 @@ big lock, entry 92).
       written. 18 checks in under a minute on Momentum, Unleashed and
       RogueMaster; on the official 1.5.1 3, the app skipped.
 
+196. **A USB packet's time.**
+    - The drive of entry 195 moved 100 to 150 KiB a second, a block of
+      512 bytes in about 3 ms. The first guess: the two threads of the
+      host that each packet woke while the CPU slept between two (the
+      main loop for the USB host's timer, then the CPU's thread for the
+      packet's interrupt), 40 to 75 us each on this host. Now the CPU's
+      thread stays awake through a sleep that a timer ends within
+      100 us, without the big lock, turning, and runs that timer itself
+      (the machine's `cpu-nap`, on by default, and settable while it
+      runs). Asleep the clock is the host's meanwhile, as it was. In
+      turns: the drive's writes a fifth faster and its reads a little;
+      an idle Flipper takes no more of a host core (windows alternating
+      on one device, cable in and out); and for a while that the host
+      was busy with other work, the drive was twice as fast with it.
+    - A trace of every bulk packet (a scratch build) showed where the
+      rest went: the host gave an IN packet within 25 us of the
+      firmware's re-arm, and the firmware took 100 to 300 us from a
+      packet's end to the next re-arm. The app's thread copies each
+      packet into the packet memory 16 bits at a time, and each of the
+      32 writes was a device access through QEMU's slow path, with the
+      clock's look before it. The packet memory is RAM now (QEMU's RAM
+      that is not migrated: its bytes stay in the device's saved state,
+      the same 1024 as before): the copies are plain stores, and the
+      endpoint registers still hand a buffer over. The drive a tenth to
+      a seventh faster.
+    - A profile of the CPU's thread during the drive's reads (eu-stack,
+      300 samples): a third of it in TLB refills of pages that hold a
+      stack's guard (entry 197), a tenth waiting for the big lock at
+      device accesses, an eighth in the card's DMA.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

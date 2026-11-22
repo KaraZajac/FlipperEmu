@@ -17,6 +17,7 @@
 #include "qemu/log.h"
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
+#include "qemu/processor.h"
 #include "qemu/guest-random.h"
 #include "hw/core/cpu.h"
 #include "hw/core/irq.h"
@@ -264,7 +265,17 @@ bool wb55_cpu_asleep(void)
  *   sleeps there is none;
  * - while the CPU sleeps, nothing but the main loop can run a timer, and
  *   the firmware runs nothing on: the clock waits for the main loop from
- *   OWN_HOLD_NS after a timer's time until it has run it.
+ *   OWN_HOLD_NS after a timer's time until it has run it;
+ * - but a sleep that a timer ends within OWN_NAP_NS the CPU's thread stays
+ *   awake through (the machine's cpu-nap, on by default).  On a host that
+ *   saves power, a thread that sleeps takes 40 to 75 us to come back: the
+ *   main loop that wakes for the timer, and then the CPU's thread for the
+ *   timer's interrupt, and that is the machine's time while the CPU
+ *   sleeps.  A USB packet is given when the firmware sleeps, and each paid
+ *   both, most of its time.  So the CPU's thread waits for the timer
+ *   without the big lock, turning, and runs it itself; an interrupt that it
+ *   raises finds that thread awake.  Asleep, the clock is the host's
+ *   meanwhile, as it would have been (own_nap()).
  * Beside 24 busy loops: one timer half a millisecond late in eight reads of
  * an NFC card, where there were six hundred.
  *
@@ -277,6 +288,8 @@ bool wb55_cpu_asleep(void)
 #define OWN_ACCESS_NS    (20 * SCALE_US)
 #define OWN_SIG_GRACE_NS (20 * SCALE_US)
 #define OWN_HOLD_NS      (100 * SCALE_US)
+#define OWN_NAP_NS       (100 * SCALE_US)
+#define OWN_NAPS_MAX     4      /* in a row, then it sleeps */
 
 /* (the meter's: timers by how late they were run, up to so many us) */
 static const int own_late_us[] = { 10, 20, 50, 100, 200, 500, 1000, 2000,
@@ -287,6 +300,8 @@ static struct {
     QemuSpin lock;
     bool on;
     bool cpu_timers;             /* the CPU's thread runs due timers */
+    bool nap;                    /* ... and stays awake through a short sleep */
+    uint64_t naps;               /* ... so often */
     void (*interrupt)(CPUState *cpu, int mask);   /* QEMU's own, kept */
     int64_t wake;                /* a wake-up: so much of it may still pass */
     int64_t woke;                /* ... and what wake-ups were given so far */
@@ -533,6 +548,25 @@ static void own_arm(int64_t first, int64_t now)
 }
 
 /*
+ * The CPU has gone to sleep, and the first timer is due in a moment: the
+ * CPU's thread stays awake until then, without the big lock (see above).
+ * Asleep, the clock goes with the host's, so the host's clock says when.
+ * An interrupt, a request to stop, or work for this thread ends it sooner.
+ */
+static void own_nap(CPUState *cpu, int64_t first, int64_t now)
+{
+    int64_t end = get_clock() + (first - now);
+
+    own.naps++;
+    bql_unlock();
+    while (get_clock() < end && !cpu_has_work(cpu) &&
+           !qatomic_read(&cpu->exit_request) && !qatomic_read(&cpu->stop)) {
+        cpu_relax();
+    }
+    bql_lock();
+}
+
+/*
  * On the CPU's thread, with the big lock (before a device access, or on its
  * way out of its translated code): the timers that are due run, and the
  * signal is set for the next one, or for none while the CPU goes to sleep.
@@ -546,10 +580,20 @@ static void own_cpu_timers(CPUState *cpu)
     }
     first = own_first_timer();
     now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    if (first >= 0 && first <= now) {
-        if (qemu_clock_run_timers(QEMU_CLOCK_VIRTUAL)) {
-            own.cpu_ran++;
+    for (int naps = 0; ; naps++) {
+        if (first >= 0 && first <= now) {
+            if (qemu_clock_run_timers(QEMU_CLOCK_VIRTUAL)) {
+                own.cpu_ran++;
+            }
+            first = own_first_timer();
+            now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         }
+        if (!own.nap || naps >= OWN_NAPS_MAX || first < 0 ||
+            first - now > OWN_NAP_NS || !qatomic_read(&cpu->halted) ||
+            cpu_has_work(cpu)) {
+            break;
+        }
+        own_nap(cpu, first, now);
         first = own_first_timer();
         now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     }
@@ -637,10 +681,12 @@ char *wb55_own_clock_late(void)
     g_string_append_printf(s, "\"metered\": %s, \"late\": %" PRIu64
                            ", \"us\": %" PRId64 ", \"set-late\": %" PRIu64
                            ", \"cpu-ran\": %" PRIu64 ", \"signals\": %u"
+                           ", \"naps\": %" PRIu64
                            ", \"asleep-held-us\": %" PRId64
                            ", \"up-to-us\": [", own.meter ? "true" : "false",
                            n, own.m_ns / SCALE_US, own.m_past, own.cpu_ran,
-                           qatomic_read(&own.signals), own.held / SCALE_US);
+                           qatomic_read(&own.signals), own.naps,
+                           own.held / SCALE_US);
     for (int i = 0; i < OWN_LATE_N; i++) {
         g_string_append_printf(s, "%s%d", i ? ", " : "", own_late_us[i]);
     }
@@ -653,6 +699,12 @@ char *wb55_own_clock_late(void)
         qemu_spin_unlock(&own.lock);
     }
     return g_string_free(s, false);
+}
+
+/* cpu-nap, set while the machine runs too (with the big lock) */
+void wb55_own_clock_nap(bool nap)
+{
+    own.nap = own.on && own.cpu_timers && nap;
 }
 
 void wb55_own_clock_loaded(int64_t steal)
@@ -669,9 +721,10 @@ void wb55_own_clock_loaded(int64_t steal)
 
 /*
  * meter: the timers' lateness is counted too (a lock more at every reading);
- * cpu_timers: the CPU's thread runs due timers (see above)
+ * cpu_timers: the CPU's thread runs due timers (see above), and with nap it
+ * stays awake through a short sleep
  */
-void wb55_own_clock_init(bool meter, bool cpu_timers)
+void wb55_own_clock_init(bool meter, bool cpu_timers, bool nap)
 {
     AccelOpsClass *ops =
         ACCEL_OPS_CLASS(object_class_by_name(ACCEL_OPS_NAME("tcg")));
@@ -684,6 +737,7 @@ void wb55_own_clock_init(bool meter, bool cpu_timers)
     own.on = true;
     own.meter = meter;
     own.cpu_timers = cpu_timers;
+    own.nap = cpu_timers && nap;
     own.armed = INT64_MIN;
     own.interrupt = ops->handle_interrupt;
     tcg_mmio_free_ns = OWN_ACCESS_NS;
