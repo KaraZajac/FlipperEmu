@@ -1,0 +1,82 @@
+From: FlipperEmu
+Subject: [PATCH] qemu-timer: wait less than a millisecond on macOS
+
+macOS has no ppoll(), so qemu_poll_ns() falls back to g_poll() with the
+timeout rounded up to whole milliseconds, and every timer due in less than
+one fires up to a millisecond late.  The Flipper's iButton reader times a
+Cyfral or Metakom key's edges, tens of microseconds apart, with such
+timers: half of them came more than a millisecond late, the key's timeline
+started again at each, and the firmware read no key.  Wait the whole
+milliseconds in poll() and the rest in select(), which takes microseconds;
+then poll() once without waiting for the events themselves.
+
+---
+--- a/util/qemu-timer.c
++++ b/util/qemu-timer.c
+@@ -341,6 +341,66 @@
+         ts.tv_sec = tvsec;
+         ts.tv_nsec = timeout % 1000000000LL;
+         return ppoll((struct pollfd *)fds, nfds, &ts, NULL);
++    }
++#elif defined(__APPLE__)
++    /*
++     * macOS has no ppoll(), and poll() takes whole milliseconds: rounded up,
++     * every timer that is due in less than one fires up to a millisecond
++     * late.  Wait the whole milliseconds in poll(), then the rest in
++     * select(), which takes microseconds, for what is wanted readable or
++     * writable; then poll() once more, without waiting, for the events
++     * themselves.  (A descriptor watched only for a hang-up is seen at the
++     * end of the wait: select() reports a hang-up as readable, and one that
++     * is not to be read would have it return at once, again and again.)
++     */
++    if (timeout <= 0) {
++        return g_poll(fds, nfds, timeout < 0 ? -1 : 0);
++    } else {
++        int64_t deadline = get_clock() + timeout;
++        int64_t left;
++        fd_set rd, wr;
++        int maxfd = -1, ret;
++
++        if (timeout >= SCALE_MS) {
++            ret = g_poll(fds, nfds, MIN(timeout / SCALE_MS, INT32_MAX));
++            if (ret != 0) {
++                return ret;
++            }
++        }
++        left = deadline - get_clock();
++        if (left <= 0) {
++            return 0;
++        }
++        FD_ZERO(&rd);
++        FD_ZERO(&wr);
++        for (guint i = 0; i < nfds; i++) {
++            if (fds[i].fd < 0 || !(fds[i].events & (G_IO_IN | G_IO_OUT))) {
++                continue;
++            }
++            if (fds[i].fd >= FD_SETSIZE) {
++                return g_poll(fds, nfds, qemu_timeout_ns_to_ms(left));
++            }
++            if (fds[i].events & G_IO_IN) {
++                FD_SET(fds[i].fd, &rd);
++            }
++            if (fds[i].events & G_IO_OUT) {
++                FD_SET(fds[i].fd, &wr);
++            }
++            maxfd = MAX(maxfd, fds[i].fd);
++        }
++        struct timeval tv = {
++            .tv_sec = left / NANOSECONDS_PER_SECOND,
++            .tv_usec = DIV_ROUND_UP(left % NANOSECONDS_PER_SECOND, SCALE_US),
++        };
++        if (tv.tv_usec >= 1000000) {
++            tv.tv_sec++;
++            tv.tv_usec -= 1000000;
++        }
++        ret = select(maxfd + 1, &rd, &wr, NULL, &tv);
++        if (ret < 0) {
++            return ret;
++        }
++        return g_poll(fds, nfds, 0);
+     }
+ #else
+     return g_poll(fds, nfds, qemu_timeout_ns_to_ms(timeout));
