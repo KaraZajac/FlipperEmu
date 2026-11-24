@@ -516,10 +516,12 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         running, which takes no request to close: closed with Back, the package
         sent and installed (53 s)
     - ☐ ufbt with Unleashed's SDK
-    - ☐ `fbt launch` and `ufbt launch` still stop at an app that takes no
-          request to close ("has to be closed manually"; on purpose since
-          BRINGUP_LOG 78, an app is to take the request), where `fbt flash_usb`
-          now closes it with Back: the same for `launch`? (Kara's)
+    - ☑ `fbt launch` and `ufbt launch` close an app that takes no request to
+          close with its Back button first, as `fbt flash_usb` does and `app`
+          did already (Kara, 2026-11-24; BRINGUP_LOG 201). Until then they
+          stopped at it ("has to be closed manually"), on purpose since
+          BRINGUP_LOG 78, as on a real Flipper: the launcher says so now, with
+          how an app takes the request. `ufbt_check.py` launches over Snake Game
   - ☑ `./flipperemu update PKG` (2026-11-10): an update package sent to a running
         device by the launcher itself, file by file through the CLI and then `update
         install`, without the radio stage; waited for on the USB serial port, with the

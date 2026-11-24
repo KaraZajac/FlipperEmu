@@ -1302,11 +1302,15 @@ Then `./flipperemu log -f` for what the firmware says, at the level you set
   the firmware's doing, and a real Flipper has it too. `update` says so when the level
   is another than before; `./flipperemu log --set-level info` and `./flipperemu reset`
   bring the log back, and `status` shows the level.
-- **`ufbt launch` ends with "Unexpected response: Application … has to be closed
-  manually".** The app that runs does not take the loader's request to close: an app
-  with a loop of its own has to ask for it (`furi_thread_set_signal_callback`, as
-  `examples/hello` does; a view dispatcher or an event loop does it for you).
-  `./flipperemu app --close` closes it with its Back button, and then `launch` again.
+- **"has to be closed manually".** The app that runs does not take the loader's
+  request to close: an app with a loop of its own has to ask for it
+  (`furi_thread_set_signal_callback`, as `examples/hello` does; a view dispatcher or
+  an event loop does it for you). On a real Flipper `ufbt launch`, `fbt launch` and
+  `fbt flash_usb` end there, with "Unexpected response: Application … has to be
+  closed manually". Here the launcher closes such an app with its Back button before
+  them, and says so, with this word on a real Flipper; with a port that you name
+  yourself (`FLIP_PORT=`) it leaves the tools alone, and `./flipperemu app --close`
+  closes it.
 - **"the firmware crashed (…) when the app was asked to close, and has started
   again".** The other side of the same request. It ends the app's event loop where it
   is, the app goes on to free what it has, and something of that was still at work: a
@@ -1356,19 +1360,19 @@ Then `./flipperemu log -f` for what the firmware says, at the level you set
 
 `scripts/ufbt_check.py FIRMWARE` goes this way on a throwaway device, with
 `examples/hello` and the `ufbt` on the PATH: build, `launch`, the app's log lines,
-buttons, `launch` over the app that runs, the crash and the restart, `ufbt cli` in a
-terminal of its own with a second command kept waiting, the refused targets,
-`ufbt flash_usb` (the SDK's package sent with its radio stage, whose stack the updater
-finds up to date, and installed), a
-stopped device. For `fbt` it has a stand-in that says what it was called with: the
-tree's `fbt` is found from a folder inside it and run in its root, the emulated port
-is named, a port you name yourself is left alone, and the same targets are refused;
-`fbt flash_usb` closes the app that runs first. In that tree the release's ELF stands
-in for a build, for `run -f`: a card made from what is staged beside it, and with
-nothing staged, the word on `./fbt resources`.
+buttons, `launch` over the app that runs and over Snake Game (which takes no request
+to close: its Back button), the crash and the restart, `ufbt cli` in a terminal of its
+own with a second command kept waiting, the refused targets, `ufbt flash_usb` (the
+SDK's package sent with its radio stage, whose stack the updater finds up to date,
+and installed), a stopped device. For `fbt` it has a stand-in that says what it was
+called with: the tree's `fbt` is found from a folder inside it and run in its root, the
+emulated port is named, a port you name yourself is left alone, the same targets are
+refused, and `fbt flash_usb` closes the app that runs first. In that tree the
+release's ELF stands in for a build, for `run -f`: a card made from what is staged
+beside it, and with nothing staged, the word on `./fbt resources`.
 At its end it runs `examples/hello/test.sh` as it is, and wants it to pass and to
 leave no Flipper running. It passes on the official 1.5.1 with ufbt 0.2.6 and its SDK
-(33 checks). Without `ufbt`, or with an SDK for another API than the firmware's, it
+(34 checks). Without `ufbt`, or with an SDK for another API than the firmware's, it
 checks nothing and its exit status is 77.
 
 `scripts/coverage_check.py FIRMWARE` checks the coverage: a run without it and one
@@ -1713,7 +1717,7 @@ packages: the official 1.5.1, Unleashed and the official dev build in 10, 6 and 
 minutes on a machine that other programs kept busy, Momentum and RogueMaster in 7 and
 10 minutes with four checks at a time. With `--package` it passes from the official
 firmware to Unleashed and to the dev build (4 and 3 minutes).
-`ufbt_check.py` has the real `ufbt flash_usb` go through the wrapper (33 checks now).
+`ufbt_check.py` has the real `ufbt flash_usb` go through the wrapper (34 checks now).
 
 `scripts/snapshot_check.py FIRMWARE` starts a device with a TMP105, an EEPROM and a
 serial flash on its header. Before that it wants what a device with no snapshot and one

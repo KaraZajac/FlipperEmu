@@ -14,7 +14,10 @@ Boots a throwaway device, copies examples/hello to a folder of its own and
 goes the way its developer goes: `./flipperemu ufbt launch` builds it, puts
 it on the Flipper and starts it; its log lines are in the firmware's log;
 buttons pressed are counted there; launched again while it runs, it is
-closed and the new one started; its crash is in the log, and the Flipper
+closed by the launcher first and the new one started; launched over an app
+that takes no request to close (Snake Game, on the official card), that is
+closed with its Back button, with a word on what a real Flipper does there;
+its crash is in the log, and the Flipper
 restarts.  Then `ufbt cli` in a terminal of its own, with a command typed
 and a second command kept waiting; the targets that are refused, because
 they go to a debug probe; `ufbt flash_usb`, which the launcher does itself,
@@ -51,6 +54,7 @@ import check_limit  # noqa: E402
 SKIPPED = 77
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 APP = "Hello FlipperEmu"
+SNAKE = "/ext/apps/Games/snake_game.fap"    # takes no request to close
 
 
 def tool(b, folder, *args, timeout=1800):
@@ -153,10 +157,30 @@ def ufbt_checks(b, folder):
 
     code, text = tool(b, folder, "launch")
     code2, text2 = b.fe("app")
-    check("launched again while it runs: closed, and the new one started",
-          code == 0 and "App closed" in text and f'"{APP}" runs' in text2
+    check("launched again while it runs: closed by the launcher first, and "
+          "the new one started",
+          code == 0 and f'`ufbt launch`: "{APP}" closed' in text
+          and "Back button" not in text and f'"{APP}" runs' in text2
           and logged(b, "[FeHello] left after 3")
           and logged(b, "[FeHello] started", count=2), text[-1500:] + text2)
+
+    code, text = b.fe("app", SNAKE)
+    if code != 0:
+        print(f"  SKIP  launched over an app that takes no request to close: "
+              f"no {SNAKE} on this card", flush=True)
+    else:
+        code, text = tool(b, folder, "launch")
+        code2, text2 = b.fe("app")
+        check("launched over an app that takes no request to close (Snake "
+              "Game): closed with its Back button first, with a word on what "
+              "a real Flipper does there, and the app started",
+              code == 0
+              and ('`ufbt launch`: "Snake Game" closed (with its Back '
+                   'button') in text
+              and "has to be closed manually" in text
+              and f'"{APP}" runs' in text2
+              and logged(b, "[FeHello] started", count=3),
+              text[-1500:] + text2)
 
     before = b.uart_text()
     crash = CRASH.search(before)

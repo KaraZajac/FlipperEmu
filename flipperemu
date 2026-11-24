@@ -5523,6 +5523,10 @@ TOOL_PROBE = {"flash", "firmware_flash", "jflash", "firmware_jflash", "debug",
 # ... those that talk to a Flipper on its USB serial port
 TOOL_PORT = {"launch", "launch_app", "cli", "cli_perf", "flash_usb",
              "flash_usb_full", "dolphin_ext", "fap_deploy"}
+# ... of them, those that stop at an app that runs: the firmware starts no
+# update while one does, and the tools' scripts stop at an app that takes no
+# request to close ("has to be closed manually")
+TOOL_CLOSE = {"launch", "launch_app", "flash_usb"}
 # ... and what ufbt does itself, before there is a build to give a port to
 UFBT_OWN = {"update", "clean", "status"}
 # an update package with a radio stack in it: fbt's flash_usb sends the one
@@ -5625,16 +5629,20 @@ def cmd_tool(args):
                        "--usb pty, is one")
             if why:
                 sys.exit(f"[{dev.name}] no USB serial port for {what}: {why}")
-            if "flash_usb" in targets:
-                # the firmware starts no update while an app runs, and an app
-                # that takes no request to close stops selfupdate.py ("has to
-                # be closed manually"); on a real Flipper a person leaves it
-                # with Back first, and here we do
+            if targets & TOOL_CLOSE:
+                # on a real Flipper a person leaves the app with Back first,
+                # and here we do
                 import fe_apps
                 cli = open_cli(dev)
                 try:
                     for text in app_close(dev, cli):
                         print(f"[{dev.name}] {what}: {text}", flush=True)
+                        if "Back button" in text:
+                            print(f"[{dev.name}] (on a real Flipper {what} "
+                                  "stops at such an app: \"has to be closed "
+                                  "manually\"; an app takes the request with "
+                                  "furi_thread_set_signal_callback(), as "
+                                  "examples/hello does)", flush=True)
                 except fe_apps.AppError as e:
                     sys.exit(f"[{dev.name}] {e}")
                 finally:

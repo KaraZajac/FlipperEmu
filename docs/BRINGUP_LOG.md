@@ -6788,6 +6788,29 @@ big lock, entry 92).
       Linux, a compiler warning in every setup: gone. Nothing of the Mac's
       own was tried here.
 
+201. **`launch` closes the app that runs first; a plugin that does not build stops the setup again.**
+    - Kara's choices on what entry 200 left open (2026-11-24). `./flipperemu
+      ufbt launch` and `fbt launch` close the app that runs before the tool
+      gets the port, as `fbt flash_usb` does since PR #3 and `app` does
+      since entry 77: the loader's request, and the Back button for an app
+      that takes none. Such an app stopped `runfap.py` until now ("has to
+      be closed manually"; on purpose since entry 78, as on a real
+      Flipper). The launcher says that a real Flipper stops there, and how
+      an app takes the request (`furi_thread_set_signal_callback()`, as
+      `examples/hello` does). With a port that is named (`FLIP_PORT=`) it
+      closes nothing.
+    - `ufbt_check.py`: launched again while it runs, the launcher's word
+      that it closed the app, where `runfap.py`'s "App closed" was read
+      before; launched over Snake Game, its Back button and that word, and
+      the app started: 34 checks. The checks that launch apps of their
+      own, on the official 1.5.1, two at a time: gdb 30, coverage 31, XIP
+      8, I2C 66, SPI 49, GPIO 112, fuzzing 21.
+    - `setup_qemu.sh`: since PR #2 a coverage plugin that did not build was
+      a warning on every system, and `--coverage` was left without one. It
+      stops the script on Linux again, as any other step does; on macOS it
+      says so and goes on. `build_plugins()` alone with a compiler that
+      fails: stopped, exit status 1; the setup check 60.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the
