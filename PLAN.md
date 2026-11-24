@@ -1133,8 +1133,8 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           the link is one), iButton and RFID pulses,
           the Sub-GHz decoders on Unleashed and RogueMaster (their CLI does not
           start the radio: through the app's Read), BLE's GATT writes
-- ☐ Upstream the twenty QEMU patches (0004: open-drain GPIO lines, 2026-11-08; 0005:
-      register reads without the big lock under TCG, 2026-11-10; 0006 to 0009: a
+- ☐ Upstream the twenty-four QEMU patches (0004: open-drain GPIO lines, 2026-11-08;
+      0005: register reads without the big lock under TCG, 2026-11-10; 0006 to 0009: a
       chardev's log file, the UART's reception, a byte no receiver took, an EEPROM's
       file, 2026-11-11; 0010 to 0013: Winbond's read-ID commands, the load of a saved
       state with an SD card on SPI, an EEPROM's address counter after an address that
@@ -1143,7 +1143,11 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       fault was, 0017: a UART's transmission at the baud rate, and 0018: a baud
       rate for the line's other end, 2026-11-15; 0019: how long a vCPU is in a
       device's model, 0020: hooks to run a machine's timers on the vCPU's thread,
-      2026-11-21); consider upstreaming the machine
+      0021: whether an SD card's medium is in, without the block layer for every
+      byte, 0022: a block that ends where a device access was not its last
+      instruction, 0023: an MPU write that flushes what it changes, 0024: a page
+      that holds a small MPU region, kept, 2026-11-21); consider upstreaming the
+      machine
 
 ## Non-goals (for now)
 - Running ST's radio stack on an emulated CPU2 (closed, encrypted binary)
