@@ -338,6 +338,9 @@ when a name is too long. USB/IP (`--usbip`, `scripts/usbip_attach.py`) needs Lin
 at `./flipperemu cli` and on the pty `devices/NAME/usb.tty`. Verified on macOS 27.3 on
 Apple silicon: `scripts/smoke_test.py` passes in full on the official 1.5.1 and on a
 Momentum dev build; the window opens with its sound, and `update` installs a package.
+The machine's clock keeps out what a busy computer takes from the emulated CPU on
+Linux only: on a Mac it goes by the host's time, so the checks there want a computer
+that is not busy otherwise (PLAN.md).
 
 ### Your own builds and other firmwares
 

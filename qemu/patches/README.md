@@ -45,7 +45,7 @@ there, and a timer due in less than a millisecond fires up to a millisecond late
 iButton reader reads no Cyfral or Metakom key.
 A source tree that was set up before a patch came (0006 to 0009: 2026-11-11; 0010 to
 0013: 2026-11-12; 0014 and 0015: 2026-11-14; 0016 to 0018: 2026-11-15; 0019 to 0024:
-2026-11-21; 0025: 2026-11-22) gets it from one more run of that script.
+2026-11-21; 0025: 2026-11-23) gets it from one more run of that script.
 
 How the script finds out what a tree has: it takes the patches out of a copy of the
 files they touch, the last one first, and what does not come out there is what the tree

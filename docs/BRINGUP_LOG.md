@@ -6731,6 +6731,63 @@ big lock, entry 92).
       time, no crash; and no sign on a device that reads. The NFC check
       on the official 1.5.1 and the three forks: 25, 28, 30, 30.
 
+200. **The first contributions from outside: a Mac, and `fbt` in a firmware's tree.**
+    - Calvin Gunther's two pull requests, merged 2026-11-23 (written with
+      Claude Code, he says; his runs were on his Mac). #2 has the emulator
+      built and run on macOS on Apple silicon: QEMU with Cocoa and
+      CoreAudio, the launcher's Linux calls replaced there (`LOCAL_PEERPID`
+      for `SO_PEERCRED`, no `FICLONE`, a socket path's 103 bytes, a busy
+      monitor that macOS refuses where Linux has the client wait), and QEMU
+      patch 0025. macOS has no `ppoll()`, and `g_poll()` rounds a wait up
+      to whole milliseconds: a timer due sooner came up to a millisecond
+      late, half the edges of a Cyfral or Metakom key among them, and the
+      iButton reader read no key. 0025 waits the whole milliseconds in
+      `poll()` and the rest in `select()`: in one read 3 resyncs of the
+      key's timeline where there were 2206 (his numbers). The smoke test
+      passed in full there, on the official 1.5.1 and a Momentum dev build.
+    - #3, in a Momentum tree (`mntm-dev`) on that Mac: `run -f` of the
+      tree's ELF makes the card from what fbt staged beside it
+      (`resources/`, with its Manifest); `fbt flash_usb` closes the app
+      that runs first, with Back if it takes no request to close; gdb with
+      the tree's ELF and its `.extapps`.
+    - Here, on Linux, with both merged: `setup_qemu.sh` applied 0025
+      (nothing of it is compiled on Linux) and built QEMU again; the setup
+      check 60, the smoke test 28 of 28, the ufbt check 31, the coverage
+      check 31, the NFC link check 4 of 4, on the official 1.5.1.
+    - The official 1.5.1 tree (third_party/fw-tree-1.5.1; fbt fetched its
+      toolchain 39 into it, 356 MB, 1.2 GB unpacked): `./fbt` in 43 s, a
+      debug build, and nothing staged beside its ELF. The official `./fbt`
+      builds the firmware alone, and `run -f` made a card of the keystore
+      overlay only (5 files). `./fbt resources` (29 s) staged the card's
+      files (1141 in its Manifest) and built the apps' debug ELFs into
+      `.extapps` (309 files); a new device's card had them. The launcher
+      says so now when a tree's build has nothing staged beside it, with
+      the `sd --resources` that makes the card again; the ufbt check has
+      both, with the release's ELF in its stand-in tree: 33 checks.
+    - `fbt launch APPSRC=` of an example: built, sent and started (10 s).
+      gdb in the tree: `build/f7-firmware-D/firmware.elf` found by what the
+      flash holds, the tree's `flipperapps.py` looking in `.extapps`, Snake
+      Game's `snake_game_d.elf` loaded where the loader put it (its `.text`
+      at 0x2000d96c), and a breakpoint on `snake_game_render_callback` hit,
+      with a backtrace through `view_port_draw` and `gui_redraw` into
+      `gui_srv`. The firmware ran on after it.
+    - `fbt flash_usb` with Snake Game running: the launcher pressed Back
+      (Snake takes no request to close), fbt built the package and
+      `selfupdate.py` sent it, 53 s in all; the firmware went through its
+      boot modes 2, 3 and 4 to 0, and its CLI answered 14 s later. `fbt
+      launch` with Snake Game running stopped at `Application "Snake Game"
+      has to be closed manually`, as `ufbt launch` does, on purpose since
+      entry 78: `flash_usb` closes such an app now and `launch` does not
+      (PLAN ☐, Kara's).
+    - What a Mac does not get: the time the CPU's thread ran
+      (`pthread_getcpuclockid()`), the time the host stole from it
+      (`/proc/thread-self/schedstat`) and the signal to that thread (a
+      POSIX timer, `SIGEV_THREAD_ID`) are Linux's. There the clock goes by
+      the host's time, and a busy host's lateness counts (PLAN ☐). The
+      coverage plugin's macro for macOS was a statement with no effect on
+      Linux, a compiler warning in every setup: gone. Nothing of the Mac's
+      own was tried here.
+
 ## Things that were right the first time (and why)
 
 - **The ST25R3916 frame model.** `nfc scanner` found the first virtual NTAG215 on the

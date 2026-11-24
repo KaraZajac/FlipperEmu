@@ -1047,6 +1047,13 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           profile. And the checks' own limits are the wall clock's: beside 16 loops
           the RFID check's `write` (40 s) and `read` (12 s) run out now and then
           with either clock
+    - ☐ On macOS (since 2026-11-23, PR #2) the CPU's thread runs due timers at its
+          device accesses and on its way out, and that is all: the time that
+          thread ran (`pthread_getcpuclockid()`), what the host stole from it
+          (`/proc/thread-self/schedstat`) and the signal to it (a POSIX timer,
+          `SIGEV_THREAD_ID`) are Linux's. There the clock goes by the host's
+          time, and a busy Mac's lateness counts (BRINGUP_LOG 200). Mach's
+          `thread_info()` has a thread's CPU time
     - ☐ `scripts/fw23_lost_flag.py`'s demonstration fails about one run in six
           on the machine's clock (the dump stuck with gdb holding the thread
           between the two calls, the chip's pin up, and no word from gdb that the
@@ -1165,7 +1172,7 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
           the link is one), iButton and RFID pulses,
           the Sub-GHz decoders on Unleashed and RogueMaster (their CLI does not
           start the radio: through the app's Read), BLE's GATT writes
-- ☐ Upstream the twenty-four QEMU patches (0004: open-drain GPIO lines, 2026-11-08;
+- ☐ Upstream the twenty-five QEMU patches (0004: open-drain GPIO lines, 2026-11-08;
       0005: register reads without the big lock under TCG, 2026-11-10; 0006 to 0009: a
       chardev's log file, the UART's reception, a byte no receiver took, an EEPROM's
       file, 2026-11-11; 0010 to 0013: Winbond's read-ID commands, the load of a saved
@@ -1178,8 +1185,9 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
       0021: whether an SD card's medium is in, without the block layer for every
       byte, 0022: a block that ends where a device access was not its last
       instruction, 0023: an MPU write that flushes what it changes, 0024: a page
-      that holds a small MPU region, kept, 2026-11-21); consider upstreaming the
-      machine
+      that holds a small MPU region, kept, 2026-11-21; 0025: a wait of less than a
+      millisecond on macOS, which has no `ppoll()`, Calvin Gunther's, 2026-11-23);
+      consider upstreaming the machine
 
 ## Non-goals (for now)
 - Running ST's radio stack on an emulated CPU2 (closed, encrypted binary)
