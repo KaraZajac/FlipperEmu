@@ -75,7 +75,7 @@
 #define SOCK_CLOEXEC 0
 #define FE_SET_CLOEXEC(fd) fcntl((fd), F_SETFD, FD_CLOEXEC)
 #else
-#define FE_SET_CLOEXEC(fd) 0
+#define FE_SET_CLOEXEC(fd) ((void)0)
 #endif
 #include <glib.h>
 
