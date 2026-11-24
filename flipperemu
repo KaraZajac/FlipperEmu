@@ -349,11 +349,16 @@ class Device:
 
 
 def find_resources_for(fw: pathlib.Path):
-    """Release folders from fetch_firmware.py keep resources next to the ELF."""
+    """Release folders from fetch_firmware.py keep resources next to the ELF,
+    and so does a firmware tree's build (build/f7-firmware-*/resources, its
+    apps and assets as fbt staged them for the card)."""
     for pat in ("*update*.tgz", "*resources*.tgz"):
         hits = sorted(fw.parent.glob(pat))
         if hits:
             return hits[0]
+    staged = fw.parent / "resources"
+    if (staged / "Manifest").is_file():
+        return staged
     return None
 
 
@@ -5610,6 +5615,20 @@ def cmd_tool(args):
                        "--usb pty, is one")
             if why:
                 sys.exit(f"[{dev.name}] no USB serial port for {what}: {why}")
+            if "flash_usb" in targets:
+                # the firmware starts no update while an app runs, and an app
+                # that takes no request to close stops selfupdate.py ("has to
+                # be closed manually"); on a real Flipper a person leaves it
+                # with Back first, and here we do
+                import fe_apps
+                cli = open_cli(dev)
+                try:
+                    for text in app_close(dev, cli):
+                        print(f"[{dev.name}] {what}: {text}", flush=True)
+                except fe_apps.AppError as e:
+                    sys.exit(f"[{dev.name}] {e}")
+                finally:
+                    cli.close()
             lock = take_port(dev.dir / "usb.lock")
         # (a stopped device has no usb.tty: then a target that is not in the
         # list above fails on that name, and does not find a real Flipper)
