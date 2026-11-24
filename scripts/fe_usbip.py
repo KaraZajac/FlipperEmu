@@ -77,6 +77,9 @@ class UsbipClient:
         self.dev = import_device(self.sock, busid)
         self.devid = self.dev["busnum"] << 16 | self.dev["devnum"]
         self.seq = 0
+        self._in_seqs = set()   # IN submissions: their replies carry data
+                                # (this client's own: another's numbers are
+                                # the same ones over again)
 
     def close(self):
         self.sock.close()
@@ -106,8 +109,6 @@ class UsbipClient:
             self._in_seqs.discard(seq)
             return cmd, seq, status, data, actual
         return cmd, seq, status, b"", 0
-
-    _in_seqs = set()
 
     def submit_in(self, ep, length, **kw):
         seq = self.submit(ep, True, length=length, **kw)
