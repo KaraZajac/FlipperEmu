@@ -52,7 +52,9 @@ revive_venv() {
 # The plugins (qemu/plugins/*.c: fe_cov, which `./flipperemu run --coverage`
 # loads) are libraries of their own, built against QEMU's plugin header into
 # build/plugins/.  A new one is put in the old one's place whole: an emulator
-# that runs keeps the one it has open.
+# that runs keeps the one it has open.  One that does not build stops the
+# script, as any other step does; on macOS the emulator is built without it,
+# and `--coverage` does not work there.
 build_plugins() {
     local src so out="$ROOT/build/plugins"
     for src in "$ROOT"/qemu/plugins/*.c; do
@@ -61,7 +63,6 @@ build_plugins() {
         if [[ ! -e "$so" || "$src" -nt "$so" ]]; then
             echo ">> building $so"
             mkdir -p "$out"
-            # shellcheck disable=SC2046
             local extra=()
             [[ "$(uname -s)" == Darwin ]] && extra=(-undefined dynamic_lookup)
             # shellcheck disable=SC2046
@@ -69,8 +70,11 @@ build_plugins() {
                 $(pkg-config --cflags glib-2.0) \
                 -I "$SRC/include/plugins" -o "$so.new" "$src"; then
                 mv "$so.new" "$so"
-            else
+            elif [[ "$(uname -s)" == Darwin ]]; then
                 echo ">> (could not build $so: --coverage will not work)" >&2
+            else
+                echo ">> could not build $so" >&2
+                return 1
             fi
         fi
     done
