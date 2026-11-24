@@ -1,10 +1,14 @@
-# FlipperEmu
+# FlipperZeroEmu
 
 Run real Flipper Zero firmware on your PC, so you can try builds without flashing your
 Flipper. This is a full-system emulator built on **QEMU 11.1.3**. The machine model is a
 new `flipper-zero` board (STM32WB55RG SoC with the Flipper's display, SD card, power ICs
 and radios), and it runs the **unmodified firmware binary**: the same `.elf`, `.dfu` or
 update `.tgz` you would flash.
+
+It was called FlipperEmu until 2026-11-23, and its launcher keeps that name
+(`./flipperemu`). Its sibling for the Flipper One is
+[FlipperOneEmu](https://github.com/KaraZajac/FlipperOneEmu).
 
 ![The window: a Flipper drawn around the emulated LCD, with a bench of virtual devices under it](docs/img/26-window-nfc-read.png)
 

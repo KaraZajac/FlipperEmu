@@ -658,7 +658,7 @@ class MainWindow(QtWidgets.QMainWindow):
         m = bar.addMenu("&Help")
         A(m, "Keys and buttons", lambda: QtWidgets.QMessageBox.information(
             self, "Keys and buttons", KEYS_HELP))
-        A(m, "About FlipperEmu", self.about)
+        A(m, "About FlipperZeroEmu", self.about)
 
         # the bench: a button for what one does most, the menu for the rest
         t = self.tiles
@@ -3086,12 +3086,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def about(self):
         QtWidgets.QMessageBox.about(
-            self, "About FlipperEmu",
-            "<p><b>FlipperEmu</b>: Flipper Zero firmware in QEMU, no Flipper "
-            "required.</p><p>This window draws a Flipper of its own around "
-            "the emulator's screen; it is not Flipper Devices' artwork, and "
-            "FlipperEmu is not made by Flipper Devices.</p>"
-            "<p>BSD-3-Clause. github.com/KaraZajac/FlipperEmu</p>")
+            self, "About FlipperZeroEmu",
+            "<p><b>FlipperZeroEmu</b>: Flipper Zero firmware in QEMU, no "
+            "Flipper required.</p><p>This window draws a Flipper of its own "
+            "around the emulator's screen; it is not Flipper Devices' "
+            "artwork, and FlipperZeroEmu is not made by Flipper Devices.</p>"
+            "<p>BSD-3-Clause. github.com/KaraZajac/FlipperZeroEmu</p>")
 
     # ------------------------------------------------------------ dropping
 
