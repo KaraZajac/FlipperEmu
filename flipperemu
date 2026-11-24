@@ -1436,7 +1436,17 @@ def cmd_run(args):
         label, resources = dev.program(fw, args.erase_all)
         print(f"[{dev.name}] flashed {label}")
         if not dev.sd.exists() and not args.no_sd and not args.print_cmd:
-            dev.make_sd(resources or find_resources_for(fw))
+            resources = resources or find_resources_for(fw)
+            if (not resources and fw.suffix == ".elf"
+                    and source_tree(fw.resolve().parent)):
+                print(f"[{dev.name}] the card has none of the firmware's "
+                      f"files: none are staged beside {fw}.  `./fbt resources` "
+                      "in its tree stages them (the official firmware's `./fbt` "
+                      "builds the firmware alone); then, with the device "
+                      f"stopped, `./flipperemu -d {dev.name} sd --resources "
+                      f"{fw.parent / 'resources'}` makes its card again from "
+                      "them", flush=True)
+            dev.make_sd(resources)
     if not dev.flash.exists():
         sys.exit(f"[{dev.name}] nothing flashed yet: ./flipperemu run -f <firmware>")
     if args.print_cmd:

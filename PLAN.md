@@ -497,8 +497,9 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         `docs/DEVELOPING.md`; `scripts/ufbt_check.py` (BRINGUP_LOG 78), which has a
         stand-in `fbt` for what the launcher hands to a tree's own
   - ☑ `fbt` in a firmware's tree, tried (2026-11-20, a Momentum tree, `mntm-dev`,
-        on macOS): `./fbt` builds; `run -f build/f7-firmware-C/firmware.elf` boots it
-        with its card made from what fbt staged for it (`build/…/resources`, which
+        on macOS, by Calvin Gunther, PR #3): `./fbt` builds; `run -f
+        build/f7-firmware-C/firmware.elf` boots it with its card made from what fbt
+        staged for it (`build/…/resources`, which
         `run` now takes as it takes a release's resources archive); `fbt launch
         APPSRC=` builds an example, sends it and starts it (16 s); `fbt flash_usb`
         sends its package and the updater installs it (32 s), with the app that runs
@@ -506,8 +507,19 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         selfupdate.py stops at an app that takes no request to close ("has to be
         closed manually"); ufbt with that tree's SDK (`ufbt update --local=…sdk….zip
         --hw-target=f7`): `create`, a build for API 87.1, `launch`.
-        `scripts/ufbt_check.py` checks the app closed before `fbt flash_usb`
+        `scripts/ufbt_check.py` checks the app closed before `fbt flash_usb`.
+        On Linux with the official 1.5.1 tree (2026-11-24, BRINGUP_LOG 200): its
+        `./fbt` builds the firmware alone and stages nothing for the card, and
+        `./fbt resources` does; `run -f` says so when nothing is staged
+        (`ufbt_check.py` checks both, with the release's ELF in its stand-in
+        tree); `fbt launch APPSRC=` (10 s); `fbt flash_usb` with Snake Game
+        running, which takes no request to close: closed with Back, the package
+        sent and installed (53 s)
     - ☐ ufbt with Unleashed's SDK
+    - ☐ `fbt launch` and `ufbt launch` still stop at an app that takes no
+          request to close ("has to be closed manually"; on purpose since
+          BRINGUP_LOG 78, an app is to take the request), where `fbt flash_usb`
+          now closes it with Back: the same for `launch`? (Kara's)
   - ☑ `./flipperemu update PKG` (2026-11-10): an update package sent to a running
         device by the launcher itself, file by file through the CLI and then `update
         install`, without the radio stage; waited for on the USB serial port, with the
@@ -553,7 +565,10 @@ TIM2 input capture (M4's IR receiver) is the same mechanism Sub-GHz async RX use
         running app (Snake 2.0's draw callback) is hit, with the app's debug ELF
         loaded where the loader put it and a backtrace into the GUI service. Its
         default build is a release one (`f7-firmware-C`, with debug info), not
-        the `-D` that DEVELOPING.md names for the official tree
+        the `-D` that DEVELOPING.md names for the official tree. The same on Linux
+        with the official 1.5.1 tree's `-D` build (2026-11-24, BRINGUP_LOG 200):
+        Snake Game's `snake_game_render_callback`, its `snake_game_d.elf` from
+        `.extapps` (which `./fbt resources` builds), a backtrace into `gui_srv`
   - ☑ gdb from VS Code (2026-11-11): `gdb --vscode` writes a debug configuration
         for the Cortex-Debug extension into `.vscode/launch.json` of the app's folder
         (a file that is there keeps all else, ufbt's comments too), with

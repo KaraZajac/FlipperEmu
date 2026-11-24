@@ -26,7 +26,11 @@ Exit status 0 = pass.
 
 `./flipperemu fbt` is checked with a stand-in for a firmware tree's `fbt`,
 which says what it was called with: which fbt is found, where it is run, the
-port it is given, what is refused.  No firmware is built here.
+port it is given, what is refused.  No firmware is built here.  In that tree
+the release's ELF stands in for what `./fbt` builds, for `run -f`: a card
+made from what fbt staged beside the ELF, and with nothing staged there, the
+launcher's word on `./fbt resources` (skipped without the release's ELF
+beside the package; scripts/fetch_firmware.py puts it there).
 """
 import argparse
 import os
@@ -294,6 +298,50 @@ def stopped_checks(b, folder, tree):
           code == 0 and ": updater_package FLIP_PORT=" in text, text)
 
 
+def tree_build_checks(name, firmware, tree, timeout):
+    """`run -f` of the ELF of a build in the stand-in tree (the release's
+    ELF stands in for it), on two devices of their own: with nothing staged
+    beside it, and with the card's files staged as `./fbt resources` does"""
+    package = pathlib.Path(firmware).resolve()
+    elf = package if package.suffix == ".elf" else package.with_name(
+        package.name.replace("-update-", "-firmware-").removesuffix(".tgz")
+        + ".elf")
+    if not elf.is_file():
+        print("  SKIP  `run -f` of a tree's build: no ELF of the release "
+              f"beside its package ({elf.name}; scripts/fetch_firmware.py "
+              "puts it there)", flush=True)
+        return
+    build = tree / "build" / "f7-firmware-D"
+    build.mkdir(parents=True)
+    shutil.copy(elf, build / "firmware.elf")
+    staged = build / "resources"
+    for n in (0, 1):
+        if n:
+            (staged / "apps" / "Tools").mkdir(parents=True)
+            (staged / "apps" / "Tools" / "fe_staged.txt").write_text(
+                "staged by fbt\n")
+            (staged / "Manifest").write_text("V:0\nT:0\nD:apps\nD:apps/Tools\n")
+        d = Bench(f"{name}-{n}", str(build / "firmware.elf"), timeout)
+        try:
+            up = d.start(first=True)
+            said = (d.dir / "qemu.log").read_text(errors="replace")
+            code, text = d.fe("ls", "/ext/apps/Tools") if up and n else (1, "")
+        finally:
+            d.stop()
+            shutil.rmtree(d.dir, ignore_errors=True)
+        if n:
+            check("`run -f` of a tree's build: its card made from what fbt "
+                  "staged beside it (resources/, with its Manifest)",
+                  up and code == 0 and "fe_staged.txt" in text
+                  and "./fbt resources" not in said, said + text)
+        else:
+            check("`run -f` of a tree's build with nothing staged beside it: "
+                  "said, with `./fbt resources` and the card made again from "
+                  "what that stages",
+                  up and "./fbt resources" in said
+                  and f"sd --resources {staged}" in said, said)
+
+
 def test_script_checks(name, firmware):
     """examples/hello/test.sh, as docs/DEVELOPING.md has it: a Flipper of its
     own, the app built and started, its log and its screens waited for"""
@@ -349,6 +397,8 @@ def main():
             b.stop()
             if done:
                 stopped_checks(b, folder, tree)
+                tree_build_checks(b.name + "-tree", args.firmware, tree,
+                                  args.timeout)
                 test_script_checks(b.name + "-t", args.firmware)
     finally:
         b.stop()

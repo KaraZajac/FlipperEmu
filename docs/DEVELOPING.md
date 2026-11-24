@@ -1225,8 +1225,11 @@ Flipper in one of three ways:
 
 ```sh
 ./fbt                                  # in the firmware's tree
+./fbt resources                        # the card's files (the apps, their assets),
+                                       # staged beside the ELF
 flipperemu -d mine run -f build/f7-firmware-D/firmware.elf
-                                       # programmed as a DFU does it, and started.
+                                       # programmed as a DFU does it, and started; a
+                                       # new card is made from what is staged.
                                        # `flipperemu gdb` has its symbols, and those of
                                        # the tree's apps
 
@@ -1244,6 +1247,13 @@ flipperemu -d mine fbt flash_usb       # with the device running: fbt builds the
 
 (`flipperemu` stands for the path to the launcher. It may be a link to it from a
 folder on your PATH.)
+
+The official firmware's `./fbt` builds the firmware alone, and stages nothing for the
+card beside its ELF: `./fbt resources` does, the apps' debug ELFs (`.extapps`, which
+gdb reads) with it. (A Momentum tree's `./fbt` stages them by itself.) A device's card
+is made once, when it has none, and `run -f` of a build with nothing staged says so;
+`flipperemu -d mine sd --resources build/f7-firmware-D/resources`, with the device
+stopped, makes it again from what is staged.
 
 `flipperemu fbt …` is `./fbt …` of the tree you are in, with the emulated port named
 as for ufbt, and the same targets refused. `fbt launch APPSRC=my_app`, `fbt cli` and
@@ -1352,10 +1362,13 @@ terminal of its own with a second command kept waiting, the refused targets,
 finds up to date, and installed), a
 stopped device. For `fbt` it has a stand-in that says what it was called with: the
 tree's `fbt` is found from a folder inside it and run in its root, the emulated port
-is named, a port you name yourself is left alone, and the same targets are refused.
+is named, a port you name yourself is left alone, and the same targets are refused;
+`fbt flash_usb` closes the app that runs first. In that tree the release's ELF stands
+in for a build, for `run -f`: a card made from what is staged beside it, and with
+nothing staged, the word on `./fbt resources`.
 At its end it runs `examples/hello/test.sh` as it is, and wants it to pass and to
 leave no Flipper running. It passes on the official 1.5.1 with ufbt 0.2.6 and its SDK
-(31 checks). Without `ufbt`, or with an SDK for another API than the firmware's, it
+(33 checks). Without `ufbt`, or with an SDK for another API than the firmware's, it
 checks nothing and its exit status is 77.
 
 `scripts/coverage_check.py FIRMWARE` checks the coverage: a run without it and one
@@ -1700,7 +1713,7 @@ packages: the official 1.5.1, Unleashed and the official dev build in 10, 6 and 
 minutes on a machine that other programs kept busy, Momentum and RogueMaster in 7 and
 10 minutes with four checks at a time. With `--package` it passes from the official
 firmware to Unleashed and to the dev build (4 and 3 minutes).
-`ufbt_check.py` has the real `ufbt flash_usb` go through the wrapper (31 checks now).
+`ufbt_check.py` has the real `ufbt flash_usb` go through the wrapper (33 checks now).
 
 `scripts/snapshot_check.py FIRMWARE` starts a device with a TMP105, an EEPROM and a
 serial flash on its header. Before that it wants what a device with no snapshot and one

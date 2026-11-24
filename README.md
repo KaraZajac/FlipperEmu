@@ -343,6 +343,7 @@ Momentum dev build; the window opens with its sound, and `update` installs a pac
 
 ```sh
 ./fbt                                          # in your firmware tree
+./fbt resources                                # the card's files, staged beside the ELF
 ./flipperemu -d mine run -f ~/flipperzero-firmware/build/f7-firmware-D/firmware.elf
 # or a whole update package (firmware + SD resources), e.g. a release or the
 # one `./fbt updater_package` puts in dist/f7-*/:
@@ -919,9 +920,12 @@ Everything else (a plain build, `ufbt create`, `ufbt update`) is passed on as it
 
 [docs/DEVELOPING.md](docs/DEVELOPING.md) goes through it: the loop for an app, the SDK
 that has to match the firmware, a firmware tree, and what the usual failures mean.
-`scripts/ufbt_check.py FIRMWARE` checks it with the `ufbt` on the PATH (31 checks on
+`scripts/ufbt_check.py FIRMWARE` checks it with the `ufbt` on the PATH (33 checks on
 the official firmware). For `fbt` it checks what the launcher hands to it, with a
-stand-in: a firmware built by `fbt` in its tree has not been tried yet.
+stand-in tree, and `run -f` of a build there (the release's ELF stands in for it). A
+firmware built by `fbt` in its tree was tried by hand: a Momentum tree on macOS
+(2026-11-20), and the official 1.5.1 tree here (2026-11-24, BRINGUP_LOG 200), with its
+card, `fbt launch`, `fbt flash_usb` and gdb in an app that runs.
 
 ### A test of an app, as a script
 
